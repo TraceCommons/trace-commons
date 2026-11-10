@@ -92,6 +92,15 @@ const TRACE_REVOCATION_PROPAGATION_ITEM_COLUMNS: &str = "\
     action, status, idempotency_key, reason, attempt_count, last_error, next_attempt_at, \
     completed_at, evidence_hash, metadata_json, created_at, updated_at";
 
+const TRACE_SUBMISSION_COLUMNS: &str = "\
+    tenant_id, submission_id, trace_id, status, auth_principal_ref, contributor_pseudonym, \
+    submitted_tenant_scope_ref, schema_version, consent_policy_version, consent_scopes, \
+    allowed_uses, retention_policy_id, privacy_risk, redaction_pipeline_version, redaction_hash, \
+    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending, \
+    credit_points_final, received_at, updated_at, reviewed_at, review_assigned_to_principal_ref, \
+    review_assigned_at, review_lease_expires_at, review_due_at, revoked_at, expires_at, \
+    purged_at, last_status_reason, residual_risk_basis";
+
 const TRACE_EXPORT_ACCESS_GRANT_COLUMNS: &str = "\
     tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
     purpose, max_item_cap, status, requested_at, expires_at, metadata_json, created_at, updated_at";
@@ -100,6 +109,34 @@ const TRACE_EXPORT_JOB_COLUMNS: &str = "\
     tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
     purpose, max_item_cap, status, requested_at, started_at, finished_at, expires_at, \
     result_manifest_id, item_count, last_error, metadata_json, created_at, updated_at";
+
+// The SET list shared by every status update of an export job. It binds
+// $3 to $9 as status, started_at, finished_at, result_manifest_id,
+// item_count, last_error and metadata_json.
+const TRACE_EXPORT_JOB_STATUS_SET: &str = "\
+    SET status = $3, started_at = $4, finished_at = $5, result_manifest_id = $6, \
+    item_count = $7, last_error = $8, metadata_json = $9, updated_at = NOW()";
+
+fn export_job_count_to_storage(
+    value: Option<u32>,
+    field: &str,
+) -> Result<Option<i32>, DatabaseError> {
+    value
+        .map(|value| {
+            i32::try_from(value).map_err(|e| {
+                DatabaseError::Constraint(format!("trace export job {field} is too large: {e}"))
+            })
+        })
+        .transpose()
+}
+
+fn export_job_metadata_to_storage(
+    metadata: &BTreeMap<String, String>,
+) -> Result<serde_json::Value, DatabaseError> {
+    serde_json::to_value(metadata).map_err(|e| {
+        DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+    })
+}
 
 const TRACE_UTILITY_ATTESTATION_COLUMNS: &str = "\
     tenant_id, attestation_id, event_type, use_category, policy_version, evidence_hash, \
@@ -220,8 +257,7 @@ async fn ensure_pg_object_ref_belongs_to_submission(
              LIMIT 1",
             &[&tenant_id, &submission_id, &object_ref_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
         .is_some();
     if exists {
         return Ok(());
@@ -248,8 +284,7 @@ async fn ensure_pg_derived_record_belongs_to_submission(
              LIMIT 1",
             &[&tenant_id, &submission_id, &derived_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
         .is_some();
     if exists {
         return Ok(());
@@ -276,8 +311,7 @@ async fn ensure_pg_vector_entry_belongs_to_submission(
              LIMIT 1",
             &[&tenant_id, &submission_id, &vector_entry_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
         .is_some();
     if exists {
         return Ok(());
@@ -1292,9 +1326,8 @@ impl PgBackend {
              ON CONFLICT (tenant_id) DO UPDATE SET updated_at = NOW()",
             &[&tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1302,16 +1335,12 @@ impl PgBackend {
         client: &'a mut deadpool_postgres::Client,
         tenant_id: &str,
     ) -> Result<deadpool_postgres::Transaction<'a>, DatabaseError> {
-        let tx = client
-            .transaction()
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let tx = client.transaction().await?;
         tx.execute(
             "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         Ok(tx)
     }
 
@@ -1340,7 +1369,7 @@ impl PgBackend {
             }
             insert_near_credit_outbox_item_on_tx(&tx, item).await?;
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -1362,8 +1391,7 @@ pub(crate) async fn list_trace_credit_holds_on_tx(
             ),
             &[&tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     rows.iter().map(row_to_credit_hold).collect()
 }
 
@@ -1454,8 +1482,7 @@ pub(crate) async fn insert_credit_settlement_batch_on_tx(
             &batch.actor_principal_ref,
         ],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     Ok(())
 }
 
@@ -1489,8 +1516,7 @@ async fn insert_near_credit_outbox_item_on_tx(
                 &status,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         return Ok(());
     }
     tx.execute(
@@ -1514,8 +1540,7 @@ async fn insert_near_credit_outbox_item_on_tx(
             &item.payout_near_account_id,
         ],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     Ok(())
 }
 
@@ -1539,8 +1564,7 @@ async fn append_trace_audit_row_in_transaction(
         "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
         &[&audit_event.tenant_id],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     let latest_event_hash: Option<String> = tx
         .query_opt(
             "SELECT event_hash
@@ -1551,8 +1575,7 @@ async fn append_trace_audit_row_in_transaction(
                  LIMIT 1",
             &[&audit_event.tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
         .map(|row| row.get("event_hash"));
     match resumes_from_event_hash {
         None => validate_trace_audit_append_chain(
@@ -1575,8 +1598,7 @@ async fn append_trace_audit_row_in_transaction(
                  WHERE tenant_id = $1",
             &[&audit_event.tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
         .get(0);
     let action = enum_to_storage(audit_event.action)?;
     let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
@@ -1608,8 +1630,7 @@ async fn append_trace_audit_row_in_transaction(
             &metadata_json,
         ],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     Ok(())
 }
 
@@ -1840,8 +1861,7 @@ async fn lock_source_session_for_submission(
          FOR UPDATE OF s",
             &[&tenant_id, &submission_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     Ok(row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()))
 }
 
@@ -2227,9 +2247,8 @@ impl TraceCorpusStore for PgBackend {
              WHERE s.tenant_id = $1 AND s.submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(witness_claim_from_row(row, Some(current_artifact_sha256)))
     }
 
@@ -2259,14 +2278,13 @@ impl TraceCorpusStore for PgBackend {
              WHERE s.tenant_id = $1 AND s.submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let selected_digest = row
             .as_ref()
             .and_then(|r| r.get::<_, Option<String>>(8))
             .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
         let claim = witness_claim_from_row(row, selected_digest.as_deref());
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(claim)
     }
 
@@ -2303,8 +2321,7 @@ impl TraceCorpusStore for PgBackend {
              WHERE s.tenant_id = $1 AND s.submission_id = ANY($2)",
                 &[&tenant_id, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let mut claims = BTreeMap::new();
         for row in rows {
             let submission_id: Uuid = row.get(9);
@@ -2316,7 +2333,7 @@ impl TraceCorpusStore for PgBackend {
                 witness_claim_from_row(Some(row), selected_digest.as_deref()),
             );
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(claims)
     }
 
@@ -2337,9 +2354,8 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.map(|stored| {
             let body_matches = stored.get::<_, String>(2) == hex::encode(Sha256::digest(raw_body));
             let witness_matches = match (certificate_json, signature_header) {
@@ -2364,23 +2380,17 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
-                "SELECT
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
+                &format!(
+                    "SELECT
+                    {TRACE_SUBMISSION_COLUMNS}
                  FROM trace_submissions
-                 WHERE tenant_id = $1 AND submission_id = $2",
+                 WHERE tenant_id = $1 AND submission_id = $2"
+                ),
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_submission).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -2396,23 +2406,17 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
+                &format!(
+                    "SELECT
+                    {TRACE_SUBMISSION_COLUMNS}
                  FROM trace_submissions
-                 WHERE tenant_id = $1 AND submission_id = ANY($2)",
+                 WHERE tenant_id = $1 AND submission_id = ANY($2)"
+                ),
                 &[&tenant_id, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_submission).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2424,24 +2428,18 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
+                &format!(
+                    "SELECT
+                    {TRACE_SUBMISSION_COLUMNS}
                  FROM trace_submissions
                  WHERE tenant_id = $1
-                 ORDER BY received_at ASC",
+                 ORDER BY received_at ASC"
+                ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_submission).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2465,18 +2463,10 @@ impl TraceCorpusStore for PgBackend {
         // `= ANY($2)` filter is an index-condition over the active principal
         // set; the cursor totally-orders across any number of principals
         // (Hardening H). No offset.
-        const SELECT_COLUMNS: &str = "tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis";
         let rows = match cursor {
             Some(cursor) => {
                 let sql = format!(
-                    "SELECT {SELECT_COLUMNS}
+                    "SELECT {TRACE_SUBMISSION_COLUMNS}
                      FROM trace_submissions
                      WHERE tenant_id = $1
                        AND auth_principal_ref = ANY($2)
@@ -2494,12 +2484,11 @@ impl TraceCorpusStore for PgBackend {
                         &limit,
                     ],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
             }
             None => {
                 let sql = format!(
-                    "SELECT {SELECT_COLUMNS}
+                    "SELECT {TRACE_SUBMISSION_COLUMNS}
                      FROM trace_submissions
                      WHERE tenant_id = $1
                        AND auth_principal_ref = ANY($2)
@@ -2507,12 +2496,11 @@ impl TraceCorpusStore for PgBackend {
                      LIMIT $3"
                 );
                 tx.query(&sql, &[&tenant_id, &principal_refs, &limit])
-                    .await
-                    .map_err(DatabaseError::Postgres)?
+                    .await?
             }
         };
         let records = rows.iter().map(row_to_submission).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2555,14 +2543,13 @@ impl TraceCorpusStore for PgBackend {
                                        OR auth_principal_ref = ANY($4))) AS submission_known",
                 &[&tenant_id, &submission_id, &since, &principal_refs, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let window = crate::trace_corpus_storage::RecentTraceSubmissionWindow {
             counted: row.get("counted"),
             oldest_counted_at: row.get("oldest_counted_at"),
             submission_known: row.get("submission_known"),
         };
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(window)
     }
 
@@ -2686,10 +2673,9 @@ impl TraceCorpusStore for PgBackend {
                     &policy.updated_by_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_tenant_policy(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -2708,10 +2694,9 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_tenant_policy).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -2788,10 +2773,9 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_json,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_tenant_access_grant(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -2811,10 +2795,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_tenant_access_grant).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2842,10 +2825,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &principal_ref, &active, &now],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_tenant_access_grant).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2866,10 +2848,9 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY occurred_at ASC",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_credit_event).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -2894,10 +2875,9 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY occurred_at ASC",
                 &[&tenant_id, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_credit_event).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3066,7 +3046,8 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
-                "UPDATE trace_submissions
+                &format!(
+                    "UPDATE trace_submissions
                  SET review_assigned_to_principal_ref = $3,
                      review_assigned_at = $6,
                      review_lease_expires_at = $4,
@@ -3081,14 +3062,8 @@ impl TraceCorpusStore for PgBackend {
                         OR review_assigned_to_principal_ref = $3
                    )
                  RETURNING
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
+                    {TRACE_SUBMISSION_COLUMNS}"
+                ),
                 &[
                     &tenant_id,
                     &submission_id,
@@ -3098,10 +3073,9 @@ impl TraceCorpusStore for PgBackend {
                     &now,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_submission).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3115,7 +3089,8 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
-                "UPDATE trace_submissions
+                &format!(
+                    "UPDATE trace_submissions
                  SET review_assigned_to_principal_ref = NULL,
                      review_assigned_at = NULL,
                      review_lease_expires_at = NULL,
@@ -3126,20 +3101,13 @@ impl TraceCorpusStore for PgBackend {
                    AND status = 'quarantined'
                    AND review_assigned_to_principal_ref = $3
                  RETURNING
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
+                    {TRACE_SUBMISSION_COLUMNS}"
+                ),
                 &[&tenant_id, &submission_id, &actor_principal_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_submission).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3187,9 +3155,8 @@ impl TraceCorpusStore for PgBackend {
                 &object_ref.created_by_job_id,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3210,10 +3177,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_object_ref).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3241,10 +3207,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &submission_id, &artifact_kind],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_object_ref).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3371,9 +3336,8 @@ impl TraceCorpusStore for PgBackend {
                 &derived_record.cluster_id,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3396,10 +3360,9 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY created_at ASC",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_derived_record).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3479,10 +3442,9 @@ impl TraceCorpusStore for PgBackend {
                     &vector_entry.deleted_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_vector_entry(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3504,10 +3466,9 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY created_at ASC",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_vector_entry).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3550,10 +3511,9 @@ impl TraceCorpusStore for PgBackend {
                     &model_version.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_model_version(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3573,10 +3533,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_model_version).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3632,8 +3591,7 @@ impl TraceCorpusStore for PgBackend {
                     &dataset.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let row = row.ok_or_else(|| {
             DatabaseError::Constraint(
                 "ranking calibration dataset manifest is immutable for this target use and policy"
@@ -3641,7 +3599,7 @@ impl TraceCorpusStore for PgBackend {
             )
         })?;
         let record = row_to_ranking_calibration_dataset(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3675,8 +3633,7 @@ impl TraceCorpusStore for PgBackend {
                     &update.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let row = row.ok_or_else(|| DatabaseError::NotFound {
             entity: "trace_ranking_calibration_dataset".to_string(),
             id: format!(
@@ -3688,7 +3645,7 @@ impl TraceCorpusStore for PgBackend {
             ),
         })?;
         let record = row_to_ranking_calibration_dataset(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3708,13 +3665,12 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows
             .iter()
             .map(row_to_ranking_calibration_dataset)
             .collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3773,10 +3729,9 @@ impl TraceCorpusStore for PgBackend {
                     &feature.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_feature(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3796,10 +3751,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_feature).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3866,10 +3820,9 @@ impl TraceCorpusStore for PgBackend {
                     &prediction.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_prediction(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3889,10 +3842,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_prediction).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -3939,10 +3891,9 @@ impl TraceCorpusStore for PgBackend {
                     &label.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_label(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -3962,10 +3913,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_label).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4016,10 +3966,9 @@ impl TraceCorpusStore for PgBackend {
                     &preference.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_preference_label(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4039,10 +3988,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_preference_label).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4178,10 +4126,9 @@ impl TraceCorpusStore for PgBackend {
                     &run.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_calibration_run(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4201,10 +4148,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_calibration_run).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4308,10 +4254,9 @@ impl TraceCorpusStore for PgBackend {
                     &run.last_error_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_ranking_worker_run(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4331,10 +4276,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_ranking_worker_run).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4384,10 +4328,9 @@ impl TraceCorpusStore for PgBackend {
                     &manifest.generated_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_export_manifest(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4426,8 +4369,7 @@ impl TraceCorpusStore for PgBackend {
              ON CONFLICT (tenant_id) DO UPDATE SET updated_at = NOW()",
             &[&tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         for object_ref in &mirror.object_refs {
             let artifact_kind = enum_to_storage(object_ref.artifact_kind)?;
@@ -4461,8 +4403,7 @@ impl TraceCorpusStore for PgBackend {
                     &object_ref.created_by_job_id,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
 
         let artifact_kind = enum_to_storage(mirror.manifest.artifact_kind)?;
@@ -4504,8 +4445,7 @@ impl TraceCorpusStore for PgBackend {
                     &mirror.manifest.generated_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_export_manifest(&row)?;
 
         for item in &mirror.items {
@@ -4566,11 +4506,10 @@ impl TraceCorpusStore for PgBackend {
                     &item.source_hash_at_export,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4586,23 +4525,20 @@ impl TraceCorpusStore for PgBackend {
              WHERE tenant_id = $1 AND export_manifest_id = $2",
             &[&tenant_id, &export_manifest_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         tx.execute(
             "DELETE FROM trace_object_refs
              WHERE tenant_id = $1 AND created_by_job_id = $2",
             &[&tenant_id, &export_manifest_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         tx.execute(
             "DELETE FROM trace_export_manifests
              WHERE tenant_id = $1 AND export_manifest_id = $2",
             &[&tenant_id, &export_manifest_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -4622,10 +4558,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_export_manifest).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4698,10 +4633,9 @@ impl TraceCorpusStore for PgBackend {
                     &item.source_hash_at_export,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_export_manifest_item(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -4722,10 +4656,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &export_manifest_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_export_manifest_item).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -4747,9 +4680,8 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -4773,9 +4705,8 @@ impl TraceCorpusStore for PgBackend {
                    AND source_invalidated_at IS NULL",
                 &[&tenant_id, &submission_id, &reason],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -4805,8 +4736,7 @@ impl TraceCorpusStore for PgBackend {
                 &distribution_reach,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         // The content is deleted by the caller, so the submission row goes to
         // `revoked` (which every consumer/export predicate already excludes)
         // and carries both `withdrawn_at` and `purged_at`. Credit columns are
@@ -4821,8 +4751,7 @@ impl TraceCorpusStore for PgBackend {
               WHERE tenant_id = $1 AND submission_id = $2",
             &[&tenant_id, &submission_id, &withdrawn_at],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         // V64's status-transition trigger revokes every derived public page in
         // this transaction, including withdrawals initiated by other paths.
         let row = tx
@@ -4832,9 +4761,8 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(TraceWithdrawalRecord {
             tenant_id: row.get("tenant_id"),
             submission_id: row.get("submission_id"),
@@ -4858,9 +4786,8 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.map(|row| TraceWithdrawalRecord {
             tenant_id: row.get("tenant_id"),
             submission_id: row.get("submission_id"),
@@ -4886,9 +4813,8 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.get("membership_count"))
     }
 
@@ -4912,9 +4838,8 @@ impl TraceCorpusStore for PgBackend {
                    WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
     }
 
@@ -4938,9 +4863,8 @@ impl TraceCorpusStore for PgBackend {
                   WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -4964,9 +4888,8 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id, &invalidated],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -4992,9 +4915,8 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id, &vector_entry_id, &invalidated],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -5006,7 +4928,7 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
         append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5029,7 +4951,7 @@ impl TraceCorpusStore for PgBackend {
                 "trace audit chain resume file append failed: {error}"
             ))
         })?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5052,10 +4974,9 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY audit_sequence ASC",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_audit_event).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5084,10 +5005,9 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT $2",
                 &[&tenant_id, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_audit_event).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5111,10 +5031,9 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT 1",
                 &[&tenant_id, &audit_event_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_audit_event).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5151,9 +5070,8 @@ impl TraceCorpusStore for PgBackend {
                     .map(TraceWitnessProvenanceClass::as_str),
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5192,10 +5110,9 @@ impl TraceCorpusStore for PgBackend {
                     &attestation.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_utility_attestation(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5215,10 +5132,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_utility_attestation).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5313,10 +5229,9 @@ impl TraceCorpusStore for PgBackend {
                     &batch.actor_principal_ref,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_credit_settlement_batch(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5336,10 +5251,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_credit_settlement_batch).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5378,10 +5292,9 @@ impl TraceCorpusStore for PgBackend {
                     &hold.released_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_credit_hold(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5392,7 +5305,7 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let records = list_trace_credit_holds_on_tx(&tx, tenant_id).await;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5433,10 +5346,9 @@ impl TraceCorpusStore for PgBackend {
                         &item.payout_near_account_id,
                     ],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             let record = row_to_near_credit_outbox_item(&row)?;
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(record);
         };
         let row = tx
@@ -5464,10 +5376,9 @@ impl TraceCorpusStore for PgBackend {
                     &status,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_near_credit_outbox_item(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5491,10 +5402,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_near_credit_outbox_item).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5558,8 +5468,7 @@ impl TraceCorpusStore for PgBackend {
                     &expected_prior_storage,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let row = if row.is_some() {
             row
         } else {
@@ -5597,14 +5506,13 @@ impl TraceCorpusStore for PgBackend {
                     &expected_prior_storage,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
         };
         let record = row
             .as_ref()
             .map(row_to_near_credit_outbox_item)
             .transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5648,10 +5556,9 @@ impl TraceCorpusStore for PgBackend {
                     &status,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_benchmark_registry_outbox_item(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5671,13 +5578,12 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows
             .iter()
             .map(row_to_benchmark_registry_outbox_item)
             .collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5724,13 +5630,12 @@ impl TraceCorpusStore for PgBackend {
                     &last_error_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row
             .as_ref()
             .map(row_to_benchmark_registry_outbox_item)
             .transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5761,9 +5666,8 @@ impl TraceCorpusStore for PgBackend {
                 &tombstone.created_by_principal_ref,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5783,10 +5687,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_tombstone).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5859,10 +5762,9 @@ impl TraceCorpusStore for PgBackend {
                     &job.completed_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_retention_job(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5906,10 +5808,9 @@ impl TraceCorpusStore for PgBackend {
                     &item.verified_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_retention_job_item(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -5929,10 +5830,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_retention_job).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -5953,10 +5853,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &retention_job_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_retention_job_item).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -6018,10 +5917,9 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_json,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_export_access_grant(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6041,10 +5939,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_export_access_grant).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -6053,30 +5950,10 @@ impl TraceCorpusStore for PgBackend {
         job: TraceExportJobWrite,
     ) -> Result<TraceExportJobRecord, DatabaseError> {
         self.ensure_trace_tenant(&job.tenant_id).await?;
-        let max_item_cap = job
-            .max_item_cap
-            .map(|value| {
-                i32::try_from(value).map_err(|e| {
-                    DatabaseError::Constraint(format!(
-                        "trace export job max_item_cap is too large: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
-        let item_count = job
-            .item_count
-            .map(|value| {
-                i32::try_from(value).map_err(|e| {
-                    DatabaseError::Constraint(format!(
-                        "trace export job item_count is too large: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
+        let max_item_cap = export_job_count_to_storage(job.max_item_cap, "max_item_cap")?;
+        let item_count = export_job_count_to_storage(job.item_count, "item_count")?;
         let status = enum_to_storage(job.status)?;
-        let metadata_json = serde_json::to_value(&job.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
-        })?;
+        let metadata_json = export_job_metadata_to_storage(&job.metadata)?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &job.tenant_id).await?;
         let row = tx
@@ -6125,10 +6002,9 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_json,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_export_job(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6148,10 +6024,9 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows.iter().map(row_to_export_job).collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -6161,34 +6036,16 @@ impl TraceCorpusStore for PgBackend {
         export_job_id: Uuid,
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
-        let item_count = update
-            .item_count
-            .map(|value| {
-                i32::try_from(value).map_err(|e| {
-                    DatabaseError::Constraint(format!(
-                        "trace export job item_count is too large: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
+        let item_count = export_job_count_to_storage(update.item_count, "item_count")?;
         let status = enum_to_storage(update.status)?;
-        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
-        })?;
+        let metadata_json = export_job_metadata_to_storage(&update.metadata)?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
                 &format!(
                     "UPDATE trace_export_jobs
-                     SET status = $3,
-                         started_at = $4,
-                         finished_at = $5,
-                         result_manifest_id = $6,
-                         item_count = $7,
-                         last_error = $8,
-                         metadata_json = $9,
-                         updated_at = NOW()
+                     {TRACE_EXPORT_JOB_STATUS_SET}
                      WHERE tenant_id = $1 AND export_job_id = $2
                      RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
                 ),
@@ -6204,10 +6061,9 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_json,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_export_job).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6271,10 +6127,9 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_patch,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_export_job).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6285,35 +6140,17 @@ impl TraceCorpusStore for PgBackend {
         stale_at: DateTime<Utc>,
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
-        let item_count = update
-            .item_count
-            .map(|value| {
-                i32::try_from(value).map_err(|e| {
-                    DatabaseError::Constraint(format!(
-                        "trace export job item_count is too large: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
+        let item_count = export_job_count_to_storage(update.item_count, "item_count")?;
         let status = enum_to_storage(update.status)?;
         let running_status = enum_to_storage(TraceExportJobStatus::Running)?;
-        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
-        })?;
+        let metadata_json = export_job_metadata_to_storage(&update.metadata)?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
                 &format!(
                     "UPDATE trace_export_jobs
-                     SET status = $3,
-                         started_at = $4,
-                         finished_at = $5,
-                         result_manifest_id = $6,
-                         item_count = $7,
-                         last_error = $8,
-                         metadata_json = $9,
-                         updated_at = NOW()
+                     {TRACE_EXPORT_JOB_STATUS_SET}
                      WHERE tenant_id = $1
                        AND export_job_id = $2
                        AND status = $10
@@ -6334,10 +6171,9 @@ impl TraceCorpusStore for PgBackend {
                     &stale_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_export_job).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6348,35 +6184,17 @@ impl TraceCorpusStore for PgBackend {
         retry_at: DateTime<Utc>,
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
-        let item_count = update
-            .item_count
-            .map(|value| {
-                i32::try_from(value).map_err(|e| {
-                    DatabaseError::Constraint(format!(
-                        "trace export job item_count is too large: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
+        let item_count = export_job_count_to_storage(update.item_count, "item_count")?;
         let status = enum_to_storage(update.status)?;
         let failed_status = enum_to_storage(TraceExportJobStatus::Failed)?;
-        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
-        })?;
+        let metadata_json = export_job_metadata_to_storage(&update.metadata)?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
                 &format!(
                     "UPDATE trace_export_jobs
-                     SET status = $3,
-                         started_at = $4,
-                         finished_at = $5,
-                         result_manifest_id = $6,
-                         item_count = $7,
-                         last_error = $8,
-                         metadata_json = $9,
-                         updated_at = NOW()
+                     {TRACE_EXPORT_JOB_STATUS_SET}
                      WHERE tenant_id = $1
                        AND export_job_id = $2
                        AND status = $10
@@ -6397,10 +6215,9 @@ impl TraceCorpusStore for PgBackend {
                     &retry_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row.as_ref().map(row_to_export_job).transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6474,8 +6291,7 @@ impl TraceCorpusStore for PgBackend {
                     &metadata_json,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(row) = row else {
             return Err(DatabaseError::Constraint(format!(
                 "trace revocation propagation source submission {} does not belong to tenant {}",
@@ -6483,7 +6299,7 @@ impl TraceCorpusStore for PgBackend {
             )));
         };
         let record = row_to_revocation_propagation_item(&row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6505,13 +6321,12 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &source_submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows
             .iter()
             .map(row_to_revocation_propagation_item)
             .collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -6539,13 +6354,12 @@ impl TraceCorpusStore for PgBackend {
                 ),
                 &[&tenant_id, &pending, &failed, &now, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let records = rows
             .iter()
             .map(row_to_revocation_propagation_item)
             .collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         records
     }
 
@@ -6587,13 +6401,12 @@ impl TraceCorpusStore for PgBackend {
                     &update.evidence_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row
             .as_ref()
             .map(row_to_revocation_propagation_item)
             .transpose()?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 
@@ -6617,8 +6430,7 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let derived_records_invalidated = tx
             .execute(
                 "UPDATE trace_derived_records
@@ -6629,9 +6441,8 @@ impl TraceCorpusStore for PgBackend {
                    AND status <> $3",
                 &[&tenant_id, &submission_id, &derived_status],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(TraceArtifactInvalidationCounts {
             object_refs_invalidated,
             derived_records_invalidated,
@@ -6660,9 +6471,8 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id, &object_store, &object_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(deleted)
     }
 
@@ -6687,9 +6497,8 @@ impl TraceCorpusStore for PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id, &artifact_kind],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(invalidated)
     }
 
@@ -6726,8 +6535,7 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT $4",
                 &[&tenant_id, &after_decided_at, &after_decision_id, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
         } else {
             tx.query(
                 "SELECT decision_id, submission_id, gate_policy_version, gate_version_hash, \
@@ -6748,8 +6556,7 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT $2",
                 &[&tenant_id, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
         };
         let out = rows
             .iter()
@@ -6785,7 +6592,7 @@ impl TraceCorpusStore for PgBackend {
                 attributed_token_fraction_micros: row.get("attributed_token_fraction_micros"),
             })
             .collect();
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(out)
     }
 
@@ -6813,9 +6620,8 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT 1",
                 &[&tenant_id, &vector_entry_id.to_string()],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.is_some())
     }
 
@@ -6874,9 +6680,8 @@ impl TraceCorpusStore for PgBackend {
                 &decision.attributed_token_fraction_micros,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -6936,8 +6741,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.attributed_token_fraction_micros,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         for entry in &chunk_entries {
             tx.execute(
                 "INSERT INTO trace_gate_chunk_vector_entries (
@@ -6951,10 +6755,9 @@ impl TraceCorpusStore for PgBackend {
                     &entry.vector_entry_id,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -6973,9 +6776,8 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY decision_id, chunk_index",
                 &[&tenant_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| TraceGateChunkVectorEntryRow {
@@ -7000,9 +6802,8 @@ impl TraceCorpusStore for PgBackend {
              WHERE tenant_id = $1 AND decision_id = $2",
             &[&tenant_id, &decision_id, &credit_withheld_reason],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7057,9 +6858,8 @@ impl TraceCorpusStore for PgBackend {
                     &perplexity_passed,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -7107,9 +6907,8 @@ impl TraceCorpusStore for PgBackend {
                     &columns[4],
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -7140,9 +6939,8 @@ impl TraceCorpusStore for PgBackend {
                 &calibration_version,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7177,9 +6975,8 @@ impl TraceCorpusStore for PgBackend {
                 &write.dedup_signal_version,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7212,9 +7009,8 @@ impl TraceCorpusStore for PgBackend {
                     &write.dedup_signal_version,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(written == 1)
     }
 
@@ -7245,9 +7041,8 @@ impl TraceCorpusStore for PgBackend {
                 &dedup_cluster_size,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7278,9 +7073,8 @@ impl TraceCorpusStore for PgBackend {
                 &write.correction_value_version,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7313,9 +7107,8 @@ impl TraceCorpusStore for PgBackend {
                 &version,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7340,9 +7133,8 @@ impl TraceCorpusStore for PgBackend {
                  RETURNING attempts",
                 &[&tenant_id, &submission_id, &now, &error_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.get(0))
     }
 
@@ -7367,9 +7159,8 @@ impl TraceCorpusStore for PgBackend {
                  RETURNING attempts",
                 &[&tenant_id, &submission_id, &now, &error_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.get(0))
     }
 
@@ -7401,9 +7192,8 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT $2",
                 &[&tenant_id, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
     }
 
@@ -7440,9 +7230,8 @@ impl TraceCorpusStore for PgBackend {
                     &canonical_summary_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(updated)
     }
 
@@ -7457,9 +7246,8 @@ impl TraceCorpusStore for PgBackend {
             "DELETE FROM trace_pii_backstop WHERE tenant_id = $1 AND submission_id = $2",
             &[&tenant_id, &submission_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7485,9 +7273,8 @@ impl TraceCorpusStore for PgBackend {
                      last_error_label = $4",
             &[&tenant_id, &submission_id, &now, &error_label],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -7523,9 +7310,8 @@ impl TraceCorpusStore for PgBackend {
                  LIMIT 1",
                 &[&tenant_id, &canonical_summary_hash, &exclude_submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().next().map(|row| TraceGateDecisionRow {
             decision_id: row.get(0),
             submission_id: row.get(1),
@@ -7599,9 +7385,8 @@ impl TraceCorpusStore for PgBackend {
                  ORDER BY submission_id, decided_at DESC, decision_id DESC",
                 &[&tenant_id, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| TraceGateCreditDecisionRow {
@@ -7686,8 +7471,7 @@ impl PgBackend {
                    AND s.status = 'quarantined'",
                 &[&submission.tenant_id, &submission.submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
         let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
             DatabaseError::Serialization(format!("trace consent scopes encode failed: {e}"))
@@ -7721,7 +7505,7 @@ impl PgBackend {
 
         let row = tx
             .query_one(
-                "INSERT INTO trace_submissions (
+                &format!("INSERT INTO trace_submissions (
                     tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
                     submitted_tenant_scope_ref, schema_version, consent_policy_version,
                     consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
@@ -7755,14 +7539,7 @@ impl PgBackend {
                     residual_risk_basis = excluded.residual_risk_basis,
                     updated_at = NOW()
                  RETURNING
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
+                    {TRACE_SUBMISSION_COLUMNS}"),
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,
@@ -7788,8 +7565,7 @@ impl PgBackend {
                     &residual_risk_basis,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let record = row_to_submission(&row)?;
         if let Some(evidence) = evidence {
             let class = match evidence.inference_class {
@@ -7818,8 +7594,7 @@ impl PgBackend {
                     &evidence.issued_at,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
             let existing = tx
                 .query_one(
                     "SELECT certificate_json, signature_header, raw_body_sha256, artifact_sha256,
@@ -7830,8 +7605,7 @@ impl PgBackend {
                  FOR UPDATE",
                     &[&evidence.tenant_id, &evidence.submission_id],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             let same_signed_source = existing.get::<_, Vec<u8>>(0) == evidence.certificate_json
                 && existing.get::<_, Vec<u8>>(1) == evidence.signature_header
                 && existing.get::<_, String>(2) == evidence.raw_body_sha256
@@ -7854,11 +7628,10 @@ impl PgBackend {
                         &evidence.artifact_sha256,
                     ],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             }
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(record)
     }
 }
@@ -7925,8 +7698,7 @@ impl PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id, &status_value, &reason_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         if updated == 0 {
             return Err(DatabaseError::NotFound {
                 entity: "trace_submission".to_string(),
@@ -7952,8 +7724,7 @@ impl PgBackend {
                    AND deleted_at IS NULL",
                 &[&tenant_id, &submission_id, &submitted_envelope_kind],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
 
         let audit_event = TraceAuditEventWrite {
             audit_event_id: Uuid::new_v4(),
@@ -7979,7 +7750,7 @@ impl PgBackend {
         if append_audit {
             append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
 
         Ok(invalidated)
     }
@@ -8008,7 +7779,7 @@ impl PgBackend {
                 | TraceCorpusStatus::Expired
                 | TraceCorpusStatus::Purged
                 | TraceCorpusStatus::Rejected => {
-                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    tx.commit().await?;
                     Ok(())
                 }
                 TraceCorpusStatus::Received
@@ -8066,15 +7837,14 @@ impl PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id, &status_value, &reason_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         if updated == 0 {
             return Err(DatabaseError::NotFound {
                 entity: "trace_submission".to_string(),
                 id: submission_id.to_string(),
             });
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         if !append_audit {
             return Ok(());
         }
