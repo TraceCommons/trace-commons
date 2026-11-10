@@ -1,8 +1,22 @@
 # `TRACE_COMMONS_*` Environment Variable Reference
 
 Every env var the `trace-commons-ingest` binary reads, grouped by surface. The
-master list is `grep '^const TRACE_COMMONS_' crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`.
-If you change a default in code, update this table.
+master list is every `"TRACE_COMMONS_..."` string literal in the ingest
+crate's production source:
+
+```sh
+find crates/trace-commons-ingest/src -name '*.rs' \
+  | grep -vE '(/tests/|tests?\.rs$|_tests?\.rs$|fixture)' \
+  | xargs grep -hoE '"TRACE_COMMONS_[A-Z0-9_]+"' | sort -u
+```
+
+Two results are prefixes completed at run time (`TRACE_COMMONS_ADMISSION`,
+`TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE`; see
+[Account contribution admission](#account-contribution-admission-default-off))
+and two are `TRACE_COMMONS_PIPELINE_TEST_*` names used only by test builds.
+If you change a default in code, update this table. Variables whose full
+description lives in another runbook are listed in
+[section 17](#17-variables-described-in-other-runbooks) with a pointer.
 
 The binary parses constants at boot; values that fail to parse refuse the
 binary's startup rather than degrading. **Defaults are conservative — when
@@ -710,6 +724,121 @@ safe to delete from env files once the deployment is past V144.
 | `TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS` | ignored since V144 | Reaper age limit for closed accounts. |
 | `TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
 | `TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
+
+## 17. Variables described in other runbooks
+
+These are read by ingest and fully described elsewhere. Each row gives the
+default and the document that owns the variable; follow the link before
+changing one.
+
+### Process, storage and tokens
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_BIND` | `127.0.0.1:3907` | Listen address. Ignored in prequalify mode. | [`local-ingest-verification.md`](local-ingest-verification.md) |
+| `TRACE_COMMONS_DATA_DIR` | `~/.ironclaw/trace_commons_ingest` | Root of the file-backed store. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_OBJECT_STORE` | unset (file) | Object store mode: `file`/`none`, `local_encrypted`, `local_service`, `remote_service` and their aliases. Any other value refuses startup. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_ARTIFACT_KEY_HEX` | (none) | Key for the local encrypted artifact store. Setting it turns encrypted artifacts on. | [`backup-restore.md`](backup-restore.md) |
+| `TRACE_COMMONS_ENCRYPTED_ARTIFACTS` | `false` | Turns the local encrypted artifact store on without a key variable. | [`../trace-commons.md`](../trace-commons.md) |
+| `TRACE_COMMONS_ARTIFACT_DIR` | `<data dir>/encrypted_artifacts` | Directory of the local encrypted artifact store; fallback for the service-local store. | [`backup-restore.md`](backup-restore.md) |
+| `TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR` | `<data dir>/service_object_store` | Directory of the service-local object store. | [`../trace-commons.md`](../trace-commons.md) |
+| `TRACE_COMMONS_INGEST_TOKEN` | (none) | Single bearer token, optional expiry suffix. | [`pilot-account-admission-cutover-2026-10.md`](pilot-account-admission-cutover-2026-10.md) |
+| `TRACE_COMMONS_TENANT_TOKENS` | (none) | Tenant bearer-token table. | [`operator-binaries.md`](operator-binaries.md) |
+| `TRACE_COMMONS_TENANT_POLICIES` | (none) | Per-tenant submission policies. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` | `false` | Refuse submissions from a tenant with no policy. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS` | `false` | Dataset exports must name a purpose and select accepted, low-risk submissions. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_BUNDLE_SERVER_ID` | (none) | Server id stamped on token distribution bundles; unset refuses the bundle routes. | [`token-distribution-bundles.md`](token-distribution-bundles.md) |
+| `TRACE_COMMONS_TOKEN_RESEARCH_EXPORTS` | `false` | Turns the token research export routes on; off, they return 503. | `docs/superpowers/plans/2026-09-10-token-logprobs-progress.md` |
+
+### Database storage mode
+
+Every switch here is `true`/`false`, default `false`. The pilot template
+sets all of them on.
+
+| Var | Description | Described in |
+|---|---|---|
+| `TRACE_COMMONS_DB_DUAL_WRITE` | Mirror every file-backed write into PostgreSQL. Required by every other switch in this table. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` | Turn a failed mirror write into a refusal. Needs dual-write. | [`../trace-commons-storage.md`](../trace-commons-storage.md), [`audit-trail-forensics.md`](audit-trail-forensics.md) |
+| `TRACE_COMMONS_DB_AUDIT_READS` | Read audit rows from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_CONTRIBUTOR_READS` | Read contributor-facing records from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REVIEWER_READS` | Read reviewer records from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS` | Reviewer reads require object refs. Needs reviewer reads. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REPLAY_EXPORT_READS` | Replay exports read from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS` | Replay exports require object refs. Needs replay-export reads. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_TENANT_POLICY_READS` | Read tenant policy from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS` | Derived exports require object refs. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+
+### Pipeline runtime
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_PIPELINE_RUNTIME` | unset | Unset: no pipeline runtime. `production`: the production assembly (`near-ai-scorer` builds). | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` | `false` | Refuse startup when no production-qualified runtime was injected. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` | `false` | Test and local development only. Production must never set it. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` | (none) | Tenants whose receipts route to the pipeline. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` | (none) | Tenants whose follow-up work the worker still drains after rollback. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` | `1` | Units of pipeline work run at once, 1 to 16, per process. | [`pipeline-activation.md`](pipeline-activation.md#worker-concurrency) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` | built-in | Review-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` | built-in | Score-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` | built-in | Settle-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` | `900` | Privacy-pass classifier ceiling, 60 to 7200. The Review lease still bounds it. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` | (none) | Trusted keys for signed pipeline packages. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH` | (none) | Trusted keys for qualification check results. | [`pipeline-qualification.md`](pipeline-qualification.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR` | (none) | Directory of qualification check results. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_RUN_ID` | (none) | Run id of the check results to read. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH` | (none) | Code revision the check results must match. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING` | off | `all` arms default routing. | [`pipeline-activation.md`](pipeline-activation.md#default-routing) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` | (none) | Directory holding the signed package default routing activates. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_INTERVAL_SECONDS` | `60` | Pass interval, 5 to 3600. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` | `50` | Tenants per pass, 1 to 1000. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+
+### Gate chunking (large traces)
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS` | `2048` | Target chunk size. Must be > 0 and <= the max. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS` | `3072` | Hard chunk bound. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_CAP` | `16` | Most chunks scored per trace, at least 1. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS` | `64` | Smallest chunk scored. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` | `50000` | Novelty a chunk needs before its embedding is inserted. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS` | unset | Per-chunk qualifying floor, non-negative integer micros. | `scripts/operator/pipeline_tooling/envfile.py` |
+
+### NEAR provisioning and settlement
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED` | `false` | Exactly `true` turns NEAR-native provisioning on. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL` | (none) | Published issuer URL, `https` only. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE` | (none) | Published audience; needs the issuer URL. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN` | (none) | Public origin of the provisioning ceremony. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT` | (none) | Published receipt endpoint. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON` | (none) | Published witness material. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` | (none) | Key that wraps stored NEAR account names. | `deploy/staging-gcp/README.md` |
+| `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | `disabled` | `dry_run` or `http`; anything else is `disabled`. | [`pipeline-activation.md`](pipeline-activation.md), [`pilot-gcp-deployment.md`](pilot-gcp-deployment.md) |
+| `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL` | (none) | Base URL the attestation drill fetches from. | [`near-attestation-drill.md`](near-attestation-drill.md) |
+| `TRACE_COMMONS_NEAR_AI_STARTER_MODE` | `disabled` | `disabled` or `dry_run`; `live` refuses startup. | `docs/superpowers/specs/2026-10-21-nearai-starter-advance-design.md` |
+| `TRACE_COMMONS_INFERENCE_CONNECTION_CATALOG_JSON` | (none) | Inference connection catalog. | [`inference-connection.md`](inference-connection.md) |
+
+### Credit estimates and first-run copy
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_CREDIT_ESTIMATE_TABLE_PATH` | (none) | Estimate table file. | `docs/superpowers/plans/2026-10-15-settlement-estimate.md` |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH` | (none) | Settlement table file. | `docs/superpowers/specs/2026-10-15-settlement-estimate-design.md` |
+| `TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN` | (none) | Low end of the first-run USD estimate, parsed fail-closed. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX` | (none) | High end of the same estimate. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_MICROS_PER_TRACE` | (none) | Per-trace amount shown in first-run copy. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_ACCOUNT_CEILING_MICROS` | (none) | Account ceiling shown in first-run copy. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_LINE` | (none) | First-run copy line. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_COULD_LINE` | (none) | First-run "could earn" copy line. | `deploy/pilot-gcp/ingest.env.template` |
+
+### Other
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTES` | (none) | Floor on the final request body in bytes for admission evidence. | [`native-admission-session.md`](native-admission-session.md) |
+| `TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR` | `25` | Fewest contributors a published register stat may describe. | [`register-stats-role.md`](register-stats-role.md) |
+| `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` | (none) | Activity missions policy. | `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md` |
 
 ## Build-time features (Cargo)
 
