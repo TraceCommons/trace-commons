@@ -51,6 +51,58 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  changes:
+    name: decide which jobs this change needs
+    # On a pull request, lists the changed files and decides whether any of
+    # them can affect a build or a test (scripts/ci/ci-changes.sh has the
+    # rule: only documents under docs/ or at the root that no other file
+    # names are skippable; anything else runs everything). Every job that
+    # compiles depends on this one and is skipped when it says `false`. On a
+    # push to main and on every merge-queue batch it always says `true`, so
+    # main and the queue run every job, whatever the pull request skipped.
+    #
+    # Fail-open by construction: the gated jobs run unless the output is
+    # exactly `false` (`!cancelled() && ... != 'false'`), so if this job
+    # fails, is skipped, or prints nothing, everything runs. A job skipped
+    # by its `if:` reports its check as skipped, which GitHub documents as
+    # satisfying a required check; a path filter on the workflow would
+    # instead leave the required checks pending forever.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          scripts/ci/ci-changes.sh self-test
+          if [ "$EVENT" != pull_request ]; then
+            echo "$EVENT: every job runs"
+            echo "build=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A renamed file's old path is listed too. The files API stops at
+          # 3000 files, so a list that long may be partial: run everything.
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' >"$RUNNER_TEMP/changed"
+          n=$(wc -l <"$RUNNER_TEMP/changed")
+          echo "$n changed paths"
+          if [ "$n" -ge 3000 ]; then
+            echo "build=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scripts/ci/ci-changes.sh decide <"$RUNNER_TEMP/changed" | tee "$RUNNER_TEMP/decision"
+          tail -1 "$RUNNER_TEMP/decision" >>"$GITHUB_OUTPUT"
+
   cargo-fmt-check:
     name: cargo fmt --check
     runs-on: ubuntu-latest
@@ -114,6 +166,10 @@ jobs:
 
   postgres-suites:
     name: database suites against a real PostgreSQL
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # Every database this job creates and then requires a suite to have used.
@@ -771,10 +827,11 @@ jobs:
     # five, and one more found while repairing the rest. This job runs all
     # of them.
     #
-    # No `if:` and no path filter, the same as `postgres-suites`: it runs on
-    # every push to main, every pull request, and every merge-queue batch. A
-    # required check that is skipped in the queue never reports there, and
-    # the queue times the entry out instead of merging it.
+    # No path filter, the same as `postgres-suites`: it runs on every push to
+    # main and every merge-queue batch, and on every pull request that
+    # changes anything but unreferenced documents (the `changes` job). A
+    # required check that never reports in the queue times the entry out
+    # instead of merging it, which is why `changes` always says `true` there.
     #
     # It also runs the named `-p trace-commons-ingest --lib` slices that used
     # to run in `postgres-suites`, each against its own database with its own
@@ -784,6 +841,10 @@ jobs:
     # second time for them (183 s of its 866 s on the run measured).
     # `INGEST_SUITE_DATABASES` is their `PG_SUITE_DATABASES`: no suite reads
     # it, and the database step and the guard below both iterate it.
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -1318,6 +1379,10 @@ jobs:
     # revision does not see it) and outside the paths the failure step
     # uploads.
     name: pipeline qualification and restore
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1390,6 +1455,10 @@ jobs:
 
   mark-assets-drift:
     name: mark assets match the generator
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The committed files under assets/mark exist so a checkout is usable
@@ -1449,6 +1518,10 @@ jobs:
       actions: write
       contents: read
     name: cargo clippy
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1507,6 +1580,10 @@ jobs:
       actions: write
       contents: read
     name: cargo check (default features)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1548,6 +1625,10 @@ jobs:
 
   cargo-check-permissive-standalone:
     name: cargo check (permissive crates, standalone)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1584,6 +1665,10 @@ jobs:
       actions: write
       contents: read
     name: cargo check (local-gpu-models, non-CUDA)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1629,6 +1714,10 @@ jobs:
       actions: write
       contents: read
     name: cargo check (near-ai-scorer)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1721,6 +1810,10 @@ jobs:
       actions: write
       contents: read
     name: cargo check (near-attestation-collateral)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1820,6 +1913,10 @@ jobs:
 
   msrv-floor:
     name: builds at the declared MSRV floor
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Every other job in this file uses dtolnay/rust-toolchain@stable, which
@@ -1940,6 +2037,10 @@ jobs:
       actions: write
       contents: read
     name: cargo test (default features)
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2012,6 +2113,10 @@ jobs:
       actions: write
       contents: read
     name: staging channel tests
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2090,6 +2195,10 @@ jobs:
       actions: write
       contents: read
     name: wallet SDK and production CSP
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2149,6 +2258,10 @@ jobs:
 
   preserve-order-guard:
     name: serde_json preserve_order guard
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2197,6 +2310,10 @@ jobs:
       actions: write
       contents: read
     name: pilot-bootstrap smoke
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2272,6 +2389,10 @@ jobs:
 
   operator-binaries-smoke:
     name: operator-binaries smoke
+    # Skipped only on a pull request whose every changed file is a document
+    # nothing builds or tests; see the `changes` job.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
