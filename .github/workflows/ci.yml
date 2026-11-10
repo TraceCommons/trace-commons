@@ -1043,6 +1043,11 @@ jobs:
           exit $fail
 
   ingest-bin-postgres-near-ai-scorer:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: trace-commons-ingest tests, whole bin, near-ai-scorer, against PostgreSQL
     # Not a required status check. The production pipeline assembly's
     # usearch index, and the near-ai-scorer arm of its end-to-end test
@@ -1156,8 +1161,18 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   ingest-bin-postgres-near-ai-staging:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL
     # Not a required status check. `near-ai-staging` compiles a different
     # ingest: the refusal of the wallet ceremony, NEAR AI sign-up without the
@@ -1277,8 +1292,18 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   pipeline-qualification:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     # Not a required status check (owner decision P4-D17): it runs on every
     # pull request and in the merge queue, and it blocks nothing until the
     # owner promotes it. `pipeline.py` starts its own digest-pinned
@@ -1357,6 +1382,11 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   mark-assets-drift:
     name: mark assets match the generator
@@ -1413,6 +1443,11 @@ jobs:
           python3 scripts/qualification/test-opencode-qualification.py
 
   cargo-clippy:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo clippy
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1459,8 +1494,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-check-default:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo check (default features)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1495,6 +1540,11 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-check-permissive-standalone:
     name: cargo check (permissive crates, standalone)
@@ -1528,6 +1578,11 @@ jobs:
       - run: cargo check -p trace-commons-build-info --no-default-features
 
   cargo-check-local-gpu-models:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo check (local-gpu-models, non-CUDA)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1561,8 +1616,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-check-near-ai-scorer:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo check (near-ai-scorer)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1643,8 +1708,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-check-near-attestation-collateral:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo check (near-attestation-collateral)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1736,6 +1811,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   msrv-floor:
@@ -1854,6 +1934,11 @@ jobs:
             --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bins
 
   cargo-test-default:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: cargo test (default features)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1908,6 +1993,11 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # Split out of cargo-test-default, which had grown past its 30-minute
   # timeout: each of these builds its own feature set or package selection,
@@ -1916,6 +2006,11 @@ jobs:
   # the steps were while they ran inside cargo-test-default; keep their
   # `name:` values stable, since branch protection matches on them.
   cargo-test-staging-channel:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: staging channel tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1982,8 +2077,18 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-test-wallet-sdk-csp:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: wallet SDK and production CSP
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2036,6 +2141,11 @@ jobs:
             ~/.cargo/git/db
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   preserve-order-guard:
     name: serde_json preserve_order guard
@@ -2081,6 +2191,11 @@ jobs:
         run: cargo test -p trace-commons-protocol
 
   pilot-bootstrap-smoke:
+    # `actions: write` for the cache prune step only; `contents: read` for
+    # checkout, since a job-level block replaces the defaults.
+    permissions:
+      actions: write
+      contents: read
     name: pilot-bootstrap smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2148,6 +2263,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # Then delete this cache's entries from older Cargo.lock generations;
+      # a dry run anywhere but a push to main. See the action.
+      - uses: ./.github/actions/prune-cargo-cache
+        with:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   operator-binaries-smoke:
