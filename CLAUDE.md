@@ -117,6 +117,17 @@ links once per crate instead of once per file.
   own pid, or are built by the near-ai-staging CI step.
 - PostgreSQL suites pointed at the same database must not run at once. Run
   them one at a time.
+- Separate databases on one cluster are not enough either: every fresh
+  database's migrations write cluster-wide role rows (`CREATE ROLE`, `ALTER
+  ROLE`, `GRANT <guard> TO CURRENT_USER`), and two suites migrating at once
+  fail with `tuple concurrently updated`. To run the `postgres-suites` job's
+  suites locally in parallel, use `scripts/dev/pg-suites-local.sh [--jobs N]
+  [--only a,b]`: it builds the test binaries once, starts one throwaway
+  cluster per lane (needs `initdb`/`pg_ctl` on PATH), runs the suites
+  round-robin across the lanes with each suite's log under
+  `target/pg-suites-local/`, refuses a suite whose database committed
+  nothing, prints a summary, and removes the clusters. `--list` names the
+  suites; keep its table in step with `ci.yml`.
 
 Workspace crates build with `debug = "line-tables-only"` (root `Cargo.toml`):
 backtraces keep file:line, but a debugger has no variables. Set `debug = true`
