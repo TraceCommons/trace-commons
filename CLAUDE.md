@@ -40,8 +40,11 @@ verification.
 
 ## Where to look
 
-- `README.md` — current phase status, open production gaps, operator promotion
-  checklist. Lead with this when orienting on the repo.
+- `README.md` — what Trace Commons and Near AI Gateway are, install paths,
+  repository layout, build commands and the required checks. Lead with this
+  when orienting on the repo.
+- `docs/status.md` — pilot deployment status and public reference notes
+  (moved out of the README for 1.0).
 - `docs/trace-commons.md` — envelope contract and threat model (authoritative).
 - `docs/trace-commons-storage.md` — storage contract (authoritative).
 - `docs/trace-commons-roadmap.md` — the production-gap queue and phase plan.
