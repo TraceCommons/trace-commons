@@ -1,0 +1,86 @@
+[
+  {
+    "label": "settlement-ready",
+    "title": "Settlement inputs",
+    "body": "Bounded server model: two immutable run identities, each with Trace Credit and one external instrument. Account earned/referral payouts have a separate identity space.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "settlement-progress",
+    "title": "Instrument progress",
+    "body": "Settle persists its selection before index or settlement effects. Each instrument progresses independently; an internal credit transaction records the ledger, batch when applicable, and completed leg together.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "settlement-uncertain",
+    "title": "External effect, uncertain local record",
+    "body": "An adapter or transfer may have succeeded before the local record commits. A retry keeps the same operation identity; a lost response is not evidence that no effect occurred.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline-near",
+    "title": "Pipeline NEAR outbox",
+    "body": "Finalized Trace Credit batches use their own NEAR outbox. A new dispatch needs runnable policy; confirmation of a stored submitted line reads the original key and submission mode.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "account-payout",
+    "title": "Account NEAR AI transfers",
+    "body": "Earned and referral streams use account links, cumulative target lines and receipt recovery on the NEAR AI rail. These transfers do not use pipeline NEAR outbox identities.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "settlement-held",
+    "title": "Dispatch or account work held",
+    "body": "Policy, shared account standing and stream-specific holds gate their own work. Already completed settlement legs remain complete after withdrawal; referral holds do not stop earned sends.",
+    "controls": [
+      "YouSuspendSettlePolicy",
+      "YouResumeSettlePolicy",
+      "YouHaltAccountRail",
+      "YouResumeAccountRail",
+      "YouRetryFailedNearSubmit",
+      "YouClearAccountHold"
+    ],
+    "kind": "server"
+  }
+]

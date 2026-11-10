@@ -27,12 +27,25 @@
 #[macro_export]
 macro_rules! app_name {
     () => {
-        "Near.ai"
+        "Near AI Gateway"
     };
 }
 
 /// The app's name, for callers that want a value rather than a literal.
 pub const APP_NAME: &str = crate::app_name!();
+
+/// Names the app shipped under before [`APP_NAME`], newest first.
+///
+/// A rename changes what the app writes, not what it already wrote: an
+/// install updated in place keeps its old bundle filename, and files and
+/// links an older version made still carry the old name. Code that
+/// recognises its own earlier output checks these too. Nothing writes them.
+pub const FORMER_APP_NAMES: &[&str] = &["Near.ai"];
+
+/// Whether `name` is this app's current or a former name.
+pub fn is_app_name(name: &str) -> bool {
+    name == APP_NAME || FORMER_APP_NAMES.contains(&name)
+}
 
 /// The commons' name as a string literal, usable inside `concat!`.
 ///
@@ -87,5 +100,18 @@ mod tests {
     #[test]
     fn the_app_and_the_commons_are_named_differently() {
         assert_ne!(APP_NAME, COMMONS_NAME);
+    }
+
+    /// The current name is never also listed as a former one, and a former
+    /// name is still recognised as ours.
+    #[test]
+    fn former_names_are_recognised_but_never_current() {
+        assert!(!FORMER_APP_NAMES.contains(&APP_NAME));
+        assert!(is_app_name(APP_NAME));
+        for name in FORMER_APP_NAMES {
+            assert!(is_app_name(name), "{name}");
+        }
+        assert!(!is_app_name("Near AI"));
+        assert!(!is_app_name(COMMONS_NAME));
     }
 }

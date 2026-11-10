@@ -63,7 +63,7 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use crate::witness::inference_record::InferenceAttestationRecord;
-use crate::witness::transport::{WitnessedEnvelope, parse_witnessed_envelope, verify_certificate};
+use crate::witness::transport::{WitnessedEnvelope, parse_witnessed_envelope};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -199,6 +199,7 @@ impl WitnessReviewArtifact {
     pub fn validate(
         &self,
         cfg: &crate::config::ContributorConfig,
+        state_dir: &std::path::Path,
         source_hash: &str,
         input_fingerprint: &str,
         verdict: Option<&str>,
@@ -209,7 +210,7 @@ impl WitnessReviewArtifact {
         {
             bail!("witness-review-stale");
         }
-        self.validate_stored(cfg, source_hash, input_fingerprint)
+        self.validate_stored(cfg, state_dir, source_hash, input_fingerprint)
     }
 
     /// Validate a saved review for display without recovering correction text.
@@ -217,6 +218,7 @@ impl WitnessReviewArtifact {
     pub fn validate_stored(
         &self,
         cfg: &crate::config::ContributorConfig,
+        state_dir: &std::path::Path,
         source_hash: &str,
         input_fingerprint: &str,
     ) -> Result<TraceContributionEnvelope> {
@@ -242,8 +244,12 @@ impl WitnessReviewArtifact {
         {
             bail!("witness-review-stale");
         }
-        verify_certificate(&self.response, &settings.signing_address)
-            .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
+        crate::witness::configuration::verify_review_certificate(
+            settings,
+            state_dir,
+            &self.response,
+        )
+        .map_err(|_| anyhow::anyhow!("witness-certificate-invalid"))?;
         if let Some(headers) = &self.response.admission {
             let evidence: trace_commons_protocol::admission::AdmissionEvidence =
                 serde_json::from_str(&headers.evidence_json)
@@ -510,6 +516,91 @@ mod tests {
     use crate::config::tests_support::temp_store;
 
     #[tokio::test]
+    async fn saved_artifact_follows_signed_rotation_and_withdrawal_without_reenrollment() {
+        use crate::witness::{accepted_list, configuration};
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_accepted_list::{ListSignature, key_id_for};
+        use trace_commons_protocol::witness_configuration::WitnessConfiguration;
+
+        let (_dir, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let source_hash = "ordinary-history-before-rotation";
+        let (tenant, _) = crate::config::tests_support::v61_account();
+        let mut envelope = envelope().await;
+        envelope.submission_id = crate::source::submission_id_for(source_hash);
+        envelope.contributor.tenant_scope_ref = Some(tenant.clone());
+        envelope.contributor.pseudonymous_contributor_id = Some(
+            trace_commons_protocol::onboarding::user_subject_hash(&device.device_key_id),
+        );
+        let (response, rotated_signer) =
+            crate::witness::transport::signed_fixture(serde_json::to_vec(&envelope).unwrap());
+        let anchor = configuration::COMMONS_ENROLLMENT_URLS[0];
+        let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url":"https://issuer.invalid", "ingest_url":"https://ingest.invalid",
+            "audience":"upload", "tenant_id":tenant, "instance_id":"",
+            "user_subject":device.device_key_id, "device_key_id":device.device_key_id,
+            "consent_scopes":["debugging_evaluation"],
+            "witness":{"url":anchor,
+                "signing_address":"0x1111111111111111111111111111111111111111",
+                "expected_measurements":[format!("mrtd={}", "aa".repeat(48))],
+                "admission_evidence":true}
+        }))
+        .unwrap();
+        store.save_config(&cfg).unwrap();
+        let config_path = store.dir().join("contributor.json");
+        let enrollment_before = std::fs::read(&config_path).unwrap();
+        let artifact = WitnessReviewArtifact::new(
+            response,
+            source_hash.into(),
+            "fingerprint".into(),
+            None,
+            None,
+            None,
+        );
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[53; 32]).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        accepted_list::set_test_keys(store.dir(), vec![public]);
+        let now = chrono::Utc::now();
+        let mut document: WitnessConfiguration = serde_json::from_value(serde_json::json!({
+            "schema":"trace-commons.witness-configuration.v1", "version":2,
+            "issued_at":now, "enrollment_urls":[anchor, "https://replacement.example"],
+            "endpoints":[{"url":"https://replacement.example", "entries":[{
+                "measurements":format!("mrtd={}", "aa".repeat(48)),
+                "signing_address":rotated_signer,
+                "not_before":now - chrono::Duration::minutes(1),
+                "not_after":now + chrono::Duration::hours(1)
+            }]}]
+        }))
+        .unwrap();
+        let publish = |document: &WitnessConfiguration| {
+            let payload = document.canonical_payload().unwrap();
+            let signature = ListSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+            };
+            let signed = serde_json::to_vec(&serde_json::json!({
+                "payload":payload, "signatures":[signature],
+            }))
+            .unwrap();
+            configuration::install(store.dir(), &signed, &[public], anchor).unwrap();
+        };
+        publish(&document);
+        artifact
+            .validate_stored(&cfg, store.dir(), source_hash, "fingerprint")
+            .unwrap();
+        document.version += 1;
+        document.endpoints.clear();
+        publish(&document);
+        assert!(
+            artifact
+                .validate_stored(&cfg, store.dir(), source_hash, "fingerprint")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(config_path).unwrap(), enrollment_before);
+    }
+
+    #[tokio::test]
     async fn new_account_receiptless_history_keeps_signed_window_review_through_approval() {
         use crate::witness::transport::{
             GrantedConsent, HttpWitnessTransport, witness_contribution,
@@ -619,7 +710,7 @@ mod tests {
         save_witnessed(&store, id, &artifact).unwrap();
         let loaded = load_witnessed(&store, id).unwrap().unwrap();
         loaded
-            .validate_stored(&cfg, source_hash, "fingerprint")
+            .validate_stored(&cfg, store.dir(), source_hash, "fingerprint")
             .unwrap();
         assert_eq!(loaded.response.envelope_bytes, bytes);
         let opts = crate::submit::SubmitOptions {

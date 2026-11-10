@@ -70,8 +70,6 @@ public enum GlassTokens {
         public static let heroButtonFill: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         /// The label on heroButtonFill: 18:1.
         public static let heroButtonInk: GlassRGBA = GlassRGBA(0x16161A, alpha: 1)
-        /// The Private AI guide card's title: a dark blue on the light card, lifted in dark so it stays readable (product owner, 2026-11-05). 9:1 on white; 7:1 on the dark pane.
-        public static let guideTitle: GlassRGBA = GlassRGBA(0x73A8FF, alpha: 1, light: GlassRGBA(0x0A459E, alpha: 1))
         /// A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up).
         public static let heroAccent: GlassRGBA = GlassRGBA(0x2E95FF, alpha: 1)
         /// A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.
@@ -281,7 +279,6 @@ public enum GlassTokens {
             "heroInk": heroInk,
             "heroButtonFill": heroButtonFill,
             "heroButtonInk": heroButtonInk,
-            "guideTitle": guideTitle,
             "heroAccent": heroAccent,
             "badgeFillSubtle": badgeFillSubtle,
             "badgeFill": badgeFill,
@@ -395,10 +392,12 @@ public enum GlassTokens {
     public enum Gradient {
         /// Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7:1 or more; the lighter runs under the graphic. Campaign (NEAR AI's own): a deep NEAR blue to the brand blue #0091fd, which alone holds white at only 3.25:1.
         public static let heroCampaign: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x0057B0, alpha: 1, at: 0), GlassStop(0x0091FD, alpha: 1, at: 1)])
-        /// Missions: deep navy to the NEAR AI accent (owner, 2026-10-20: the accent replaced the purple; it was indigo to violet).
-        public static let heroMissions: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x06264A, alpha: 1, at: 0), GlassStop(0x035CA3, alpha: 1, at: 1)])
-        /// Insights: deep sea blue to the accent blue.
-        public static let heroInsights: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x073B55, alpha: 1, at: 0), GlassStop(0x1F7AA8, alpha: 1, at: 1)])
+        /// Home's campaign card (Ron, 2026-11-05): a solid navy as dark as the plain cards, both stops the same. heroCampaign itself stays, since the flow map and the library graphics take its brand blue.
+        public static let heroCampaignCard: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x081538, alpha: 1, at: 0), GlassStop(0x081538, alpha: 1, at: 1)])
+        /// Missions: a solid navy, both stops the same (Ron, 2026-11-05; it was deep navy to the NEAR AI accent).
+        public static let heroMissions: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x07152F, alpha: 1, at: 0), GlassStop(0x07152F, alpha: 1, at: 1)])
+        /// Insights: a solid deep azure, both stops the same; a blue of its own beside the campaign card's navy, no longer the deep sea teal #07202b (Ron, 2026-11-05; recoloured 2026-11-09).
+        public static let heroInsights: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x0A2546, alpha: 1, at: 0), GlassStop(0x0A2546, alpha: 1, at: 1)])
         public static var paneFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.1, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.55)), GlassStop(0xFFFFFF, alpha: 0.05, at: 0.4, light: GlassRGBA(0xFFFFFF, alpha: 0.35)), GlassStop(0xFFFFFF, alpha: 0.03, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.25))]), flat: GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.04, at: 0, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 0.4, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xF4F6F9, alpha: 0.08))])) }
         public static var cardFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.085, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.72)), GlassStop(0xFFFFFF, alpha: 0.045, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.52))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x0D1124, alpha: 0.35, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.35)), GlassStop(0x0D1124, alpha: 0.35, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.35))])) }
         public static var cardFillQuiet: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x0D1124, alpha: 0.28, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.29)), GlassStop(0x0D1124, alpha: 0.28, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.29))])) }
@@ -413,6 +412,7 @@ public enum GlassTokens {
         /// Every gradient token by its JSON name.
         public static var all: [String: GlassGradient] { [
             "heroCampaign": heroCampaign,
+            "heroCampaignCard": heroCampaignCard,
             "heroMissions": heroMissions,
             "heroInsights": heroInsights,
             "paneFill": paneFill,

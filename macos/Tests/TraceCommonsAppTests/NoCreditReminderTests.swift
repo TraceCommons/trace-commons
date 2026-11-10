@@ -4,7 +4,7 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 /// Home's reminder while Train coding models is off (product owner,
-/// 2026-11-05): one slim amber line under the Traces hero, with Open
+/// 2026-11-05): one slim amber line at the top of Home, with Open
 /// Settings, until it is on. Amber, never red, no X, and none in first run.
 @MainActor
 final class NoCreditReminderTests: XCTestCase {
@@ -26,20 +26,30 @@ final class NoCreditReminderTests: XCTestCase {
         XCTAssertFalse(NoCreditNotice.showsOnHome(loggedIn: false, scopes: []))
     }
 
-    func test_itIsOneAmberLineUnderTheHeroWithNoX() throws {
+    func test_itIsOneAmberLineUnderTheTracesHeadingWithNoX() throws {
         let notice = try source("Views/NoCreditNotice.swift")
         XCTAssertTrue(notice.contains(".foregroundStyle(GlassStatus.ask.color)"))
         XCTAssertTrue(notice.contains(".fill(GlassStatus.ask.color.opacity(0.12))"))
-        XCTAssertTrue(notice.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // Open Settings is a glass pill, not a link (Ron, 2026-11-09).
+        XCTAssertTrue(notice.contains(".buttonStyle(GlassButtonStyle(.glass))"))
+        XCTAssertFalse(notice.contains(".buttonStyle(GlassButtonStyle(.link))"))
         XCTAssertFalse(notice.contains(".outside"), "never red")
         XCTAssertFalse(notice.contains("xmark"))
         XCTAssertFalse(notice.contains("@AppStorage"), "nothing remembers it closed")
-        // Under the owner's Traces hero, which stays first on Home.
+        // Under the Traces heading, over its cards (Ron, 2026-11-09; it led
+        // Home from 2026-11-05), and nowhere else.
         let home = try source("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("            tracesHero\n            noCredit\n            privateAI"))
+        let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {\n"))
+        let line = try XCTUnwrap(home.range(of: "                noCredit\n                if showsTracesWalkthrough {",
+                                            range: traces.upperBound..<home.endIndex))
+        XCTAssertLessThan(traces.upperBound, line.lowerBound)
+        XCTAssertEqual(home.components(separatedBy: "noCredit\n").count - 1, 1, "drawn once")
         XCTAssertTrue(home.contains("perform: openSettings)"))
         let window = try source("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("openSettings: { navigation.requestSettings(at: .consent) },"))
+        // Open Settings opens the Settings window at the data uses, not just
+        // the section a later window would open at.
+        XCTAssertTrue(window.contains(
+            "openSettings: {\n                            navigation.requestSettings(at: .consent)\n                            openWindow(id: WindowID.settings)\n                        },"))
         // No pop-up in first run (owner, 2026-11-05).
         let join = try source("Views/FirstRun/JoinScreen.swift")
         XCTAssertFalse(join.contains("NoCreditNotice"))

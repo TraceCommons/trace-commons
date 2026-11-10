@@ -74,7 +74,7 @@ struct InviteRequest<'a> {
     idempotency_key: Uuid,
 }
 
-async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
+pub(crate) async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
     store: &ConfigStore,
     cfg: &ContributorConfig,
     method: Method,

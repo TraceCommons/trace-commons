@@ -1,0 +1,908 @@
+{
+  "schemaVersion": 2,
+  "recordedAtUTC": "2026-11-06T23:54:32.114167+00:00",
+  "scope": "All selected finite-model safety hypotheses proved by induction; reviewed native repairs tested separately; no production deployment or complete source-equivalence claim",
+  "sourceReview": {
+    "repairSourceCommit": "91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07",
+    "repairedNativeSource": {
+      "macos/Sources/TraceCommonsApp/AppModel.swift": "7f120214910f356a6397634fd97bd87ade2bcb2a53b722a83ddc0cfb9f461d05",
+      "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
+      "macos/Sources/TraceCommonsApp/Views/Settings/ConsentSection.swift": "f2c2ecbeabe0219d9b99721f48e61233473f36a648572ae71aa5012043e0cc10",
+      "macos/Sources/TraceCommonsApp/Views/Settings/ProjectsSection.swift": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
+      "macos/Tests/TraceCommonsAppTests/ScopedGrantHistoryReadsTests.swift": "f848761a0bc22aa02393b1b150cc02e381751c1b9d77bda97772d6c81064113e",
+      "macos/Tests/TraceCommonsAppTests/ContributionAccountTests.swift": "b4b714552be58469e9ec000f3fd2e3a047b7deefc1c5454a04e1b8c2b4bdf4ed",
+      "macos/Tests/TraceCommonsAppTests/FirstRunDaemonAdaptorTests.swift": "81ed2738aa4ccec067d67e6c5de15636be8bb20e698ba750073ede8cfb25e2a3",
+      "macos/Tests/TraceCommonsAppTests/MonitorNavigationTests.swift": "e03054a0e5f6635a8a0d9e2a3af806754fc6f207829c9f06b9c671ab213014f2"
+    },
+    "sourceCorrespondence": "Reviewed seams and actual native regression tests; no executable-source equivalence theorem",
+    "selectedSourceFileHashes": {
+      "macos/Sources/TraceCommonsApp/AppModel.swift": "7f120214910f356a6397634fd97bd87ade2bcb2a53b722a83ddc0cfb9f461d05",
+      "macos/Sources/TraceCommonsApp/Views/Settings/SharingChoiceCard.swift": "a4a7ec03cd08c453ac8f56ff4a386801a337b177e16ec4a565b0c4daebdd438d",
+      "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
+      "macos/Sources/TraceCommonsApp/SkillLearningStore.swift": "20c0bee6b18cbc3fe30c1676f85be982fc580e9f65f25b5b74fd515f8f476a35",
+      "macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift": "d27f1de153171507fa1a91d1d2952e43f258a327f461f34325f2cd714f133b12",
+      "crates/trace-commons-contributor/src/daemon/mod.rs": "8f01774b4d11a2ae4b1af84fc2c0ab7934f8a83305329a00d8eaa25039332671",
+      "crates/trace-commons-contributor/src/daemon/uploader.rs": "3bb4f06fb8a117a9342977aef43cb87ddfe599340aa0c045440d9b1e1129db63",
+      "crates/trace-commons-contributor/src/submit.rs": "e39a56e17531d608f44a47a5375ff090e2ee453fdcfa198a70287c820c28336e",
+      "crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs": "34ba7b0b8572200fc4ccd729d0b9917311fac5a42d931e60f4b08749bd8f2d5e",
+      "crates/trace-commons-contributor/src/daemon/skill_loop.rs": "b508bbb2328c1b5954925bf85b3d27c13d5ffc3a047a6c1f0684ea864ce9aac1",
+      "crates/trace-commons-contributor/src/skill_loop/install.rs": "66b9ec580a21b4b1ca92adaffbb484dd0cf6b8b9e6492fcf0ebd8693a6ff2ff8",
+      "crates/trace-commons-server/src/versioned_pipeline.rs": "8c914644b054a653497183b157d5f30e95460b589285dcbc1762c47b4658f02a",
+      "crates/trace-commons-server/src/versioned_pipeline_credit.rs": "318e13371c1085420f1bdc6d74506c1dfe7679a17fad961d27047ee30b7be812",
+      "crates/trace-commons-server/src/payout_pass.rs": "78e6628fccc279c2c452124ebed6dc1a10fe26af3c84005c6ae148439dc55707",
+      "crates/trace-commons-server/src/versioned_pipeline_product.rs": "aca5ff19c21fa040a7c504e4694bc550f8dac415fe2b8678c94eb9c864b5441b"
+    },
+    "historicalPreRepairComparison": {
+      "reviewedBaseline": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
+      "mainAtFinalReview": "828ad59f5bc539fafd4915267a45152941000639",
+      "unchangedSelectedSourceFiles": [
+        "macos/Sources/TraceCommonsApp/AppModel.swift",
+        "macos/Sources/TraceCommonsApp/Views/Settings/SharingChoiceCard.swift",
+        "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift",
+        "macos/Sources/TraceCommonsApp/SkillLearningStore.swift",
+        "macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift",
+        "crates/trace-commons-contributor/src/daemon/mod.rs",
+        "crates/trace-commons-contributor/src/daemon/uploader.rs",
+        "crates/trace-commons-contributor/src/submit.rs",
+        "crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs",
+        "crates/trace-commons-contributor/src/daemon/skill_loop.rs",
+        "crates/trace-commons-contributor/src/skill_loop/install.rs",
+        "crates/trace-commons-server/src/versioned_pipeline.rs",
+        "crates/trace-commons-server/src/versioned_pipeline_credit.rs",
+        "crates/trace-commons-server/src/payout_pass.rs",
+        "crates/trace-commons-server/src/versioned_pipeline_product.rs"
+      ],
+      "ipcDiff": "test-only managed Codex catalogue/redeem assertions; skill handlers unchanged"
+    },
+    "note": "Historical comparison is separate from the repaired source commit and current file hashes"
+  },
+  "selectionSha256": "9c45f9def35e233d08910f3e4011ea3abe0f137d5d48088db084b76a76311d23",
+  "hypotheses": [
+    {
+      "id": "P1",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_consent",
+          "definition": "P1",
+          "status": "holds",
+          "certificate": "induction/client_consent/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P2",
+          "status": "holds",
+          "certificate": "induction/client_contribution/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P3",
+          "status": "holds",
+          "certificate": "induction/client_contribution/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P4",
+          "status": "holds",
+          "certificate": "induction/client_contribution/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P5",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P5",
+          "status": "holds",
+          "certificate": "induction/server_receipt/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P6",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_pipeline",
+          "definition": "P6",
+          "status": "holds",
+          "certificate": "induction/server_pipeline/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P7",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_pipeline",
+          "definition": "P7",
+          "status": "holds",
+          "certificate": "induction/server_pipeline/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P8",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P8",
+          "status": "holds",
+          "certificate": "induction/server_receipt/certificate.json"
+        },
+        {
+          "model": "server_pipeline",
+          "definition": "P8",
+          "status": "holds",
+          "certificate": "induction/server_pipeline/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P9",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_settlement",
+          "definition": "P9",
+          "status": "holds",
+          "certificate": "induction/server_settlement/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P10",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_lifecycle",
+          "definition": "P10",
+          "status": "holds",
+          "certificate": "induction/server_lifecycle/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P11",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P11",
+          "status": "holds",
+          "certificate": "induction/server_receipt/certificate.json"
+        },
+        {
+          "model": "server_lifecycle",
+          "definition": "P11",
+          "status": "holds",
+          "certificate": "induction/server_lifecycle/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P12",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P12",
+          "status": "holds",
+          "certificate": "induction/client_contribution/certificate.json"
+        }
+      ]
+    },
+    {
+      "id": "P13",
+      "status": "holds",
+      "seams": [
+        {
+          "model": "client_learning",
+          "definition": "P13",
+          "status": "holds",
+          "certificate": "induction/client_learning/certificate.json"
+        }
+      ]
+    }
+  ],
+  "currentModelProofs": [
+    {
+      "model": "client_consent",
+      "status": "proved",
+      "certificate": "induction/client_consent/certificate.json",
+      "modelSha256": "b4c00c7f25ddda740375cf589463facd5b2e251924b6908cee7ae9bcbb156b87",
+      "harnessSha256": "fedbeec53947d1242fdbeb412cd3acfbc38b18aaf9f15ce62b35fba9cf77d9b2"
+    },
+    {
+      "model": "client_contribution",
+      "status": "proved",
+      "certificate": "induction/client_contribution/certificate.json",
+      "modelSha256": "e612dbe9c2cdb247e0eaaa4ed2797f51d276ce1e3d744a8ca2c265fc24aae264",
+      "harnessSha256": "111066737e09653c47f480901da555dc704c1543daa8a0f213dca7ba8a7d98fb"
+    },
+    {
+      "model": "client_learning",
+      "status": "proved",
+      "certificate": "induction/client_learning/certificate.json",
+      "modelSha256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
+      "harnessSha256": "a10417d273b6b2969b8b788792a518601712670c939f2cf4cf74b4d78ffd9d43"
+    },
+    {
+      "model": "server_lifecycle",
+      "status": "proved",
+      "certificate": "induction/server_lifecycle/certificate.json",
+      "modelSha256": "4dbf6f293ab5da0d096ba67950fb67fd2102f3c7188affa8660efad8e94afe29",
+      "harnessSha256": "2175595cf173bb08f3f3b9e987f40cf3e8a8479a1762981e96fb9cb20c245280"
+    },
+    {
+      "model": "server_pipeline",
+      "status": "proved",
+      "certificate": "induction/server_pipeline/certificate.json",
+      "modelSha256": "b637efc035cf624c3c73f5bf574a860935e0386ffd0317369a5b89d5c669117f",
+      "harnessSha256": "e1c4fb0435a272007a69e042b83446b1a7dbcc36b5da2543f024650e0f6b04df"
+    },
+    {
+      "model": "server_receipt",
+      "status": "proved",
+      "certificate": "induction/server_receipt/certificate.json",
+      "modelSha256": "0bceeb8153c5347626dc3676da4cdebb4942fc6301fe9c09a796f76a719cf69e",
+      "harnessSha256": "96ffd090665627a552d2b29900e33ba0ed9e56527859376fb2b3c8b4ef361c3c"
+    },
+    {
+      "model": "server_settlement",
+      "status": "proved",
+      "certificate": "induction/server_settlement/certificate.json",
+      "modelSha256": "8f8350008deab8b9077bf556b99461503f2733c9a922941962f51f4a025606bc",
+      "harnessSha256": "f0e04ec024c5557e7969250d98b38aa9b9a6d102ca2d9c43cd5d7ea49f815181"
+    }
+  ],
+  "tools": {
+    "Quint": "0.33.0",
+    "Apalache": "0.62.1",
+    "Java": "21.0.13",
+    "Node": "26.13.0",
+    "Python": "3.12.8",
+    "Swift": "6",
+    "historicalTLC": "1.7.4",
+    "historicalWorkflowCommit": "6f35f6ae6b3581c499bdfcae080932b4ffa7e281"
+  },
+  "proofMethod": {
+    "obligations": [
+      "initiation",
+      "full original-step consecution including domain closure",
+      "implication",
+      "nonvacuity"
+    ],
+    "independentAgentReview": "All seven generator/domain/transition/conclusion linkages and terminal coherent logs approved",
+    "stateOrActionConstraintsAdded": false,
+    "fairnessOrProgressClaim": false
+  },
+  "nativeValidation": {
+    "fullPackageExitCode": 0,
+    "command": [
+      "swift",
+      "test",
+      "--package-path",
+      "macos"
+    ],
+    "cwd": "/private/tmp/tc-quint-client-server",
+    "environment": {
+      "TC_FFI_LIB_DIR": "/private/tmp/tc-quint-client-server/target/debug",
+      "DYLD_LIBRARY_PATH": "/private/tmp/tc-quint-client-server/target/debug",
+      "NSUnbufferedIO": "YES"
+    },
+    "xctestTargets": [
+      {
+        "target": "TraceCommonsAppTests.xctest",
+        "tests": 1852,
+        "summary": "Executed 1852 tests, with 10 tests skipped and 0 failures (0 unexpected) in 118.094 (118.219) seconds"
+      },
+      {
+        "target": "TCUpdatesTests.xctest",
+        "tests": 27,
+        "summary": "Executed 27 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds"
+      },
+      {
+        "target": "TCShellCoreTests.xctest",
+        "tests": 1048,
+        "summary": "Executed 1048 tests, with 0 failures (0 unexpected) in 8.051 (8.086) seconds"
+      },
+      {
+        "target": "TCDesignTests.xctest",
+        "tests": 296,
+        "summary": "Executed 296 tests, with 0 failures (0 unexpected) in 0.624 (0.636) seconds"
+      },
+      {
+        "target": "TCBridgeTests.xctest",
+        "tests": 299,
+        "summary": "Executed 299 tests, with 0 failures (0 unexpected) in 4.498 (4.520) seconds"
+      }
+    ],
+    "xctestTotalIncludingSkips": 3522,
+    "existingSkippedTests": 10,
+    "swiftTestingPassed": 8,
+    "newDeterministicRegressions": 24,
+    "independentAgentReview": "Final owner preflight and callback code approved at AppModel hash 7f120214910f356a6397634fd97bd87ade2bcb2a53b722a83ddc0cfb9f461d05",
+    "runtime": "Normal approved AppKit/Vision environment; restricted rendering failures resolved without modifying OCR tests",
+    "negativeControlProvenance": "55-assertion guard-bypass run before owner-preflight addition; separate initial-owner red regression then restored green; final full suite covers current source",
+    "artifacts": [
+      {
+        "name": "full-suite",
+        "file": "native/full-suite.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "c0de3a27d573949dcb399a99b5c898624e1bbd655e35c38239ee11cb0ff48a6a",
+        "compressedSha256": "2dabe8b88d5e16b556466835a011de7644b84a87a88e8f2b981e06aeac4d5cc1"
+      },
+      {
+        "name": "focused-final",
+        "file": "native/focused-final.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "46f38a5cbae722119361f111539519f86c71ddb3ab226a0170172b79e8cdc70a",
+        "compressedSha256": "bc4f289b88eacfda1bd6c5e54d595dab8b1d32bb3d9b12c326cd3c7202871d1b"
+      },
+      {
+        "name": "guard-bypass-red",
+        "file": "native/guard-bypass-red.log.gz",
+        "exitCode": 1,
+        "rawLogSha256": "e358b3bc7640fbbf554891b66b8a25fc47bd7e860c7765bfb9c9b943f4642885",
+        "compressedSha256": "7f12f05a96ca3e83d91d91faa0af4b6015f902558173b576f48720cf83aba162"
+      },
+      {
+        "name": "initial-owner-red",
+        "file": "native/initial-owner-red.log.gz",
+        "exitCode": 1,
+        "rawLogSha256": "7a5a7bc2513de7cdbb263aceed0f2df677449a82deca599228eafa31361b3200",
+        "compressedSha256": "7939e64e83572fda12cc618e8a69851adf2f57eeb221d7b8cd2ba5f2061db942"
+      },
+      {
+        "name": "owner-final-green",
+        "file": "native/owner-final-green.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "77f25ef4d0fc90ceb56b41521de81dd06a7b9f1261485dca1fa063dbc4c57e23",
+        "compressedSha256": "0ea4ecab5dcb943e1cbaade3b235275f50fcf2fa97ff2985126031edf919d6bd"
+      },
+      {
+        "name": "history-source-replay",
+        "file": "native/history-source-replay.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "f0732d70cd4500b0399d62019f85c63a9c476f80e9d3dd0e7b7586ffe5dc7bef",
+        "compressedSha256": "a70ed79e2fbd0175fd80ed966934f181c9028c03c5180c3c0bc061aedd561a4f"
+      },
+      {
+        "name": "consent-source-replay",
+        "file": "native/consent-source-replay.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "bdaa87de41ee4e306cba6dd588e0d2cf251ac93e43c8c712e761289aded65e0d",
+        "compressedSha256": "853086341e5ae3930aac20ea10829f5a141a5ab259d3f1ce32dba513c27e6998"
+      },
+      {
+        "name": "license-boundary",
+        "file": "native/license-boundary.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "de1ea8e906c6bb7fcd51e77c06ce408a1cf6bafb6a195198ff0649b9140f8af8",
+        "compressedSha256": "e545b0012a0a451f7f68ad2f48ec40f93f001f80597b0b5b53513fb3eb258a85"
+      },
+      {
+        "name": "ffi-build",
+        "file": "native/ffi-build.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "852f3eadee229c694a8a494bc85aaa767854807b118d49d9518ce494ff7e37d4",
+        "compressedSha256": "08a05ba07650770a386add15ea5058fbca18c7ca4ea6ff62931ed07f670cfc4c"
+      },
+      {
+        "name": "model-controls",
+        "file": "native/model-controls.log.gz",
+        "exitCode": 0,
+        "rawLogSha256": "832bbcd665f18c27297cda3efb00ed89670bdf0fa01697609ce0017ccd554420",
+        "compressedSha256": "cec79866aa6854acf0e2a3d75c6d192ece56df184c7145deb4b269aea7d87182"
+      }
+    ]
+  },
+  "otherValidation": {
+    "structuralModels": 14,
+    "frameControlProjections": 155,
+    "sampledTraces": 1792,
+    "sampledStates": 180992,
+    "structuralEvidence": "../../validation.json",
+    "proofAdapterTests": 13,
+    "focusedModelAssertions": 12,
+    "licenseBoundaryTests": 4,
+    "receiptObserverControls": 5,
+    "skillObserverControls": 5,
+    "sourceInventory": {
+      "commit": "91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07",
+      "rows": 1013,
+      "classifications": {
+        "gap": 926,
+        "coarse-interface": 28,
+        "detailed": 59
+      }
+    }
+  },
+  "historicalEvidence": "Pre-fix TLC reports/results and earlier incomplete attempts remain under evidence; current statuses come only from currentModelProofs",
+  "adapterSourceHashes": {
+    "induction_checks.py": "34681ad1cdde91689a7525400fd09d498b66585cebbea1e82be892802f879c92",
+    "run_induction.py": "8240d65c91d5ae0c8a8e3a89309d9d8c55028ace1f96eeb2b747111d10e19cd7",
+    "proof_checks.py": "f35ff7580894c5c6002df6c7a924803e7be610c04529af58b8802dcd2833f037",
+    "verify.py": "054bf7969e26cba6583d41221793548755aa261976a19580bde05db1a3319bf1"
+  },
+  "artifacts": [
+    {
+      "path": "client_learning-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "client_learning-tlc-result.json",
+      "bytes": 886,
+      "sha256": "bcac620d689aa6d678f2764c826409f6c819f3a2759daa9e1c05bde0a1c3f145"
+    },
+    {
+      "path": "contribution-tlc-report.md",
+      "bytes": 591,
+      "sha256": "9dba54c3b0d21058cef0d95339ac9c5bc4ccfaaba9b2af2b2728aa5914ddce12"
+    },
+    {
+      "path": "contribution-tlc-result.json",
+      "bytes": 1111,
+      "sha256": "b7b81317b08d67e28b7b4e202264377dfe996b40440c227a9a051bafbf9d6fde"
+    },
+    {
+      "path": "contribution-tlc.log",
+      "bytes": 13093,
+      "sha256": "ca9432e75d4e96eb469bfa18e0368c0ae03b042dd50911092e3cf31d7ecc6971"
+    },
+    {
+      "path": "induction/client_consent/certificate.json",
+      "bytes": 7144,
+      "sha256": "e5d4a352c3aa01f94dc0c2ff6260a6497262ac253571db9d9d686d76214ac38a"
+    },
+    {
+      "path": "induction/client_consent/consecution.log.gz",
+      "bytes": 22990,
+      "sha256": "04fe2c98b2b010ec0a379d9c009a13f29878d0dad0cde0c230c8b6a412bca347"
+    },
+    {
+      "path": "induction/client_consent/implication.log.gz",
+      "bytes": 1903,
+      "sha256": "54c5d7b7cbc9225f126e4ea2733ad94e2ffa8d16b3096ab1bec8b90f5394c5b3"
+    },
+    {
+      "path": "induction/client_consent/initiation.log.gz",
+      "bytes": 2469,
+      "sha256": "f451a79c358eb451a40382ecc10914017fe4238892c643e1eb4bfb9d8bb821e1"
+    },
+    {
+      "path": "induction/client_consent/nonvacuity.log.gz",
+      "bytes": 2553,
+      "sha256": "e3509e14058242bee309be8f750f4bc6b86abdc60f354cde1a2420190dcc826e"
+    },
+    {
+      "path": "induction/client_contribution/certificate.json",
+      "bytes": 7553,
+      "sha256": "aa864ff4f90e8308fb73eb8a1b20101e15a8eb8d7dcf7da576c9dcb7f0db03c7"
+    },
+    {
+      "path": "induction/client_contribution/consecution.log.gz",
+      "bytes": 34737,
+      "sha256": "dd96428243f6e8e42765605aba733d1cb398173370e4f3b60bd40201ccdb263d"
+    },
+    {
+      "path": "induction/client_contribution/implication.log.gz",
+      "bytes": 1909,
+      "sha256": "7d9bde550d3a3ba37dfbce84e1172059e5e21560332e160d70d14bdbe425a77f"
+    },
+    {
+      "path": "induction/client_contribution/initiation.log.gz",
+      "bytes": 2430,
+      "sha256": "acc5c61c013f13ffe9f170d12310c3926e82ffd828f5b1619f42c5bf539f8e98"
+    },
+    {
+      "path": "induction/client_contribution/nonvacuity.log.gz",
+      "bytes": 2489,
+      "sha256": "fc24c9702ba15f20601418dd00150567047dac680daed1ccb4cc3c491e9552a5"
+    },
+    {
+      "path": "induction/client_learning/certificate.json",
+      "bytes": 5550,
+      "sha256": "0e9854accad2d49a42a8499000bf645e802b5f9d3a0d8a7319c560a865c38434"
+    },
+    {
+      "path": "induction/client_learning/consecution.log.gz",
+      "bytes": 22044,
+      "sha256": "d4bc12f891e9e110eee7026e7df180c29dad5ce02936f1518684fe81bb2c1659"
+    },
+    {
+      "path": "induction/client_learning/implication.log.gz",
+      "bytes": 1887,
+      "sha256": "88f793cf79c6c0e0b85c1ace05703a878ac4dae67dc32d1db542a647c867754d"
+    },
+    {
+      "path": "induction/client_learning/initiation.log.gz",
+      "bytes": 2323,
+      "sha256": "34daebd2850f639e54eb013dd837e0a0b8f9e7bc45bf170a1993cba699c2db49"
+    },
+    {
+      "path": "induction/client_learning/nonvacuity.log.gz",
+      "bytes": 2480,
+      "sha256": "d9f4be5f5510af19b428c6510d7ef540c5e7708e4275b50f84a10edd58fb230c"
+    },
+    {
+      "path": "induction/runner-validation.json",
+      "bytes": 6466,
+      "sha256": "01eef68a3094bb07166a273899d5a94086c430bd8730ac10f7c24a56336bf076"
+    },
+    {
+      "path": "induction/server_lifecycle/certificate.json",
+      "bytes": 5838,
+      "sha256": "7daab0e4ffd4304ce8cfaa4170e1c8cceb6cf859bb9a926b8bdd58b77d0bbadd"
+    },
+    {
+      "path": "induction/server_lifecycle/consecution.log.gz",
+      "bytes": 10173,
+      "sha256": "2c43461a8ca0f690ff6d512f0670a1dbea1911bcd1a33be8f3ec9f4380854353"
+    },
+    {
+      "path": "induction/server_lifecycle/implication.log.gz",
+      "bytes": 1902,
+      "sha256": "25bfb4ebfccb052b4ffbaa9c465b36012089b5f8d282c833d43305cbe724871a"
+    },
+    {
+      "path": "induction/server_lifecycle/initiation.log.gz",
+      "bytes": 2143,
+      "sha256": "2c082507995a7510e9aaacb7e068f38996395e8c716b9011532dfde9a0e18357"
+    },
+    {
+      "path": "induction/server_lifecycle/nonvacuity.log.gz",
+      "bytes": 2265,
+      "sha256": "bfafc2be81dc08d5f2f4e4dc19f3c57a95dbdcf44806f700183000ce4e051549"
+    },
+    {
+      "path": "induction/server_pipeline/certificate.json",
+      "bytes": 7005,
+      "sha256": "cc89ab854aa4c97ad31c6e1da7ec842db841f4f5beacbd11812ffe290bd9f955"
+    },
+    {
+      "path": "induction/server_pipeline/consecution.log.gz",
+      "bytes": 4475,
+      "sha256": "828e68ffcee5c23c55883928d7083c4b3d2432d8ebf76bccb8e73c5422eede96"
+    },
+    {
+      "path": "induction/server_pipeline/implication.log.gz",
+      "bytes": 1883,
+      "sha256": "a99b48430b7f2a040204a971eecf179a186d2f07b448544edd720d4cf2f6a903"
+    },
+    {
+      "path": "induction/server_pipeline/initiation.log.gz",
+      "bytes": 1976,
+      "sha256": "34cfe5263c35228b3a41b123516748ed48c18b8def256bf0172340aec6e2dafa"
+    },
+    {
+      "path": "induction/server_pipeline/nonvacuity.log.gz",
+      "bytes": 2615,
+      "sha256": "e2c3ffcb4c00a9a72fd0c409a34cb42ac10abe8af0e46be365ccb88a3b450133"
+    },
+    {
+      "path": "induction/server_receipt/certificate.json",
+      "bytes": 6946,
+      "sha256": "0e94fd937ace864016e2ac513a55b71b789adf59fbd5f8c59ac8e95a7edd963d"
+    },
+    {
+      "path": "induction/server_receipt/consecution.log.gz",
+      "bytes": 4372,
+      "sha256": "e61cdeb832704437d9f872783c69f877dd5ec8957c37c2f0cdfe758c5de5918b"
+    },
+    {
+      "path": "induction/server_receipt/implication.log.gz",
+      "bytes": 1884,
+      "sha256": "bf344a4aba3fddc4cd17cf89e407651bf0f93a018fa4708436eca3fc89a7211d"
+    },
+    {
+      "path": "induction/server_receipt/initiation.log.gz",
+      "bytes": 1964,
+      "sha256": "c48edf59ab57e6cd562b65c3434aaf129d050553d37fe7d21dddf971786cb3f6"
+    },
+    {
+      "path": "induction/server_receipt/nonvacuity.log.gz",
+      "bytes": 2772,
+      "sha256": "d05769b8812f48ad1928bad7a42985460eee488db773ee18d1fc0c7ae5264d5d"
+    },
+    {
+      "path": "induction/server_settlement/certificate.json",
+      "bytes": 5848,
+      "sha256": "8fc81239c08c22a67505cf9dcaadf71ba594681970d4eeba3bfb4006deedf472"
+    },
+    {
+      "path": "induction/server_settlement/consecution.log.gz",
+      "bytes": 19378,
+      "sha256": "62a6f6ef4499f4d968080ea33305c936e886ff07e519c1a047d87b953ba84d28"
+    },
+    {
+      "path": "induction/server_settlement/implication.log.gz",
+      "bytes": 1893,
+      "sha256": "6304a9ffc54350dfa8b31f0bf90eb087b5824743d1b4b7b3ff42630b40678cc9"
+    },
+    {
+      "path": "induction/server_settlement/initiation.log.gz",
+      "bytes": 2260,
+      "sha256": "21e86a549bfbe03dfe7b38765a02354763fa93056a24bd56964df3d149c06d42"
+    },
+    {
+      "path": "induction/server_settlement/nonvacuity.log.gz",
+      "bytes": 2405,
+      "sha256": "8441ed6b03b05874fee5ea975204f025660e368598f483c56ad3f79b9be13b9a"
+    },
+    {
+      "path": "main-drift-review.json",
+      "bytes": 1231,
+      "sha256": "d7ead1f1e58b7c60ae414be0231fa25e0b2ca948f195a3b381124573b2fcc98d"
+    },
+    {
+      "path": "native/consent-source-replay.log.gz",
+      "bytes": 1494,
+      "sha256": "853086341e5ae3930aac20ea10829f5a141a5ab259d3f1ce32dba513c27e6998"
+    },
+    {
+      "path": "native/ffi-build.log.gz",
+      "bytes": 620,
+      "sha256": "08a05ba07650770a386add15ea5058fbca18c7ca4ea6ff62931ed07f670cfc4c"
+    },
+    {
+      "path": "native/focused-final.log.gz",
+      "bytes": 3345,
+      "sha256": "bc4f289b88eacfda1bd6c5e54d595dab8b1d32bb3d9b12c326cd3c7202871d1b"
+    },
+    {
+      "path": "native/full-suite.log.gz",
+      "bytes": 104540,
+      "sha256": "2dabe8b88d5e16b556466835a011de7644b84a87a88e8f2b981e06aeac4d5cc1"
+    },
+    {
+      "path": "native/guard-bypass-red.log.gz",
+      "bytes": 2411,
+      "sha256": "7f12f05a96ca3e83d91d91faa0af4b6015f902558173b576f48720cf83aba162"
+    },
+    {
+      "path": "native/history-source-replay.log.gz",
+      "bytes": 532,
+      "sha256": "a70ed79e2fbd0175fd80ed966934f181c9028c03c5180c3c0bc061aedd561a4f"
+    },
+    {
+      "path": "native/initial-owner-red.log.gz",
+      "bytes": 1082,
+      "sha256": "7939e64e83572fda12cc618e8a69851adf2f57eeb221d7b8cd2ba5f2061db942"
+    },
+    {
+      "path": "native/license-boundary.log.gz",
+      "bytes": 1838,
+      "sha256": "e545b0012a0a451f7f68ad2f48ec40f93f001f80597b0b5b53513fb3eb258a85"
+    },
+    {
+      "path": "native/model-controls.log.gz",
+      "bytes": 478,
+      "sha256": "cec79866aa6854acf0e2a3d75c6d192ece56df184c7145deb4b269aea7d87182"
+    },
+    {
+      "path": "native/owner-final-green.log.gz",
+      "bytes": 2096,
+      "sha256": "0ea4ecab5dcb943e1cbaade3b235275f50fcf2fa97ff2985126031edf919d6bd"
+    },
+    {
+      "path": "p1-bounded8-result.json",
+      "bytes": 554,
+      "sha256": "4cfd2dc20169d17abb617e220293267b12281979769440ec7c426ac13c14a40a"
+    },
+    {
+      "path": "p1-bounded8.log",
+      "bytes": 49285,
+      "sha256": "02b274815400394bc6ea7fd8f4e35f004d56cd053db0b4c76db355e8d19aaa98"
+    },
+    {
+      "path": "p1-tlc-report.md",
+      "bytes": 742,
+      "sha256": "1f27405b6f71c3892ceb41696a3fe0b6ae6e3c65dbfccb8daac7e357dd48f7c8"
+    },
+    {
+      "path": "p1-tlc-result.json",
+      "bytes": 878,
+      "sha256": "c13a1c78f8fdd1576cd9dc20cecccd8c0b8ff4c98cc80110e70ce12522c7c1bc"
+    },
+    {
+      "path": "p1-tlc.log",
+      "bytes": 29949,
+      "sha256": "28c4e633471a2a25aa1dd3f44020ffd69ced37c8303be436ca6c6ba438ad5f43"
+    },
+    {
+      "path": "p10-p11-bounded10.json",
+      "bytes": 640,
+      "sha256": "f3efbfdfd64a4914cc6ef32cd835e810b4bc7cabf406665a756392a25166129a"
+    },
+    {
+      "path": "p10-p11-bounded10.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "p10-p11-inductive.json",
+      "bytes": 559,
+      "sha256": "ad91a4d2247cb7699fb98ec6c4c866abc98c9c70c0eb4254219831c7bab44c07"
+    },
+    {
+      "path": "p10-p11-inductive.log",
+      "bytes": 9973,
+      "sha256": "7a9203c01437612e1a3ac3176d7e58834cd42092eb30647bbecca7299199dcbd"
+    },
+    {
+      "path": "p13-bounded10-command.json",
+      "bytes": 416,
+      "sha256": "a2dfdc5fbbfe97d67c9553d6ca063d2e37b5acd4ba93b1f35763265a40c466b6"
+    },
+    {
+      "path": "p13-bounded10-hashes.json",
+      "bytes": 550,
+      "sha256": "ddb744d9cb6f5b4c14bd6276c85bef3a7e59c0c406a8542a9a5e2f593cf2f0cb"
+    },
+    {
+      "path": "p13-bounded10-result.json",
+      "bytes": 480,
+      "sha256": "ac2120e156d759cde0d7e4fb93562c185cd3cec4e1a981dec0a2f5d5760ab99c"
+    },
+    {
+      "path": "p13-bounded10.log",
+      "bytes": 41046,
+      "sha256": "781b4b7a1a5747a45f3412856ae1cd88d13588366e1b4f661bc3caa4625d800c"
+    },
+    {
+      "path": "p13-inductive-command.json",
+      "bytes": 405,
+      "sha256": "a56e7c4593ef87411764234989645d2ce6b9773ddf1d0e012fee0318b254bb21"
+    },
+    {
+      "path": "p13-inductive-hashes.json",
+      "bytes": 550,
+      "sha256": "5a5022c6dd705bb30e8f1ce4ff8618282570cb3ddd15efedb7f4d5e2185338a8"
+    },
+    {
+      "path": "p13-inductive-result.json",
+      "bytes": 462,
+      "sha256": "d69ab2a50633f3254d58d662fe6245e278dccb0b3c421bb25f5bd166649bf306"
+    },
+    {
+      "path": "p13-inductive.log",
+      "bytes": 9400,
+      "sha256": "16fe3edaaf7b552827550b4ade35aefd0d9cfcd38689f916cdecc09cd17e8f6c"
+    },
+    {
+      "path": "p2-bounded8-result.json",
+      "bytes": 563,
+      "sha256": "023692902a27e84ad80f5dfd3191693551fd42f4a091b6512c8310231c863ed2"
+    },
+    {
+      "path": "p2-bounded8.log",
+      "bytes": 38755,
+      "sha256": "bf4ad72df61d79bd770a72ae7a9fcd18e584afac96c405bead8b17ef48301787"
+    },
+    {
+      "path": "p3-bounded8-result.json",
+      "bytes": 564,
+      "sha256": "118f0006cbed6112715f5d64816a2be21e7eab31bdc66e6ab9e2fe2ea124b808"
+    },
+    {
+      "path": "p3-bounded8.log",
+      "bytes": 40294,
+      "sha256": "5294723777f82c1cc9cc025ed55f2996c5025ff995f0f25891e6420e45c12202"
+    },
+    {
+      "path": "p4-bounded8-result.json",
+      "bytes": 564,
+      "sha256": "a1d03055da5a3f59a96d6c7aca4e649dde8b0793bb60f5ae8853e905b0c261cc"
+    },
+    {
+      "path": "p4-bounded8.log",
+      "bytes": 38755,
+      "sha256": "ab79909305f6a0f341421f1b4f921f8cb42ae0476258e506ab12edfb7b51132d"
+    },
+    {
+      "path": "p9-bounded10.json",
+      "bytes": 624,
+      "sha256": "0a42703bdbd2731b119f4487481c145dafa7aa6cfea5dc48ad0143f0e18a81f6"
+    },
+    {
+      "path": "p9-bounded10.log",
+      "bytes": 112728,
+      "sha256": "d6894cecb6d240ffa7b3a9ca276cdcf412ae94923173ee372854e6c32ffe8019"
+    },
+    {
+      "path": "p9-inductive.json",
+      "bytes": 594,
+      "sha256": "00b7bd8e4d7accb0becb5252b1940b8937ea72ef185d5ec1748d4ed7d4c627a2"
+    },
+    {
+      "path": "p9-inductive.log",
+      "bytes": 9632,
+      "sha256": "1ff24f2073ed1618b5eb4571633cf7afae3f14a93c43ba7806fafd49274ad0fe"
+    },
+    {
+      "path": "server_lifecycle-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_lifecycle-tlc-result.json",
+      "bytes": 959,
+      "sha256": "5962fc8e8e604fd7791176f0a885ebd178095e4d57b8d8bc500e26172cfcb971"
+    },
+    {
+      "path": "server_pipeline-bounded8-result.json",
+      "bytes": 555,
+      "sha256": "09f1879c12e130e95d553f0851772de6e608d431c4a418d73a02f6d493b56893"
+    },
+    {
+      "path": "server_pipeline-bounded8.log",
+      "bytes": 21235,
+      "sha256": "3db3c47ec41e51d3e1f868512501006140e3046320292afc99e0e81b611ecf1f"
+    },
+    {
+      "path": "server_pipeline-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_pipeline-tlc-result.json",
+      "bytes": 1023,
+      "sha256": "8c09a695edfe75a4e7fceba9115afbef096cb1f390ef60668901c4a47d484322"
+    },
+    {
+      "path": "server_receipt-bounded8-result.json",
+      "bytes": 554,
+      "sha256": "17f86bb1e726344fdc74e4bc825cb4f332521571e1c800ebbe7527bb262af25b"
+    },
+    {
+      "path": "server_receipt-bounded8.log",
+      "bytes": 17508,
+      "sha256": "54540f7063bc2d9eea795a886a7560a3512ee726811f28cf84af1124bfc914aa"
+    },
+    {
+      "path": "server_receipt-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_receipt-tlc-result.json",
+      "bytes": 1020,
+      "sha256": "a46fca9a231edf39bfc51e52d079a7df408cef79b55d1b0b347c045a8635a5ad"
+    },
+    {
+      "path": "server_settlement-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_settlement-tlc-result.json",
+      "bytes": 891,
+      "sha256": "81ceac2183f203397f48b3096b3257b272fef4cf553776758223d83cb826f288"
+    }
+  ]
+}

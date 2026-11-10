@@ -3,7 +3,7 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Where Customize on Tools reads the repos and their past sessions (Ron's
+/// Where Customize on Uses reads the repos and their past sessions (Ron's
 /// #1030 Rules screen, folded into Tools on 2026-10-21). Nil is a refusal or
 /// no daemon, never an empty answer.
 @MainActor
@@ -14,7 +14,7 @@ protocol FirstRunRulesSource: AnyObject {
 
 extension AppModel: FirstRunRulesSource {}
 
-/// The per-repo rules' decisions, which Customize on Tools draws, apart from
+/// The per-repo rules' decisions, which Customize on Uses draws, apart from
 /// the view so they can be tested
 /// (#1030 `ftux-model.ts`: `groupState`, `toggleGroup`, `applyRule`,
 /// `pastSessionSummary`).

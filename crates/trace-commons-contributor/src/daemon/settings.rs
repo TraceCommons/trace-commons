@@ -772,7 +772,7 @@ pub struct DaemonSettings {
     pub managed_terminal_chosen: bool,
 
     /// "Group sessions in herdr" (owner decision D4, 2026-11-03): managed
-    /// sessions open as tabs of herdr's "Near.ai" workspace, with
+    /// sessions open as tabs of herdr's "Near AI Gateway" workspace, with
     /// `managed_terminal` hosting herdr when no herdr client is running.
     /// Off by default and in a file written before the key existed.
     #[serde(default)]

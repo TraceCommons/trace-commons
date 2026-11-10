@@ -289,13 +289,14 @@ async fn stored_admission_artifact(
 /// and every admission-bearing review was refused `witness-certificate-invalid`.
 #[tokio::test]
 async fn a_v61_accounts_admission_review_is_not_refused_for_its_tenant_id() {
+    let state = tempfile::tempdir().unwrap();
     let account = V61Account::provision("alice.near");
     let key = fixture_signer("witness-fixture-only");
     let cfg = config_for(&account, &fixture_address(&key));
     let (artifact, source_hash) = stored_admission_artifact(&cfg, &key, &account.anchor).await;
 
     let envelope = artifact
-        .validate_stored(&cfg, &source_hash, "fingerprint-e2e")
+        .validate_stored(&cfg, state.path(), &source_hash, "fingerprint-e2e")
         .expect("a V61 account's own admission review must validate");
     assert_eq!(
         envelope.contributor.tenant_scope_ref.as_deref(),
@@ -319,6 +320,7 @@ async fn a_v61_accounts_admission_review_is_not_refused_for_its_tenant_id() {
 /// express the new world's failure.
 #[tokio::test]
 async fn the_pre_v61_account_shape_validates_which_is_why_this_was_missed() {
+    let state = tempfile::tempdir().unwrap();
     let key = fixture_signer("witness-fixture-only");
     let anchor = "ab".repeat(32);
     let legacy = V61Account {
@@ -329,7 +331,7 @@ async fn the_pre_v61_account_shape_validates_which_is_why_this_was_missed() {
     let (artifact, source_hash) = stored_admission_artifact(&cfg, &key, &anchor).await;
 
     artifact
-        .validate_stored(&cfg, &source_hash, "fingerprint-e2e")
+        .validate_stored(&cfg, state.path(), &source_hash, "fingerprint-e2e")
         .expect(
             "the pre-V61 shape must validate; if this fails the fixture's own \
              certificate is broken and the test above proves nothing",

@@ -26,18 +26,14 @@ struct BalanceRow: View {
 
     var body: some View {
         let status = model.balanceStatus
-        let tone = BalanceSurface.tone(status, calls: model.balanceCalls)
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             // A sentence OR the figures, never both: every state but the one
             // that was read has null figures behind it, and the sentence for
             // a null remaining amount is about an uncapped account, which is
-            // nonsense beside "no sign-in is kept here".
-            if let sentence = BalanceSurface.stateLine(
-                status, copy: copy, calls: model.balanceCalls)
-            {
-                GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
+            // nonsense beside "no sign-in is kept here". The card draws the
+            // sentence, as its subtitle.
+            if BalanceSurface.stateLine(status, copy: copy, calls: model.balanceCalls) == nil,
+               BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
                 figures(status)
             }
         }

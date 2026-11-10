@@ -120,7 +120,10 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertTrue(traces.contains(needle), "the Traces notices lack \(needle)")
         }
         let privateAI = try member("    private var privateAIItems: [GlassPopoverItem] {")
-        for needle in ["model.showsPrivateInferenceOffer", "!snapshot.nearAiSignedIn", "model.managedText(\"sign_in_needed\")"] {
+        // Signed out of NEAR AI, unless a Debug build's review switch draws
+        // the tab signed in (`ManagedSessionsSection.showsSignedIn`).
+        for needle in ["model.showsPrivateInferenceOffer", "!ManagedSessionsSection.showsSignedIn(snapshot)",
+                       "model.managedText(\"sign_in_needed\")"] {
             XCTAssertTrue(privateAI.contains(needle), "the Private AI notices lack \(needle)")
         }
         XCTAssertFalse(traces.contains("model.showsPrivateInferenceOffer"), "Traces offers Private AI again")
@@ -442,7 +445,7 @@ final class TracesInspectorHostTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         let result = try XCTUnwrap(traces.lastContributedFolder)
         XCTAssertFalse(result.toast.offerUndo)
-        XCTAssertTrue(result.toast.line.hasSuffix("3 traces need individual review."))
+        XCTAssertEqual(result.toast.line, "Nothing approved. 3 traces need individual review.")
         let view = MonitorNotices(place: .traces, traces: traces, home: HomeStore(client: nil), closed: .constant([]))
             .environmentObject(AppModel())
         let png = try await InsightsGetStartedRenderTests.render(AnyView(view), width: 760, height: 400) { true }

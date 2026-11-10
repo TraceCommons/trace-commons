@@ -17,8 +17,10 @@
 //! here -- it enforces only when `TRACE_COMMONS_ALLOWED_HOSTS` happens to be
 //! set, which on a contributor's laptop it is not.
 //!
-//! Note also which host. `api.near.ai` is RETIRED and answers HTTP 410; the
-//! deployed cloud-api is `cloud-api.near.ai`, confirmed live.
+//! Note also which host. `api.near.ai` is RETIRED and answers HTTP 410.
+//! Account, organisation, usage and credit routes moved from
+//! `cloud-api.near.ai`, which keeps inference, to `cloud-platform.near.ai`
+//! (staging `cloud-platform-stg.near.ai`), per NEAR AI (2026-11-06).
 
 use super::loopback::{CALLBACK_PATH, SessionTokens};
 use crate::daemon::nearai_credential::near_wallet::VerifiedNearWalletSignIn;
@@ -1296,12 +1298,12 @@ mod tests {
         let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
         assert_eq!(api.base.host_str(), pinned.host_str());
         #[cfg(not(feature = "near-ai-staging"))]
-        assert_eq!(api.base.host_str(), Some("cloud-api.near.ai"));
+        assert_eq!(api.base.host_str(), Some("cloud-platform.near.ai"));
         for refused in [
-            "http://cloud-api.near.ai",
-            "https://user:pw@cloud-api.near.ai",
-            "https://cloud-api.near.ai/?a=b",
-            "https://cloud-api.near.ai/#f",
+            "http://cloud-platform.near.ai",
+            "https://user:pw@cloud-platform.near.ai",
+            "https://cloud-platform.near.ai/?a=b",
+            "https://cloud-platform.near.ai/#f",
         ] {
             assert!(CloudApi::at(refused).is_err(), "{refused}");
         }
@@ -1315,7 +1317,7 @@ mod tests {
         let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
         assert_eq!(parsed.host_str(), pinned.host_str());
         #[cfg(not(feature = "near-ai-staging"))]
-        assert_eq!(parsed.host_str(), Some("cloud-api.near.ai"));
+        assert_eq!(parsed.host_str(), Some("cloud-platform.near.ai"));
         assert_eq!(parsed.path(), "/v1/auth/github");
         let callback = parsed
             .query_pairs()
@@ -1395,14 +1397,14 @@ mod staging_origin_tests {
     #[test]
     fn a_default_build_pins_production() {
         assert!(!near_ai_staging());
-        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-api.near.ai");
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-platform.near.ai");
     }
 
     #[cfg(feature = "near-ai-staging")]
     #[test]
     fn a_staging_build_says_so() {
         assert!(near_ai_staging());
-        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-stg-api.near.ai");
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-platform-stg.near.ai");
     }
 
     #[test]

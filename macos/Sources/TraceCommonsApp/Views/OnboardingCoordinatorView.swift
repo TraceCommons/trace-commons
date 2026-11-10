@@ -5,7 +5,7 @@ import TCDesign
 import TCShellCore
 
 /// Hosts the animated first run (Ron's 2026-10-21 canvas, built on the
-/// owner's request of 2026-10-22): Welcome, Tools, Uses, Traces, Private AI
+/// owner's request of 2026-10-22): Welcome, Tools, Private AI, Traces, Uses
 /// and Join, one screen per step over one scene, with the step thread above
 /// them and the NEAR mark and the tool tiles moving from step to step.
 ///
@@ -112,11 +112,11 @@ private struct FirstRunSteps: View {
             ZStack(alignment: .top) {
                 FirstRunBackdrop()
                 screen
-                if let index = FirstRunStageLayout.threadIndex(of: runner.state.step, in: runner.state) {
+                if let index = FirstRunStageLayout.threadIndex(of: runner.state.step) {
                     FirstRunStepThread(
-                        labels: copy.threadLabels(for: runner.state), current: index, enabled: !runner.isCommitting
+                        labels: copy.threadLabels, current: index, enabled: !runner.isCommitting
                     ) { picked in
-                        let steps = FirstRunNavigation.threadSteps(for: runner.state)
+                        let steps = FirstRunNavigation.threadSteps
                         guard steps.indices.contains(picked) else { return }
                         runner.state = FirstRunNavigation.back(to: steps[picked], from: runner.state)
                     }
@@ -125,6 +125,9 @@ private struct FirstRunSteps: View {
                 }
             }
             .environment(\.firstRunActors, actors)
+            // Dark here too when the Private AI tab hosts Tools in a light
+            // Monitor, which the window's own preference does not reach.
+            .environment(\.colorScheme, .dark)
             .animation(GlassMotion.spatial(reduceMotion), value: runner.state.step)
         }
         .onChange(of: runner.state.step, initial: true) { _, step in
@@ -151,7 +154,7 @@ private struct FirstRunSteps: View {
             WelcomeScreen(copy: copy, runner: runner)
                 .transition(.opacity)
         case .tools:
-            ToolsScreen(copy: copy, runner: runner, memory: memory, source: model)
+            ToolsScreen(copy: copy, runner: runner, memory: memory)
                 .transition(.opacity)
         case .uses:
             UsesScreen(copy: copy, runner: runner)
@@ -161,6 +164,9 @@ private struct FirstRunSteps: View {
                 .transition(.opacity)
         case .privateAI:
             PrivateAIScreen(copy: copy, runner: runner, memory: memory)
+                .transition(.opacity)
+        case .terms:
+            TermsScreen(copy: copy, runner: runner)
                 .transition(.opacity)
         case .join:
             JoinScreen(copy: copy, runner: runner)

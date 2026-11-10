@@ -5,3 +5,9 @@
 
 pub mod ingest;
 pub use ingest::{IngestOptions, OPEN_BUILD_BIN_NAME, run, run_with_score_policies};
+
+/// Test fixtures for packages that test this service from outside it. Only
+/// under the `test-support` feature, which no shipped build may enable.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use ingest::app::test_support;

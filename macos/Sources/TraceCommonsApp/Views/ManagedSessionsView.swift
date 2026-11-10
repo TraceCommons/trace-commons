@@ -28,11 +28,11 @@ struct ManagedSessionsSection: View {
     @State private var modelNames: [String: String] = [:]
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
+            if let snapshot = model.managedSnapshot, Self.showsSignedIn(snapshot) {
                 signInCard(snapshot)
             }
             if let snapshot = model.managedSnapshot {
-                if !snapshot.nearAiSignedIn, !snapshot.missingInstallTools.isEmpty {
+                if !Self.showsSignedIn(snapshot), !snapshot.missingInstallTools.isEmpty {
                     setupOnlyButtons(snapshot)
                 }
                 sessionsCard(snapshot)
@@ -99,6 +99,22 @@ struct ManagedSessionsSection: View {
             content: { AnyView(toolButtons(snapshot)) })
     }
 
+    /// Whether the NEAR AI card is drawn as signed in: a NEAR AI sign-in,
+    /// or a Debug build's `TC_REVIEW_PRIVATE_AI_SIGNED_IN=1`
+    /// (`AppModel.reviewPrivateAISignedIn`).
+    static func showsSignedIn(_ snapshot: ManagedSnapshot) -> Bool {
+        snapshot.nearAiSignedIn || AppModel.reviewPrivateAISignedIn
+    }
+
+    /// The card's Start buttons: the sign-in's tools; under the review
+    /// switch, which has no sign-in to derive them from, every sign-in
+    /// tool installed here. A review launch starts nothing (`launch`
+    /// finds no sign-in to start it on).
+    static func startTools(_ snapshot: ManagedSnapshot) -> [String] {
+        guard AppModel.reviewPrivateAISignedIn else { return snapshot.signInStartTools }
+        return ManagedSurface.signInTools.filter { tool in snapshot.tools?.first { $0.tool == tool }?.installed == true }
+    }
+
     /// What the NEAR AI card holds at its foot: the tool buttons; in their
     /// place, the no-terminal notice. Missing tools retain Install beside
     /// installed tools' launch buttons.
@@ -135,7 +151,7 @@ struct ManagedSessionsSection: View {
             }
             HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
                 if Self.toolArea(snapshot) == .buttons {
-                    ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                    ForEach(Self.startTools(snapshot), id: \.self) { tool in
                         ManagedToolButton(tool: tool) { start(tool) }
                     }
                 }
@@ -258,12 +274,13 @@ struct ManagedSessionsSection: View {
             GlassIconCard(
                 systemImage: "terminal", title: model.managedText("title"),
                 subtitle: snapshot.sessions.isEmpty ? [model.managedText("empty")] : [],
+                flushContent: true,
                 content: {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                         if !snapshot.sessions.isEmpty {
                             LazyVStack(spacing: 0) {
                                 ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
-                                    GlassTableRow(first: index == 0) { sessionRow(session) }
+                                    GlassTableRow(first: index == 0, horizontalInset: 0) { sessionRow(session) }
                                 }
                             }
                         }

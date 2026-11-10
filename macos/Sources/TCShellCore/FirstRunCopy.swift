@@ -19,6 +19,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// The animated first run's Traces and Private AI steps.
         public let stepTraces: String
         public let stepPrivateAi: String
+        /// The Terms step, before Join.
+        public let stepTerms: String
         public let customSetupInstead: String
         public let continueButton: String
         public let answerEveryTool: String
@@ -49,6 +51,36 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let title: String
         public let body: String
         public let start: String
+        /// Absent in older core exports; those retain their existing Welcome.
+        public let legal: Legal?
+
+        public struct Legal: Decodable, Equatable, Sendable {
+            /// The Terms step's title, before `terms` in bold.
+            public let titleLight: String
+            public let accept: String
+            public let terms: String
+            public let privacy: String
+            public let termsUrl: URL
+            public let privacyUrl: URL
+            /// The terms reader's words (terms read-through, 2026-11-09):
+            /// the disabled checkbox's hint, the loading and failed lines,
+            /// Try again, the not-in-effect line and the sheet's Accept.
+            public let scrollHint: String
+            public let loading: String
+            public let failed: String
+            public let retry: String
+            public let notInEffect: String
+            public let acceptButton: String
+        }
+    }
+
+    /// New Terms of Service after onboarding: the Home notice, its button
+    /// and the menu bar row.
+    public struct TermsHold: Decodable, Equatable, Sendable {
+        public let noticeTitle: String
+        public let noticeBody: String
+        public let review: String
+        public let menuRow: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -126,8 +158,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neither: String
         /// `{tool}`: a tool watched in two rows.
         public let oneFolderPerTool: String
-        /// Beside Continue: finish setup for Private AI alone.
-        public let privateAiOnly: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -218,9 +248,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let theCommons: String
         /// Under Automatic before sign-in.
         public let automaticAfterSignIn: String
-        /// The two equal buttons above the optional uses.
-        public let allowAll: String
-        public let onlyRequired: String
         /// The collapsed section holding the required use; `{title}` is its
         /// title.
         public let alwaysOn: String
@@ -271,6 +298,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     public let uses: Uses
     public let traces: Traces
     public let privateAi: PrivateAi
+    public let termsHold: TermsHold
 
     /// Fill a string's `{name}` placeholders, each with its value. The one
     /// filler every first-run screen uses; it adds nothing to the template.

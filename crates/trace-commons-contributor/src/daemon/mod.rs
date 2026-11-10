@@ -122,6 +122,7 @@ pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
 pub(crate) mod subscription_usage;
+pub mod terms_state;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
@@ -774,6 +775,9 @@ struct TickState {
     /// The signed witness accepted-measurements list's fetch schedule: due
     /// at start, then about daily (`witness::accepted_list`).
     witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule,
+    /// When the published Terms of Service are fetched again: at start,
+    /// then every six hours (`terms_state::TermsSchedule`).
+    terms_schedule: terms_state::TermsSchedule,
     /// Whether this process has re-read the witness-risk holds under the
     /// current rule (`release_witness_risk_holds_once`).
     witness_risk_holds_rechecked: bool,
@@ -792,6 +796,7 @@ impl TickState {
             witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule::starting(
                 now,
             ),
+            terms_schedule: terms_state::TermsSchedule::starting(),
             witness_risk_holds_rechecked: false,
             second_look_holds_rechecked: false,
         }
@@ -909,6 +914,19 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
             "near-ai-arrivals",
             nearai_credential::arrivals::poll(shared, now),
         )
+        .await;
+    // Terms of Service: re-check the published version when due (start,
+    // then every six hours), then post an acceptance owed to the configured org. Both
+    // reach the network, so a dry run and a developer dry run skip them; the
+    // hold persisted from an earlier check still applies. A failed fetch
+    // changes nothing (`terms_state::apply_fetch`).
+    let terms_schedule = &mut state.terms_schedule;
+    guards
+        .run(shared, "terms", async {
+            if !dry_run && !shared.dev_dry_run {
+                terms_state::tick(shared, now, terms_schedule).await;
+            }
+        })
         .await;
     let expiry = guards
         .run(shared, "expire", async {
@@ -1236,6 +1254,12 @@ async fn drain_approved(
     if shared.uploads_held.load(Ordering::SeqCst) {
         return Ok(());
     }
+    // Held until the published in-effect Terms of Service version is
+    // accepted (`terms_state`). Its own flag, never the pause: approved
+    // entries stay approved and go out once it lifts.
+    if shared.terms_held.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
     // is. Refusing an entry here would record a final `Refused`, and an
     // approved session would never upload once the dry run ended.
@@ -1524,7 +1548,9 @@ async fn drain_approved(
             // `unenroll` is settling uploads: nothing new goes in flight.
             // Checked under the queue lock `unenroll` checks `Uploading`
             // under, so the two cannot interleave.
-            if shared.uploads_held.load(Ordering::SeqCst) {
+            if shared.uploads_held.load(Ordering::SeqCst)
+                || shared.terms_held.load(Ordering::SeqCst)
+            {
                 break;
             }
             drop(policy);
@@ -2652,6 +2678,7 @@ async fn refresh_witness_accepted_list(
         .lock()
         .expect("queue lock")
         .has_measurement_holds();
+    let mut configuration_state = None;
     if let Ok(Some(cfg)) = shared.store.load_config() {
         let _ = crate::witness::accepted_list::refresh_for_tick(
             &cfg,
@@ -2662,6 +2689,9 @@ async fn refresh_witness_accepted_list(
             holds,
         )
         .await;
+        configuration_state = cfg.witness.as_ref().and_then(|settings| {
+            crate::witness::configuration::active_state(settings, shared.store.dir(), now)
+        });
     }
     let dir = shared.store.dir();
     let version = crate::witness::accepted_list::load_verified(
@@ -2669,7 +2699,8 @@ async fn refresh_witness_accepted_list(
         &crate::witness::accepted_list::trusted_keys(dir),
     )
     .map(|list| list.version);
-    note_accepted_list_version(shared, schedule, version, now);
+    let configuration_changed = schedule.configuration_changed(configuration_state);
+    note_accepted_list_version(shared, schedule, version, now, configuration_changed);
 }
 
 /// When the stored accepted list is one `schedule` has not seen, release the
@@ -2681,8 +2712,10 @@ fn note_accepted_list_version(
     schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
     version: Option<u64>,
     now: chrono::DateTime<Utc>,
+    configuration_changed: bool,
 ) {
-    if !schedule.list_version_changed(version) {
+    let list_changed = schedule.list_version_changed(version);
+    if !list_changed && !configuration_changed {
         return;
     }
     let decisions_owed_before = shared.decisions_owed_value();
@@ -3217,6 +3250,12 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // when it matters most. Ignored entirely under `Interval`, which the
     // generic `Tz` parameter never touches.
     let local_tz = chrono::Local;
+    // The terms hold is deliberately not a blocker here (spec section 5:
+    // expiry skips only entries waiting because of the hold). The hold
+    // keeps `Approved` entries waiting, and `expire` never touches those;
+    // a `Pending` entry waits for the contributor's review (an armed
+    // folder's are approved by the watcher whatever the hold), so its
+    // review timeout runs as usual.
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -3485,7 +3524,7 @@ mod tests {
             let mut schedule = crate::witness::accepted_list::ListRefreshSchedule::starting(at(0));
             let mut rx = shared.events.subscribe();
 
-            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1));
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1), false);
             {
                 let q = shared.queue.lock().unwrap();
                 assert_eq!(q.get(measurement).unwrap().reason_label, None);
@@ -3507,7 +3546,7 @@ mod tests {
                 queue::QueueState::Pending,
                 Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()),
             );
-            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2));
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2), false);
             assert!(
                 shared
                     .queue
@@ -3517,6 +3556,152 @@ mod tests {
                     .unwrap()
                     .held_for_review()
             );
+            // Signed routing/activation is an independent change signal.
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(3), true);
+            let q = shared.queue.lock().unwrap();
+            assert_eq!(q.get(measurement).unwrap().reason_label, None);
+            assert_eq!(
+                q.get(untrusted).unwrap().reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_NOT_TRUSTED)
+            );
+        }
+
+        #[cfg(not(feature = "near-ai-staging"))]
+        #[tokio::test]
+        async fn same_version_repairs_release_measurement_holds_even_when_another_process_repairs()
+        {
+            use crate::witness::{accepted_list, configuration};
+            use ring::signature::{Ed25519KeyPair, KeyPair};
+            use trace_commons_protocol::witness_accepted_list::{
+                AcceptedEntry, ListSignature, key_id_for,
+            };
+            use trace_commons_protocol::witness_configuration::{
+                WITNESS_CONFIGURATION_SCHEMA, WitnessConfiguration, WitnessEndpoint,
+            };
+            for another_process in [false, true] {
+                let (_dir, shared) = fixture();
+                let dir = shared.store.dir();
+                let now = Utc::now();
+                let secret =
+                    Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+                let signer = Ed25519KeyPair::from_pkcs8(secret.as_ref()).unwrap();
+                let public: [u8; 32] = signer.public_key().as_ref().try_into().unwrap();
+                accepted_list::set_test_keys(dir, vec![public]);
+                let witness = crate::config::WitnessSettings {
+                    admission_evidence: false,
+                    url: configuration::COMMONS_ENROLLMENT_URLS[0].into(),
+                    signing_address: format!("0x{}", "11".repeat(20)),
+                    expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+                };
+                let config = WitnessConfiguration {
+                    schema: WITNESS_CONFIGURATION_SCHEMA.into(),
+                    version: 8,
+                    issued_at: now,
+                    enrollment_urls: vec![witness.url.clone()],
+                    endpoints: vec![WitnessEndpoint {
+                        url: witness.url.clone(),
+                        entries: vec![AcceptedEntry {
+                            signing_address: witness.signing_address.clone(),
+                            measurements: witness.expected_measurements[0].clone(),
+                            not_before: now - chrono::Duration::hours(1),
+                            not_after: now + chrono::Duration::hours(1),
+                            commit: None,
+                        }],
+                    }],
+                };
+                let payload = trace_commons_protocol::canonical_json::to_canonical_string(
+                    &serde_json::to_value(config).unwrap(),
+                )
+                .unwrap();
+                let signature = ListSignature {
+                    key_id: key_id_for(&public),
+                    signature: hex::encode(signer.sign(payload.as_bytes()).as_ref()),
+                };
+                let bytes = serde_json::to_vec(
+                    &serde_json::json!({"payload":payload,"signatures":[signature]}),
+                )
+                .unwrap();
+                configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                let mut cfg = crate::commands::unenrolled_preview_config();
+                cfg.witness = Some(witness.clone());
+                cfg.ingest_url = "https://ingest.invalid".into();
+                cfg.allowed_hosts = Some("deny-all-named-hosts.invalid".into());
+                shared.store.save_config(&cfg).unwrap();
+                let mut schedule = accepted_list::ListRefreshSchedule::starting(now);
+                // The supervisor has already seen V8 with no holds outstanding.
+                refresh_witness_accepted_list(&shared, now, &mut schedule).await;
+                let entry_id = queue::entry_id_for("repair-measurement");
+                shared
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .upsert(
+                        queue::QueueEntry {
+                            entry_id,
+                            session_hash: "sha256:repair-measurement".into(),
+                            source: "claude-code".into(),
+                            project_key: "/tmp/repair-measurement".into(),
+                            project_label: "repair-measurement".into(),
+                            path: "/tmp/repair-measurement.jsonl".into(),
+                            size_bytes: 10,
+                            discovered_at: now,
+                            state: queue::QueueState::Pending,
+                            reason_label: Some(
+                                crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.into(),
+                            ),
+                            ..Default::default()
+                        },
+                        5000,
+                    )
+                    .unwrap();
+                // Damage and repair both happen before the next supervisor read.
+                std::fs::write(dir.join(configuration::CONFIGURATION_FILE), b"damaged").unwrap();
+                if another_process {
+                    std::fs::write(dir.join("repair-document.test-input"), &bytes).unwrap();
+                    std::fs::write(dir.join("repair-public-key.test-input"), public).unwrap();
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "witness::configuration::tests::repair_cache_in_subprocess",
+                            "--nocapture",
+                        ])
+                        .env("TRACE_COMMONS_WITNESS_REPAIR_TEST_DIR", dir)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "repair subprocess failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                } else {
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                }
+                assert_eq!(
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap(),
+                    accepted_list::InstallOutcome::NotNewer
+                );
+                refresh_witness_accepted_list(
+                    &shared,
+                    now + chrono::Duration::minutes(1),
+                    &mut schedule,
+                )
+                .await;
+                assert_eq!(
+                    shared
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .get(entry_id)
+                        .unwrap()
+                        .reason_label,
+                    None,
+                    "actual repair must release the hold even after a NotNewer observation"
+                );
+                assert_eq!(
+                    shared.store.load_config().unwrap().unwrap().witness,
+                    Some(witness)
+                );
+            }
         }
 
         fn fixture() -> (tempfile::TempDir, ipc::DaemonShared) {
@@ -7305,6 +7490,249 @@ mod tests {
             ipc::EstimateTableSlot::built_in()
         );
         assert!(!schedule.due(start));
+    }
+
+    /// The Terms of Service hold: the re-check, what it stops, and what it
+    /// keeps from ageing out (`terms_state`).
+    mod terms_hold {
+        use super::*;
+        use crate::terms::FetchedTerms;
+        use trace_commons_protocol::terms::{TermsBlock, TermsDocument};
+
+        fn fetched(version: &str, in_effect: bool) -> FetchedTerms {
+            FetchedTerms {
+                document: TermsDocument {
+                    schema_version: trace_commons_protocol::terms::TERMS_SCHEMA_VERSION.into(),
+                    version: version.into(),
+                    effective: "2026-12-01".into(),
+                    in_effect,
+                    title: "Terms".into(),
+                    blocks: vec![TermsBlock::Paragraph {
+                        text: "Terms text.".into(),
+                    }],
+                },
+                content_sha256: std::iter::repeat_n('c', 64).collect(),
+            }
+        }
+
+        fn load(dir: &std::path::Path) -> Arc<ipc::DaemonShared> {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            Arc::new(ipc::DaemonShared::load(store).unwrap())
+        }
+
+        fn accept(shared: &ipc::DaemonShared, version: &str) {
+            let reply = ipc::handle_request(
+                shared,
+                &ipc::Request {
+                    id: 1,
+                    method: "terms_accept".into(),
+                    params: serde_json::json!({
+                        "version": version,
+                        "content_sha256": std::iter::repeat_n('c', 64).collect::<String>(),
+                        "accepted_at": Utc::now(),
+                    }),
+                },
+            );
+            assert!(reply.error.is_none(), "{:?}", reply.error);
+        }
+
+        #[tokio::test]
+        async fn a_new_in_effect_version_starts_the_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            accept(&shared, "v1");
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v2", true)));
+            let mut events = shared.events.subscribe();
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_version_owed"], "v2");
+            let mut names = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                names.push(event.event);
+            }
+            assert!(names.iter().any(|e| e == ipc::EVENT_STATUS_CHANGED));
+            // The same version again moves nothing.
+            terms_state::apply_fetch(&shared, at("2026-11-09T18:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_never_starts_a_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            // No override: the fetch is unavailable.
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+            assert!(shared.terms.lock().unwrap().published.is_none());
+            // Nor does a refused document, and neither lifts a hold.
+            terms_state::apply_fetch(&shared, at("2026-11-09T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            terms_state::apply_fetch(
+                &shared,
+                at("2026-11-09T18:00:00Z"),
+                Err("terms-schema-unknown"),
+            );
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "a failure keeps the hold"
+            );
+            assert_eq!(
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .unwrap()
+                    .version,
+                "v2"
+            );
+        }
+
+        #[tokio::test]
+        async fn held_uploads_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let id = seed_contributor_approval(&shared);
+            terms_state::apply_fetch(&shared, at("2026-08-08T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+
+            let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(held, before, "held exactly as it was, not sent");
+            assert_eq!(held.unwrap().state, queue::QueueState::Approved);
+
+            accept(&shared, "v2");
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+            let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(
+                released.map(|e| (e.state, e.reason_label)),
+                Some((
+                    queue::QueueState::Failed,
+                    Some("session-file-vanished".to_string())
+                )),
+                "released: the pass reached the send"
+            );
+        }
+
+        /// Spec section 5: expiry does not run against entries waiting only
+        /// because of the hold. The hold delays `Approved` entries, which
+        /// never age out; a `Pending` entry waits for the contributor's own
+        /// review (an armed folder's entries are approved by the watcher
+        /// whatever the hold), so review expiry runs as it does without one.
+        #[tokio::test]
+        async fn held_entries_do_not_expire() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let now = at("2026-11-09T12:00:00Z");
+            let ttl_days = shared.settings.lock().unwrap().queue_ttl_days;
+            let old = now - chrono::Duration::days(ttl_days + 1);
+            let (approved, pending) = {
+                let mut q = shared.queue.lock().expect("queue lock");
+                let a = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-approved".to_string(),
+                    project_key: "/w/approved".to_string(),
+                    discovered_at: old,
+                    ..Default::default()
+                };
+                let p = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-pending".to_string(),
+                    project_key: "/w/pending".to_string(),
+                    discovered_at: old,
+                    ..Default::default()
+                };
+                let (a_id, p_id) = (a.entry_id, p.entry_id);
+                q.upsert(a, 100).unwrap();
+                q.upsert(p, 100).unwrap();
+                assert!(q.approve(a_id, &[], None, None, None, None));
+                (a_id, p_id)
+            };
+            terms_state::apply_fetch(&shared, now, Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+
+            expire_and_digest(&shared, now);
+            let q = shared.queue.lock().unwrap();
+            assert_eq!(
+                q.get(approved).unwrap().state,
+                queue::QueueState::Approved,
+                "an entry the hold keeps waiting does not age out"
+            );
+            assert_eq!(
+                q.get(pending).unwrap().state,
+                queue::QueueState::Expired,
+                "review expiry is not suspended by the hold"
+            );
+        }
+
+        #[tokio::test]
+        async fn hold_survives_restart_without_network() {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let shared = load(dir.path());
+                accept(&shared, "v1");
+                terms_state::apply_fetch(
+                    &shared,
+                    at("2026-11-09T12:00:00Z"),
+                    Ok(fetched("v2", true)),
+                );
+                assert!(shared.terms_held.load(Ordering::SeqCst));
+            }
+            // A new process, offline: the persisted published version holds.
+            let shared = load(dir.path());
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_hold"], true);
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T13:00:00Z"), &mut schedule).await;
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "an offline start keeps it"
+            );
+        }
+
+        #[tokio::test]
+        async fn recheck_runs_at_start_then_every_six_hours() {
+            let start = at("2026-11-09T12:00:00Z");
+            let mut schedule = terms_state::TermsSchedule::starting();
+            assert!(schedule.due(start));
+            schedule.attempted(start);
+            assert!(!schedule.due(start));
+            assert!(!schedule.due(start + chrono::Duration::seconds(6 * 60 * 60 - 1)));
+            assert!(schedule.due(start + chrono::Duration::hours(6)));
+
+            // Through the pass: the check time moves only when due.
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v1", false)));
+            let checked = |shared: &ipc::DaemonShared| {
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .map(|p| p.checked_at)
+            };
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, start, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start));
+            terms_state::tick(&shared, start + chrono::Duration::hours(1), &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start), "not due an hour later");
+            let later = start + chrono::Duration::hours(6);
+            terms_state::tick(&shared, later, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(later));
+            // A draft never holds.
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+        }
     }
 }
 

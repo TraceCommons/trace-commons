@@ -18,8 +18,9 @@
 //! - **Outside consent (Q10).** The list lives in its own file, never in
 //!   `WitnessSettings`, so it is not part of the witness identity digest, the
 //!   approval input fingerprint or the grant-terms void rule. A refresh
-//!   re-asks nothing; a change of witness URL still does, through
-//!   `WitnessSettings` as before.
+//!   re-asks nothing. A manual change of `WitnessSettings` still invalidates
+//!   approval as before; signed runtime endpoint routing is separate
+//!   (`super::configuration`) and leaves that enrollment identity unchanged.
 //! - **Refreshed** at daemon start, about daily after that
 //!   ([`ListRefreshSchedule`]), and when a witness is refused for its
 //!   measurement ([`refresh_on_refusal`]). A build with no trusted key never
@@ -156,7 +157,10 @@ fn read_bounded(path: &Path) -> Option<Vec<u8>> {
 /// under `keys`; it names a witness URL other than `configured_url`; any
 /// entry's measurement set does not parse (the whole list, never a skipped
 /// line, as for the sign-up pins). A verified list whose version is not
-/// higher than the stored one is [`InstallOutcome::NotNewer`].
+/// higher than the stored one is [`InstallOutcome::NotNewer`]. The version
+/// highwater remains global to this state directory, including across witness
+/// URL changes: coordinated lists must keep increasing versions across URLs,
+/// including when rolling back to an earlier URL.
 pub fn install(
     dir: &Path,
     document: &[u8],
@@ -242,6 +246,7 @@ pub struct ListRefreshSchedule {
     /// The stored list's version when last looked at, so a change is seen
     /// whichever path installed it.
     seen_version: Option<u64>,
+    seen_configuration: Option<String>,
 }
 
 impl ListRefreshSchedule {
@@ -250,6 +255,7 @@ impl ListRefreshSchedule {
         Self {
             next_at: started_at,
             seen_version: None,
+            seen_configuration: None,
         }
     }
 
@@ -262,6 +268,14 @@ impl ListRefreshSchedule {
         if version.is_some() {
             self.seen_version = version;
         }
+        changed
+    }
+
+    /// Track matching signed routing independently, including time-based
+    /// activation of prepublished pins without any document version change.
+    pub fn configuration_changed(&mut self, state: Option<String>) -> bool {
+        let changed = state.is_some() && state != self.seen_configuration;
+        self.seen_configuration = state;
         changed
     }
 
@@ -308,8 +322,25 @@ pub enum RefreshOutcome {
 /// Fetch the list from the configured ingest origin and install it.
 ///
 /// Anonymous, no redirects, the host allowlist and a bounded read, through
-/// the same client as the other public documents. Logs one fixed label.
+/// the same client as the other public documents. The query selects the
+/// configured witness URL; install still requires the signed document to name
+/// that URL. Logs one fixed label.
 pub async fn refresh(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
+    let (legacy, configuration) = tokio::join!(
+        refresh_legacy(cfg, dir),
+        super::configuration::refresh(cfg, dir)
+    );
+    match (legacy, configuration) {
+        (RefreshOutcome::Installed { version }, _) | (_, RefreshOutcome::Installed { version }) => {
+            RefreshOutcome::Installed { version }
+        }
+        (RefreshOutcome::NotNewer, _) | (_, RefreshOutcome::NotNewer) => RefreshOutcome::NotNewer,
+        (RefreshOutcome::Skipped, RefreshOutcome::Skipped) => RefreshOutcome::Skipped,
+        _ => RefreshOutcome::Failed,
+    }
+}
+
+async fn refresh_legacy(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
     let Some(witness) = cfg.witness.as_ref() else {
         return RefreshOutcome::Skipped;
     };
@@ -323,7 +354,10 @@ pub async fn refresh(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
                 origin.as_str(),
                 cfg.allowed_hosts.as_deref(),
             ) {
-                Ok(client) => client.fetch_witness_accepted_list().await.ok(),
+                Ok(client) => client
+                    .fetch_witness_accepted_list_for(&witness.url)
+                    .await
+                    .ok(),
                 Err(_) => None,
             }
         }
@@ -678,6 +712,45 @@ mod tests {
     }
 
     #[test]
+    fn the_version_highwater_stays_global_across_url_changes_and_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        let keys = [public(&signer)];
+        let legacy = signed(&signer, &list(4, vec![entry("cc", 1, 20)]));
+        install(dir.path(), &legacy, &keys, WITNESS_URL).unwrap();
+
+        let custom_url = "https://custom-witness.example/api/%2Fproof";
+        let mut custom = list(4, vec![entry("dd", 1, 20)]);
+        custom.witness_url = custom_url.into();
+        assert_eq!(
+            install(dir.path(), &signed(&signer, &custom), &keys, custom_url),
+            Ok(InstallOutcome::NotNewer)
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(ACCEPTED_LIST_FILE)).unwrap(),
+            legacy
+        );
+        custom.version = 5;
+        assert_eq!(
+            install(dir.path(), &signed(&signer, &custom), &keys, custom_url),
+            Ok(InstallOutcome::Installed { version: 5 })
+        );
+        assert_eq!(
+            install(dir.path(), &legacy, &keys, WITNESS_URL),
+            Ok(InstallOutcome::NotNewer)
+        );
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&signer, &list(6, vec![entry("cc", 1, 20)])),
+                &keys,
+                WITNESS_URL
+            ),
+            Ok(InstallOutcome::Installed { version: 6 })
+        );
+    }
+
+    #[test]
     fn a_newer_list_with_no_valid_entries_replaces_the_stored_one() {
         // That is how an operator withdraws an entry.
         let dir = tempfile::tempdir().unwrap();
@@ -824,6 +897,10 @@ mod tests {
                 }
             }),
         );
+        serve_app(app).await
+    }
+
+    async fn serve_app(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -840,7 +917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refresh_fetches_verifies_and_stores_and_a_failure_keeps_the_pins() {
+    async fn a_legacy_server_ignoring_the_query_still_refreshes_the_configured_legacy_url() {
         let dir = tempfile::tempdir().unwrap();
         let signer = key();
         set_test_keys(dir.path(), vec![public(&signer)]);
@@ -879,6 +956,128 @@ mod tests {
         let trust = trust_with_accepted(&settings(), dir.path(), at(10)).unwrap();
         assert_eq!(trust.accepted.len(), 1);
         assert!(trust.is_pinned());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_requests_and_installs_the_list_for_the_configured_url() {
+        use axum::{Router, extract::Query, http::StatusCode, routing::get};
+        const CUSTOM_URL: &str = "https://custom-witness.example/api/%2Fproof/";
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        let mut custom = list(4, vec![entry("cc", 1, 20)]);
+        custom.witness_url = CUSTOM_URL.into();
+        let document = signed(&signer, &custom);
+        let served = document.clone();
+        let app = Router::new().route(
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+            get(move |Query(query): Query<HashMap<String, String>>| {
+                let served = served.clone();
+                async move {
+                    if query.len() == 1
+                        && query.get("witness_url").map(String::as_str) == Some(CUSTOM_URL)
+                    {
+                        (StatusCode::OK, served)
+                    } else {
+                        (StatusCode::NOT_FOUND, Vec::new())
+                    }
+                }
+            }),
+        );
+        let (origin, server) = serve_app(app).await;
+        let mut cfg = cfg_for(&origin);
+        cfg.witness.as_mut().unwrap().url = CUSTOM_URL.into();
+        let settings_before = cfg.witness.clone();
+        assert_eq!(
+            refresh(&cfg, dir.path()).await,
+            RefreshOutcome::Installed { version: 4 }
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(ACCEPTED_LIST_FILE)).unwrap(),
+            document
+        );
+        assert_eq!(
+            cfg.witness, settings_before,
+            "refresh never migrates the configured witness"
+        );
+        let trust = trust_with_accepted(cfg.witness.as_ref().unwrap(), dir.path(), at(10)).unwrap();
+        assert_eq!(trust.accepted.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_old_server_ignoring_the_query_cannot_install_a_list_for_another_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        let custom_url = "https://custom-witness.example/api/%2Fproof";
+        let mut custom = list(4, vec![entry("cc", 1, 20)]);
+        custom.witness_url = custom_url.into();
+        let stored = signed(&signer, &custom);
+        install(dir.path(), &stored, &[public(&signer)], custom_url).unwrap();
+
+        // This legacy server ignores the selector and returns its default list,
+        // even with a higher version and a trusted signature.
+        let (origin, server) =
+            serve(Some(signed(&signer, &list(5, vec![entry("dd", 1, 20)])))).await;
+        let mut cfg = cfg_for(&origin);
+        cfg.witness.as_mut().unwrap().url = custom_url.into();
+        assert_eq!(refresh(&cfg, dir.path()).await, RefreshOutcome::Failed);
+        assert_eq!(
+            std::fs::read(dir.path().join(ACCEPTED_LIST_FILE)).unwrap(),
+            stored
+        );
+        assert_eq!(cfg.witness.as_ref().unwrap().url, custom_url);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_oversized_and_redirected_refreshes_preserve_the_stored_list() {
+        use axum::{Router, response::Redirect, routing::get};
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        let stored = signed(&signer, &list(4, vec![entry("cc", 1, 20)]));
+        install(dir.path(), &stored, &[public(&signer)], WITNESS_URL).unwrap();
+        for document in [
+            b"not json".to_vec(),
+            vec![b' '; WITNESS_ACCEPTED_LIST_MAX_BYTES + 1],
+        ] {
+            let (origin, server) = serve(Some(document)).await;
+            assert_eq!(
+                refresh(&cfg_for(&origin), dir.path()).await,
+                RefreshOutcome::Failed
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join(ACCEPTED_LIST_FILE)).unwrap(),
+                stored
+            );
+            server.abort();
+        }
+
+        let newer = signed(&signer, &list(5, vec![entry("dd", 1, 20)]));
+        let app = Router::new()
+            .route(
+                trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+                get(|| async { Redirect::temporary("/redirected-list") }),
+            )
+            .route(
+                "/redirected-list",
+                get(move || {
+                    let newer = newer.clone();
+                    async move { newer }
+                }),
+            );
+        let (origin, server) = serve_app(app).await;
+        assert_eq!(
+            refresh(&cfg_for(&origin), dir.path()).await,
+            RefreshOutcome::Failed
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(ACCEPTED_LIST_FILE)).unwrap(),
+            stored
+        );
+        server.abort();
     }
 
     #[tokio::test]

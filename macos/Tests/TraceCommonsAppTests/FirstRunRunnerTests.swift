@@ -120,6 +120,15 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     /// What each finished first run handed over, in order.
     var finished: [String?] = []
     func firstRunFinished(notice: String?) { finished.append(notice) }
+
+    /// `terms_accept` is not a plan call (`FirstRunCall`), so each hand-off
+    /// is kept on its own, with how many plan calls were logged before it.
+    private(set) var termsRecorded: [(terms: AcceptedTerms, afterCalls: Int)] = []
+    var termsAnswer = true
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool {
+        termsRecorded.append((terms, log.count))
+        return termsAnswer
+    }
 }
 
 /// The failure each call reports when the daemon refuses it.
@@ -860,9 +869,9 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.daemonStarted)
         XCTAssertEqual(runner.state.startedSettingsJSON, json)
         XCTAssertNil(runner.state.enrolledInvite)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .privateAI)
 
-        // Customize sends the same, and stays on Tools.
+        // Customize's `declareRoots` sends the same, and the step stays.
         let customizing = FirstRunRunner(state: state, daemon: RecordingFirstRunDaemon())
         await customizing.commit(.declareRoots)
         XCTAssertTrue(customizing.state.daemonStarted)
@@ -892,7 +901,7 @@ final class FirstRunRunnerTests: XCTestCase {
         }
         XCTAssertEqual(daemon.log.count, 1, "nothing is enrolled or signed in twice")
         XCTAssertEqual(runner.state.startedSettingsJSON, runner.state.sessionRoots.settingsJSON())
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .privateAI)
     }
 
     /// Kristi's #1235 M3: the daemon is running, so a refused change of
@@ -917,5 +926,96 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNotEqual(runner.failure, .startFailed)
         XCTAssertEqual(runner.state.startedSettingsJSON, held)
         XCTAssertEqual(runner.state.step, .join)
+    }
+
+    // MARK: Terms of Service
+
+    private static let accepted = AcceptedTerms(
+        version: "2026-08-22-draft", contentSHA256: String(repeating: "a", count: 64),
+        acceptedAt: Date(timeIntervalSince1970: 1_762_689_600))
+
+    /// Terms accepted before the daemon starts go to it exactly once, right
+    /// after it first starts, and not again on a later commit.
+    func testTermsHandedToDaemonOnceAfterStart() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)])
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
+        XCTAssertEqual(daemon.termsRecorded.first?.terms, Self.accepted)
+        XCTAssertEqual(daemon.termsRecorded.first?.afterCalls, 1, "after .startDaemon")
+        XCTAssertTrue(runner.termsHandedOver)
+
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.count, 1, "handed over once per first run")
+    }
+
+    /// A first run that began with the daemon already running (it is not
+    /// started again) still hands the terms over, once, at its first commit.
+    func testTermsHandedOverWhenTheDaemonWasAlreadyRunning() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        XCTAssertFalse(daemon.log.contains { if case .startDaemon = $0 { return true }; return false })
+        XCTAssertEqual(daemon.termsRecorded.map(\.terms), [Self.accepted])
+        await runner.commit(.leaveTools)
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
+    }
+
+    /// The first-run order since the terms moved to Join: Tools starts the
+    /// daemon with nothing accepted, so nothing is handed over then; the
+    /// terms accepted on Join go over at Join's sign-in, once.
+    func testTermsAcceptedOnJoinHandedOverAtSignIn() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveTools)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertTrue(daemon.termsRecorded.isEmpty, "nothing accepted yet")
+        XCTAssertFalse(runner.termsHandedOver)
+
+        runner.acceptedTerms = Self.accepted
+        let before = daemon.log.count
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.map(\.terms), [Self.accepted])
+        XCTAssertEqual(daemon.termsRecorded.first?.afterCalls, before, "before the sign-in's calls")
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.count, 1, "handed over once per first run")
+    }
+
+    /// Nothing accepted, nothing handed over.
+    func testNoTermsNoHandOff() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveTools)
+        XCTAssertTrue(daemon.termsRecorded.isEmpty)
+    }
+
+    /// A refused hand-off does not fail the first run: the step moves on and
+    /// no failure is reported. The daemon's terms hold asks again later.
+    func testRefusedHandOffDoesNotFailFirstRun() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.termsAnswer = false
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.step, .privateAI)
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
     }
 }

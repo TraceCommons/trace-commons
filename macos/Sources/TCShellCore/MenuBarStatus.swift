@@ -51,15 +51,15 @@ public enum MenuBarStatus {
 
 public extension MenuBarStatus {
     static func accessibilityLabel(decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
-        guard available else { return "Near.ai. Watcher unavailable. Needs attention." }
+        guard available else { return "Near AI Gateway. Watcher unavailable. Needs attention." }
         guard let decisionsOwed else {
-            return "Near.ai. Decisions owed unavailable." + (paused ? " Paused." : "")
+            return "Near AI Gateway. Decisions owed unavailable." + (paused ? " Paused." : "")
         }
         let detail: String
         if decisionsOwed > 0 {
             detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "trace" : "traces") waiting for your decision."
         } else if unhealthy { detail = "Needs attention." }
         else { detail = "Nothing waiting." }
-        return "Near.ai. " + detail + (paused ? " Paused." : "")
+        return "Near AI Gateway. " + detail + (paused ? " Paused." : "")
     }
 }

@@ -2188,6 +2188,19 @@ char*       tc_onboarding_copy(void);
  */
 char*       tc_first_run_copy_json(void);
 
+/* The published Terms of Service, fetched from the Trace Commons site
+ * (terms::fetch_published_blocking): {"document": <TermsDocument>,
+ * "content_sha256": "<64 lowercase hex of the exact bytes served>"}. HTTPS to
+ * the document's own host only, no redirects, no credential. Needs no daemon
+ * and no state directory. Blocks up to the fetch timeouts: call it off the UI
+ * thread. Returns an OWNED string; free with tc_string_free. On failure
+ * returns NULL and, when err is non-NULL, sets *err to an OWNED label (free
+ * with tc_string_free): terms-unavailable, terms-host-refused,
+ * terms-too-large, terms-malformed, terms-schema-unknown,
+ * terms-version-invalid, terms-empty, terms-link-refused, or panic.
+ */
+char*       tc_terms_document_json(char** err);
+
 /* The first run's Traces line under the count, worded by the core
  * (first_run_copy::traces_estimate_line). `request` is a JSON object:
  * {"traces": <found>, "earns_credit": <bool>}, each optional; older shells'

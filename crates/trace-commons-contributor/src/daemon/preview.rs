@@ -1215,6 +1215,7 @@ async fn build_witnessed_preview_unbounded(
     artifact.token_bundle = token_bundle;
     let envelope = artifact.validate(
         cfg,
+        store.dir(),
         &transcript.session_hash,
         &fingerprint,
         verdict,
@@ -1252,15 +1253,16 @@ async fn build_witnessed_preview_unbounded(
 pub fn summarize_witnessed_preview(
     artifact: &super::approved_envelope::WitnessReviewArtifact,
     cfg: &ContributorConfig,
+    store: &ConfigStore,
     near_ai: Option<NearAiSettings>,
     transcript: &crate::source::SessionTranscript,
     raw_session_bytes: u64,
     include_inference_bodies: bool,
-    // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
-    envelope_limit: usize,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    let envelope_limit = store.envelope_limit_bytes();
     let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), include_inference_bodies);
-    let envelope = artifact.validate_stored(cfg, &transcript.session_hash, &fingerprint)?;
+    let envelope =
+        artifact.validate_stored(cfg, store.dir(), &transcript.session_hash, &fingerprint)?;
     let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)?;
     let mut summary = summarize_envelope(
         &envelope,

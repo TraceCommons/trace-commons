@@ -1,0 +1,1874 @@
+{
+  "complete": true,
+  "total": 60,
+  "results": [
+    {
+      "name": "account_trust_live_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_live_pg-dbf0bbd76d34cbb7",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_live_pg-dbf0bbd76d34cbb7",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_account_trust_live"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_ACCOUNT_TRUST_LIVE_PG_TEST_DATABASE_URL": "admission_test_account_trust_live"
+      },
+      "exitCode": 0,
+      "seconds": 0.98,
+      "traceTables": {
+        "admission_test_account_trust_live": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s"
+      ],
+      "executableSha256": "7847f9c1352c00588224f9ec4422aaee92f8f83661bd61ec8aeaa433069b67ea",
+      "ok": true,
+      "logSha256": "7aca9b6c6beef8cb1b9077328ccd906f7004ee477148082d8f8cf8b055ca02b1"
+    },
+    {
+      "name": "upload_trust_frontier_plan_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/upload_trust_frontier_plan_pg-9c13737b484cef59",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/upload_trust_frontier_plan_pg-9c13737b484cef59",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_upload_trust_plan_ci"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_UPLOAD_TRUST_PLAN_PG_TEST_URL": "admission_test_upload_trust_plan_ci"
+      },
+      "exitCode": 0,
+      "seconds": 0.73,
+      "traceTables": {
+        "admission_test_upload_trust_plan_ci": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s"
+      ],
+      "executableSha256": "101c7da5b2072e08e4e25ed151cd73697e1e0e28e13d66bd701c37ea9321e78a",
+      "ok": true,
+      "logSha256": "c392c3d06e59ab6ba5c996110690626591ba354f5ea42bb61df987c52579f9a6"
+    },
+    {
+      "name": "staging_pins_tool",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/staging_pins_tool-d19223686e27a643",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/staging_pins_tool-d19223686e27a643",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_staging_pins_tool"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.16,
+      "traceTables": {
+        "admission_test_staging_pins_tool": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "d22c460d7eeb34fb3542afc9ad1ca7d85afd743aeffd799883dfe66d7cdce9cc",
+      "ok": true,
+      "logSha256": "df166913f47ff1f04202cae9b31df67ed272d692d99a0023a8117dc3029100dd"
+    },
+    {
+      "name": "trace-commons-reward-operator",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_reward_operator-4031574e45f28602",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_reward_operator-4031574e45f28602",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_reward_operator"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.24,
+      "traceTables": {
+        "admission_test_trace_commons_reward_operator": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "executableSha256": "450d708415f6a97c652134e58ca1c256bcc90dabc5cfc25bf64f60b50ff84aca",
+      "ok": true,
+      "logSha256": "9959299086b2bc86c92336eaf563edefac74a347568af62599420e2c16ff91d4"
+    },
+    {
+      "name": "trace_commons_server",
+      "kind": [
+        "lib"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_server-b9bc863745ff2a79",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_server-b9bc863745ff2a79",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_server"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 30.83,
+      "traceTables": {
+        "admission_test_trace_commons_server": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1390 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 30.09s"
+      ],
+      "executableSha256": "4d5bd30f5227e723f28acb53e5f5950cf13ac8c38e3a5f68ddca58b83d5cd3c4",
+      "ok": true,
+      "logSha256": "654ba198d0f67a18274ed759cfaa2e022a2528b7362b78702ae741bcf0f4eec9"
+    },
+    {
+      "name": "payout_rails_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/payout_rails_pg-a5a1e357adc532c1",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/payout_rails_pg-a5a1e357adc532c1",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_payout_rails"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_payout_rails"
+      },
+      "exitCode": 0,
+      "seconds": 1.92,
+      "traceTables": {
+        "admission_test_payout_rails": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s"
+      ],
+      "executableSha256": "bf1a19b15cf8e47142c15d6dbfd9d895a004f7626559c6107d1f6d0fc6f78ff0",
+      "ok": true,
+      "logSha256": "615980a0e80c1782e63f6f3a953de3f2e55aaeb54b3479dd1f60b4da6e2ec1f3"
+    },
+    {
+      "name": "credit_settlement_enumerator_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/credit_settlement_enumerator_pg-0bf0ae50e54cec07",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/credit_settlement_enumerator_pg-0bf0ae50e54cec07",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_credit_settlement_enumerator_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.68,
+      "traceTables": {
+        "admission_test_credit_settlement_enumerator_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s"
+      ],
+      "executableSha256": "c0561e3b6e37803260634323d25aed3b794d2a4110120e86124f852b52b9563f",
+      "ok": true,
+      "logSha256": "32014977171ec8abf1907483925fcf1220a511d676b5c8aa440046b16880612a"
+    },
+    {
+      "name": "migration_atomicity_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/migration_atomicity_pg-ecb8a17e7539b48a",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/migration_atomicity_pg-ecb8a17e7539b48a",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_migration"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_migration"
+      },
+      "exitCode": 0,
+      "seconds": 5.6,
+      "traceTables": {
+        "admission_test_migration": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.12s"
+      ],
+      "executableSha256": "a5074e5636cfe1aadff3330b6fb4503055babdfd98951ce58711bb41ec25f054",
+      "ok": true,
+      "logSha256": "8091d8c29f6c0efebebce4b604be56696ea5cb230e292f9a773f820e78317f69"
+    },
+    {
+      "name": "trace_corpus_pg_rls",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_corpus_pg_rls-8b94f3d23491bdcd",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_corpus_pg_rls-8b94f3d23491bdcd",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_rls"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_rls"
+      },
+      "exitCode": 0,
+      "seconds": 1.84,
+      "traceTables": {
+        "admission_test_rls": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s"
+      ],
+      "executableSha256": "f8df245712403be556606efcd80f8c4c1cd8db52a01d1723ce0d50ec76cecf4f",
+      "ok": true,
+      "logSha256": "5e51444d01b666b08fc0de58beaeff6c2e0378f7f23521d646018c2ca4c4ce82"
+    },
+    {
+      "name": "trace-commons-upload-claim-issuer",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_upload_claim_issuer-640deb2bcb223c22",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_upload_claim_issuer-640deb2bcb223c22",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_upload_claim_issuer"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.22,
+      "traceTables": {
+        "admission_test_trace_commons_upload_claim_issuer": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "9d42237fbeb00a412ca66545ad829a88bf70186178a785497c4235d51c41e786",
+      "ok": true,
+      "logSha256": "df166913f47ff1f04202cae9b31df67ed272d692d99a0023a8117dc3029100dd"
+    },
+    {
+      "name": "referral_codes_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_codes_pg-96edac147c8cab34",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_codes_pg-96edac147c8cab34",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_referral_codes_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 1.54,
+      "traceTables": {
+        "admission_test_referral_codes_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s"
+      ],
+      "executableSha256": "f1125e493c4d310033aa3a71c6830be1e103a297e0bfffe03e8a7306a6844d5c",
+      "ok": true,
+      "logSha256": "b9e392f662bca7cc50451c0d9b60de4127f21a9e146cd59701e03a1c5a375e75"
+    },
+    {
+      "name": "trace-commons-gate-calibrate",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_gate_calibrate-42f728276cba2813",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_gate_calibrate-42f728276cba2813",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_gate_calibrate"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.24,
+      "traceTables": {
+        "admission_test_trace_commons_gate_calibrate": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "7176fce82007b619392dacd0b94d6e1f3608ab47d086315caa5d855a90b163e9",
+      "ok": true,
+      "logSha256": "63583d9b858826c607a31c0147f4fbd42ddf29dd581ef703923bfc07e64e7b3f"
+    },
+    {
+      "name": "mission_rewards_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_rewards_pg-4082d4a065139020",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_rewards_pg-4082d4a065139020",
+        "--test-threads=1",
+        "--nocapture",
+        "--include-ignored"
+      ],
+      "databases": [
+        "reward_test_missions"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_REWARDS_PG_TEST_URL": "reward_test_missions"
+      },
+      "exitCode": 0,
+      "seconds": 4.43,
+      "traceTables": {
+        "reward_test_missions": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.18s"
+      ],
+      "executableSha256": "1344d321730611cce57d4e87518752647c659c11c112a0eee42b6b4167070f4b",
+      "ok": true,
+      "logSha256": "17920056845bed077e2710d843572bb79e9da212df36eada741c5ce2952b68d0"
+    },
+    {
+      "name": "inference_connection_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/inference_connection_pg-b7b5f6b075987fce",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/inference_connection_pg-b7b5f6b075987fce",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_inference_connection"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL": "admission_test_inference_connection"
+      },
+      "exitCode": 0,
+      "seconds": 0.59,
+      "traceTables": {
+        "admission_test_inference_connection": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s"
+      ],
+      "executableSha256": "c9ed9758de103190805523443125b27c0f874cace94d255e9e4c7d5ed743b384",
+      "ok": true,
+      "logSha256": "00d1dc66d5b61baa3391e565e79cc340feab03beed17c4e5dae326617a035163"
+    },
+    {
+      "name": "account_trust_external_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_external_pg-012e7ca44dd7b887",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_external_pg-012e7ca44dd7b887",
+        "--test-threads=1",
+        "--nocapture",
+        "--include-ignored"
+      ],
+      "databases": [
+        "admission_test_account_trust_external"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL": "admission_test_account_trust_external"
+      },
+      "exitCode": 0,
+      "seconds": 0.94,
+      "traceTables": {
+        "admission_test_account_trust_external": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s"
+      ],
+      "executableSha256": "5f0e4c167ac577459882362eb50e9a7f7b7d19043165d0375322980c83c200f9",
+      "ok": true,
+      "logSha256": "5b1394d262506d64a70c97ef56440affa7ebe00042dc1d51f2065d8010809a75"
+    },
+    {
+      "name": "trace_session_withdrawal_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_session_withdrawal_pg-e6a2c1cd17609eb2",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_session_withdrawal_pg-e6a2c1cd17609eb2",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_source_sessions"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_source_sessions"
+      },
+      "exitCode": 0,
+      "seconds": 1.17,
+      "traceTables": {
+        "admission_test_source_sessions": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s"
+      ],
+      "executableSha256": "d87f61585a3a1de9b11cda23fb4803348db3f3f9d216c47f8a426c038239cf48",
+      "ok": true,
+      "logSha256": "e97799cda76ceac97aed09df2ec3b4d3b996bbc3214bb2873b4838962bb0326d"
+    },
+    {
+      "name": "trace-commons-worker",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_worker-6c9531b5aef8a6e7",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_worker-6c9531b5aef8a6e7",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_worker"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 1.96,
+      "traceTables": {
+        "admission_test_trace_commons_worker": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s"
+      ],
+      "executableSha256": "0dea94e89fd1fe6d13d1795047a31b88206830d36faa116fa9f0cecf57b95dbc",
+      "ok": true,
+      "logSha256": "cb4938e84c118869d2f6131295b0bb23f73170f2e67d23c1815bc99ce36f6298"
+    },
+    {
+      "name": "register_stats_rls",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/register_stats_rls-8a9fd636fd79b806",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/register_stats_rls-8a9fd636fd79b806",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_register_stats_rls"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.38,
+      "traceTables": {
+        "admission_test_register_stats_rls": 0
+      },
+      "defaultIgnoredSuite": true,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "4295e2e3242c8387249d578df4c86842555a15e745f1a055e52a36e430c2606a",
+      "ok": true,
+      "logSha256": "e39cd8d2b78551f3f95de58d04558383419bfbb7804fb26165ae25f0d3c7f4ba"
+    },
+    {
+      "name": "trace-commons-repair-upload-ownership",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_repair_upload_ownership-a1ee1c15bb5c78ea",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_repair_upload_ownership-a1ee1c15bb5c78ea",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_repair_upload_ownership"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.19,
+      "traceTables": {
+        "admission_test_trace_commons_repair_upload_ownership": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "735c9762e3b4bfcb4cd6743e8cd42e202640fef88a1a6497e3afc75b5a40bf99",
+      "ok": true,
+      "logSha256": "b2a891963906b5a9f931e242f5fe15667c9513967ac519662c4561d57060dabb"
+    },
+    {
+      "name": "onboarding_retention_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/onboarding_retention_pg-32905abf8556f18e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/onboarding_retention_pg-32905abf8556f18e",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_onboarding_retention_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.23,
+      "traceTables": {
+        "admission_test_onboarding_retention_pg": 0
+      },
+      "defaultIgnoredSuite": true,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "2166b522502d63dcbf8976a0a09d4964e13713438a090bb266c1feeb159369f1",
+      "ok": true,
+      "logSha256": "b42a942d512eda66c8e77ef683a774701b7746a65236767634ce1087f6005b97"
+    },
+    {
+      "name": "legacy_invite_link_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_invite_link_pg-5696b36da0955b7d",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_invite_link_pg-5696b36da0955b7d",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_legacy_invite_link"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL": "admission_test_legacy_invite_link"
+      },
+      "exitCode": 0,
+      "seconds": 6.69,
+      "traceTables": {
+        "admission_test_legacy_invite_link": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.25s"
+      ],
+      "executableSha256": "0d41bbe02ee12121a121b02cd608030c394470d9f94cb971e4afcfc5242493e7",
+      "ok": true,
+      "logSha256": "fe18ffcc5f3fea142d767c82c913f6f9e5fde7e254d0b16bfeff463881bfc271"
+    },
+    {
+      "name": "account_trust_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_pg-12d0bdad19dcbd03",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_pg-12d0bdad19dcbd03",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_account_trust"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL": "admission_test_account_trust"
+      },
+      "exitCode": 0,
+      "seconds": 2.86,
+      "traceTables": {
+        "admission_test_account_trust": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s"
+      ],
+      "executableSha256": "aa013e853e64ee1c1760eba094d3868b968229b3302a0bf6c7f40f7f1e0f1ea0",
+      "ok": true,
+      "logSha256": "ce6d880c15dfc060c07a42a3a1736c09d8e1a6b424a359ddfdb5a70109f05a34"
+    },
+    {
+      "name": "activity_missions_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/activity_missions_pg-7920a49994ea9999",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/activity_missions_pg-7920a49994ea9999",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_activity_missions_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.61,
+      "traceTables": {
+        "admission_test_activity_missions_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s"
+      ],
+      "executableSha256": "138b25500b8d75c12c5d9472c35552122328dcc5311f132ad5d593acf9a998e6",
+      "ok": true,
+      "logSha256": "f695a9d065c114945755abc5ad162491a2c68aa3913dcfde8d1f136c64bcf095"
+    },
+    {
+      "name": "versioned_pipeline_runtime_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/versioned_pipeline_runtime_pg-432f2b5ddf9df561",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/versioned_pipeline_runtime_pg-432f2b5ddf9df561",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_pipeline"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_pipeline"
+      },
+      "exitCode": 0,
+      "seconds": 119.73,
+      "traceTables": {
+        "admission_test_pipeline": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 459 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 119.01s"
+      ],
+      "executableSha256": "329066623a3ff0489c76ea6a9151a707021087bf7193ab2ebe25438e3fa694c5",
+      "ok": true,
+      "logSha256": "23807605c56c2820b7595148a64993f134bfaf7b3eee33d9a149ba342773cfbf"
+    },
+    {
+      "name": "usage_events_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/usage_events_pg-eeb13a8735f006eb",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/usage_events_pg-eeb13a8735f006eb",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_usage_events_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.77,
+      "traceTables": {
+        "admission_test_usage_events_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s"
+      ],
+      "executableSha256": "625ecffb6bbdb132d90a7465d30b7d99ecb5e066b058e161d1c26021f97f1ae4",
+      "ok": true,
+      "logSha256": "82a2de45ffddba0f65b5e7501b6f485d15f0861097947f34731e248164b0bd8d"
+    },
+    {
+      "name": "starter_plausibility_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/starter_plausibility_pg-42947f33416d1a64",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/starter_plausibility_pg-42947f33416d1a64",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_starter"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_STARTER_PG_TEST_DATABASE_URL": "admission_test_starter"
+      },
+      "exitCode": 0,
+      "seconds": 0.87,
+      "traceTables": {
+        "admission_test_starter": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s"
+      ],
+      "executableSha256": "c163d692841e99ea88facab4769e9b6bca76170d4556eba89a5102293f1f46b9",
+      "ok": true,
+      "logSha256": "819f280e68ae25a90c1bfe181b8975c587d3e24b7d6304f153a277bd4b676f21"
+    },
+    {
+      "name": "trace-commons-smoke-envelope",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_smoke_envelope-2cfaac07960acc27",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_smoke_envelope-2cfaac07960acc27",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_smoke_envelope"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.22,
+      "traceTables": {
+        "admission_test_trace_commons_smoke_envelope": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "47bea02146b2cf775611863deb2167291e9af271bbe16b1a57477b53d60733ab",
+      "ok": true,
+      "logSha256": "df166913f47ff1f04202cae9b31df67ed272d692d99a0023a8117dc3029100dd"
+    },
+    {
+      "name": "r1_pipeline_measurement",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/r1_pipeline_measurement-aed56258781cc45c",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/r1_pipeline_measurement-aed56258781cc45c",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_r1_pipeline_measurement"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_R1_MEASUREMENT_PG_TEST_URL": "admission_test_r1_pipeline_measurement"
+      },
+      "exitCode": 0,
+      "seconds": 1.56,
+      "traceTables": {
+        "admission_test_r1_pipeline_measurement": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s"
+      ],
+      "executableSha256": "cc1f35b48333573c3e4519fad58c9733e030315bc4d85e3eb5cb458152af2b1b",
+      "ok": true,
+      "logSha256": "7658565e15c8fff739587e6edfa98acc744aa40d85cb8b5ef87c25aabfa1b7bb"
+    },
+    {
+      "name": "mission_publication_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_publication_pg-32cad46d09639c41",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_publication_pg-32cad46d09639c41",
+        "--test-threads=1",
+        "--nocapture",
+        "--include-ignored"
+      ],
+      "databases": [
+        "reward_test_mission_packages"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_REWARDS_PG_TEST_URL": "reward_test_mission_packages"
+      },
+      "exitCode": 0,
+      "seconds": 3.92,
+      "traceTables": {
+        "reward_test_mission_packages": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.65s"
+      ],
+      "executableSha256": "0816af8cc3f87fe2faf6257b1bf35de83ae406bf29f09c3d9286094a1b301df5",
+      "ok": true,
+      "logSha256": "25b1325d54907a1902ac47d0a1429ad24a2eac38ab3148514b7f983af30b0837"
+    },
+    {
+      "name": "device_invite_subject_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/device_invite_subject_pg-c66e1be5b58e6929",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/device_invite_subject_pg-c66e1be5b58e6929",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_device_invite_subject"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_DEVICE_INVITE_SUBJECT_PG_TEST_DATABASE_URL": "admission_test_device_invite_subject"
+      },
+      "exitCode": 0,
+      "seconds": 0.8,
+      "traceTables": {
+        "admission_test_device_invite_subject": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s"
+      ],
+      "executableSha256": "2dec2504c128374cd1f564a45b74ff3761f7554ca78336703fed550bd11e4b55",
+      "ok": true,
+      "logSha256": "edc0844e3a5b809d856c0ed681b7acedb69474590fe4b2b737f3200a2f5bb2aa"
+    },
+    {
+      "name": "witness_blocked_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/witness_blocked_pg-6762e9013daf69d1",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/witness_blocked_pg-6762e9013daf69d1",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_witness_blocked"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_witness_blocked"
+      },
+      "exitCode": 0,
+      "seconds": 0.6,
+      "traceTables": {
+        "admission_test_witness_blocked": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s"
+      ],
+      "executableSha256": "7de435ee15a13ee305fafb31dd437215722fbf4ba1b4ac6faf7d32f4e8bcab5d",
+      "ok": true,
+      "logSha256": "b3c734b3d99bef90e68898da667b837e755202f3660999d7063464e3995ad6d7"
+    },
+    {
+      "name": "account_merge_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_merge_pg-38dbbd8e71deaf31",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_merge_pg-38dbbd8e71deaf31",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_merge"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_merge"
+      },
+      "exitCode": 0,
+      "seconds": 1.01,
+      "traceTables": {
+        "admission_test_merge": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s"
+      ],
+      "executableSha256": "2540525b0fa56042246103808b7d7e7add52ecc428f133313e77b536c9af0013",
+      "ok": true,
+      "logSha256": "55dc0cb790beea94450e9f389480ab8105cc58d14358d57629adec548b61fc4e"
+    },
+    {
+      "name": "trace-commons-witness",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_witness-33be2045ec4d4083",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_witness-33be2045ec4d4083",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_witness"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.17,
+      "traceTables": {
+        "admission_test_trace_commons_witness": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "executableSha256": "9fa7f3248bd47cadef2001c7745b75a87e6103eaf90c1c12d61e4bd4da2909ee",
+      "ok": true,
+      "logSha256": "233e5e42968b8b8ec62a0e94246c2db7ccb622ac7d39096c9b355081f7c5eb00"
+    },
+    {
+      "name": "trace_corpus_pg_store",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_corpus_pg_store-3d5d686c946a56fd",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_corpus_pg_store-3d5d686c946a56fd",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_store"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_store"
+      },
+      "exitCode": 0,
+      "seconds": 2.9,
+      "traceTables": {
+        "admission_test_store": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.58s"
+      ],
+      "executableSha256": "6dca05c3f07e9afef449e207315d9a5ba1de2eba122936a1ab009b4d10a60a6f",
+      "ok": true,
+      "logSha256": "2d88fc70ad977cbea4341bce8910e9917a775c316ca134d965d7decebc93be84"
+    },
+    {
+      "name": "referral_rewards_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_rewards_pg-0d1989584f6b6dd0",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_rewards_pg-0d1989584f6b6dd0",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_referral_rewards_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.88,
+      "traceTables": {
+        "admission_test_referral_rewards_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s"
+      ],
+      "executableSha256": "082e223fb603cefd7ae1fc6dc108b60b62c0f4ff083262e749a8643fd3cf2a45",
+      "ok": true,
+      "logSha256": "52943c42057970788a9901c3ba42bd8db149520078e1f7f783e8d6f0c84f4bc1"
+    },
+    {
+      "name": "model_training_consent_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/model_training_consent_pg-fd0eeacfb441aa44",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/model_training_consent_pg-fd0eeacfb441aa44",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_model_training_consent_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.63,
+      "traceTables": {
+        "admission_test_model_training_consent_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s"
+      ],
+      "executableSha256": "ed2f9c2e17a63740003a566405b9cd7ed9233e052884d9ac08dbed19b8c63a43",
+      "ok": true,
+      "logSha256": "038fba927f627cd97a362a23738f185ceeda4e4835a6fe2ad48f4640732a693c"
+    },
+    {
+      "name": "trace-commons-pilot-bootstrap",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_pilot_bootstrap-68bc456ae41452bd",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_pilot_bootstrap-68bc456ae41452bd",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_pilot_bootstrap"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.48,
+      "traceTables": {
+        "admission_test_trace_commons_pilot_bootstrap": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s"
+      ],
+      "executableSha256": "cadc424aa1b5851a0aa5670bdfef700d6510b9d51537528c72e2a7b522702d69",
+      "ok": true,
+      "logSha256": "47b53840e499e2530e4d09d0eab2d69f3297755bfcf3714372852ca12751efb8"
+    },
+    {
+      "name": "account_trust_growth_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_growth_pg-6510497a5da6d334",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_trust_growth_pg-6510497a5da6d334",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_account_trust_growth"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL": "admission_test_account_trust_growth"
+      },
+      "exitCode": 0,
+      "seconds": 1.42,
+      "traceTables": {
+        "admission_test_account_trust_growth": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s"
+      ],
+      "executableSha256": "33d45f9233054e22975c0dfcc8f31756703a5192c39be03b060d6f23bc08d09c",
+      "ok": true,
+      "logSha256": "55be74099ce779447844f93e839b630b80ac279d2705bb23c89173cdc86bf441"
+    },
+    {
+      "name": "upload_principal_ownership_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/upload_principal_ownership_pg-273120b4c418dd73",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/upload_principal_ownership_pg-273120b4c418dd73",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_upload_ownership"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_upload_ownership"
+      },
+      "exitCode": 0,
+      "seconds": 0.74,
+      "traceTables": {
+        "admission_test_upload_ownership": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s"
+      ],
+      "executableSha256": "509cd2a01f3ced593adf2c04a6984653c35b273223adbfcdd20d405aa5c59afd",
+      "ok": true,
+      "logSha256": "8bba52901ef1a367ce8ba1a5b567b4a677190140961433248737ebe7f283d999"
+    },
+    {
+      "name": "it",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/it-a52c3005019478cf",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/it-a52c3005019478cf",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_it"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 3.74,
+      "traceTables": {
+        "admission_test_it": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 260 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.28s"
+      ],
+      "executableSha256": "49289bd8323231a0fca73f4b8386a59f916b334e887f7f438ffcac014e8452b3",
+      "ok": true,
+      "logSha256": "237558188ef24f49407ab5302237278071f12e01c2036c252fb437a1a8a145ba"
+    },
+    {
+      "name": "reward_participant_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/reward_participant_pg-e532bf55dd01b2dc",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/reward_participant_pg-e532bf55dd01b2dc",
+        "--test-threads=1",
+        "--nocapture",
+        "--include-ignored"
+      ],
+      "databases": [
+        "reward_test_participants"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_REWARDS_PG_TEST_URL": "reward_test_participants"
+      },
+      "exitCode": 0,
+      "seconds": 0.93,
+      "traceTables": {
+        "reward_test_participants": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s"
+      ],
+      "executableSha256": "ebe876a8af4db1303fcfd237bb349548c64836ec4ce0bd3307e78d2b6b075fcb",
+      "ok": true,
+      "logSha256": "5c718e8ebc8b5e65abb16fa51b3f3e95815eb550292e2d4c91ae7c79a334876c"
+    },
+    {
+      "name": "trace-commons-review",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_review-dbd9afb6b1a841dd",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_review-dbd9afb6b1a841dd",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_review"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.62,
+      "traceTables": {
+        "admission_test_trace_commons_review": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s"
+      ],
+      "executableSha256": "8eeb663b2aac64213356425210afe4ca6e326af01ed1dc9b6f33d04336ac9275",
+      "ok": true,
+      "logSha256": "4a4c6b02611067c5a3f7321dd92598fbbecf1ea4003743ce2392af0738dca194"
+    },
+    {
+      "name": "legacy_payout_carry_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_payout_carry_pg-86c69d34d410db0e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_payout_carry_pg-86c69d34d410db0e",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_legacy_payout_carry"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_legacy_payout_carry"
+      },
+      "exitCode": 0,
+      "seconds": 2.84,
+      "traceTables": {
+        "admission_test_legacy_payout_carry": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s"
+      ],
+      "executableSha256": "41de2716ae2e97d020f6a555e9a2625f69fbbb7dd4b913be4312f1f09dc78b31",
+      "ok": true,
+      "logSha256": "309dcc25ff05e296732ff2a902fd6023840df8cd5df0ead893ba868c437d44fe"
+    },
+    {
+      "name": "payout_pass_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/payout_pass_pg-81102109963e1d41",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/payout_pass_pg-81102109963e1d41",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_payout_pass"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_payout_pass"
+      },
+      "exitCode": 0,
+      "seconds": 9.45,
+      "traceTables": {
+        "admission_test_payout_pass": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.94s"
+      ],
+      "executableSha256": "64c02a7a3a5786ab873f44209eb04d84c8da94dc08754bce566ab0be6811b288",
+      "ok": true,
+      "logSha256": "d066e1a17c51718de425a3fa5d9172078fb24afc65a1a9027116cca19781b691"
+    },
+    {
+      "name": "admission_ledger_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/admission_ledger_pg-cfdf37ff065ea08e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/admission_ledger_pg-cfdf37ff065ea08e",
+        "--test-threads=1",
+        "--nocapture",
+        "--include-ignored"
+      ],
+      "databases": [
+        "admission_test_account_ledger",
+        "admission_test_ledger"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_ADMISSION_PG_TEST_URL": "admission_test_ledger",
+        "TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL": "admission_test_account_ledger"
+      },
+      "exitCode": 0,
+      "seconds": 4.06,
+      "traceTables": {
+        "admission_test_account_ledger": 123,
+        "admission_test_ledger": 5
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.71s"
+      ],
+      "executableSha256": "5d357202a540d2dcbcdb909f09fee8bdaf1f393e4413833f53cd512036af95f0",
+      "ok": true,
+      "logSha256": "08e62e425090df21121caa247c27befc0e42d3ff819e8fb08fb3e846b2eaee4c"
+    },
+    {
+      "name": "vector_replay_store_methods",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/vector_replay_store_methods-3b0512a9578e903e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/vector_replay_store_methods-3b0512a9578e903e",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_vector_replay_store_methods"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.55,
+      "traceTables": {
+        "admission_test_vector_replay_store_methods": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s"
+      ],
+      "executableSha256": "b6d21d8e18d662ce2cc64d41aa7ec2cdc1f1eca704ea470961f56a4e5f9130b9",
+      "ok": true,
+      "logSha256": "8e4871abe139fafa46bac1dc56f7413f17ba0b7bdce4dde9be58c8c9634d30dd"
+    },
+    {
+      "name": "token_bundle_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/token_bundle_pg-f0604798c74e02fa",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/token_bundle_pg-f0604798c74e02fa",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_token_bundle_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.71,
+      "traceTables": {
+        "admission_test_token_bundle_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s"
+      ],
+      "executableSha256": "a03cd92c15a414c43776db729b0520f3d06ba573c7244b207830f481c2ceec7a",
+      "ok": true,
+      "logSha256": "c40e302d7b2f4e31253fe0026306e5c4b8ff26216f6c5c41043f77ed3f65ad0b"
+    },
+    {
+      "name": "referral_bonus_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_bonus_pg-785be271eec0d729",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_bonus_pg-785be271eec0d729",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_referral_bonus_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 1.91,
+      "traceTables": {
+        "admission_test_referral_bonus_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s"
+      ],
+      "executableSha256": "192c00cdd0e84990f3daf617dc90af9f9118fa5b43fd7ba4989a30210d53781e",
+      "ok": true,
+      "logSha256": "8e80c2a30ef15679a3dba205066cb4a66cd989d2cd724837514f2532760f34f3"
+    },
+    {
+      "name": "trace-commons-tenant",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_tenant-ac220c2bd03099f2",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_tenant-ac220c2bd03099f2",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_tenant"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 1.66,
+      "traceTables": {
+        "admission_test_trace_commons_tenant": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s"
+      ],
+      "executableSha256": "f024c634cfe2d4308ebc752119c748b50eb57fa7eee9dd50494f128cd305a585",
+      "ok": true,
+      "logSha256": "c8202d5dc1bd71440319a6fd788024d2afd4501283fc4107f1470698f94b0b29"
+    },
+    {
+      "name": "mission_rewards_cli_errors",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_rewards_cli_errors-25ddbff346c74e95",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/mission_rewards_cli_errors-25ddbff346c74e95",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_mission_rewards_cli_errors"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.19,
+      "traceTables": {
+        "admission_test_mission_rewards_cli_errors": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s"
+      ],
+      "executableSha256": "6be9f42b65d27753acfeb0eadd34986ea20a907a9359fd1eb9cdc68ea801ff51",
+      "ok": true,
+      "logSha256": "e45cb6667af3b81ca83cd27209a3d5cb3d69d8a2c9c5aa7a4c4e884a08ec0268"
+    },
+    {
+      "name": "first_run_stats_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/first_run_stats_pg-d7cef9e232315607",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/first_run_stats_pg-d7cef9e232315607",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_first_run_stats"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_first_run_stats"
+      },
+      "exitCode": 0,
+      "seconds": 0.56,
+      "traceTables": {
+        "admission_test_first_run_stats": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s"
+      ],
+      "executableSha256": "1a0d463a49cc030961dd1ce6befcb2dfb7fac81b2691044afb9f94fa7c8be74c",
+      "ok": true,
+      "logSha256": "17cdba230b73f6361e31d03266321105293a6fd5143d44e39e9f8b04b1ace628"
+    },
+    {
+      "name": "trace-commons-admin",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_admin-8b863d8f0e3ad915",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_admin-8b863d8f0e3ad915",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_admin"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.91,
+      "traceTables": {
+        "admission_test_trace_commons_admin": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s"
+      ],
+      "executableSha256": "600d07ce903715c057ae3363e3ba920467762cb4875f08757310d99ef6265981",
+      "ok": true,
+      "logSha256": "05ee9d27d002e3b1cbb99f7e60e2ecb1d0a7afce0bdd9fa070840300d8c29f8d"
+    },
+    {
+      "name": "witness_evidence_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/witness_evidence_pg-c6da94bf0f4870b3",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/witness_evidence_pg-c6da94bf0f4870b3",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_witness_evidence"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_witness_evidence"
+      },
+      "exitCode": 0,
+      "seconds": 0.7,
+      "traceTables": {
+        "admission_test_witness_evidence": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s"
+      ],
+      "executableSha256": "3e551428af4eab670ffbf38ea46f238b72d7a631d1e4e4b5239f16cf7da36797",
+      "ok": true,
+      "logSha256": "9942cb9f601d9b0099a924c49ac51ee3298a740f18f0a31310e62ebce8be18e8"
+    },
+    {
+      "name": "account_onboarding_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_onboarding_pg-be335eeee728076e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/account_onboarding_pg-be335eeee728076e",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_onboarding"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL": "admission_test_onboarding"
+      },
+      "exitCode": 0,
+      "seconds": 5.04,
+      "traceTables": {
+        "admission_test_onboarding": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.58s"
+      ],
+      "executableSha256": "553da892d4b0d7c1d9dbbcc17d03d3d54058f998bb01e9ce716618803aba05d5",
+      "ok": true,
+      "logSha256": "cc2062794d82037d3435dac02e2d7468992ee649a676d89e6858385fabd26447"
+    },
+    {
+      "name": "trace_invite_registry_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_invite_registry_pg-4bdad2619ccf4916",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_invite_registry_pg-4bdad2619ccf4916",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_invite"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": "admission_test_invite"
+      },
+      "exitCode": 0,
+      "seconds": 1.21,
+      "traceTables": {
+        "admission_test_invite": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s"
+      ],
+      "executableSha256": "e92ee8a5f0407168237af255cce43cb3dc201f33ccd573a9fdb55d72ac9f3987",
+      "ok": true,
+      "logSha256": "58d192dfeb659c907439793757981ce357c2e9efae391e419c339d3d8404f19d"
+    },
+    {
+      "name": "trace-commons-witness-list",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_witness_list-e9deac93f555ad06",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_witness_list-e9deac93f555ad06",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_witness_list"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.97,
+      "traceTables": {
+        "admission_test_trace_commons_witness_list": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s"
+      ],
+      "executableSha256": "8ce4053c8a2123f594b9ba04857d050242ae3d8b6ac2418be2e82f3ad52fbf7a",
+      "ok": true,
+      "logSha256": "c330d0c70d0b78286ae65014140a5e77e51a034e010a3b77f8ebb9785603c28b"
+    },
+    {
+      "name": "referral_stream_pg",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_stream_pg-e39ea81e656376cd",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/referral_stream_pg-e39ea81e656376cd",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_referral_stream_pg"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 4.95,
+      "traceTables": {
+        "admission_test_referral_stream_pg": 123
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.51s"
+      ],
+      "executableSha256": "67b35305b39d1421070d0e3235900b796b9ee37381f7b7443d7bcb6648286f66",
+      "ok": true,
+      "logSha256": "c478213f6a78f89432213444bb03ba8828690db4f7a8eea0b8d6a36c7f43d588"
+    },
+    {
+      "name": "trace-commons-pipeline-corpus-export",
+      "kind": [
+        "bin"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_pipeline_corpus_export-aaddea4ff1f7621e",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/trace_commons_pipeline_corpus_export-aaddea4ff1f7621e",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_trace_commons_pipeline_corpus_export"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 0.45,
+      "traceTables": {
+        "admission_test_trace_commons_pipeline_corpus_export": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s"
+      ],
+      "executableSha256": "45cc583c968448034fba6e320c5f9954cc4b66dde9b1f39b580a7d744120434e",
+      "ok": true,
+      "logSha256": "0073d6d35815436d778d9e5a339b5a4d47f4389c0a53a95ac02076c877366ff0"
+    },
+    {
+      "name": "legacy_invite_counts",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_invite_counts-75b14df0852d1335",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/legacy_invite_counts-75b14df0852d1335",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_legacy_invite_counts"
+      ],
+      "fixtureVariables": {
+        "TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL": "admission_test_legacy_invite_counts"
+      },
+      "exitCode": 0,
+      "seconds": 1.26,
+      "traceTables": {
+        "admission_test_legacy_invite_counts": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s"
+      ],
+      "executableSha256": "ffa62ad4bb04bf3e815750aa94e2360538ea7d5f87e92f5c0f532ef1dedba09c",
+      "ok": true,
+      "logSha256": "338543745e83a6211272d1b5be0569968700d48cf46f30b3e0d821ac6a618916"
+    },
+    {
+      "name": "near_ai_rail_mock",
+      "kind": [
+        "test"
+      ],
+      "executable": "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/near_ai_rail_mock-a3bfa646019421a4",
+      "command": [
+        "/private/tmp/tc-backend-authorization-fixes/target/debug/deps/near_ai_rail_mock-a3bfa646019421a4",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "databases": [
+        "admission_test_near_ai_rail_mock"
+      ],
+      "fixtureVariables": {},
+      "exitCode": 0,
+      "seconds": 2.32,
+      "traceTables": {
+        "admission_test_near_ai_rail_mock": 0
+      },
+      "defaultIgnoredSuite": false,
+      "missingFixture": false,
+      "pgSuiteUsedDatabase": true,
+      "testSummaries": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s"
+      ],
+      "executableSha256": "8af5df3cecc299c8a3b52555974bd1e8e0aa16d8442a53736d37067f0e70442d",
+      "ok": true,
+      "logSha256": "c709eef518075134f96ba9bd9b918c6045bf4406069fe8c46941befb537348ab"
+    }
+  ]
+}

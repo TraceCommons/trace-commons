@@ -58,6 +58,7 @@ BUILD_FILES=(
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   macos/scripts/info-plist.sh                 # reads the bundle channel (spec 4.1)
+  macos/scripts/info-plist-strings.sh         # the bundle's display name, from the channel
   macos/scripts/channel.sh                    # loads the bundle channel file
   macos/channels/production.env               # the production bundle channel
   windows/scripts/make-msix.ps1

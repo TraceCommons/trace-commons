@@ -230,7 +230,7 @@ final class CoreCopyExportTests: XCTestCase {
         let prompt = try XCTUnwrap(QuitPrompt.decode(
             fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()))
         XCTAssertEqual(prompt.role, "unavailable")
-        XCTAssertEqual(prompt.title, "Quit Near.ai?")
+        XCTAssertEqual(prompt.title, "Quit Near AI Gateway?")
         XCTAssertFalse(prompt.body.contains("Quitting stops"), prompt.body)
         XCTAssertFalse(prompt.body.contains("stays waiting"), prompt.body)
     }

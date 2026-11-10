@@ -30,12 +30,28 @@ private final class ContributionDaemon: DaemonCalling {
     func call(_ method: String, params: String) -> String {
         let refused = state.withLock { state in
             state.recorded.append((method, params))
+            guard method == "account_invite_redeem" || method == "account_contribution_status" else { return false }
             let refused = state.refuse
             state.refuse = false
             return refused
         }
         if refused { return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"# }
-        if blockReady { started.signal(); resume.wait() }
+        // Account-scope changes also refresh history and grant snapshots.
+        // Only park the account operation this fixture is exercising.
+        switch method {
+        case "list_history": return #"{"id":1,"result":{"history":[]}}"#
+        case "history_rollup":
+            let counts = #"{"submitted":0,"accepted":0,"quarantined":0,"other":0}"#
+            return #"{"id":1,"result":{"week":\#(counts),"month":\#(counts),"all_time":\#(counts),"credit_pending":0,"credit_final":0,"quarantined":0}}"#
+        case "automatic_grant": return #"{"id":1,"result":{"granted":false}}"#
+        default: break
+        }
+        if blockReady {
+            started.signal()
+            guard resume.wait(timeout: .now() + 5) == .success else {
+                return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_timeout"}}"#
+            }
+        }
         let body = (try? JSONSerialization.jsonObject(with: Data(params.utf8))) as? [String: String]
         return "{\"id\":1,\"result\":{\"account_scope\":\"\(body?["account_scope"] ?? "scope-a")\",\"status\":{\"authority\":\"bounded\",\"ready\":true,\"policy_version\":\"v1\"},\"line\":\"Ready to contribute.\"}}"
     }
@@ -64,7 +80,7 @@ final class ContributionAccountTests: XCTestCase {
         XCTAssertFalse(first)
         let second = await model.updateContributionAccount(inviteCode: "SYNTHETICINVITE01")
         XCTAssertTrue(second)
-        let calls = daemon.calls
+        let calls = daemon.calls.filter { $0.0.hasPrefix("account_") }
         XCTAssertEqual(calls.map { $0.0 }, ["account_invite_redeem", "account_invite_redeem"])
         let firstBody = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[0].1.utf8)) as? [String: String])
         let secondBody = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[1].1.utf8)) as? [String: String])
@@ -75,7 +91,7 @@ final class ContributionAccountTests: XCTestCase {
         XCTAssertTrue(model.contributionLine.contains("Ready to contribute"))
         let refreshed = await model.updateContributionAccount()
         XCTAssertTrue(refreshed)
-        XCTAssertEqual(daemon.calls.last?.0, "account_contribution_status")
+        XCTAssertEqual(daemon.calls.filter { $0.0.hasPrefix("account_") }.last?.0, "account_contribution_status")
     }
     @MainActor
     func testSameEnrollmentLifecycleChangeClearsReadinessAndRetryKey() async throws {
@@ -105,7 +121,7 @@ final class ContributionAccountTests: XCTestCase {
         let request = Task { await model.updateContributionAccount() }
         let started = await daemon.waitUntilStarted()
         XCTAssertEqual(started, .success)
-        XCTAssertEqual(daemon.calls.map { $0.0 }, ["account_contribution_status"],
+        XCTAssertEqual(daemon.calls.filter { $0.0.hasPrefix("account_") }.map { $0.0 }, ["account_contribution_status"],
                        "The recorded call must remain readable while its reply is parked")
         status.accountScope = "scope-b"; model.setStatusForTesting(status)
         daemon.resume.signal()

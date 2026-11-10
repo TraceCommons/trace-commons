@@ -130,15 +130,32 @@ Make the grant before either of these is set:
 
 While either setting above is on and the service has a database, ingest
 checks at startup that its login can assume the role, by opening a
-transaction, assuming it, and rolling back. It refuses to start with:
+transaction, checking runtime isolation, assuming it, checking its effective
+grants, and rolling back. It refuses to start with:
 
 - `referrals refused to start: referral_resolver_unprovisioned` -- the
-  `SET ROLE` was refused: the grant is missing, or was made with `SET FALSE`.
+  grant is missing, has `SET FALSE`, or fails the safety checks below.
 - `referrals refused to start: referral_resolver_check_failed` -- any other
   database error during the check (connection lost, role missing because V142
   has not been applied).
 
 With referrals off, nothing is checked and the role is never assumed.
+
+The runtime must not inherit the resolver policy, directly or through another
+role. Its own broader table grants would combine with the resolver's
+cross-tenant policy and expose columns the resolver alone cannot read. The
+probe also rejects applicable permissive policies that widen the tenant
+predicate, runtime access to table ownership or bypass roles, and a resolver
+that can log in, write, read any additional column or table, or cannot read
+all six required columns. A superuser connection is not a supported runtime.
+Restrictive policies and unrelated roles' policies are supported.
+
+The general RLS diagnostic applies the same effective-policy and reachable
+owner/bypass checks to its full table inventory. Failures reuse
+`policy_expression_mismatch_tables` and the ownership/bypass booleans, so an
+unchanged named tenant policy alone is no longer sufficient for readiness.
+These are startup observations; role and policy changes still require an
+operator-controlled migration and a fresh readiness check.
 
 ## Verification
 
@@ -154,6 +171,11 @@ SELECT r.rolname AS role, m.rolname AS member, a.inherit_option, a.set_option
   JOIN pg_roles r ON r.oid = a.roleid
   JOIN pg_roles m ON m.oid = a.member
  WHERE r.rolname = 'trace_referral_resolver';
+
+-- Run as the ingest login: includes every transitive membership path.
+SELECT pg_has_role(current_user, 'trace_referral_resolver', 'USAGE') AS inherited,
+       pg_has_role(session_user, 'trace_referral_resolver', 'SET') AS assumable;
+-- inherited = false, assumable = true.
 
 -- The role cannot write, nor read another referral table.
 SELECT has_table_privilege('trace_referral_resolver', 'trace_referral_codes', 'INSERT');            -- f

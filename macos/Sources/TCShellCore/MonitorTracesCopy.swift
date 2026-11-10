@@ -795,10 +795,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     /// Beside the Account heading while its figures wait on a sign-in
     /// (owner, 2026-11-02).
     public let accountNoData: String
-    /// Home's Traces hero: its title, its line and its way into Traces
-    /// (owner, 2026-10-28; restored 2026-11-05).
+    /// Home's Traces hero: its title and way into Traces (owner,
+    /// 2026-10-28; no line under the title since 2026-11-02).
     public let tracesHeroTitle: String
-    public let tracesHeroBody: String
     public let tracesHeroAction: String
     /// The hero's three steps, each a title over one line (owner,
     /// 2026-10-29).
@@ -868,7 +867,6 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case privateAISignIn = "private_ai_sign_in"
         case accountNoData = "account_no_data"
         case tracesHeroTitle = "traces_hero_title"
-        case tracesHeroBody = "traces_hero_body"
         case tracesHeroAction = "traces_hero_action"
         case tracesHeroStepContribute = "traces_hero_step_contribute"
         case tracesHeroStepContributeDetail = "traces_hero_step_contribute_detail"

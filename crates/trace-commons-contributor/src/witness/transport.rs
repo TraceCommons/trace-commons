@@ -679,32 +679,6 @@ pub fn verify_certificate(
     Ok(())
 }
 
-/// The redaction pipeline a certificate certifies, read only once
-/// [`verify_certificate`] has accepted it against `pinned_address`.
-///
-/// This is the witness's `redaction_pipeline_version()` alias -- the value
-/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
-/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
-/// read that field any other way: an unverified copy of it is a claim, and
-/// is exactly what a certificate over some other artifact, or from some
-/// other key, would carry.
-///
-/// Returned as the exact string signed. Nothing here trims, lowercases or
-/// otherwise normalises it; a caller comparing it must compare exactly.
-pub fn certified_redaction_pipeline_version(
-    response: &WitnessedEnvelope,
-    pinned_address: &str,
-) -> Result<String, WitnessTrustError> {
-    verify_certificate(response, pinned_address)?;
-    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
-        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
-    certificate
-        .get("redaction_policy_version")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .ok_or(WitnessTrustError::WitnessResponseMalformed)
-}
-
 /// Recover the signer from a stored certificate without exposing its raw
 /// signature or certificate JSON to a shell.
 ///
@@ -940,6 +914,8 @@ pub struct HttpWitnessTransport {
     probe_timeout: Duration,
     /// The deadline for a whole job review, submit to answer.
     review_timeout: Duration,
+    /// Signed runtime routing is rechecked after body serialization.
+    routing_guard: Option<super::configuration::RoutingGuard>,
 }
 
 /// The deadline for a whole witness review: a job from submit to answer
@@ -1054,7 +1030,20 @@ impl HttpWitnessTransport {
             envelope_limit: MAX_ENVELOPE_BYTES,
             probe_timeout: timeout.min(WITNESS_PROBE_TIMEOUT),
             review_timeout: timeout,
+            routing_guard: None,
         })
+    }
+
+    pub(crate) fn with_routing_guard(mut self, guard: super::configuration::RoutingGuard) -> Self {
+        self.routing_guard = Some(guard);
+        self
+    }
+
+    fn validate_routing(&self) -> Result<(), WitnessTrustError> {
+        if let Some(guard) = &self.routing_guard {
+            guard.validate()?;
+        }
+        Ok(())
     }
 
     /// Select the distinct evidence route only for an explicitly configured profile.
@@ -1160,6 +1149,7 @@ impl WitnessTransport for HttpWitnessTransport {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
+        self.validate_routing()?;
         let base = self.allowed(witness.url())?;
         if !self.admission_evidence {
             return self.witness_job(&base, body).await;
@@ -1349,7 +1339,19 @@ impl HttpWitnessTransport {
             // the review's budget does not restart.
             let job = tokio::time::timeout_at(deadline, self.submit_job(base, body))
                 .await
-                .map_err(|_| WitnessTrustError::WitnessTimeout)??;
+                .map_err(|_| WitnessTrustError::WitnessTimeout)?
+                .map_err(|error| {
+                    // A first POST already disclosed this request. Do not
+                    // turn a later policy withdrawal into a pre-send pin
+                    // refusal that the caller could refresh and reroute.
+                    if resubmitted
+                        && matches!(error, WitnessTrustError::WitnessMeasurementUnpinned { .. })
+                    {
+                        WitnessTrustError::WitnessUnreachable
+                    } else {
+                        error
+                    }
+                })?;
             match self.poll_job(&job, deadline).await {
                 Ok(envelope) => return Ok(envelope),
                 Err(PollMiss::Final(error)) => return Err(error),
@@ -1397,8 +1399,11 @@ impl HttpWitnessTransport {
         // endpoint: a deadline is `witness_timeout`, no connection is
         // `witness_unreachable`. Anything else keeps the label this call
         // always reported.
+        let request = request.body(body.to_vec());
+        // Also covers the same-endpoint resubmit after a gone/unreachable
+        // job. Recheck after copying the body, directly before every POST.
+        self.validate_routing()?;
         let response = request
-            .body(body.to_vec())
             .send()
             .await
             .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
@@ -1658,6 +1663,7 @@ impl HttpWitnessTransport {
         if body.len() > MAX_WITNESS_REQUEST_BYTES {
             return Err(WitnessTrustError::WitnessPayloadTooLarge);
         }
+        self.validate_routing()?;
         let url = self
             .allowed(witness.url())?
             .join("/v1/witness/token-bundle")

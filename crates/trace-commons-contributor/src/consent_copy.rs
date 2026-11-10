@@ -3892,11 +3892,11 @@ mod tests {
         // Approved 2026-10-12 (owner), word for word.
         assert_eq!(
             AUTO_SUMMARY_PATTERNS_ONLY,
-            "Near.ai removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
+            "Near AI Gateway removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
         );
         assert_eq!(
             AUTO_SUMMARY_MODEL,
-            "Near.ai removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
+            "Near AI Gateway removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
         );
     }
 

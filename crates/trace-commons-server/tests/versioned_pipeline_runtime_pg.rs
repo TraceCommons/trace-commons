@@ -169,6 +169,152 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     Some(Arc::new(backend))
 }
 
+/// `runtime_backend`, or a return from the calling test when
+/// `TRACE_COMMONS_PG_TEST_DATABASE_URL` is unset.
+macro_rules! runtime_backend_or_skip {
+    ($pool_size:expr) => {
+        match runtime_backend($pool_size).await {
+            Some(backend) => backend,
+            None => return,
+        }
+    };
+}
+
+/// Implements each named `TraceArtifactStore` method as a plain call to the
+/// same method on `self.inner`, for the wrapper stores below that change
+/// only a few calls and pass the rest through.
+macro_rules! forward_to_inner_store {
+    ($($method:ident),+ $(,)?) => {
+        $(forward_to_inner_store!(@ $method);)+
+    };
+    (@ prepare_serialized_json) => {
+        fn prepare_serialized_json(
+            &self,
+            tenant_storage_ref: &str,
+            artifact_kind: TraceArtifactKind,
+            object_id: &str,
+            serialized_json: &[u8],
+        ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+            self.inner.prepare_serialized_json(
+                tenant_storage_ref,
+                artifact_kind,
+                object_id,
+                serialized_json,
+            )
+        }
+    };
+    (@ publish_serialized_json) => {
+        fn publish_serialized_json(
+            &self,
+            prepared: &PreparedSerializedJsonArtifact,
+        ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+            self.inner.publish_serialized_json(prepared)
+        }
+    };
+    (@ put_serialized_json) => {
+        fn put_serialized_json(
+            &self,
+            tenant_storage_ref: &str,
+            artifact_kind: TraceArtifactKind,
+            object_id: &str,
+            serialized_json: &[u8],
+        ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+            self.inner.put_serialized_json(
+                tenant_storage_ref,
+                artifact_kind,
+                object_id,
+                serialized_json,
+            )
+        }
+    };
+    (@ read_artifact) => {
+        fn read_artifact(
+            &self,
+            expected_tenant_storage_ref: &str,
+            receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<EncryptedTraceArtifact> {
+            self.inner
+                .read_artifact(expected_tenant_storage_ref, receipt)
+        }
+    };
+    (@ read_json) => {
+        fn read_json(
+            &self,
+            expected_tenant_storage_ref: &str,
+            receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.inner.read_json(expected_tenant_storage_ref, receipt)
+        }
+    };
+    (@ read_json_by_object_key) => {
+        fn read_json_by_object_key(
+            &self,
+            expected_tenant_storage_ref: &str,
+            expected_artifact_kind: TraceArtifactKind,
+            object_key: &str,
+            expected_ciphertext_sha256: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.inner.read_json_by_object_key(
+                expected_tenant_storage_ref,
+                expected_artifact_kind,
+                object_key,
+                expected_ciphertext_sha256,
+            )
+        }
+    };
+    (@ delete_artifact) => {
+        fn delete_artifact(
+            &self,
+            expected_tenant_storage_ref: &str,
+            receipt: &EncryptedTraceArtifactReceipt,
+        ) -> anyhow::Result<bool> {
+            self.inner
+                .delete_artifact(expected_tenant_storage_ref, receipt)
+        }
+    };
+    (@ artifact_present_by_object_key) => {
+        fn artifact_present_by_object_key(
+            &self,
+            expected_tenant_storage_ref: &str,
+            expected_artifact_kind: TraceArtifactKind,
+            object_key: &str,
+            expected_ciphertext_sha256: &str,
+        ) -> anyhow::Result<Option<bool>> {
+            self.inner.artifact_present_by_object_key(
+                expected_tenant_storage_ref,
+                expected_artifact_kind,
+                object_key,
+                expected_ciphertext_sha256,
+            )
+        }
+    };
+    (@ serialized_json_object_key) => {
+        fn serialized_json_object_key(
+            &self,
+            tenant_storage_ref: &str,
+            artifact_kind: TraceArtifactKind,
+            object_id: &str,
+        ) -> anyhow::Result<String> {
+            self.inner
+                .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+        }
+    };
+    (@ delete_artifact_at_object_key) => {
+        fn delete_artifact_at_object_key(
+            &self,
+            expected_tenant_storage_ref: &str,
+            artifact_kind: TraceArtifactKind,
+            object_key: &str,
+        ) -> anyhow::Result<bool> {
+            self.inner.delete_artifact_at_object_key(
+                expected_tenant_storage_ref,
+                artifact_kind,
+                object_key,
+            )
+        }
+    };
+}
+
 /// Pinned per A4: an off-chain credit account, whole units only. Shared by
 /// `seed_run` and the bundle-registry tests.
 fn storage_rebate_descriptor() -> InstrumentDescriptor {
@@ -346,9 +492,7 @@ async fn force_due(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) {
 
 #[tokio::test]
 async fn stale_lease_cannot_commit_after_reclaim() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("stale-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -399,9 +543,7 @@ async fn stale_lease_cannot_commit_after_reclaim() {
 /// transaction's start, would still call it live.
 #[tokio::test]
 async fn the_index_write_state_lease_check_reads_the_database_clock() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("index-write-clock-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -432,9 +574,7 @@ async fn the_index_write_state_lease_check_reads_the_database_clock() {
 /// other lease-checked write losing a race to a reclaim.
 #[tokio::test]
 async fn record_lease_expired_on_a_reclaimed_run_changes_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("lease-expired-fence-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -472,9 +612,7 @@ async fn record_lease_expired_on_a_reclaimed_run_changes_nothing() {
 /// sleeps once per attempt, not once per chunk).
 #[tokio::test]
 async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let lease_config = PipelineLeaseConfig::new(
         chrono::Duration::seconds(1),
@@ -493,15 +631,7 @@ async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
 
     let tenant = format!("slow-score-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -547,9 +677,7 @@ async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
 /// below); PR 4's renewal keeps a merely slow Score's lease alive.
 #[tokio::test]
 async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let lease_config = PipelineLeaseConfig::new(
         chrono::Duration::seconds(1),
@@ -568,15 +696,7 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     .await;
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -630,9 +750,7 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
 /// itself -- only ever a claim on a run A already, visibly holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
     let lease_config = PipelineLeaseConfig::new(
         chrono::Duration::seconds(1),
@@ -652,15 +770,7 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
 
     let tenant = format!("two-workers-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service_a, &tenant, &env).await;
     let run_id = created.run_id;
 
     let reviewed = service_a
@@ -796,9 +906,7 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
 /// A's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewal_stops_at_the_lease_cap() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
     let lease_config = PipelineLeaseConfig::new(
         chrono::Duration::seconds(1),
@@ -817,15 +925,7 @@ async fn renewal_stops_at_the_lease_cap() {
 
     let tenant = format!("renewal-cap-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service_a, &tenant, &env).await;
     let run_id = created.run_id;
 
     let reviewed = service_a
@@ -966,9 +1066,7 @@ async fn renewal_stops_at_the_lease_cap() {
 /// own expiry is left exactly as that second claim set it.
 #[tokio::test]
 async fn a_lost_lease_is_never_renewed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("lost-lease-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -1020,9 +1118,7 @@ async fn a_lost_lease_is_never_renewed() {
 /// already-expired `lease_expires_at` exactly as it was.
 #[tokio::test]
 async fn a_naturally_expired_lease_is_never_renewed_under_its_own_still_current_token() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("expired-not-reclaimed-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -1070,9 +1166,7 @@ async fn a_naturally_expired_lease_is_never_renewed_under_its_own_still_current_
 /// longer expiry untouched (the `GREATEST` in the update SQL).
 #[tokio::test]
 async fn renewal_never_shortens_a_lease() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("renewal-no-shorten-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -1127,9 +1221,7 @@ enum RunRowHolder {
 /// session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lease_that_expires_while_its_renewal_waits_for_the_row_is_not_renewed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for holder_kind in [RunRowHolder::Updates, RunRowHolder::LocksOnly] {
         let store = PgPipelineStore::new(backend.clone());
         let tenant = format!("renewal-waits-{}", uuid::Uuid::new_v4());
@@ -1268,9 +1360,7 @@ fn lease_for_phase_matches_the_config() {
 /// phase's own commit finds the lease gone (case A, tested above).
 #[tokio::test]
 async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let lease_config = PipelineLeaseConfig::new(
         chrono::Duration::seconds(1),
@@ -1289,15 +1379,7 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
     .await;
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -1338,9 +1420,7 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
 /// phase it actually claimed.
 #[tokio::test]
 async fn claim_next_picks_the_lease_by_the_runs_next_phase() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("claim-next-lease-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -1427,9 +1507,7 @@ async fn advance_run_to_phase(
 
 #[tokio::test]
 async fn register_bundle_refuses_a_changed_descriptor_for_a_registered_instrument() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("bundle-registry-{}", uuid::Uuid::new_v4());
     let scorer = ReferencePerplexityScorer::new();
@@ -1502,9 +1580,7 @@ async fn register_bundle_refuses_a_changed_descriptor_for_a_registered_instrumen
 /// goes around it with raw SQL to prove the backstop itself.
 #[tokio::test]
 async fn settlement_amounts_are_bounded_by_the_database() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let tenant = format!("settlement-bound-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
 
@@ -1648,29 +1724,13 @@ async fn tamper_stored_bundle_manifest(
 /// `bundle_package_invalid` with no new outcome.
 #[tokio::test]
 async fn a_stored_package_at_an_earlier_format_version_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("earlier-format-{}", uuid::Uuid::new_v4());
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let stored = service
         .store()
         .load_bundle(&tenant, &created.bundle_id)
@@ -1751,9 +1811,7 @@ async fn a_stored_package_at_an_earlier_format_version_fails_closed() {
 /// proceeding past a control the call could not evaluate.
 #[tokio::test]
 async fn register_bundle_refuses_while_a_registered_package_no_longer_loads() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("bundle-registry-stale-{}", uuid::Uuid::new_v4());
     let scorer = ReferencePerplexityScorer::new();
@@ -1935,9 +1993,7 @@ const OUTCOME_DELETE: &str = "DELETE FROM phase_outcomes WHERE tenant_id = $1 AN
 
 #[tokio::test]
 async fn outcomes_are_immutable_and_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("outcome-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -2072,9 +2128,7 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
 
 #[tokio::test]
 async fn attempts_exhaust_to_failed_but_transient_retries_do_not_charge() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("budget-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -2158,9 +2212,7 @@ async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: c
 /// much later, so the phase is twice as old) and caps at one retry per hour.
 #[tokio::test]
 async fn transient_retry_backoff_doubles_from_the_phase_start_and_caps_at_one_hour() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("backoff-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -2460,6 +2512,29 @@ async fn test_service(
     }
     let service = builder.build().expect("build pipeline service");
     (Arc::new(service), index, adapters)
+}
+
+/// `test_service` with no crash point, for a test that needs only the
+/// service.
+async fn pipeline_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    config: PipelineBundleConfig,
+) -> Arc<PipelineService> {
+    pipeline_service_parts(backend, dir, config).await.0
+}
+
+/// `test_service` with no crash point, over a store in `dir`.
+async fn pipeline_service_parts(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    config: PipelineBundleConfig,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    Vec<Arc<RecordingSettlementAdapter>>,
+) {
+    test_service(backend.clone(), artifact_store(dir), config, None).await
 }
 
 /// P5: like `test_service`, but takes the settlement adapters directly
@@ -2781,9 +2856,7 @@ fn qualification_candidate_config() -> CompatibilityBundleConfig {
 /// distinguish "held" from "used."
 #[tokio::test]
 async fn qualification_inspects_the_objects_the_constructor_receives() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let q = Arc::new(CountingScorer {
         identity: "counting_scorer_q_test_only",
@@ -2845,15 +2918,7 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
 
     let tenant = format!("qualification-inspects-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     service
         .process_run(&tenant, created.run_id)
         .await
@@ -3411,9 +3476,7 @@ async fn bundle_qualification_production_mode_inverts_the_reference_assertions()
 /// dependency.
 #[tokio::test]
 async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -3528,9 +3591,7 @@ async fn qualification_fails_closed_for_a_substituted_or_missing_dependency() {
 /// mode it was made under.
 #[tokio::test]
 async fn qualification_reports_payout_only_when_it_applies() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -4079,6 +4140,29 @@ async fn submit_registered(
     service.submit(request).await
 }
 
+/// `submit_registered`, expecting the receipt to create a run.
+async fn submit_created(
+    service: &PipelineService,
+    request: PipelineReceiptRequest<'_>,
+) -> PipelineRunRecord {
+    match submit_registered(service, request).await.unwrap() {
+        PipelineReceiptResult::Created(run) => run,
+        other => panic!("receipt creates a run, got {other:?}"),
+    }
+}
+
+/// `submit_created` for `env` as `tenant`, keyed by its submission id, with
+/// no admission limits.
+async fn submit_envelope(
+    service: &PipelineService,
+    tenant: &str,
+    env: &TraceContributionEnvelope,
+) -> PipelineRunRecord {
+    let raw = serde_json::to_vec(env).unwrap();
+    let key = env.submission_id.to_string();
+    submit_created(service, receipt(tenant, &key, &raw, env, NO_LIMITS)).await
+}
+
 /// `SELECT COUNT(*) FROM {table} WHERE tenant_id = $1`, in its own
 /// tenant-scoped transaction on an owner connection: this is an observer,
 /// not the runtime under test, and it counts tables the runtime login holds
@@ -4366,28 +4450,14 @@ fn count_files_under(path: &std::path::Path) -> usize {
 
 #[tokio::test]
 async fn receipt_replay_and_conflict_are_exact() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("replay-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("first receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     let PipelineReceiptResult::Replayed(replayed) =
         submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
             .await
@@ -4430,17 +4500,9 @@ async fn receipt_replay_and_conflict_are_exact() {
 /// before acting on either outcome.
 #[tokio::test]
 async fn replay_receipt_reads_without_writing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("replay-receipt-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -4456,13 +4518,7 @@ async fn replay_receipt_reads_without_writing() {
     );
     assert_eq!(count_runs(&backend, &tenant).await, 0);
 
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("first receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
 
     // Identical content: the same run, read-only, with the principal
     // `receipt()` submitted it under.
@@ -4591,17 +4647,9 @@ async fn seed_redaction_tombstone(backend: &Arc<PgBackend>, tenant: &str, redact
 /// itself asserts.
 #[tokio::test]
 async fn receipt_derives_retention_and_expiry_on_the_server() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("retention-{}", uuid::Uuid::new_v4());
     let mut env = envelope(uuid::Uuid::new_v4()).await;
     env.trace_card.retention_policy = "client_asserted_keep_forever".to_string();
@@ -4610,15 +4658,7 @@ async fn receipt_derives_retention_and_expiry_on_the_server() {
     let max_age_days = expected
         .max_age_days
         .expect("the fixture's allowed uses carry a bounded retention policy");
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(_) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let _ = submit_envelope(&service, &tenant, &env).await;
 
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
@@ -4679,11 +4719,7 @@ async fn high_risk_and_pending(service: &PipelineService, tenant: &str) -> Pipel
         residual_risk_basis: &[ResidualRiskCondition::KeyFinding],
         ..receipt(tenant, &key, &raw, &env, NO_LIMITS)
     };
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, request).await.unwrap()
-    else {
-        panic!("a High-risk receipt creates its run record")
-    };
+    let created = submit_created(service, request).await;
     assert_eq!(
         created.admission_decision, "quarantine",
         "PC-D27: a receipt-time High is held for review, not rejected"
@@ -4707,17 +4743,9 @@ async fn high_risk_and_pending(service: &PipelineService, tenant: &str) -> Pipel
 /// approval that resolves that reason completes it.
 #[tokio::test]
 async fn a_high_risk_receipt_is_held_for_review_and_completes_on_approval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("admission-high-hold-{}", uuid::Uuid::new_v4());
     let created = high_risk_and_pending(&service, &tenant).await;
     assert_eq!(
@@ -4826,17 +4854,9 @@ async fn a_high_risk_receipt_is_held_for_review_and_completes_on_approval() {
 /// it -- Review `Rejected`, no Score, no credit, submission `rejected`.
 #[tokio::test]
 async fn a_high_risk_receipt_held_for_review_is_rejected_by_the_reviewer() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("admission-high-reject-{}", uuid::Uuid::new_v4());
     let created = high_risk_and_pending(&service, &tenant).await;
     let parked = service
@@ -4911,29 +4931,13 @@ async fn a_high_risk_receipt_held_for_review_is_rejected_by_the_reviewer() {
 /// code.
 #[tokio::test]
 async fn a_quarantined_receipt_waits_for_review_without_retrying() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("admission-quarantine-{}", uuid::Uuid::new_v4());
     let mut env = envelope(uuid::Uuid::new_v4()).await;
     env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     assert_eq!(created.admission_decision, "quarantine");
     assert_eq!(created.state, PipelineRunState::Pending);
     assert_eq!(created.next_phase, Some(Phase::Review));
@@ -5038,13 +5042,7 @@ async fn quarantined_and_pending(service: &PipelineService, tenant: &str) -> Pip
     env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(service, receipt(tenant, &key, &raw, &env, NO_LIMITS)).await;
     assert_eq!(created.admission_decision, "quarantine");
     assert_eq!(created.state, PipelineRunState::Pending);
     assert_eq!(created.next_phase, Some(Phase::Review));
@@ -5106,17 +5104,9 @@ async fn set_next_attempt_at_in_the_future(
 /// assessment's own evidence hash.
 #[tokio::test]
 async fn quarantined_run_completes_after_an_approving_assessment() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-approve-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     assert_eq!(
@@ -5228,17 +5218,9 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
 /// there is no next phase, and the submission's status moves to `rejected`.
 #[tokio::test]
 async fn rejecting_assessment_ends_the_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-reject-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -5285,17 +5267,9 @@ async fn rejecting_assessment_ends_the_run() {
 /// assessment row is written.
 #[tokio::test]
 async fn approval_without_resolving_the_reason_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-unresolved-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -5334,17 +5308,9 @@ async fn approval_without_resolving_the_reason_is_refused() {
 /// fresh lease token.
 #[tokio::test]
 async fn claim_is_exclusive_until_expiry() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-exclusive-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -5399,17 +5365,9 @@ async fn claim_is_exclusive_until_expiry() {
 /// to `pending` the same way `claim_review`'s own refusal would.
 #[tokio::test]
 async fn assessment_after_withdrawal_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-withdrawn-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -5470,17 +5428,9 @@ async fn assessment_after_withdrawal_is_refused() {
 /// assessment and park the run in `awaiting_review` once more.
 #[tokio::test]
 async fn parked_run_with_an_inoperable_submission_is_released() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-inoperable-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
 
@@ -5555,17 +5505,9 @@ async fn parked_run_with_an_inoperable_submission_is_released() {
 /// run_id)` once the worker's own park re-attempt runs).
 #[tokio::test]
 async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-worker-race-{}", uuid::Uuid::new_v4());
     let pending = quarantined_and_pending(&service, &tenant).await;
     // The race needs a run a reviewer can claim while it is still `pending`
@@ -5641,17 +5583,9 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
 /// still waiting for a human.
 #[tokio::test]
 async fn claim_refuses_a_run_that_already_failed_at_review() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-failed-{}", uuid::Uuid::new_v4());
     let pending = quarantined_and_pending(&service, &tenant).await;
     let store = service.store();
@@ -5734,28 +5668,12 @@ async fn failed_run_submission_rows(
 /// pending credit, and records the move and the audit marker on the run.
 #[tokio::test]
 async fn a_run_failed_by_its_bundle_at_review_rejects_its_received_submission() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("failed-bundle-received-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     assert_eq!(created.admission_decision, "admit");
     assert_eq!(created.state, PipelineRunState::Pending);
     assert_eq!(created.next_phase, Some(Phase::Review));
@@ -5801,17 +5719,9 @@ async fn a_run_failed_by_its_bundle_at_review_rejects_its_received_submission() 
 /// code does today, so a change to it is a deliberate one.
 #[tokio::test]
 async fn a_run_failed_by_its_bundle_keeps_an_admission_quarantined_submission() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("failed-bundle-quarantined-{}", uuid::Uuid::new_v4());
     let pending = quarantined_and_pending(&service, &tenant).await;
     assert_eq!(
@@ -5846,17 +5756,9 @@ async fn a_run_failed_by_its_bundle_keeps_an_admission_quarantined_submission() 
 /// instead of refusing cleanly.
 #[tokio::test]
 async fn claim_refuses_a_run_that_already_has_an_assessment() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-reassess-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -5908,17 +5810,9 @@ async fn claim_refuses_a_run_that_already_has_an_assessment() {
 
 #[tokio::test]
 async fn tombstoned_content_is_refused_before_the_store() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("tombstone-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -5946,9 +5840,7 @@ async fn tombstoned_content_is_refused_before_the_store() {
 /// closed before any database work -- no run, no staged artifact.
 #[tokio::test]
 async fn receipt_without_authority_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = test_service_with_controls(
         backend.clone(),
@@ -5977,9 +5869,7 @@ async fn receipt_without_authority_fails_closed() {
 /// for a high-risk envelope, not a hard failure of `submit` itself.
 #[tokio::test]
 async fn authority_allowlist_rejects_a_disallowed_use() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     // The fixture envelope's consent scope is DebuggingEvaluation, whose
     // default allowed uses are Debugging/Evaluation/AggregateAnalytics
@@ -6008,13 +5898,7 @@ async fn authority_allowlist_rejects_a_disallowed_use() {
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
 
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("a denied receipt still creates its run record")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     assert_eq!(created.admission_decision, "reject");
     assert_eq!(created.state, PipelineRunState::Complete);
     assert_eq!(created.next_phase, None);
@@ -6118,9 +6002,7 @@ impl PipelinePrivacyBoundary for CountingSlowClassifierBoundary {
 /// same key calls neither half again.
 #[tokio::test]
 async fn receipt_makes_no_classifier_call() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let deterministic_calls = Arc::new(AtomicUsize::new(0));
     let classifier_calls = Arc::new(AtomicUsize::new(0));
@@ -6180,9 +6062,7 @@ async fn receipt_makes_no_classifier_call() {
 /// object is prepared, so a failure costs no encryption either.
 #[tokio::test]
 async fn receipt_deterministic_failure_refuses_with_privacy_rescrub_failed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = test_service_with_controls(
         backend.clone(),
@@ -6270,9 +6150,7 @@ impl IdentifiedEmbedder for CapturingEmbedder {
 /// the receipt never calls the classifier).
 #[tokio::test]
 async fn transformed_content_flows_to_score_and_replay_stays_exact() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(CapturingEmbedder {
@@ -6320,13 +6198,7 @@ async fn transformed_content_flows_to_score_and_replay_stays_exact() {
     );
     let key = env.submission_id.to_string();
 
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
 
     let processed = service
         .process_run(&tenant, created.run_id)
@@ -6385,17 +6257,9 @@ async fn transformed_content_flows_to_score_and_replay_stays_exact() {
 
 #[tokio::test]
 async fn quota_is_counted_before_the_store_under_concurrency() {
-    let Some(backend) = runtime_backend(8).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(8);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("quota-{}", uuid::Uuid::new_v4());
     let limits = PipelineAdmissionLimits {
         max_per_tenant_per_hour: 3,
@@ -6438,9 +6302,7 @@ async fn quota_is_counted_before_the_store_under_concurrency() {
 
 #[tokio::test]
 async fn pool_size_one_receipt_does_not_nest_checkouts() {
-    let Some(backend) = runtime_backend(1).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(1);
     let dir = tempfile::tempdir().unwrap();
     let (service, _, _) =
         test_service(backend, artifact_store(&dir), minimal_config(false), None).await;
@@ -6465,9 +6327,7 @@ async fn pool_size_one_receipt_does_not_nest_checkouts() {
 /// `submit` having to do any of that work itself.
 #[tokio::test]
 async fn register_default_bundle_activates_it_for_a_fresh_tenant() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let dir = tempfile::tempdir().unwrap();
     let (service, _, _) =
         test_service(backend, artifact_store(&dir), minimal_config(false), None).await;
@@ -6516,9 +6376,7 @@ async fn register_default_bundle_activates_it_for_a_fresh_tenant() {
 /// never makes that call.
 #[tokio::test]
 async fn submit_does_not_register_the_bundle_registry() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let tenant = format!("submit-no-register-{}", uuid::Uuid::new_v4());
     let scorer = ReferencePerplexityScorer::new();
@@ -6614,43 +6472,16 @@ struct BlockFirstPublishArtifactStore {
 }
 
 impl TraceArtifactStore for BlockFirstPublishArtifactStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        prepare_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact
+    );
 
     fn publish_serialized_json(
         &self,
@@ -6669,69 +6500,11 @@ impl TraceArtifactStore for BlockFirstPublishArtifactStore {
         }
         self.inner.publish_serialized_json(prepared)
     }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_receipt_does_not_wait_on_the_firsts_blocked_object_write() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockFirstPublishArtifactStore {
@@ -6905,9 +6678,7 @@ fn stored_ciphertext_sha256(path: &std::path::Path) -> String {
 /// `cleanup_after` has passed, the sweeper removes the object and the row.
 #[tokio::test]
 async fn a_receipt_failing_after_the_write_leaves_a_staged_row_the_sweeper_removes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (crashing, _, _) = test_service(
         backend.clone(),
@@ -6956,9 +6727,7 @@ async fn a_receipt_failing_after_the_write_leaves_a_staged_row_the_sweeper_remov
 /// counted once: with a tenant limit of one it still gets through.
 #[tokio::test]
 async fn the_sweeper_keeps_committed_receipts_and_staged_rows_not_yet_due() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (crashing, _, _) = test_service(
         backend.clone(),
@@ -6967,13 +6736,7 @@ async fn the_sweeper_keeps_committed_receipts_and_staged_rows_not_yet_due() {
         Some(PipelineCrashPoint::AfterArtifactStorage),
     )
     .await;
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("receipt-sweep-keep-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -6986,13 +6749,7 @@ async fn the_sweeper_keeps_committed_receipts_and_staged_rows_not_yet_due() {
     submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, one_per_hour))
         .await
         .expect_err("the first attempt fails after its object write");
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, one_per_hour))
-            .await
-            .unwrap()
-    else {
-        panic!("the retry of the same key is not refused by its own count")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, one_per_hour)).await;
     assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
 
     let rows = receipt_artifact_rows(&backend, &tenant).await;
@@ -7044,28 +6801,14 @@ impl HookedWriteStore {
 }
 
 impl TraceArtifactStore for HookedWriteStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact
+    );
 
     fn put_serialized_json(
         &self,
@@ -7108,47 +6851,6 @@ impl TraceArtifactStore for HookedWriteStore {
         (self.after_write)();
         Ok(receipt)
     }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
 }
 
 /// Two concurrent receipts with the same key and content: both are past the
@@ -7158,9 +6860,7 @@ impl TraceArtifactStore for HookedWriteStore {
 /// ciphertext. The sweeper then finds nothing more to remove.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_receipts_for_one_key_commit_one_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     // Hold each write until both attempts are writing (or five seconds
     // pass, which records a miss).
@@ -7286,9 +6986,7 @@ async fn concurrent_receipts_for_one_key_commit_one_object() {
 /// attempt deletes its own object and row at once. The quota stays counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("receipt-late-tombstone-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -7343,15 +7041,15 @@ struct FailingDeleteArtifactStore {
 }
 
 impl TraceArtifactStore for FailingDeleteArtifactStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        prepare_serialized_json,
+        publish_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key
+    );
 
     fn delete_artifact_at_object_key(
         &self,
@@ -7360,75 +7058,6 @@ impl TraceArtifactStore for FailingDeleteArtifactStore {
         _object_key: &str,
     ) -> anyhow::Result<bool> {
         anyhow::bail!("test-injected delete failure")
-    }
-
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn publish_serialized_json(
-        &self,
-        prepared: &PreparedSerializedJsonArtifact,
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
-    }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
     }
 
     fn delete_artifact(
@@ -7448,9 +7077,7 @@ impl TraceArtifactStore for FailingDeleteArtifactStore {
 /// stays `staged` and becomes due now, for the sweeper to retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tombstone_during_the_write_restages_the_row_when_its_delete_fails() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("receipt-late-tombstone-restage-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -7509,9 +7136,7 @@ async fn a_tombstone_during_the_write_restages_the_row_when_its_delete_fails() {
 /// run whose source object ref names a deleted object.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attempt_whose_row_is_due_does_not_commit() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("receipt-due-attempt-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -7569,9 +7194,7 @@ async fn an_attempt_whose_row_is_due_does_not_commit() {
 /// is encrypted, so a refused receipt costs no encryption and no key wrap.
 #[tokio::test]
 async fn refused_receipts_do_not_prepare_an_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(HookedWriteStore::new(artifact_store(&dir), Box::new(|| {})));
     let (service, _, _) = test_service(
@@ -7705,28 +7328,14 @@ async fn owner_tenant_tx<'a>(
 /// land together with the outcome, in one transaction.
 #[tokio::test]
 async fn review_commits_approved_revision_provenance_and_transition_together() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-commit-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     let request_content_hash = created.request_content_hash.clone();
 
     let processed = service
@@ -7794,9 +7403,7 @@ async fn review_commits_approved_revision_provenance_and_transition_together() {
 /// unreferenced rather than overwritten.
 #[tokio::test]
 async fn review_crash_after_artifact_storage_reuses_one_revision() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, _, _) = test_service(
         backend.clone(),
@@ -7809,13 +7416,7 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
 
     let crashed = service.process_run(&tenant, created.run_id).await;
     let error = crashed.expect_err("the injected crash must propagate as an error");
@@ -7901,28 +7502,12 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
 /// completes.
 #[tokio::test]
 async fn a_stale_worker_cannot_overwrite_committed_artifacts() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("stale-writer-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     // Worker A claims the run and stalls in policy work until its lease
     // expires (a direct UPDATE: a time shortcut, not a processor call).
@@ -8019,28 +7604,12 @@ async fn a_stale_worker_cannot_overwrite_committed_artifacts() {
 /// multi-chunk envelope.
 #[tokio::test]
 async fn score_commit_seeds_one_operation_per_award_and_keeps_every_chunk() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(true)).await;
     let tenant = format!("score-commit-{}", uuid::Uuid::new_v4());
     let env = large_envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -8124,13 +7693,7 @@ async fn score_commit_seeds_one_operation_per_award_and_keeps_every_chunk() {
 
     // Build a NEW service over the same database and artifact root (a
     // restart), then load the command again from durable state alone.
-    let (restarted, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let restarted = pipeline_service(&backend, &dir, scored_config(true)).await;
     let reloaded_run = restarted
         .store()
         .get_run(&tenant, scored.run_id)
@@ -8152,28 +7715,12 @@ async fn score_commit_seeds_one_operation_per_award_and_keeps_every_chunk() {
 /// Settle: zero settlement rows and no command reference.
 #[tokio::test]
 async fn empty_awards_still_continue_to_settle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("score-empty-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     service
         .process_run(&tenant, created.run_id)
@@ -8204,9 +7751,7 @@ async fn empty_awards_still_continue_to_settle() {
 /// own claim's key (FR1) and commits once, never twice.
 #[tokio::test]
 async fn score_crash_after_command_storage_keeps_one_command() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, _, _) = test_service(
         backend.clone(),
@@ -8217,15 +7762,7 @@ async fn score_crash_after_command_storage_keeps_one_command() {
     .await;
     let tenant = format!("score-crash-{}", uuid::Uuid::new_v4());
     let env = large_envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     service
         .process_run(&tenant, created.run_id)
@@ -8296,13 +7833,7 @@ async fn run_to_settle_ready(
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(service, receipt(tenant, &key, &raw, &env, NO_LIMITS)).await;
     service
         .process_run(tenant, created.run_id)
         .await
@@ -8350,17 +7881,9 @@ fn artifact_file_path(
 /// entry cannot perturb its outcome.
 #[tokio::test]
 async fn settle_writes_the_stored_command_without_requerying_the_live_index() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("settle-included-{}", uuid::Uuid::new_v4());
     let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -8438,17 +7961,9 @@ async fn settle_writes_the_stored_command_without_requerying_the_live_index() {
 /// run a second time.
 #[tokio::test]
 async fn settle_retry_reuses_the_persisted_selection() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("settle-retry-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -8525,17 +8040,9 @@ async fn settle_retry_reuses_the_persisted_selection() {
 /// completes once the index is back.
 #[tokio::test]
 async fn a_settle_index_outage_longer_than_the_attempt_budget_does_not_fail_the_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("settle-index-outage-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -8578,9 +8085,7 @@ async fn a_settle_index_outage_longer_than_the_attempt_budget_does_not_fail_the_
 /// holds the adapter completes it.
 #[tokio::test]
 async fn a_missing_settlement_adapter_waits_without_charging() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let shared_artifacts = artifact_store(&dir);
     let (full, _, _) = test_service(
@@ -8605,15 +8110,7 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
     assert_eq!(full.bundle_id(), missing.bundle_id());
     let tenant = format!("settle-adapter-missing-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&full, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&full, &tenant, &env).await;
     let reviewed = full
         .process_run(&tenant, created.run_id)
         .await
@@ -8681,9 +8178,7 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 /// fails the hash check), is `index_command_invalid`, with the short backoff.
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
 
     async fn assert_fails_closed(
         service: &PipelineService,
@@ -8713,13 +8208,7 @@ async fn stored_command_binding_failures_fail_closed() {
     // (a) delete the command file from the artifact root.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let tenant = format!("settle-binding-a-{}", uuid::Uuid::new_v4());
         let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
         let (object_key, _) = run
@@ -8745,13 +8234,7 @@ async fn stored_command_binding_failures_fail_closed() {
     // (b) overwrite the file with other bytes.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let tenant = format!("settle-binding-b-{}", uuid::Uuid::new_v4());
         let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
         let (object_key, _) = run
@@ -8773,13 +8256,7 @@ async fn stored_command_binding_failures_fail_closed() {
     // (c) point index_command_ref at another tenant's stored command.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let tenant_a = format!("settle-binding-c-a-{}", uuid::Uuid::new_v4());
         let tenant_b = format!("settle-binding-c-b-{}", uuid::Uuid::new_v4());
         let (run_a, _) = run_to_settle_ready(&service, &tenant_a).await;
@@ -8813,13 +8290,7 @@ async fn stored_command_binding_failures_fail_closed() {
     // (d) point it at another run's command of the same tenant.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let tenant = format!("settle-binding-d-{}", uuid::Uuid::new_v4());
         let (run_1, _) = run_to_settle_ready(&service, &tenant).await;
         let (run_2, _) = run_to_settle_ready(&service, &tenant).await;
@@ -8843,13 +8314,7 @@ async fn stored_command_binding_failures_fail_closed() {
     // package, a store with another master key.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let wrong_key: Arc<dyn TraceArtifactStore> =
             Arc::new(LocalEncryptedTraceArtifactStore::new(
                 dir.path(),
@@ -8881,17 +8346,9 @@ async fn stored_command_binding_failures_fail_closed() {
 /// and no Settle outcome is written.
 #[tokio::test]
 async fn equal_key_with_different_content_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("settle-conflict-{}", uuid::Uuid::new_v4());
     let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
     let command = service
@@ -8969,9 +8426,7 @@ async fn withdraw_submission(backend: &PgBackend, tenant_id: &str, submission_id
 /// Review outcome, and no change to the run row.
 #[tokio::test]
 async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
@@ -9214,28 +8669,14 @@ impl WithdrawOnApprovedWriteStore {
 }
 
 impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact
+    );
 
     fn put_serialized_json(
         &self,
@@ -9288,47 +8729,6 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
         }
         Ok(receipt)
     }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
 }
 
 /// Builds the runtime role's connection URL from the test database URL env
@@ -9343,9 +8743,7 @@ fn runtime_role_url(base_url: &str) -> String {
 
 #[tokio::test]
 async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner_url =
         std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
     let dir = tempfile::tempdir().unwrap();
@@ -9368,15 +8766,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
     )
     .await;
     let env = envelope(submission_id).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     // Before Review runs, only the source envelope has been written.
     assert_eq!(count_files_under(dir.path()), 1);
@@ -9451,9 +8841,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
 /// approved revision stay stored.
 #[tokio::test]
 async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner_url =
         std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
     let dir = tempfile::tempdir().unwrap();
@@ -9475,15 +8863,7 @@ async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
     )
     .await;
     let env = large_envelope(submission_id).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let reviewed = service
         .process_run(&tenant, created.run_id)
         .await
@@ -9522,28 +8902,12 @@ async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
 /// because Review never reaches the point that writes one.
 #[tokio::test]
 async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-withdraw-before-claim-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     backend
         .record_trace_withdrawal(
@@ -9591,17 +8955,9 @@ async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
 /// -- not inside the policy call itself).
 #[tokio::test]
 async fn withdrawal_between_score_and_settle_excludes_the_index() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("settle-withdrawn-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -9659,17 +9015,9 @@ async fn withdrawal_between_score_and_settle_excludes_the_index() {
 /// excluded, nothing is written to it, and every leg is forfeited.
 #[tokio::test]
 async fn settle_completes_a_withdrawn_run_whose_score_objects_are_deleted() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, scored_config(true)).await;
     let tenant = format!("settle-score-objects-deleted-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     withdraw(&service, &tenant, run.submission_id).await;
@@ -9721,9 +9069,7 @@ async fn settle_completes_a_withdrawn_run_whose_score_objects_are_deleted() {
 /// stale `Include` the persisted selection holds.
 #[tokio::test]
 async fn withdrawal_during_dispatch_cancels_the_index_write() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, _) = test_service(
         backend.clone(),
@@ -10023,9 +9369,7 @@ async fn held_index_test_service_with_margin(
 /// while the held write runs, and the task commits the write when it ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_settle_keeps_its_rows_locked_until_its_index_writes_end() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, mut held) =
         held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
@@ -10083,9 +9427,7 @@ async fn a_dropped_settle_keeps_its_rows_locked_until_its_index_writes_end() {
 /// writing a withdrawn revision's entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_index_write_stops_at_its_lease_deadline() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, mut held) = held_index_test_service_with_leases(
         backend.clone(),
@@ -10142,9 +9484,7 @@ async fn an_index_write_stops_at_its_lease_deadline() {
 /// once that call returned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_index_write_past_its_deadline_releases_the_rows() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, mut held) = held_index_test_service_with_leases(
         backend.clone(),
@@ -10246,9 +9586,7 @@ async fn wait_for_entry_count(
 /// so the withdrawn entry does not stay in the index.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_index_write_slower_than_the_fence_margin_cannot_restore_a_withdrawn_revision() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, mut held) = held_index_test_service_with_margin(
         backend.clone(),
@@ -10323,17 +9661,9 @@ async fn an_index_write_slower_than_the_fence_margin_cannot_restore_a_withdrawn_
 /// claim removes the revision again.
 #[tokio::test]
 async fn a_claim_taken_before_a_reopen_does_not_complete_the_invalidation() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidation-reopen-token-{}", uuid::Uuid::new_v4());
     let settled = settled_included_run(&service, &tenant).await;
     service
@@ -10374,9 +9704,7 @@ async fn a_claim_taken_before_a_reopen_does_not_complete_the_invalidation() {
 /// `index_dispatch_deadline`'s own test pins the deadline.
 #[tokio::test]
 async fn the_index_dispatch_reads_the_lease_remaining_on_the_database_clock() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let client = backend.trace_pool_for_test().get().await.unwrap();
     let mut lease_ends = Vec::new();
     for offset in ["5 seconds", "-30 seconds", "1 day"] {
@@ -10418,17 +9746,9 @@ async fn the_index_dispatch_reads_the_lease_remaining_on_the_database_clock() {
 /// stays `pending` for the next claim.
 #[tokio::test]
 async fn a_late_write_reopens_a_claimed_invalidation_past_the_claims_token() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidation-reopen-claimed-{}", uuid::Uuid::new_v4());
     let settled = settled_included_run(&service, &tenant).await;
     let store = PgPipelineStore::new(backend.clone());
@@ -10487,17 +9807,9 @@ async fn a_late_write_reopens_a_claimed_invalidation_past_the_claims_token() {
 /// later claim sweeps it.
 #[tokio::test]
 async fn the_claim_sweep_skips_a_locked_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("sweep-skip-locked-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
     let store = PgPipelineStore::new(backend.clone());
@@ -10558,17 +9870,9 @@ async fn the_claim_sweep_skips_a_locked_run() {
 /// an upsert still in flight cannot land after the invalidation ran.
 #[tokio::test]
 async fn a_withdrawal_delays_the_invalidation_of_a_write_a_live_lease_may_make() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("dispatch-invalidation-floor-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
     let store = PgPipelineStore::new(backend.clone());
@@ -10648,13 +9952,7 @@ async fn run_past_review(service: &PipelineService, tenant: &str) -> PipelineRun
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(service, receipt(tenant, &key, &raw, &env, NO_LIMITS)).await;
     let reviewed = service
         .process_run(tenant, created.run_id)
         .await
@@ -10684,17 +9982,9 @@ async fn expire_lease(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) 
 /// row, even while `trace_submissions.status` is unchanged.
 #[tokio::test]
 async fn content_reads_refuse_withdrawn_submissions() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("content-read-withdrawn-{}", uuid::Uuid::new_v4());
     let reviewed = run_past_review(&service, &tenant).await;
     service
@@ -10781,9 +10071,7 @@ async fn assert_score_refused_as_inoperable(
 /// so the commit itself must refuse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn score_commit_refuses_a_submission_withdrawn_after_the_read() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
 
     // First case: crash after the read, withdraw, resume.
     let dir = tempfile::tempdir().unwrap();
@@ -11058,9 +10346,7 @@ async fn attempt_artifact_rows(
 /// sweep handles them by their keys alone.
 #[tokio::test]
 async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner_url =
         std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
     let dir = tempfile::tempdir().unwrap();
@@ -11086,13 +10372,7 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
     let env = large_envelope(submission_id).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     let reviewed = service
         .process_run(&tenant, created.run_id)
         .await
@@ -11245,9 +10525,7 @@ async fn staged_attempt_objects(
 /// expires, a new claim commits Score under its own lease.
 #[tokio::test]
 async fn a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -11384,9 +10662,7 @@ async fn a_crashed_score_attempt_leaves_staged_objects_the_sweep_removes() {
 /// once it has passed.
 #[tokio::test]
 async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -11617,9 +10893,7 @@ async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
 /// leave the committed object and row alone and remove only the stale ones.
 #[tokio::test]
 async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -11814,9 +11088,7 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
 /// failure.
 #[tokio::test]
 async fn the_sweep_treats_an_absent_object_as_removed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -11897,15 +11169,15 @@ struct PresenceUnknownStore {
 }
 
 impl TraceArtifactStore for PresenceUnknownStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        put_serialized_json,
+        prepare_serialized_json,
+        publish_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key
+    );
 
     fn delete_artifact_at_object_key(
         &self,
@@ -11921,75 +11193,6 @@ impl TraceArtifactStore for PresenceUnknownStore {
             expected_tenant_storage_ref,
             artifact_kind,
             object_key,
-        )
-    }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn publish_serialized_json(
-        &self,
-        prepared: &PreparedSerializedJsonArtifact,
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
         )
     }
 
@@ -12023,9 +11226,7 @@ impl TraceArtifactStore for PresenceUnknownStore {
 /// removed exactly as it would be for a confirmed-present object.
 #[tokio::test]
 async fn the_sweep_deletes_through_an_unknown_presence_answer() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let double = Arc::new(PresenceUnknownStore {
         inner: artifact_store(&dir),
@@ -12096,9 +11297,7 @@ async fn the_sweep_deletes_through_an_unknown_presence_answer() {
 /// next pass, and is not counted as removed.
 #[tokio::test]
 async fn the_sweep_keeps_a_row_whose_delete_fails_despite_unknown_presence() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let double = Arc::new(PresenceUnknownStore {
         inner: artifact_store(&dir),
@@ -12155,9 +11354,7 @@ async fn the_sweep_keeps_a_row_whose_delete_fails_despite_unknown_presence() {
 /// just the sweep's own `WHERE tenant_id = $1`.
 #[tokio::test]
 async fn attempt_artifact_rows_are_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -12263,9 +11460,7 @@ async fn attempt_artifact_rows_are_tenant_scoped() {
 /// before the wait misses it and fails the `cancelled` check every time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_dispatch_holds_the_guard_until_the_write_commits() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
 
     // First case: the withdrawal waits for the write in progress.
     let dir = tempfile::tempdir().unwrap();
@@ -12473,17 +11668,9 @@ async fn index_dispatch_holds_the_guard_until_the_write_commits() {
 /// bounded, so that shows as a failure.
 #[tokio::test]
 async fn index_dispatch_never_holds_two_pooled_connections() {
-    let Some(backend) = runtime_backend(1).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(1);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
 
     // The index-outage branch, then the write path.
     let tenant = format!("dispatch-pool-one-{}", uuid::Uuid::new_v4());
@@ -12597,17 +11784,9 @@ async fn index_invalidation_rows(
 /// withdrawal here, written straight to the database, woke nothing.
 #[tokio::test]
 async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("dispatch-partial-cancel-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
@@ -12712,17 +11891,10 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
 /// the run records its Settle outcome only once both legs are terminal.
 #[tokio::test]
 async fn independent_instruments_retry_without_repeating_a_completed_one() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let rebate = adapters[0].clone();
     let trace_credit = adapters[1].clone();
     let tenant = format!("settle-instruments-{}", uuid::Uuid::new_v4());
@@ -12900,17 +12072,10 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
 /// a committed `Forfeited` operation per leg.
 #[tokio::test]
 async fn withdrawal_after_score_forfeits_pending_operations_and_settle_completes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let rebate = adapters[0].clone();
     let trace_credit = adapters[1].clone();
     let tenant = format!("settle-forfeit-{}", uuid::Uuid::new_v4());
@@ -13003,9 +12168,7 @@ async fn withdrawal_after_score_forfeits_pending_operations_and_settle_completes
 /// Settle still completes under the inoperable guard.
 #[tokio::test]
 async fn withdrawal_flags_a_dispatched_external_leg_for_reconciliation() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let storage_bonus = RecordingSettlementAdapter::new(
         InstrumentId::new("storage_bonus").unwrap(),
@@ -13143,9 +12306,7 @@ async fn withdrawal_flags_a_dispatched_external_leg_for_reconciliation() {
 /// mean nothing needs reconciling.
 #[tokio::test]
 async fn a_conflict_leg_forfeited_on_withdrawal_keeps_submission_inoperable() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let storage_rebate = Arc::new(RefusingSettlementAdapter {
         instrument_id: InstrumentId::new("storage_rebate").unwrap(),
@@ -13239,17 +12400,10 @@ async fn a_conflict_leg_forfeited_on_withdrawal_keeps_submission_inoperable() {
 /// `pending_microcredits` must not count it either.
 #[tokio::test]
 async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let tenant = format!("settle-forfeit-status-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:test";
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
@@ -13310,17 +12464,10 @@ async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
 /// then. The pipeline holds the notifier and nothing else of the payout.
 #[tokio::test]
 async fn a_finalized_credit_batch_wakes_the_payout_rails() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let wake = Arc::new(tokio::sync::Notify::new());
     let notifier = trace_commons_server::payout_worker::PayoutNotifier::new(vec![wake.clone()]);
     assert!(service.attach_payout_notifier(notifier.clone()));
@@ -13351,17 +12498,10 @@ async fn a_finalized_credit_batch_wakes_the_payout_rails() {
 
 #[tokio::test]
 async fn settled_credit_stays_when_withdrawal_follows_settlement() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let tenant = format!("settle-post-withdraw-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -13449,17 +12589,10 @@ async fn settled_credit_stays_when_withdrawal_follows_settlement() {
 /// released does the leg settle and the Settle outcome commit.
 #[tokio::test]
 async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complete() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let trace_credit = adapters[1].clone();
     let tenant = format!("settle-held-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
@@ -13625,9 +12758,7 @@ async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complet
 /// exhausted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn credit_ledger_work_survives_a_lease_that_expires_during_the_adapter_call() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("settle-credit-lease-{}", uuid::Uuid::new_v4());
     let storage_rebate = RecordingSettlementAdapter::new(
@@ -13714,9 +12845,7 @@ async fn credit_ledger_work_survives_a_lease_that_expires_during_the_adapter_cal
 /// idempotent adapter call and settles the leg exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hold_placed_during_the_adapter_call_is_caught_by_the_credit_transaction() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("settle-credit-hold-race-{}", uuid::Uuid::new_v4());
     let hold_id = uuid::Uuid::new_v4();
@@ -13879,9 +13008,7 @@ impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
 /// dedicated test for that is not needed.
 #[tokio::test]
 async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner_url =
         std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
     let dir = tempfile::tempdir().unwrap();
@@ -13917,15 +13044,7 @@ async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award(
     .await;
 
     let env = envelope(submission_id).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     service
         .process_run(&tenant, created.run_id)
         .await
@@ -14062,9 +13181,7 @@ async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award(
 /// Settle still completes.
 #[tokio::test]
 async fn a_withdrawal_inside_the_credit_call_also_forfeits_a_later_dispatched_leg() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner_url =
         std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
     let dir = tempfile::tempdir().unwrap();
@@ -14105,15 +13222,7 @@ async fn a_withdrawal_inside_the_credit_call_also_forfeits_a_later_dispatched_le
     .await;
 
     let env = envelope(submission_id).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     service
         .process_run(&tenant, created.run_id)
         .await
@@ -14255,17 +13364,10 @@ async fn a_withdrawal_inside_the_credit_call_also_forfeits_a_later_dispatched_le
 /// several tenants to give the interleaving a chance to occur.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_runs_for_one_account_never_share_a_credit_event_across_batches() {
-    let Some(backend) = runtime_backend(8).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(8);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     for round in 0..4 {
         let tenant = format!("settle-two-runs-{round}-{}", uuid::Uuid::new_v4());
         // The receipt helper submits every run as the same principal, so
@@ -14311,9 +13413,7 @@ async fn two_runs_for_one_account_never_share_a_credit_event_across_batches() {
 /// it and stays charged.
 #[tokio::test]
 async fn adapter_result_that_differs_from_the_selection_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let mismatching = CountingSettlementAdapter::new(Arc::new(MismatchingSettlementAdapter {
         instrument_id: InstrumentId::new("storage_rebate").unwrap(),
@@ -14449,17 +13549,10 @@ async fn tamper_stored_score_bundle_id(tenant_id: &str, run_id: uuid::Uuid, bund
 /// same tenant whose decision is untouched settles.
 #[tokio::test]
 async fn a_stored_score_decision_under_another_bundle_is_refused_at_settle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let tenant = format!("settle-score-bundle-{}", uuid::Uuid::new_v4());
     let (tampered, _evidence) = run_to_settle_ready(&service, &tenant).await;
     let (untouched, _evidence) = run_to_settle_ready(&service, &tenant).await;
@@ -14540,29 +13633,13 @@ async fn a_stored_score_decision_under_another_bundle_is_refused_at_settle() {
 /// flight.
 #[tokio::test]
 async fn activation_does_not_rebind_an_existing_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("activation-{}", uuid::Uuid::new_v4());
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let bundle_a = created.bundle_id.clone();
 
     // Register and activate a second bundle B for the tenant, with a
@@ -14671,14 +13748,11 @@ async fn activation_does_not_rebind_an_existing_run() {
     let env_second = envelope(uuid::Uuid::new_v4()).await;
     let raw_second = serde_json::to_vec(&env_second).unwrap();
     let key_second = env_second.submission_id.to_string();
-    let PipelineReceiptResult::Created(created_second) = submit_registered(
+    let created_second = submit_created(
         &service,
         receipt(&tenant, &key_second, &raw_second, &env_second, NO_LIMITS),
     )
-    .await
-    .unwrap() else {
-        panic!("second receipt creates a run")
-    };
+    .await;
     assert_eq!(created_second.bundle_id, package_b.bundle_id);
 }
 
@@ -14689,9 +13763,7 @@ async fn activation_does_not_rebind_an_existing_run() {
 /// proceeds.
 #[tokio::test]
 async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let shared_artifact_store = artifact_store(&dir);
     let (service_one, _, _) = test_service(
@@ -14715,15 +13787,7 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
 
     let tenant = format!("dep-missing-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service_one, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service_one, &tenant, &env).await;
 
     let reviewed = service_one
         .process_run(&tenant, created.run_id)
@@ -14773,9 +13837,7 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
 /// more than the run's whole attempt budget, and the run still reaches Score.
 #[tokio::test]
 async fn transient_policy_errors_do_not_exhaust_the_trace() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let flaky_embedder = Arc::new(FlakyEmbedder {
         calls: AtomicUsize::new(0),
@@ -14790,15 +13852,7 @@ async fn transient_policy_errors_do_not_exhaust_the_trace() {
 
     let tenant = format!("transient-score-retry-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -14865,29 +13919,13 @@ async fn transient_policy_errors_do_not_exhaust_the_trace() {
 /// the safe label, and no new phase outcome is recorded for it.
 #[tokio::test]
 async fn a_tampered_stored_package_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("tampered-package-{}", uuid::Uuid::new_v4());
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
 
     let outcomes_before = service
         .store()
@@ -14924,19 +13962,13 @@ async fn a_tampered_stored_package_fails_closed() {
     // stored JSON is well formed -- only `BundleManifest`'s own load-time
     // validation refuses it, not `BundlePackage::validate`'s artifact-hash
     // check exercised above.
-    let (manifest_service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let manifest_service = pipeline_service(&backend, &dir, scored_config(false)).await;
     let manifest_tenant = format!("tampered-manifest-{}", uuid::Uuid::new_v4());
 
     let manifest_env = envelope(uuid::Uuid::new_v4()).await;
     let manifest_raw = serde_json::to_vec(&manifest_env).unwrap();
     let manifest_key = manifest_env.submission_id.to_string();
-    let PipelineReceiptResult::Created(manifest_created) = submit_registered(
+    let manifest_created = submit_created(
         &manifest_service,
         receipt(
             &manifest_tenant,
@@ -14946,10 +13978,7 @@ async fn a_tampered_stored_package_fails_closed() {
             NO_LIMITS,
         ),
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
 
     let manifest_outcomes_before = manifest_service
         .store()
@@ -15007,9 +14036,7 @@ async fn a_tampered_stored_package_fails_closed() {
 /// since `claim_run` only consults it for a row still in state `leased`.
 #[tokio::test]
 async fn crash_matrix_produces_one_logical_effect_per_point() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let mut points_checked = 0usize;
     for point in [
         PipelineCrashPoint::AfterArtifactStorage,
@@ -15088,22 +14115,12 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
             // the store's point of view, not a claim resume -- resubmit the
             // same bytes. The crashed attempt's object stays staged for the
             // sweeper.
-            let PipelineReceiptResult::Created(created) =
-                submit_registered(&service_b, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                    .await
-                    .unwrap()
-            else {
-                panic!("resubmission after the crash must create the run (point {point:?})")
-            };
+            let created =
+                submit_created(&service_b, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
             created.run_id
         } else {
-            let PipelineReceiptResult::Created(created) =
-                submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                    .await
-                    .unwrap()
-            else {
-                panic!("receipt creates a run (point {point:?})")
-            };
+            let created =
+                submit_created(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
 
             // Drive service A phase by phase until its injected crash
             // fires -- bounded, with a clear failure message if it never
@@ -15721,9 +14738,7 @@ impl CompletionFault {
 /// the cap then settles the leg.
 #[tokio::test]
 async fn a_missing_cap_waits_uncharged_and_an_amount_over_the_cap_stays_charged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let shared_artifacts = artifact_store(&dir);
     let storage_rebate = CountingSettlementAdapter::new(RecordingSettlementAdapter::new(
@@ -15845,9 +14860,7 @@ async fn a_missing_cap_waits_uncharged_and_an_amount_over_the_cap_stays_charged(
 /// completes the leg with one logical payment.
 #[tokio::test]
 async fn a_transient_database_error_after_the_adapter_call_is_not_charged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let rebate_recording = RecordingSettlementAdapter::new(
         InstrumentId::new("storage_rebate").unwrap(),
@@ -15932,9 +14945,7 @@ async fn a_transient_database_error_after_the_adapter_call_is_not_charged() {
 /// it once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_lease_after_the_adapter_call_is_recorded_and_the_leg_settles_once() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("settle-stale-after-call-{}", uuid::Uuid::new_v4());
     let rebate_recording = RecordingSettlementAdapter::new(
@@ -16038,9 +15049,7 @@ async fn a_stale_lease_after_the_adapter_call_is_recorded_and_the_leg_settles_on
 /// Credit leg is forfeited (`run_failed`) without reaching its adapter.
 #[tokio::test]
 async fn a_settle_run_that_exhausts_its_attempts_resolves_every_leg() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let bonus_outage = Arc::new(OutageThenRecordingAdapter {
         inner: RecordingSettlementAdapter::new(
@@ -16181,9 +15190,7 @@ async fn a_settle_run_that_exhausts_its_attempts_resolves_every_leg() {
 /// dispatched leg is `settlement_unreconciled`.
 #[tokio::test]
 async fn a_settle_run_failed_by_its_bundle_reconciles_dispatched_legs() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let rebate_recording = RecordingSettlementAdapter::new(
         InstrumentId::new("storage_rebate").unwrap(),
@@ -16299,9 +15306,7 @@ async fn a_settle_run_failed_by_its_bundle_reconciles_dispatched_legs() {
 /// are `forfeited` / `run_failed`, and no leg keeps a lease.
 #[tokio::test]
 async fn the_claim_sweep_resolves_the_legs_of_an_exhausted_settle_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let adapters: Vec<Arc<CountingSettlementAdapter>> = [
         "storage_bonus",
@@ -16453,9 +15458,7 @@ impl SettlementAdapter for LeaseExpiringOutageAdapter {
 /// failure path reconciles), and `trace_credit` settles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("settle-stale-resolution-{}", uuid::Uuid::new_v4());
     let storage_bonus = CountingSettlementAdapter::new(Arc::new(MismatchingSettlementAdapter {
@@ -16568,9 +15571,7 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
 /// both legs under their own labels.
 #[tokio::test]
 async fn conflict_and_rejected_legs_fail_under_their_labels_and_are_never_dispatched_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let storage_bonus = CountingSettlementAdapter::new(Arc::new(RefusingSettlementAdapter {
         instrument_id: InstrumentId::new("storage_bonus").unwrap(),
@@ -16701,9 +15702,7 @@ async fn conflict_and_rejected_legs_fail_under_their_labels_and_are_never_dispat
 /// dispatched again.
 #[tokio::test]
 async fn an_external_receipt_is_recorded_on_its_leg_and_answers_only_that_leg() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let receipt_hash = dependency_content_hash(b"external-receipt-for-one-leg");
     let storage_rebate = CountingSettlementAdapter::new(Arc::new(ExternalReceiptAdapter {
@@ -16852,9 +15851,7 @@ async fn an_external_receipt_is_recorded_on_its_leg_and_answers_only_that_leg() 
 /// and a recorded hash never changes.
 #[tokio::test]
 async fn external_receipt_hashes_are_checked_by_the_database() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let tenant = format!("external-receipt-db-{}", uuid::Uuid::new_v4());
     let other_tenant = format!("external-receipt-db-other-{}", uuid::Uuid::new_v4());
     let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -17001,9 +15998,7 @@ async fn external_receipt_hashes_are_checked_by_the_database() {
 /// it as `run_failed`: nothing was paid. No reconciling call is made for it.
 #[tokio::test]
 async fn a_trace_credit_leg_with_a_mismatched_receipt_is_forfeited_when_its_run_fails() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let storage_rebate = CountingSettlementAdapter::new(RecordingSettlementAdapter::new(
         InstrumentId::new("storage_rebate").unwrap(),
@@ -17103,9 +16098,7 @@ async fn a_trace_credit_leg_with_a_mismatched_receipt_is_forfeited_when_its_run_
 /// result and no external receipt hash, and the first leg keeps its receipt.
 #[tokio::test]
 async fn a_reused_external_receipt_does_not_reconcile_a_leg() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let receipt_hash = dependency_content_hash(b"external-receipt-reused-on-reconcile");
     let rebate_recording = RecordingSettlementAdapter::new(
@@ -17201,17 +16194,10 @@ async fn a_reused_external_receipt_does_not_reconcile_a_leg() {
 /// is forfeited as `run_failed`).
 #[tokio::test]
 async fn a_failed_leg_without_a_label_is_dispatched_and_resolved() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
 
     let tenant = format!("settle-unlabeled-dispatch-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
@@ -17292,9 +16278,7 @@ async fn a_failed_leg_without_a_label_is_dispatched_and_resolved() {
 /// fail; a matching result then completes it.
 #[tokio::test]
 async fn an_unreconciled_leg_on_a_live_run_is_dispatched_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let rebate_recording = RecordingSettlementAdapter::new(
         InstrumentId::new("storage_rebate").unwrap(),
@@ -17513,17 +16497,10 @@ async fn insert_export_snapshot_and_item(
 /// below covers it.
 #[tokio::test]
 async fn deleting_a_submission_with_pipeline_rows_succeeds() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let tenant = format!("delete-submission-{}", uuid::Uuid::new_v4());
     let run = run_with_every_pipeline_row_kind(&service, &tenant).await;
 
@@ -17573,17 +16550,10 @@ async fn deleting_a_submission_with_pipeline_rows_succeeds() {
 /// expected to disappear along with its item (Ruling RB-5).
 #[tokio::test]
 async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let tenant = format!("delete-tenant-{}", uuid::Uuid::new_v4());
     let _run = run_with_every_pipeline_row_kind(&service, &tenant).await;
 
@@ -17628,17 +16598,10 @@ async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
 /// still live, only cascaded away with it.
 #[tokio::test]
 async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("outcome-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
@@ -17687,17 +16650,10 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
 /// with it) is let through.
 #[tokio::test]
 async fn a_direct_review_assessment_delete_is_still_refused_while_its_run_exists() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("assessment-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     let assessment_id = insert_review_claim_and_assessment(&tenant, run.run_id).await;
@@ -17724,17 +16680,10 @@ async fn a_direct_review_assessment_delete_is_still_refused_while_its_run_exists
 /// (the tenant going away with it) is let through.
 #[tokio::test]
 async fn a_direct_export_snapshot_delete_is_still_refused_while_its_run_exists() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("snapshot-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     let (snapshot_id, _registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
@@ -17761,17 +16710,10 @@ async fn a_direct_export_snapshot_delete_is_still_refused_while_its_run_exists()
 /// submission, or tenant going away with it) is let through.
 #[tokio::test]
 async fn a_direct_export_snapshot_item_delete_is_still_refused_while_its_run_exists() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("snapshot-item-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     let (snapshot_id, registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
@@ -17804,17 +16746,10 @@ async fn a_direct_export_snapshot_item_delete_is_still_refused_while_its_run_exi
 /// violation surfaces only when the transaction tries to commit.
 #[tokio::test]
 async fn a_direct_pipeline_run_delete_is_still_refused_while_an_export_item_references_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("run-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     insert_export_snapshot_and_item(&tenant, &run).await;
@@ -17861,7 +16796,7 @@ async fn submit_envelope_and_complete(
 ) -> PipelineRunRecord {
     let raw = serde_json::to_vec(env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = submit_registered(
+    let created = submit_created(
         service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -17876,10 +16811,7 @@ async fn submit_envelope_and_complete(
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
     service
         .process_run(tenant, created.run_id)
         .await
@@ -17903,17 +16835,9 @@ async fn submit_envelope_and_complete(
 /// and even when another tenant's own submission id is asked for directly.
 #[tokio::test]
 async fn product_reads_are_tenant_and_principal_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(false)).await;
 
     let tenant_a = format!("product-scope-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("product-scope-b-{}", uuid::Uuid::new_v4());
@@ -18038,26 +16962,18 @@ async fn product_reads_are_tenant_and_principal_scoped() {
 /// T11-1), and a quarantined run's Review-phase wait.
 #[tokio::test]
 async fn status_follows_outcomes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let product = PipelineProductStore::new(backend.clone());
 
     // -- Main progression: unscored -> scored -> settled/finalized. --
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(false)).await;
     let tenant = format!("status-follows-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:status-follows";
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = submit_registered(
+    let created = submit_created(
         &service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -18072,10 +16988,7 @@ async fn status_follows_outcomes() {
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
 
     service
         .process_run(&tenant, created.run_id)
@@ -18158,7 +17071,7 @@ async fn status_follows_outcomes() {
     let env_pending = envelope(uuid::Uuid::new_v4()).await;
     let raw_pending = serde_json::to_vec(&env_pending).unwrap();
     let key_pending = env_pending.submission_id.to_string();
-    let PipelineReceiptResult::Created(created_pending) = submit_registered(
+    let created_pending = submit_created(
         &pending_service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -18173,10 +17086,7 @@ async fn status_follows_outcomes() {
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
     pending_service
         .process_run(&tenant_pending, created_pending.run_id)
         .await
@@ -18260,20 +17170,15 @@ async fn status_follows_outcomes() {
     // and the responsible phase (Review's own wait set the label), not
     // Admission (the phase that last committed an outcome). --
     let dir_quarantine = tempfile::tempdir().unwrap();
-    let (quarantine_service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir_quarantine),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let quarantine_service =
+        pipeline_service(&backend, &dir_quarantine, minimal_config(false)).await;
     let tenant_quarantine = format!("status-follows-quarantine-{}", uuid::Uuid::new_v4());
     let principal_quarantine = "principal_sha256:status-follows-quarantine";
     let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
     env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
     let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
     let key_quarantine = env_quarantine.submission_id.to_string();
-    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+    let created_quarantine = submit_created(
         &quarantine_service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -18288,10 +17193,7 @@ async fn status_follows_outcomes() {
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
     quarantine_service
         .process_run(&tenant_quarantine, created_quarantine.run_id)
         .await
@@ -18325,17 +17227,9 @@ async fn status_follows_outcomes() {
 /// (itself only instrument ids and amounts).
 #[tokio::test]
 async fn attestation_entries_are_hash_only() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(false)).await;
     let tenant = format!("attestation-hash-only-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:attestation-hash-only";
     submit_and_complete(&service, &tenant, principal).await;
@@ -18370,9 +17264,7 @@ async fn attestation_entries_are_hash_only() {
 /// fall through to `Pending`.
 #[tokio::test]
 async fn amounts_above_u64_round_trip_as_strings() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let large_amount = AtomicUnits::from_raw(u128::from(u64::MAX) + 1);
     let config = PipelineBundleConfig {
@@ -18427,17 +17319,9 @@ async fn amounts_above_u64_round_trip_as_strings() {
 /// `collect()` for the entire batch).
 #[tokio::test]
 async fn zero_credit_runs_read_as_zero_not_pending() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("zero-credit-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:zero-credit";
     let run = submit_and_complete(&service, &tenant, principal).await;
@@ -18473,9 +17357,7 @@ async fn zero_credit_runs_read_as_zero_not_pending() {
 /// separately rolls up the retryable- and terminal-error counts.
 #[tokio::test]
 async fn operational_summary_counts_runs_by_state_and_label() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let tenant = format!("operational-summary-{}", uuid::Uuid::new_v4());
     let store = PgPipelineStore::new(backend.clone());
 
@@ -18486,19 +17368,14 @@ async fn operational_summary_counts_runs_by_state_and_label() {
     // quarantines the run and parks it for a human assessment. A parked run
     // is not a retry.
     let dir_quarantine = tempfile::tempdir().unwrap();
-    let (quarantine_service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir_quarantine),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let quarantine_service =
+        pipeline_service(&backend, &dir_quarantine, minimal_config(false)).await;
     let principal_quarantine = "principal_sha256:operational-summary-quarantine";
     let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
     env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
     let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
     let key_quarantine = env_quarantine.submission_id.to_string();
-    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+    let created_quarantine = submit_created(
         &quarantine_service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -18513,10 +17390,7 @@ async fn operational_summary_counts_runs_by_state_and_label() {
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
     quarantine_service
         .process_run(&tenant, created_quarantine.run_id)
         .await
@@ -18549,13 +17423,7 @@ async fn operational_summary_counts_runs_by_state_and_label() {
 
     // Complete: a full admission-review-score-settle run.
     let dir_complete = tempfile::tempdir().unwrap();
-    let (complete_service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir_complete),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let complete_service = pipeline_service(&backend, &dir_complete, scored_config(false)).await;
     let complete_run = submit_and_complete(
         &complete_service,
         &tenant,
@@ -18661,17 +17529,9 @@ async fn operational_summary_counts_runs_by_state_and_label() {
 /// principal, request bytes, or trace text those hashes were computed over.
 #[tokio::test]
 async fn forensic_trace_is_hash_only() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(false)).await;
     let tenant = format!("forensic-hash-only-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:forensic-hash-only";
     let run = submit_and_complete(&service, &tenant, principal).await;
@@ -18713,17 +17573,9 @@ async fn forensic_trace_is_hash_only() {
 /// tenant B for tenant A's run id returns `None`, not tenant A's row.
 #[tokio::test]
 async fn forensic_trace_is_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(false)).await;
     let tenant_a = format!("forensic-scope-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("forensic-scope-b-{}", uuid::Uuid::new_v4());
     let run_a = submit_and_complete(&service, &tenant_a, "principal_sha256:forensic-scope-a").await;
@@ -19055,9 +17907,7 @@ async fn write_routing_as_operator(tenant_id: &str, state: &str) {
 /// makes no award at all: no settlement row, no ledger row.
 #[tokio::test]
 async fn compatibility_credit_matches_main_gate_path() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
 
     let zero_config = CompatibilityBundleConfig::local_reference();
@@ -19497,9 +18347,7 @@ fn assert_credited((leg, rows, status, committed): &SettledCompatibilityAward) {
 /// row and a `Withheld` product status; a model-training one gets its row.
 #[tokio::test]
 async fn a_compatibility_award_needs_the_model_training_allowed_use() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service =
         checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
@@ -19555,9 +18403,7 @@ async fn graded_compatibility_service(
 /// prices that pipeline-written batch like any other.
 #[tokio::test]
 async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service =
         graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
@@ -19699,9 +18545,7 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
 /// `policy_mismatch`, with no ledger row and no batch.
 #[tokio::test]
 async fn a_graded_award_without_model_training_consent_is_withheld_unbatched() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service =
         graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
@@ -19742,9 +18586,7 @@ async fn a_graded_award_without_model_training_consent_is_withheld_unbatched() {
 /// `NoveltyUtility` leg ignores holds, since it is never paid).
 #[tokio::test]
 async fn a_held_principals_graded_award_stays_held() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service =
         graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
@@ -19790,9 +18632,7 @@ async fn a_held_principals_graded_award_stays_held() {
 /// everywhere.
 #[tokio::test]
 async fn a_tenant_on_a_bundle_that_awards_nothing_passes_its_startup_checks() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let old = compatibility_test_service_with(
         backend.clone(),
@@ -19869,9 +18709,7 @@ async fn a_tenant_on_a_bundle_that_awards_nothing_passes_its_startup_checks() {
 /// An empty list allows (the test above).
 #[tokio::test]
 async fn a_compatibility_award_needs_the_pipeline_issuer_on_the_central_issuer_list() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let listed = format!("principal_sha256:{}", "a".repeat(64));
     let unlisted = format!("principal_sha256:{}", "b".repeat(64));
@@ -19915,9 +18753,7 @@ async fn a_compatibility_award_needs_the_pipeline_issuer_on_the_central_issuer_l
 /// `non_production_gate`.
 #[tokio::test]
 async fn the_production_gate_flag_withholds_an_award_from_unqualified_dependencies() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = checked_compatibility_service(
         &backend,
@@ -19961,9 +18797,7 @@ impl PipelineAuthorityProvider for SwitchableAuthority {
 ///   `credit_check_error` -- not a charged Settle error.
 #[tokio::test]
 async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let evaluation_only = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
         SubmissionAuthority {
@@ -19996,15 +18830,7 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
     };
     let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
     let env = model_training_envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     for phase in ["Review", "Score"] {
         service
             .process_run(&tenant, created.run_id)
@@ -20117,9 +18943,7 @@ async fn checked_compatibility_service_over_adapter_with(
 /// label.
 #[tokio::test]
 async fn a_dispatched_leg_is_not_re_decided_as_a_duplicate() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let outage = Arc::new(OutageThenRecordingAdapter {
         inner: RecordingSettlementAdapter::new(
@@ -20146,15 +18970,7 @@ async fn a_dispatched_leg_is_not_re_decided_as_a_duplicate() {
     let mut runs = Vec::new();
     for _ in 0..2 {
         let env = model_training_envelope(uuid::Uuid::new_v4()).await;
-        let raw = serde_json::to_vec(&env).unwrap();
-        let key = env.submission_id.to_string();
-        let PipelineReceiptResult::Created(created) =
-            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await
-                .unwrap()
-        else {
-            panic!("the receipt creates a run")
-        };
+        let created = submit_envelope(&service, &tenant, &env).await;
         runs.push(created);
     }
     let (a, b) = (&runs[0], &runs[1]);
@@ -20210,9 +19026,7 @@ async fn a_dispatched_leg_is_not_re_decided_as_a_duplicate() {
 /// the leg kept for an operator to reconcile.
 #[tokio::test]
 async fn a_dispatched_leg_the_credit_checks_withhold_later_stays_unreconciled() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let authority = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
         SubmissionAuthority {
@@ -20239,15 +19053,7 @@ async fn a_dispatched_leg_the_credit_checks_withhold_later_stays_unreconciled() 
     .await;
     let tenant = format!("compat-unreconciled-{}", uuid::Uuid::new_v4());
     let env = model_training_envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     for phase in ["Review", "Score"] {
         service
             .process_run(&tenant, created.run_id)
@@ -20350,9 +19156,7 @@ async fn a_dispatched_leg_the_credit_checks_withhold_later_stays_unreconciled() 
 /// and only Settle's check decides.
 #[tokio::test]
 async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for (allowed_consent_scope, credited) in [
         (ConsentScope::DebuggingEvaluation, false),
@@ -20371,15 +19175,7 @@ async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() 
         let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
         let env = model_training_envelope(uuid::Uuid::new_v4()).await;
         assert_eq!(env.consent.scopes, vec![ConsentScope::ModelTraining]);
-        let raw = serde_json::to_vec(&env).unwrap();
-        let key = env.submission_id.to_string();
-        let PipelineReceiptResult::Created(created) =
-            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await
-                .unwrap()
-        else {
-            panic!("the receipt creates a run")
-        };
+        let created = submit_envelope(&service, &tenant, &env).await;
         for phase in ["Review", "Score"] {
             service
                 .process_run(&tenant, created.run_id)
@@ -20544,9 +19340,7 @@ async fn wait_for_a_waiter_on<T>(
 /// `index_write_state` assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, mut held) =
         held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
@@ -20668,18 +19462,10 @@ async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
 /// and run behind the withdrawal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_withdrawal_before_the_final_receipt_transaction_refuses_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("receipt-session-race-{}", uuid::Uuid::new_v4());
     service.register_default_bundle(&tenant).await.unwrap();
     let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
@@ -20777,17 +19563,9 @@ async fn a_session_withdrawal_before_the_final_receipt_transaction_refuses_it() 
 /// the withdrawal, and PostgreSQL would abort one side as a deadlock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn withdrawal_locks_the_run_before_the_submission() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("withdraw-lock-order-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
 
@@ -20851,17 +19629,10 @@ async fn withdrawal_locks_the_run_before_the_submission() {
 /// after Settle forfeited it reports the same.
 #[tokio::test]
 async fn withdrawal_before_selection_excludes_the_index() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let (service, index, adapters) =
+        pipeline_service_parts(&backend, &dir, scored_config(true)).await;
     let tenant = format!("withdraw-before-selection-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
 
@@ -20925,9 +19696,7 @@ async fn withdrawal_before_selection_excludes_the_index() {
 /// finishes without writing.
 #[tokio::test]
 async fn withdrawal_during_pending_index_work_cancels_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, _) = test_service(
         backend.clone(),
@@ -21006,17 +19775,9 @@ async fn withdrawal_during_pending_index_work_cancels_it() {
 /// finalized batch.
 #[tokio::test]
 async fn withdrawal_forfeits_unsettled_and_keeps_settled_credit() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _, adapters) = pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let rebate = adapters[0].clone();
     let tenant = format!("withdraw-forfeit-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
@@ -21085,17 +19846,9 @@ async fn withdrawal_forfeits_unsettled_and_keeps_settled_credit() {
 /// does not exist, are both `NotFound`, and neither writes anything.
 #[tokio::test]
 async fn withdrawal_by_another_principal_is_not_found() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("withdraw-not-owner-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
 
@@ -21182,17 +19935,9 @@ async fn count_submission_rows(
 /// index write, and a second call: the same answer and no new rows.
 #[tokio::test]
 async fn withdrawal_is_idempotent() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(true)).await;
     let tenant = format!("withdraw-idempotent-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
     let settled = service
@@ -21279,13 +20024,7 @@ async fn run_envelope_to_settle_ready(
 ) -> PipelineRunRecord {
     let raw = serde_json::to_vec(envelope).unwrap();
     let key = envelope.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(tenant, &key, &raw, envelope, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(service, receipt(tenant, &key, &raw, envelope, NO_LIMITS)).await;
     let reviewed = service
         .process_run(tenant, created.run_id)
         .await
@@ -21365,9 +20104,7 @@ async fn object_deletion_state(
 /// withdrawal queues nothing more.
 #[tokio::test]
 async fn withdrawal_queues_the_deletion_of_the_score_objects() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_test_service(
         backend.clone(),
@@ -21414,17 +20151,9 @@ async fn withdrawal_queues_the_deletion_of_the_score_objects() {
 /// longer in the review queue.
 #[tokio::test]
 async fn withdrawal_releases_a_parked_review_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("withdraw-parked-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     set_next_attempt_at_in_the_future(&backend, &tenant, parked.run_id).await;
@@ -21532,17 +20261,9 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
 /// and an assessment whose resolved quarantine reasons are not a JSON array.
 #[tokio::test]
 async fn the_database_refuses_malformed_export_and_assessment_fields() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("schema-checks-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
     let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
@@ -21681,9 +20402,7 @@ async fn the_database_refuses_malformed_export_and_assessment_fields() {
 /// columns.
 #[tokio::test]
 async fn the_invalidation_and_export_item_foreign_keys_are_indexed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let client = backend.trace_pool_for_test().get().await.unwrap();
     for (table, index, columns) in [
         (
@@ -21720,17 +20439,9 @@ async fn the_invalidation_and_export_item_foreign_keys_are_indexed() {
 /// as `main` does for a legacy export.
 #[tokio::test]
 async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("withdraw-exported-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
     let delivered = insert_export_snapshot(&run, true).await;
@@ -21777,17 +20488,9 @@ async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() 
 /// it, delivered or still `ready`, and the item, under the matching reason.
 #[tokio::test]
 async fn expiry_purge_and_revocation_invalidate_a_delivered_pipeline_export() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let store = PgPipelineStore::new(backend.clone());
     for reason in ["expired", "purged", "revoked"] {
         let tenant = format!("export-invalidation-{reason}-{}", uuid::Uuid::new_v4());
@@ -21925,19 +20628,11 @@ async fn insert_submission_without_a_run(backend: &PgBackend, tenant_id: &str) -
 /// turns into `source_session_withdrawn`).
 #[tokio::test]
 async fn withdrawal_of_either_session_submission_withdraws_the_session() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner = owner_backend().await;
     for withdraw_the_pipeline_submission in [true, false] {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(true),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
         let tenant = format!("withdraw-session-{}", uuid::Uuid::new_v4());
         let (run, _) = run_to_settle_ready(&service, &tenant).await;
         let settled = service
@@ -22289,18 +20984,10 @@ async fn expected_withdrawn_version(
 /// snapshot is invalidated. A second withdrawal changes nothing.
 #[tokio::test]
 async fn a_session_withdrawal_writes_each_versions_rows_as_its_own_withdrawal_would() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, scored_config(true)).await;
     let product = PipelineProductStore::new(backend.clone());
     let tenant = format!("withdraw-three-versions-{}", uuid::Uuid::new_v4());
     let mut runs = Vec::new();
@@ -22561,17 +21248,9 @@ async fn make_invalidation_due(tenant_id: &str, run_id: uuid::Uuid) {
 /// finds nothing to do.
 #[tokio::test]
 async fn invalidation_removes_the_revision_after_withdrawal() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-withdrawn-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
@@ -22664,17 +21343,9 @@ async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
 /// row. However slow the runner, the row alone decides the result.
 #[tokio::test]
 async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-outage-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
@@ -22787,17 +21458,9 @@ async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
 /// `Ok(false)`, and completes the invalidation.
 #[tokio::test]
 async fn an_uncertain_invalidation_is_retried_and_then_completes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-uncertain-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
@@ -22882,17 +21545,9 @@ async fn tamper_stored_score_index_id_away(tenant_id: &str, run_id: uuid::Uuid) 
 /// invalidation is never claimed again, even when due.
 #[tokio::test]
 async fn an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-unreadable-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
@@ -22980,17 +21635,9 @@ async fn fail_invalidation_as_owner(tenant_id: &str, run_id: uuid::Uuid) {
 /// invalidation state with it; the next pass removes the revision.
 #[tokio::test]
 async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-requeue-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
@@ -23041,17 +21688,9 @@ async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
 /// re-enqueue still finishes at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn requeue_takes_no_run_row_lock() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("requeue-lock-order-{}", uuid::Uuid::new_v4());
     let (run, _) = complete_indexed_run(&service, &tenant).await;
     withdraw(&service, &tenant, run.submission_id).await;
@@ -23088,17 +21727,9 @@ async fn requeue_takes_no_run_row_lock() {
 /// and touches no other tenant's. A second call finds none.
 #[tokio::test]
 async fn requeue_failed_index_invalidations_resets_the_tenants_failed_ones() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant_a = format!("requeue-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("requeue-b-{}", uuid::Uuid::new_v4());
     let mut runs = Vec::new();
@@ -23144,17 +21775,9 @@ async fn requeue_failed_index_invalidations_resets_the_tenants_failed_ones() {
 /// pass then processes it, so the row was due all along.
 #[tokio::test]
 async fn invalidation_is_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant_a = format!("invalidate-tenant-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("invalidate-tenant-b-{}", uuid::Uuid::new_v4());
     let tenant_a_ref = pipeline_tenant_storage_ref(&tenant_a);
@@ -23209,17 +21832,9 @@ async fn invalidation_is_tenant_scoped() {
 /// (`claim_due_index_invalidations`, Zaki review 1, round 2, item 4).
 #[tokio::test]
 async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-claim-{}", uuid::Uuid::new_v4());
     let (run, _) = complete_indexed_run(&service, &tenant).await;
     withdraw(&service, &tenant, run.submission_id).await;
@@ -23301,17 +21916,9 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
 /// every claimed invalidation.
 #[tokio::test]
 async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-batch-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let mut run_ids = BTreeSet::new();
@@ -23408,17 +22015,9 @@ async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
 /// path.
 #[tokio::test]
 async fn the_invalidation_pass_never_holds_two_pooled_connections() {
-    let Some(backend) = runtime_backend(1).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(1);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _) = pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("invalidate-pool-one-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, _) = tokio::time::timeout(HELD_CALL_BOUND, complete_indexed_run(&service, &tenant))
@@ -23522,17 +22121,9 @@ fn item_runs(snapshot: &PipelineExportSnapshot) -> Vec<uuid::Uuid> {
 /// the first answer.
 #[tokio::test]
 async fn export_snapshots_return_what_a_fresh_read_returns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let product = PipelineProductStore::new(backend.clone());
     let tenant = format!("export-fresh-read-{}", uuid::Uuid::new_v4());
     for _ in 0..3 {
@@ -23584,9 +22175,7 @@ async fn export_snapshots_return_what_a_fresh_read_returns() {
 /// records `main`'s export manifest for it, which `main`'s own readers load.
 #[tokio::test]
 async fn export_items_carry_the_approved_revision_only() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = test_service_with_controls(
         backend.clone(),
@@ -23609,13 +22198,7 @@ async fn export_items_carry_the_approved_revision_only() {
         "the raw request carries the marker"
     );
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     for phase in ["Review", "Score"] {
         service
             .process_run(&tenant, created.run_id)
@@ -23721,17 +22304,9 @@ async fn export_items_carry_the_approved_revision_only() {
 /// tenant's snapshot, which does not exist for it.
 #[tokio::test]
 async fn exports_never_include_another_tenants_runs() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant_a = format!("export-tenant-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("export-tenant-b-{}", uuid::Uuid::new_v4());
     let run_a = submit_and_complete(&service, &tenant_a, RECEIPT_PRINCIPAL).await;
@@ -23788,18 +22363,10 @@ async fn exports_never_include_another_tenants_runs() {
 /// one.
 #[tokio::test]
 async fn withdrawn_submissions_are_excluded_and_invalidate_snapshots() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-withdrawn-{}", uuid::Uuid::new_v4());
     let withdrawn = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let sibling = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
@@ -23882,17 +22449,9 @@ async fn withdrawn_submissions_are_excluded_and_invalidate_snapshots() {
 /// the stored snapshot.
 #[tokio::test]
 async fn export_request_key_is_idempotent() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-idempotent-{}", uuid::Uuid::new_v4());
     let first_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let product = PipelineProductStore::new(backend.clone());
@@ -23942,17 +22501,9 @@ async fn export_request_key_is_idempotent() {
 /// holds neither.
 #[tokio::test]
 async fn exports_honor_allowed_uses() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-uses-{}", uuid::Uuid::new_v4());
     let evaluation_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let mut debugging_only = envelope(uuid::Uuid::new_v4()).await;
@@ -24002,17 +22553,9 @@ async fn exports_honor_allowed_uses() {
 /// different scope each: the two are checked one by one, not intersected.
 #[tokio::test]
 async fn exports_honor_consent_scope_allowlists() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-consent-{}", uuid::Uuid::new_v4());
     let with_scopes = |scopes: Vec<ConsentScope>| async move {
         let mut env = envelope(uuid::Uuid::new_v4()).await;
@@ -24145,17 +22688,9 @@ async fn exports_honor_consent_scope_allowlists() {
 /// would ever mark that item.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-race-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
 
@@ -24245,17 +22780,9 @@ async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
 /// reaches; an expiry marks none, so the items' own marks are not enough.
 #[tokio::test]
 async fn completing_a_snapshot_rechecks_that_its_submissions_are_exportable() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-expired-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let product = PipelineProductStore::new(backend.clone());
@@ -24295,17 +22822,9 @@ async fn completing_a_snapshot_rechecks_that_its_submissions_are_exportable() {
 /// request for one item, with two runs exportable, holds the older run only.
 #[tokio::test]
 async fn export_item_count_is_bounded() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("export-bound-{}", uuid::Uuid::new_v4());
     let older = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
@@ -24360,6 +22879,24 @@ fn trace_credit_only_config() -> PipelineBundleConfig {
         include_index: false,
         variant: None,
     }
+}
+
+/// `payout_test_service` for `trace_credit_only_config` on the NEAR rail,
+/// with no crash point.
+async fn trace_credit_payout_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    near: Arc<dyn NearPayoutAdapter>,
+) -> Arc<PipelineService> {
+    payout_test_service(
+        backend.clone(),
+        artifact_store(dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near,
+        None,
+    )
+    .await
 }
 
 /// A recording Trace Credit adapter on payout rail `near`.
@@ -24518,9 +23055,7 @@ fn enabled_test_payout() -> PipelinePayoutConfig {
 /// disabled it builds.
 #[tokio::test]
 async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let checks = PipelineNoveltyUtilityChecks {
         settlement_require_issuer_approval: true,
@@ -24566,9 +23101,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
 /// each under its own label; with payout disabled it builds.
 #[tokio::test]
 async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_account_cap() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for (checks, label) in [
         (
@@ -24628,9 +23161,7 @@ async fn an_enabled_payout_is_refused_while_main_requires_smoke_readiness_or_an_
 /// listed issuer build, and so does a disabled payout under either refusal.
 #[tokio::test]
 async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_out() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let listed = credit_account_hash("pipeline-issuer");
     let versions = |allowed: &[&str]| {
@@ -24715,9 +23246,7 @@ async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_o
 /// 1, round 2, item 4).
 #[tokio::test]
 async fn a_held_payout_is_resolved_again_only_after_the_confirmation_interval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let service = payout_test_service_with_config(
@@ -24879,20 +23408,10 @@ async fn near_outbox_payout_targets(
 /// principal's, as `main`'s event does.
 #[tokio::test]
 async fn an_account_linked_contributor_is_paid_under_the_account_and_its_near_account() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-account-{}", uuid::Uuid::new_v4());
     service.register_default_bundle(&tenant).await.unwrap();
     let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
@@ -24934,9 +23453,7 @@ async fn an_account_linked_contributor_is_paid_under_the_account_and_its_near_ac
 /// the account has one active identity, the line is paid to it.
 #[tokio::test]
 async fn the_pipeline_holds_an_account_payout_as_main_does() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for (identities, label) in [
         (vec![], "none_enrolled"),
         (
@@ -24946,15 +23463,7 @@ async fn the_pipeline_holds_an_account_payout_as_main_does() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let near = Arc::new(RecordingNearAdapter::new());
-        let service = payout_test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            trace_credit_only_config(),
-            vec![near_rail_trace_credit_adapter()],
-            near.clone(),
-            None,
-        )
-        .await;
+        let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
         let tenant = format!("payout-held-{}", uuid::Uuid::new_v4());
         service.register_default_bundle(&tenant).await.unwrap();
         let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
@@ -25001,20 +23510,10 @@ async fn the_pipeline_holds_an_account_payout_as_main_does() {
 /// for a batch without approval evidence.
 #[tokio::test]
 async fn the_pipeline_batch_records_no_derived_issuer_approval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-no-derived-approval-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let batch_id = trace_credit_settlement(&service, &tenant, run.run_id)
@@ -25209,9 +23708,7 @@ async fn outcome_row_texts(
 /// nothing, and neither does a direct `process_payout` of the run.
 #[tokio::test]
 async fn payout_disabled_by_default_submits_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let service = test_service_with_adapters(
@@ -25242,20 +23739,10 @@ async fn payout_disabled_by_default_submits_nothing() {
 /// confirms it, and a confirmed payout is not listed again.
 #[tokio::test]
 async fn payout_submits_once_and_confirms() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-confirm-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(run.state, PipelineRunState::Complete);
@@ -25322,21 +23809,11 @@ fn near_transaction_failed_hash_text() -> String {
 /// the line again.
 #[tokio::test]
 async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-chain-fail-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(run.state, PipelineRunState::Complete);
@@ -25381,21 +23858,11 @@ async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again()
 /// that failed on chain: no second submit, and the line keeps its marker.
 #[tokio::test]
 async fn a_direct_payout_does_not_submit_a_line_that_failed_on_chain_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-chain-fail-direct-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
@@ -25432,9 +23899,7 @@ async fn a_direct_payout_does_not_submit_a_line_that_failed_on_chain_again() {
 /// Settle's included -- stay byte-identical.
 #[tokio::test]
 async fn payout_crash_between_submit_and_confirm_submits_once() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let mut points_checked = 0usize;
     for point in [
         PipelineCrashPoint::AfterNearSubmit,
@@ -25480,15 +23945,7 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
             "the crash came after the outbox recorded the step ({point:?})"
         );
 
-        let restarted = payout_test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            trace_credit_only_config(),
-            vec![near_rail_trace_credit_adapter()],
-            near.clone(),
-            None,
-        )
-        .await;
+        let restarted = trace_credit_payout_service(&backend, &dir, near.clone()).await;
         assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
         if point == PipelineCrashPoint::AfterNearSubmit {
             assert_eq!(
@@ -25547,20 +24004,10 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
 /// it is not listed again.
 #[tokio::test]
 async fn a_withdrawal_after_settle_still_pays_and_confirms_the_payout() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-after-withdrawal-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(run.state, PipelineRunState::Complete);
@@ -25609,20 +24056,10 @@ async fn a_withdrawal_after_settle_still_pays_and_confirms_the_payout() {
 /// line, no NEAR request.
 #[tokio::test]
 async fn a_withdrawal_before_settle_forfeits_the_leg_and_pays_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-withdrawn-before-settle-{}", uuid::Uuid::new_v4());
     let (run, _) = run_to_settle_ready(&service, &tenant).await;
 
@@ -25653,9 +24090,7 @@ async fn a_withdrawal_before_settle_forfeits_the_leg_and_pays_nothing() {
 /// `process_payout` of the run.
 #[tokio::test]
 async fn other_instruments_never_touch_the_outbox() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let storage_rebate: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
@@ -25705,20 +24140,10 @@ async fn other_instruments_never_touch_the_outbox() {
 /// of the run takes it up again and submits it once.
 #[tokio::test]
 async fn a_failed_near_submit_fails_the_payout_until_the_run_is_paid_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-failed-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
 
@@ -25756,20 +24181,10 @@ async fn a_failed_near_submit_fails_the_payout_until_the_run_is_paid_again() {
 /// contract is refused when the service is built.
 #[tokio::test]
 async fn payout_calls_name_the_configured_near_contract() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-contract-{}", uuid::Uuid::new_v4());
     submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
@@ -25862,24 +24277,14 @@ impl NearPayoutAdapter for BadEvidenceNearAdapter {
 /// pass. The failed payout is not listed again.
 #[tokio::test]
 async fn a_payout_error_on_one_run_does_not_stop_the_pass() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = Arc::new(BadEvidenceNearAdapter {
         inner: recording.clone(),
         bad_keys: std::sync::Mutex::new(BTreeSet::new()),
     });
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-error-{}", uuid::Uuid::new_v4());
     let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
@@ -25930,9 +24335,7 @@ async fn a_payout_error_on_one_run_does_not_stop_the_pass() {
 /// confirms the line through its stored key.
 #[tokio::test]
 async fn a_withdrawal_after_a_near_submit_still_confirms_the_payout() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
@@ -25961,15 +24364,7 @@ async fn a_withdrawal_after_a_near_submit_still_confirms_the_payout() {
     withdraw(&crashing, &tenant, run.submission_id).await;
     confirm_every_near_request(&recording);
 
-    let restarted = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let restarted = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
     assert_eq!(near.submits(), 1, "nothing is submitted again");
     assert_eq!(recording.requests().len(), 1);
@@ -25996,21 +24391,11 @@ async fn a_withdrawal_after_a_near_submit_still_confirms_the_payout() {
 /// idempotency key makes a repeat safe) and the line is confirmed.
 #[tokio::test]
 async fn a_withdrawal_after_a_failed_near_submit_does_not_stop_its_retry() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-failed-withdrawn-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     recording.fail_next();
@@ -26078,30 +24463,12 @@ impl NearPayoutAdapter for HoldingNearAdapter {
 /// direct `process_payout` is refused with `payout_lock_held`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_payout_passes_at_once_submit_one_line_once() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = HoldingNearAdapter::new(recording.clone());
-    let first = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
-    let second = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let first = trace_credit_payout_service(&backend, &dir, near.clone()).await;
+    let second = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-overlap-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
 
@@ -26208,30 +24575,12 @@ impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
 /// up again only by a direct `process_payout`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_payout_that_fails_after_the_pass_listed_it_is_not_submitted_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let holding = ConfirmationHoldingNearAdapter::new(recording.clone());
-    let first = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        holding.clone(),
-        None,
-    )
-    .await;
-    let second = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        recording.clone(),
-        None,
-    )
-    .await;
+    let first = trace_credit_payout_service(&backend, &dir, holding.clone()).await;
+    let second = trace_credit_payout_service(&backend, &dir, recording.clone()).await;
     let tenant = format!("payout-failed-after-listing-{}", uuid::Uuid::new_v4());
 
     // Run A's payout is submitted and not yet confirmed, so the next pass
@@ -26320,20 +24669,10 @@ async fn a_payout_that_fails_after_the_pass_listed_it_is_not_submitted_again() {
 async fn payout_waits_while_mains_near_submitter_holds_the_tenant_lock() {
     use trace_commons_server::db::Database;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-main-lock-{}", uuid::Uuid::new_v4());
     submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
 
@@ -26358,24 +24697,14 @@ async fn payout_waits_while_mains_near_submitter_holds_the_tenant_lock() {
 /// Settle (item S: it is paid).
 #[tokio::test]
 async fn payout_never_holds_two_pooled_connections() {
-    let Some(backend) = runtime_backend(1).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(1);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = Arc::new(BadEvidenceNearAdapter {
         inner: recording.clone(),
         bad_keys: std::sync::Mutex::new(BTreeSet::new()),
     });
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-pool-one-{}", uuid::Uuid::new_v4());
     let paid = tokio::time::timeout(
         HELD_CALL_BOUND,
@@ -26454,9 +24783,7 @@ async fn payout_never_holds_two_pooled_connections() {
 /// is still confirmed through its stored idempotency key.
 #[tokio::test]
 async fn a_changed_near_contract_replays_the_stored_call_and_submits_nothing_new() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
@@ -26523,9 +24850,7 @@ async fn a_changed_near_contract_replays_the_stored_call_and_submits_nothing_new
 /// not flag it: the payout is recorded `confirmed`, with no label.
 #[tokio::test]
 async fn a_withdrawal_after_a_confirmed_payout_records_it_confirmed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
@@ -26559,15 +24884,7 @@ async fn a_withdrawal_after_a_confirmed_payout_records_it_confirmed() {
     );
 
     withdraw(&crashing, &tenant, run.submission_id).await;
-    let restarted = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let restarted = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
     let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
     assert_eq!(leg.payout_state, "confirmed");
@@ -26580,9 +24897,7 @@ async fn a_withdrawal_after_a_confirmed_payout_records_it_confirmed() {
 /// even on the `near` rail, so it never reads as a pending payout.
 #[tokio::test]
 async fn a_compatibility_leg_is_never_a_pending_payout() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let mut config = CompatibilityBundleConfig::local_reference();
@@ -26641,21 +24956,11 @@ async fn a_compatibility_leg_is_never_a_pending_payout() {
 async fn confirmation_polling_does_not_take_the_near_submit_lock() {
     use trace_commons_server::db::Database;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-poll-unlocked-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
@@ -26690,9 +24995,7 @@ async fn confirmation_polling_does_not_take_the_near_submit_lock() {
 /// sets. Two passes inside one interval look the confirmation up once.
 #[tokio::test]
 async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
@@ -26758,9 +25061,7 @@ async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
 /// enabled.
 #[tokio::test]
 async fn the_operational_summary_reports_both_controls_passed() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let tenant = format!("controls-{}", uuid::Uuid::new_v4());
     let summary = PipelineProductStore::new(backend.clone())
         .operational_summary(&tenant)
@@ -26775,9 +25076,7 @@ async fn the_operational_summary_reports_both_controls_passed() {
 /// that name. An empty list fails it too.
 #[tokio::test]
 async fn a_missing_table_fails_the_isolation_control() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = client.transaction().await.unwrap();
     let present = pipeline_control_health(&tx, &["pipeline_runs", "phase_outcomes"])
@@ -26804,9 +25103,7 @@ async fn a_missing_table_fails_the_isolation_control() {
 /// ever sees it disabled.
 #[tokio::test]
 async fn a_disabled_immutability_trigger_fails_the_audit_control() {
-    let Some(_backend) = runtime_backend(2).await else {
-        return;
-    };
+    let _backend = runtime_backend_or_skip!(2);
     let mut owner = owner_client().await;
     let tx = owner.transaction().await.unwrap();
     let enabled = pipeline_control_health(&tx, &["phase_outcomes"])
@@ -26818,7 +25115,7 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
         .unwrap();
     // The rest of the check runs as the runtime login, which cannot bypass
     // row-level security, so the isolation control can pass.
-    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+    tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
         .await
         .unwrap();
     let disabled = pipeline_control_health(&tx, &["phase_outcomes"])
@@ -26852,9 +25149,7 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
 ///   fails the isolation control, whatever the tables' flags.
 #[tokio::test]
 async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
-    let Some(_backend) = runtime_backend(2).await else {
-        return;
-    };
+    let _backend = runtime_backend_or_skip!(2);
     let tables = ["pipeline_runs", "phase_outcomes"];
     let mut owner = owner_client().await;
     for (case, change) in [
@@ -26918,7 +25213,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
         tx.batch_execute(change)
             .await
             .unwrap_or_else(|error| panic!("{case}: {error}"));
-        tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
             .await
             .unwrap();
         let controls = pipeline_control_health(&tx, &tables).await.unwrap();
@@ -26947,7 +25242,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
              GRANT pipeline_control_test_policy_role TO pipeline_control_test_reader;
              CREATE POLICY pipeline_control_test_role_open ON pipeline_runs
                  FOR SELECT TO pipeline_control_test_policy_role USING (true);
-             SET LOCAL ROLE pipeline_control_test_reader"
+             SET LOCAL SESSION AUTHORIZATION pipeline_control_test_reader"
         ))
         .await
         .unwrap_or_else(|error| panic!("{case}: {error}"));
@@ -26962,7 +25257,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
         !as_owner.tenant_isolation_passed,
         "a role that bypasses row-level security fails the isolation control"
     );
-    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+    tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
         .await
         .unwrap();
     let as_runtime = pipeline_control_health(&tx, &tables).await.unwrap();
@@ -27023,19 +25318,11 @@ async fn gate_driver_backend() -> PgBackend {
 async fn mains_gate_enumeration_leaves_out_pipeline_submissions() {
     use trace_commons_server::db::Database as _;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let gate = gate_driver_backend().await;
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("gate-enumeration-{}", uuid::Uuid::new_v4());
     let legacy = insert_submission_without_a_run(&owner, &tenant).await;
     owner
@@ -27114,9 +25401,7 @@ async fn payout_service_under(
 /// `process_payout` alike.
 #[tokio::test]
 async fn a_payout_under_mains_disabled_settlement_mode_advances_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let service = payout_service_under(
@@ -27155,9 +25440,7 @@ async fn a_payout_under_mains_disabled_settlement_mode_advances_nothing() {
 /// with hash-only evidence. The injected adapter is never called.
 #[tokio::test]
 async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapter() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let service = payout_service_under(
@@ -27208,9 +25491,7 @@ async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapt
 /// real transaction hash, and the line waits for `http` to confirm it.
 #[tokio::test]
 async fn a_line_submitted_under_http_is_not_confirmed_under_dry_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
@@ -27266,9 +25547,7 @@ async fn a_line_submitted_under_http_is_not_confirmed_under_dry_run() {
 /// confirms it.
 #[tokio::test]
 async fn a_submitted_line_with_no_mode_key_is_confirmed_only_under_http() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
@@ -27363,9 +25642,7 @@ async fn a_submitted_line_with_no_mode_key_is_confirmed_only_under_http() {
 /// an unauthenticated adapter when the flag is off.
 #[tokio::test]
 async fn an_enabled_payout_needs_an_authenticated_adapter_when_main_requires_one() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let dir = tempfile::tempdir().unwrap();
     let build = |near: RecordingNearAdapter, mode, require_adapter_auth| {
         payout_test_builder(
@@ -27435,28 +25712,14 @@ impl RunOnWriteStore {
 }
 
 impl TraceArtifactStore for RunOnWriteStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact
+    );
 
     fn put_serialized_json(
         &self,
@@ -27505,47 +25768,6 @@ impl TraceArtifactStore for RunOnWriteStore {
         }
         Ok(receipt)
     }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
 }
 
 /// A hook that expires `run_id`'s current lease, as the database owner, on a
@@ -27580,9 +25802,7 @@ fn expire_the_lease_hook(tenant_id: String, run_id: uuid::Uuid) -> Box<dyn Fn() 
 /// expiry, and the retry writes and commits its own.
 #[tokio::test]
 async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("review-stale-objects-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -27605,15 +25825,7 @@ async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
         None,
     )
     .await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     run_id_cell.set(created.run_id).unwrap();
     assert_eq!(count_files_under(dir.path()), 1, "the source envelope");
 
@@ -27660,9 +25872,7 @@ async fn a_review_commit_refused_for_a_stale_lease_leaves_no_object() {
 /// stale lease.
 #[tokio::test]
 async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("score-stale-objects-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -27685,15 +25895,7 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
         None,
     )
     .await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     run_id_cell.set(created.run_id).unwrap();
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -27765,20 +25967,16 @@ struct FailingWriteStore {
 }
 
 impl TraceArtifactStore for FailingWriteStore {
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
+    forward_to_inner_store!(
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact,
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        artifact_present_by_object_key
+    );
 
     fn prepare_serialized_json(
         &self,
@@ -27818,87 +26016,9 @@ impl TraceArtifactStore for FailingWriteStore {
         self.inner.publish_serialized_json(prepared)
     }
 
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
-
     // PR 4 (rebase 10, option D): a compatibility Score derives its object
     // keys before its tenant lock, and the attempt sweep deletes and checks
     // presence at a key; the double delegates all three.
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn artifact_present_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<Option<bool>> {
-        self.inner.artifact_present_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
 }
 
 /// Finding 4, the last case of df1550dd: a Score whose second object write
@@ -27910,9 +26030,7 @@ impl TraceArtifactStore for FailingWriteStore {
 /// outage, and the retry publishes both objects and commits.
 #[tokio::test]
 async fn a_failed_score_write_deletes_the_object_written_before_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(FailingWriteStore {
         inner: artifact_store(&dir),
@@ -28113,15 +26231,7 @@ async fn service_changing_an_attempt_row(
         None,
     )
     .await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     run_id_cell.set(created.run_id).unwrap();
     (service, tenant, created.run_id, dir)
 }
@@ -28136,9 +26246,7 @@ async fn service_changing_an_attempt_row(
 /// objects are deleted, and the retry stages, writes and commits its own.
 #[tokio::test]
 async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for change in [
         AttemptRowChange::Deleted,
         AttemptRowChange::OtherKey,
@@ -28228,9 +26336,7 @@ async fn a_score_commit_missing_its_attempt_row_is_refused_and_leaves_no_object(
 /// still `staged`.
 #[tokio::test]
 async fn a_review_rejection_that_finds_a_staged_attempt_row_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let store = PgPipelineStore::new(backend.clone());
@@ -28308,9 +26414,7 @@ async fn a_review_rejection_that_finds_a_staged_attempt_row_is_refused() {
 /// own.
 #[tokio::test]
 async fn a_review_commit_missing_its_attempt_row_is_refused_and_leaves_no_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for change in [
         AttemptRowChange::Deleted,
         AttemptRowChange::OtherKey,
@@ -28389,17 +26493,9 @@ async fn a_review_commit_missing_its_attempt_row_is_refused_and_leaves_no_object
 /// once the run completes.
 #[tokio::test]
 async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarantine() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let product = PipelineProductStore::new(backend.clone());
     let tenant = format!("review-status-reason-{}", uuid::Uuid::new_v4());
     let store = service.store();
@@ -28504,17 +26600,9 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
 /// claim whose assessment would break the one-assessment-per-run rule.
 #[tokio::test]
 async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-claim-after-lock-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let reviewer = reviewer_principal_ref('a');
@@ -28614,17 +26702,9 @@ async fn index_invalidation_of(
 /// is not found again, and one whose follow-up ran is never found.
 #[tokio::test]
 async fn the_sweep_recovers_a_revocation_or_withdrawal_whose_follow_up_was_lost() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("lost-follow-up-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:lost-follow-up";
     let mut runs = Vec::new();
@@ -28711,17 +26791,9 @@ async fn the_sweep_recovers_a_revocation_or_withdrawal_whose_follow_up_was_lost(
 /// recovered submission is not found again.
 #[tokio::test]
 async fn the_sweep_recovers_a_lost_follow_up_of_an_excluded_run_in_a_delivered_export() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("lost-follow-up-export-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let run = submit_envelope_and_complete(
@@ -28838,17 +26910,9 @@ impl InvalidationFault {
 /// step is woken; the failed one is found again on the next pass.
 #[tokio::test]
 async fn the_sweep_goes_on_after_one_failed_follow_up() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("lost-follow-up-fault-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:lost-follow-up-fault";
     let mut runs = Vec::new();
@@ -28918,17 +26982,9 @@ async fn the_sweep_goes_on_after_one_failed_follow_up() {
 /// ones are still tried again.
 #[tokio::test]
 async fn failing_follow_ups_do_not_starve_the_sweep() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("lost-follow-up-starve-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:lost-follow-up-starve";
     let mut runs = Vec::new();
@@ -29016,9 +27072,7 @@ async fn failing_follow_ups_do_not_starve_the_sweep() {
 #[tokio::test]
 async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run() {
     const RUNS_READER_LOGIN: &str = "trace_pipeline_runs_reader_test";
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .expect("runtime_backend read the same variable");
     let mut owner = owner_client().await;
@@ -29089,17 +27143,9 @@ async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run
 /// rest.
 #[tokio::test]
 async fn releasing_parked_runs_is_bounded_per_call() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-parked-bounded-{}", uuid::Uuid::new_v4());
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     for _ in 0..3 {
@@ -29147,17 +27193,9 @@ async fn releasing_parked_runs_is_bounded_per_call() {
 /// would. A parked run whose submission is still operable stays parked.
 #[tokio::test]
 async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("review-parked-inoperable-{}", uuid::Uuid::new_v4());
     let untouched = quarantined_and_parked(&service, &tenant).await;
     for (cause, statement) in [
@@ -29234,9 +27272,7 @@ async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() 
 /// held the same way stays held.
 #[tokio::test]
 async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service =
         checked_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
@@ -29345,9 +27381,7 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
 /// role (`vector_worker`).
 #[tokio::test]
 async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let issuer = format!("principal_sha256:{}", "d".repeat(64));
     let service = checked_compatibility_service(
@@ -29414,9 +27448,7 @@ fn issuing_checks() -> PipelineNoveltyUtilityChecks {
 /// contributor standing in as the issuer.
 #[tokio::test]
 async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = checked_compatibility_service(
         &backend,
@@ -29471,9 +27503,7 @@ fn main_gate_of(
 /// qualifiable configuration.
 #[tokio::test]
 async fn startup_checks_every_bundle_a_tenant_may_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let old_config = near_duplicate_config();
@@ -29588,9 +27618,7 @@ async fn startup_checks_every_bundle_a_tenant_may_run() {
 /// a runnable configuration marked not qualifiable.
 #[tokio::test]
 async fn startup_qualifies_every_bundle_a_tenant_may_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let qualified_scorer = Arc::new(QualifiedProductionScorer(ReferencePerplexityScorer::new()));
     let unqualified_scorer = Arc::new(ReferencePerplexityScorer::new());
@@ -29739,20 +27767,10 @@ async fn startup_qualifies_every_bundle_a_tenant_may_run() {
 /// `process_payout`.
 #[tokio::test]
 async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = format!("payout-unmarked-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
@@ -29799,9 +27817,7 @@ async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
 /// status reads its payout state.
 #[tokio::test]
 async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let near = Arc::new(RecordingNearAdapter::new());
     let crashing = payout_test_service(
@@ -29815,15 +27831,7 @@ async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
     .await;
     let tenant = format!("payout-failed-run-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&crashing, &tenant, &env).await;
     for phase in ["Review", "Score"] {
         crashing
             .process_run(&tenant, created.run_id)
@@ -29851,15 +27859,7 @@ async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
     .unwrap();
     tx.commit().await.unwrap();
 
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
     let outbox = near_outbox_rows(&backend, &tenant).await;
     assert_eq!(outbox.len(), 1);
@@ -29885,9 +27885,7 @@ async fn a_completed_leg_of_a_run_that_later_failed_is_still_paid() {
 /// enabled.
 #[tokio::test]
 async fn only_trace_credit_is_seeded_a_pending_payout() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = payout_test_service(
         backend.clone(),
@@ -29938,9 +27936,7 @@ async fn only_trace_credit_is_seeded_a_pending_payout() {
 /// adapter records no request. A credited leg still settles through it.
 #[tokio::test]
 async fn a_withheld_novelty_utility_leg_never_reaches_its_adapter() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -30026,7 +28022,7 @@ async fn receive_envelope(
 ) -> uuid::Uuid {
     let raw = serde_json::to_vec(env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = submit_registered(
+    let created = submit_created(
         service,
         PipelineReceiptRequest {
             accept_medium_risk: false,
@@ -30041,10 +28037,7 @@ async fn receive_envelope(
             limits: NO_LIMITS,
         },
     )
-    .await
-    .unwrap() else {
-        panic!("receipt creates a run")
-    };
+    .await;
     created.run_id
 }
 
@@ -30111,9 +28104,7 @@ async fn assert_one_award_and_one_indexed_revision(
 /// Scores run before the first Settle writes the index.
 #[tokio::test]
 async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -30139,9 +28130,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_one_worker() {
 /// first run's Settle wrote the index.
 #[tokio::test]
 async fn identical_receipts_earn_one_novelty_utility_award_when_interleaved() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -30240,59 +28229,17 @@ struct BarrierStore {
 }
 
 impl TraceArtifactStore for BarrierStore {
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn publish_serialized_json(
-        &self,
-        prepared: &PreparedSerializedJsonArtifact,
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
-    }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
+    forward_to_inner_store!(
+        prepare_serialized_json,
+        publish_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        delete_artifact,
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        artifact_present_by_object_key
+    );
 
     fn read_json_by_object_key(
         &self,
@@ -30314,56 +28261,10 @@ impl TraceArtifactStore for BarrierStore {
         )
     }
 
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
-
     // PR 4 (rebase 10, option D): a compatibility Score derives its object
     // keys before its tenant lock, and the attempt sweep deletes and checks
     // presence at a key; the double delegates all three, so the Score
     // reaches its scorer rather than stopping at a method the double lacks.
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn artifact_present_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<Option<bool>> {
-        self.inner.artifact_present_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
 }
 
 /// Finding 12 with two workers: two services over one database and one
@@ -30374,9 +28275,7 @@ impl TraceArtifactStore for BarrierStore {
 /// against an empty unapplied set and both would earn.
 #[tokio::test]
 async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let barrier = Arc::new(ScoreBarrier::default());
@@ -30472,9 +28371,7 @@ async fn identical_receipts_earn_one_novelty_utility_award_with_two_workers() {
 /// fixed delay (not the phase-age backoff), and runs once the lock is free.
 #[tokio::test]
 async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_test_service_on(
         backend.clone(),
@@ -30560,17 +28457,9 @@ async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
 /// caller's reason (`revoked`), not a fixed `withdrawn`.
 #[tokio::test]
 async fn a_revocation_follow_up_tombstones_under_its_own_reason() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("revocation-tombstone-{}", uuid::Uuid::new_v4());
     let (run, _) = complete_indexed_run(&service, &tenant).await;
     assert!(
@@ -30607,9 +28496,7 @@ async fn a_revocation_follow_up_tombstones_under_its_own_reason() {
 /// run still waiting for Settle does.
 #[tokio::test]
 async fn a_compatibility_score_reads_only_commands_still_to_apply() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     // Every trace novel and every chunk inserted, so each run stores a
     // command.
@@ -30796,9 +28683,7 @@ fn counting_compatibility_service(
 /// before the lock).
 #[tokio::test]
 async fn a_score_behind_a_held_tenant_lock_never_calls_its_scorer() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(DelayedCountingScorer {
         inner: ReferencePerplexityScorer::new(),
@@ -30855,9 +28740,7 @@ async fn a_score_behind_a_held_tenant_lock_never_calls_its_scorer() {
 /// committed.
 #[tokio::test]
 async fn a_slow_score_commit_stamps_the_commit_time() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(DelayedCountingScorer {
         inner: ReferencePerplexityScorer::new(),
@@ -30951,9 +28834,7 @@ impl ScoreOutcomeDelay {
 /// insert, between the two, takes longer than the one-second lease.
 #[tokio::test]
 async fn a_score_commit_whose_lease_ends_before_its_run_update_deletes_its_objects() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = score_lease_test_service(
         backend.clone(),
@@ -31009,9 +28890,7 @@ async fn a_score_commit_whose_lease_ends_before_its_run_update_deletes_its_objec
 /// that into a failure.
 #[tokio::test]
 async fn compatibility_score_never_holds_two_pooled_connections() {
-    let Some(backend) = runtime_backend(1).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(1);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -31059,9 +28938,7 @@ async fn set_attempt_count(
 /// phase and completes; it is not left `pending` with no attempt to claim.
 #[tokio::test]
 async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budget() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -31109,9 +28986,7 @@ async fn a_phase_that_commits_on_its_last_attempt_leaves_the_next_phase_its_budg
 /// trace.
 #[tokio::test]
 async fn a_run_no_claim_can_select_is_not_a_compatibility_neighbour() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -31186,6 +29061,13 @@ impl OutageArtifactStore {
 }
 
 impl TraceArtifactStore for OutageArtifactStore {
+    forward_to_inner_store!(
+        delete_artifact,
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        artifact_present_by_object_key
+    );
+
     fn prepare_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -31261,56 +29143,10 @@ impl TraceArtifactStore for OutageArtifactStore {
         )
     }
 
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
-
     // PR 4 (rebase 10, option D): a compatibility Score derives its object
     // keys before its tenant lock, and the attempt sweep deletes and checks
     // presence at a key; the double delegates all three, so an outage hits
     // the call the test names rather than a missing method.
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn artifact_present_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<Option<bool>> {
-        self.inner.artifact_present_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
 }
 
 /// Multi-lens review L2-2 and ruling FR3: an object-store call that fails
@@ -31322,9 +29158,7 @@ impl TraceArtifactStore for OutageArtifactStore {
 /// `stored_command_binding_failures_fail_closed` covers it.)
 #[tokio::test]
 async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let store = OutageArtifactStore::over(artifact_store(&dir));
     let service = compatibility_test_service_on(
@@ -31418,28 +29252,12 @@ fn assert_integrity_retry_waits_an_hour(run: &PipelineRunRecord) {
 /// `an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase`.)
 #[tokio::test]
 async fn a_missing_source_object_is_charged_and_ends_the_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("integrity-missing-source-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
     let object_key: String = tx
@@ -31525,9 +29343,7 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
 /// `stored_command_binding_failures_fail_closed`.)
 #[tokio::test]
 async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let store = OutageArtifactStore::over(artifact_store(&dir));
     let (service, _, _) =
@@ -31656,9 +29472,7 @@ impl GcsObjectClient for ProbeGcsClient {
 /// failure stays the uncharged `artifact_store_unavailable`.
 #[tokio::test]
 async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let master_key = trace_commons_server::secrets::keychain::generate_master_key_hex();
     let crypto = SecretsCrypto::new(SecretString::from(master_key.clone())).unwrap();
     let kek = LocalMasterKeyWrapper::new(
@@ -31679,15 +29493,7 @@ async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not(
     let (service, _, _) = test_service(backend.clone(), store, minimal_config(true), None).await;
     let tenant = format!("integrity-missing-gcs-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let written = client.keys.lock().unwrap().clone();
     assert!(!written.is_empty(), "the receipt wrote its source object");
 
@@ -32149,9 +29955,7 @@ fn promotion_now(evidence: &[DrillEvidence]) -> PromotionDecision {
 /// with its tenant.
 #[tokio::test]
 async fn qualify_bundle_records_an_immutable_hash_only_identity() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, package) = qualified_production_service(backend.clone(), &dir).await;
 
@@ -32328,9 +30132,7 @@ async fn qualify_bundle_records_an_immutable_hash_only_identity() {
 /// calls leaves a row behind.
 #[tokio::test]
 async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, package) = qualified_production_service(backend.clone(), &dir).await;
     let profile = ProductionDependencyProfile::for_bundle(
@@ -32766,9 +30568,7 @@ fn zero_floor_production_package(package: &BundlePackage) -> BundlePackage {
 /// covers it.)
 #[tokio::test]
 async fn qualify_bundle_refuses_a_package_whose_configuration_is_not_qualifiable() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, package) = qualified_production_service(backend.clone(), &dir).await;
     let zero = zero_floor_production_package(&package);
@@ -32974,9 +30774,7 @@ fn assert_refused(result: Result<BundleQualificationRecord, DatabaseError>, labe
 /// ceiling (signed that way) are each refused, and none leaves a row.
 #[tokio::test]
 async fn an_unsigned_or_altered_result_cannot_qualify_a_bundle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let qualification = attested_qualification(backend.clone(), &dir).await;
     let store = PipelineQualificationStore::new(backend.clone());
@@ -33222,9 +31020,7 @@ async fn an_unsigned_or_altered_result_cannot_qualify_a_bundle() {
 /// caller gives it.
 #[tokio::test]
 async fn qualify_bundle_refuses_metadata_that_the_attestations_do_not_back() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let qualification = attested_qualification(backend.clone(), &dir).await;
     let store = PipelineQualificationStore::new(backend.clone());
@@ -33405,17 +31201,10 @@ async fn queue_test_index_invalidation(
 /// (different) chunk count.
 #[tokio::test]
 async fn index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
 
@@ -33524,17 +31313,10 @@ async fn index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes() {
 /// here -- while still rebuilding a third, ordinary included run.
 #[tokio::test]
 async fn index_rebuild_skips_withdrawn_and_invalidated_runs() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-skip-{}", uuid::Uuid::new_v4());
 
     // A withdrawn submission's run: settled, included, then withdrawn.
@@ -33582,17 +31364,10 @@ async fn index_rebuild_skips_withdrawn_and_invalidated_runs() {
 /// `index_command_invalid`, and writes no entry from that run.
 #[tokio::test]
 async fn index_rebuild_fails_closed_on_a_tampered_command() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-tamper-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
 
@@ -33636,9 +31411,7 @@ async fn index_rebuild_fails_closed_on_a_tampered_command() {
 /// writes an entry.
 #[tokio::test]
 async fn index_rebuild_splits_a_store_fault_from_bad_content() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let store = OutageArtifactStore::over(artifact_store(&dir));
     let (service, index, _adapters) =
@@ -33707,17 +31480,10 @@ async fn index_rebuild_splits_a_store_fault_from_bad_content() {
 /// though both tenants have an included run under the same service.
 #[tokio::test]
 async fn index_rebuild_is_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant_a = format!("index-rebuild-tenant-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("index-rebuild-tenant-b-{}", uuid::Uuid::new_v4());
     let tenant_ref_a = pipeline_tenant_storage_ref(&tenant_a);
@@ -33775,17 +31541,10 @@ async fn index_rebuild_is_tenant_scoped() {
 /// settlement row, or a credit ledger row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-race-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
 
@@ -33910,17 +31669,10 @@ async fn index_rebuild_holds_the_guard_and_skips_a_run_withdrawn_after_listing()
 /// invalidation can exclude it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_sees_an_invalidation_queued_while_it_waited_for_the_run_lock() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-queued-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (ready, _) = run_to_settle_ready(&service, &tenant).await;
@@ -33990,9 +31742,7 @@ async fn index_rebuild_sees_an_invalidation_queued_while_it_waited_for_the_run_l
 /// has an invalidation row, and the rebuilt index holds none of its entries.
 #[tokio::test]
 async fn index_rebuild_never_rewrites_a_run_that_failed_for_good() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, _) = test_service(
         backend.clone(),
@@ -34076,17 +31826,10 @@ async fn index_rebuild_never_rewrites_a_run_that_failed_for_good() {
 /// on a runtime worker, it writes every entry of the run's sealed command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_writes_off_the_runtime_workers() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("index-rebuild-blocking-pool-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (ready, _) = run_to_settle_ready(&service, &tenant).await;
@@ -34117,17 +31860,10 @@ async fn index_rebuild_writes_off_the_runtime_workers() {
 /// call, writes no other entry, and fails closed as `index_unavailable`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let (rebuilder, _, _) = held_index_test_service_with_leases(
         backend.clone(),
         artifact_store(&dir),
@@ -34211,17 +31947,10 @@ async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
 /// revision's removal runs again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_index_rebuild_call_slower_than_the_fence_margin_cannot_restore_a_withdrawn_revision() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let rebuilt = IsolatedPipelineIndex::new();
     let rebuilder = fence_test_service(
         backend.clone(),
@@ -34599,17 +32328,10 @@ impl IdentifiedIndexWriter for SecondUpsertHoldWriter {
 /// removes the entries.
 #[tokio::test]
 async fn an_invalidation_is_not_claimed_while_a_rebuild_fence_is_set() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("rebuild-fence-claim-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let settled = settled_included_run(&service, &tenant).await;
@@ -34672,17 +32394,10 @@ async fn an_invalidation_is_not_claimed_while_a_rebuild_fence_is_set() {
 /// row does not stay for ever; another tenant's expired row stays.
 #[tokio::test]
 async fn an_expired_fence_does_not_block() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("rebuild-fence-expired-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let settled = settled_included_run(&service, &tenant).await;
@@ -34739,17 +32454,10 @@ async fn an_expired_fence_does_not_block() {
 /// fence in place.
 #[tokio::test]
 async fn a_fence_is_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant_a = format!("rebuild-fence-tenant-a-{}", uuid::Uuid::new_v4());
     let tenant_b = format!("rebuild-fence-tenant-b-{}", uuid::Uuid::new_v4());
     let tenant_ref_a = pipeline_tenant_storage_ref(&tenant_a);
@@ -34840,17 +32548,10 @@ async fn a_fence_is_tenant_scoped() {
 /// returns, no row is left.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_sets_extends_and_clears_its_fence() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("rebuild-fence-runs-{}", uuid::Uuid::new_v4());
     for _ in 0..3 {
         settled_included_run(&service, &tenant).await;
@@ -34918,17 +32619,10 @@ async fn a_rebuild_sets_extends_and_clears_its_fence() {
 /// invalidation; once A clears it, the invalidation runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_rebuild_clears_only_its_own_fence() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("rebuild-fence-two-rebuilds-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let settled = settled_included_run(&service, &tenant).await;
@@ -35010,9 +32704,7 @@ async fn a_second_rebuild_clears_only_its_own_fence() {
 /// too. The lost rebuild never cleared its fence; its row is left to expire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _index, _adapters) = test_service(
@@ -35172,9 +32864,7 @@ async fn a_rebuild_that_loses_its_session_cannot_be_overtaken_by_an_invalidation
 /// No write started, so the failed rebuild clears its fence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_lock_wait_counts_against_the_run_deadline() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _index, _adapters) = test_service(
@@ -35252,9 +32942,7 @@ async fn a_rebuild_lock_wait_counts_against_the_run_deadline() {
 /// fence to expire rather than clearing it: a write of its may still land.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_with_a_write_still_in_flight_leaves_its_fence() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _index, _adapters) = test_service(
@@ -35323,17 +33011,10 @@ async fn a_rebuild_with_a_write_still_in_flight_leaves_its_fence() {
 /// injected by a test-only trigger, as the owner, scoped to this tenant.
 #[tokio::test]
 async fn a_rebuild_whose_fence_write_fails_writes_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("rebuild-fence-write-fails-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     settled_included_run(&service, &tenant).await;
@@ -35391,9 +33072,7 @@ async fn a_rebuild_whose_fence_write_fails_writes_nothing() {
 /// key is still swept, with its object.
 #[tokio::test]
 async fn the_sweep_keeps_a_no_hash_row_whose_key_names_another_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -35586,9 +33265,7 @@ async fn staged_rows_and_presence(
 /// limit of 1 and four kept rows ahead, it reaches the bound first.
 #[tokio::test]
 async fn the_sweep_goes_on_past_rows_it_keeps() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -35642,9 +33319,7 @@ async fn the_sweep_goes_on_past_rows_it_keeps() {
 /// rows and starts the next one over.
 #[tokio::test]
 async fn the_sweep_resumes_where_its_last_pass_stopped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -35722,83 +33397,16 @@ struct ObjectKeyGapStore {
 }
 
 impl TraceArtifactStore for ObjectKeyGapStore {
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn publish_serialized_json(
-        &self,
-        prepared: &PreparedSerializedJsonArtifact,
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
-    }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
+    forward_to_inner_store!(
+        prepare_serialized_json,
+        publish_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact,
+        delete_artifact_at_object_key
+    );
 
     fn serialized_json_object_key(
         &self,
@@ -35816,19 +33424,6 @@ impl TraceArtifactStore for ObjectKeyGapStore {
             ),
         }
     }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
 }
 
 /// Rebase 10 review, M2 (ruling FR3): an artifact store that cannot derive
@@ -35843,9 +33438,7 @@ impl TraceArtifactStore for ObjectKeyGapStore {
 /// `pipeline_operational_error` before).
 #[tokio::test]
 async fn a_store_without_a_usable_object_key_suspends_the_score_uncharged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for (gap, label) in [
         (
             ObjectKeyGap::Unavailable,
@@ -36010,9 +33603,7 @@ async fn score_attempt_lease_tokens(
 /// row's key alone.
 #[tokio::test]
 async fn the_sweep_keeps_a_no_hash_row_when_the_store_cannot_derive_its_key() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let (service, _, _) = test_service(
@@ -36098,17 +33689,10 @@ async fn the_sweep_keeps_a_no_hash_row_when_the_store_cannot_derive_its_key() {
 /// too.
 #[tokio::test]
 async fn a_committed_attempt_artifact_cannot_return_to_staged() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _index, _adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let (service, _index, _adapters) =
+        pipeline_service_parts(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("attempt-artifact-guard-{}", uuid::Uuid::new_v4());
     let (ready, _) = run_to_settle_ready(&service, &tenant).await;
     let rows_before = attempt_artifact_rows(&backend, &tenant, ready.run_id).await;
@@ -36263,9 +33847,7 @@ async fn hold_compatibility_score_lock(tx: &tokio_postgres::Transaction<'_>, ten
 /// the object ref its commit records.
 #[tokio::test]
 async fn a_crashed_compatibility_score_leaves_unhashed_staged_rows_the_sweep_removes() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let service = Arc::new(
@@ -36411,9 +33993,7 @@ async fn a_crashed_compatibility_score_leaves_unhashed_staged_rows_the_sweep_rem
 /// no `index-command` row.
 #[tokio::test]
 async fn a_committed_compatibility_score_commits_hashed_rows_and_drops_unwritten_ones() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_test_service_on(
         backend.clone(),
@@ -36491,17 +34071,9 @@ async fn a_committed_compatibility_score_commits_hashed_rows_and_drops_unwritten
 /// owner alike, and a `committed` row without a hash cannot exist at all.
 #[tokio::test]
 async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("attempt-artifact-hash-guard-{}", uuid::Uuid::new_v4());
     let run_id = run_past_review(&service, &tenant).await.run_id;
     let lease_token = uuid::Uuid::new_v4();
@@ -36722,9 +34294,7 @@ async fn the_attempt_artifact_guard_lets_only_the_commit_set_a_missing_hash() {
 /// next attempt stages, writes and commits rows of its own.
 #[tokio::test]
 async fn a_compatibility_score_that_finds_its_tenant_lock_held_leaves_no_staged_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let writes = Arc::new(AtomicUsize::new(0));
     let counting: Arc<dyn TraceArtifactStore> = {
@@ -36845,9 +34415,7 @@ impl IdentifiedPerplexityScorer for SlowScorer {
 /// rows staged before the lock stay `staged` with no hash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_compatibility_score_slower_than_its_lease_cap_publishes_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let writes = Arc::new(AtomicUsize::new(0));
@@ -37118,9 +34686,7 @@ impl TraceArtifactStore for BlockingPoolOnlyArtifactStore {
 /// at a key), and every one of those objects is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_attempt_sweep_calls_the_store_off_the_runtime_workers() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockingPoolOnlyArtifactStore {
@@ -37315,9 +34881,7 @@ impl IdentifiedEmbedder for BlockingPoolOnlyEmbedder {
 /// withdrawal's invalidation removes the revision.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     index.refuse_calls_on_runtime_workers();
@@ -37430,9 +34994,7 @@ impl IdentifiedEmbedder for InputRejectingEmbedder {
 /// counts it.
 #[tokio::test]
 async fn an_embedder_input_rejection_fails_the_run_and_leaves_readiness_clear() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
@@ -37528,9 +35090,7 @@ async fn an_embedder_input_rejection_fails_the_run_and_leaves_readiness_clear() 
 /// `run_failed`). The invalidation pass removes the revision.
 #[tokio::test]
 async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (service, index, _) = test_service(
         backend.clone(),
@@ -37614,28 +35174,12 @@ async fn a_run_that_fails_for_good_after_its_index_write_has_its_revision_remove
 /// reaches Settle.
 #[tokio::test]
 async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = format!("withdrawn-at-operability-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let reviewed = service
         .process_run(&tenant, created.run_id)
         .await
@@ -37707,9 +35251,7 @@ async fn visible_rows(backend: &Arc<PgBackend>, tenant_id: &str, table: &str) ->
 
 #[tokio::test]
 async fn a_tenant_without_a_row_has_no_routing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend);
     let tenant = routing_tenant("none");
     assert_eq!(store.routing(&tenant).await.unwrap(), None);
@@ -37718,9 +35260,7 @@ async fn a_tenant_without_a_row_has_no_routing() {
 
 #[tokio::test]
 async fn containment_and_deactivation_write_the_row_and_an_event() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend);
     let tenant = routing_tenant("contain");
     let actor = routing_actor();
@@ -37829,9 +35369,7 @@ async fn containment_and_deactivation_write_the_row_and_an_event() {
 /// both bundle columns, and the active bundle row is as it was.
 #[tokio::test]
 async fn containment_records_the_active_bundle_in_both_bundle_columns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("bundle");
     let actor = routing_actor();
@@ -37871,9 +35409,7 @@ async fn containment_records_the_active_bundle_in_both_bundle_columns() {
 
 #[tokio::test]
 async fn routing_is_tenant_scoped() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant_a = routing_tenant("scope-a");
     let tenant_b = routing_tenant("scope-b");
@@ -38011,9 +35547,7 @@ async fn routing_generations(tenant_id: &str) -> (i64, i64) {
 /// the events is checked at the commit, and the row is not stored.
 #[tokio::test]
 async fn a_routing_row_without_its_event_is_refused_at_commit() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("no-event");
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
@@ -38056,9 +35590,7 @@ async fn a_routing_row_without_its_event_is_refused_at_commit() {
 /// event.
 #[tokio::test]
 async fn a_routing_update_that_keeps_its_event_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("keeps-event");
     let contained = store
@@ -38087,9 +35619,7 @@ async fn a_routing_update_that_keeps_its_event_is_refused() {
 /// commit check compares the row's state with the event's resulting state.
 #[tokio::test]
 async fn a_routing_row_that_names_an_event_of_another_state_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("other-state");
     let contained = store
@@ -38132,9 +35662,7 @@ async fn a_routing_row_that_names_an_event_of_another_state_is_refused() {
 /// gate.
 #[tokio::test]
 async fn a_routing_row_that_names_an_old_event_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("old-event");
     let actor = routing_actor();
@@ -38218,9 +35746,7 @@ async fn a_routing_row_that_names_an_old_event_is_refused() {
 /// store's own event.
 #[tokio::test]
 async fn a_routing_change_commits_when_an_event_has_a_later_recorded_at() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("later-event");
     let actor = routing_actor();
@@ -38284,9 +35810,7 @@ async fn a_routing_change_commits_when_an_event_has_a_later_recorded_at() {
 /// carries that event's id, its resulting state, and its generation.
 #[tokio::test]
 async fn every_routing_change_shares_its_id_with_its_event() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -38413,9 +35937,7 @@ async fn insert_routing_row_with_generation(
 /// proposed row and the `SET` list name.
 #[tokio::test]
 async fn a_routing_row_inserted_with_its_generation_commits_only_beside_its_event() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("restore-generation");
     let actor = routing_actor();
@@ -38556,9 +36078,7 @@ async fn a_routing_row_inserted_with_its_generation_commits_only_beside_its_even
 /// kept and still takes a `contain` through the store.
 #[tokio::test]
 async fn an_inserted_routing_row_cannot_carry_a_generation_near_the_end_of_its_type() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let actor = routing_actor();
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
@@ -38656,9 +36176,7 @@ async fn an_inserted_routing_row_cannot_carry_a_generation_near_the_end_of_its_t
 /// version, against that version's state, event, and generation.
 #[tokio::test]
 async fn two_routing_changes_in_one_transaction_commit_with_an_event_each() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("two-changes");
     let contained = store
@@ -38720,9 +36238,7 @@ async fn two_routing_changes_in_one_transaction_commit_with_an_event_each() {
 
 #[tokio::test]
 async fn a_legacy_claim_is_permanent_and_idempotent() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("claim");
     let submission_id = uuid::Uuid::new_v4();
@@ -38793,9 +36309,7 @@ async fn a_legacy_claim_is_permanent_and_idempotent() {
 
 #[tokio::test]
 async fn the_runtime_role_cannot_change_an_event_or_an_ownership_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("immutable");
     let actor = routing_actor();
@@ -38878,9 +36392,7 @@ async fn the_runtime_role_cannot_change_an_event_or_an_ownership_row() {
 /// uses), and it waits for nothing of another tenant.
 #[tokio::test]
 async fn a_routing_change_waits_for_a_receipt_holding_the_routing_lock() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PipelineActivationStore::new(backend);
     let tenant = routing_tenant("lock");
     let other_tenant = routing_tenant("lock-other");
@@ -39049,43 +36561,16 @@ struct PausingArtifactStore {
 }
 
 impl TraceArtifactStore for PausingArtifactStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        prepare_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        read_json_by_object_key,
+        delete_artifact
+    );
 
     fn publish_serialized_json(
         &self,
@@ -39102,62 +36587,6 @@ impl TraceArtifactStore for PausingArtifactStore {
         }
         self.inner.publish_serialized_json(prepared)
     }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json_by_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        expected_artifact_kind: TraceArtifactKind,
-        object_key: &str,
-        expected_ciphertext_sha256: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json_by_object_key(
-            expected_tenant_storage_ref,
-            expected_artifact_kind,
-            object_key,
-            expected_ciphertext_sha256,
-        )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
-    }
 }
 
 /// The receipt transaction commits the pipeline's ownership row with the
@@ -39166,17 +36595,9 @@ impl TraceArtifactStore for PausingArtifactStore {
 /// deferred foreign key is checked at commit). A replay adds no row.
 #[tokio::test]
 async fn a_receipt_commits_its_ownership_with_its_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("owned");
     let env = envelope(uuid::Uuid::new_v4()).await;
@@ -39190,13 +36611,7 @@ async fn a_receipt_commits_its_ownership_with_its_run() {
         None
     );
 
-    let PipelineReceiptResult::Created(run) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the first receipt creates a run")
-    };
+    let run = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     assert_eq!(
         activation
             .ownership(&tenant, env.submission_id)
@@ -39231,17 +36646,9 @@ async fn a_receipt_commits_its_ownership_with_its_run() {
 /// an internal error.
 #[tokio::test]
 async fn a_legacy_submission_is_never_given_a_pipeline_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
 
     // (a) The legacy path claimed the id.
@@ -39338,17 +36745,9 @@ async fn a_legacy_submission_is_never_given_a_pipeline_run() {
 /// writes nothing for the contained tenant. The owner of the id is unchanged.
 #[tokio::test]
 async fn a_legacy_owned_id_is_refused_when_containment_commits_before_the_receipt() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
 
     for claimed in [true, false] {
@@ -39444,17 +36843,9 @@ async fn a_legacy_owned_id_is_refused_when_containment_commits_before_the_receip
 /// created run means the claim comes back `Pipeline`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_owners_cannot_commit_for_one_submission() {
-    let Some(backend) = runtime_backend(8).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(8);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("two-owners");
     service.register_default_bundle(&tenant).await.unwrap();
@@ -39545,22 +36936,14 @@ async fn two_owners_cannot_commit_for_one_submission() {
 /// the operator routes the tenant to the pipeline.
 #[tokio::test]
 async fn a_service_without_unqualified_routing_refuses_a_tenant_with_no_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = service_with_default_routing(backend.clone(), artifact_store(&dir));
     assert!(
         !service.unqualified_routing(),
         "the default of unqualified routing is false"
     );
-    let (qualified_free, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let qualified_free = pipeline_service(&backend, &dir, minimal_config(false)).await;
     assert!(
         qualified_free.unqualified_routing(),
         "the test harness builds services that allow unqualified routing"
@@ -39584,13 +36967,7 @@ async fn a_service_without_unqualified_routing_refuses_a_tenant_with_no_row() {
     assert_eq!(count_files_under(dir.path()), 0);
 
     write_routing_as_operator(&tenant, "pipeline").await;
-    let PipelineReceiptResult::Created(run) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("a tenant routed to the pipeline gets a run")
-    };
+    let run = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     assert_eq!(count_runs(&backend, &tenant).await, 1);
     assert_eq!(
         PipelineActivationStore::new(backend)
@@ -39609,31 +36986,20 @@ async fn a_service_without_unqualified_routing_refuses_a_tenant_with_no_row() {
 /// service's flag (this harness service allows unqualified routing).
 #[tokio::test]
 async fn a_contained_or_legacy_tenant_gets_no_new_run_and_keeps_its_replays() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = routing_tenant("refused-states");
     write_routing_as_operator(&tenant, "pipeline").await;
 
     let env_a = envelope(uuid::Uuid::new_v4()).await;
     let raw_a = serde_json::to_vec(&env_a).unwrap();
     let key_a = env_a.submission_id.to_string();
-    let PipelineReceiptResult::Created(run_a) = submit_registered(
+    let run_a = submit_created(
         &service,
         receipt(&tenant, &key_a, &raw_a, &env_a, NO_LIMITS),
     )
-    .await
-    .unwrap() else {
-        panic!("a tenant routed to the pipeline gets a run")
-    };
+    .await;
     let rows_after_a = receipt_rows(&tenant).await;
     assert_eq!(rows_after_a.runs, 1);
     assert_eq!(rows_after_a.ownership, 1);
@@ -39719,9 +37085,7 @@ async fn a_contained_or_legacy_tenant_gets_no_new_run_and_keeps_its_replays() {
 /// row are discarded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_receipt_in_flight_cannot_commit_after_containment() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let (reached_tx, reached_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -39811,30 +37175,19 @@ async fn a_receipt_in_flight_cannot_commit_after_containment() {
 /// every error of the commit transaction, and the sweep removes them.
 #[tokio::test]
 async fn a_second_key_for_a_pipeline_owned_submission_is_an_error_not_legacy_owned() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("second-key");
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let first_key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(first) = submit_registered(
+    let first = submit_created(
         &service,
         receipt(&tenant, &first_key, &raw, &env, NO_LIMITS),
     )
-    .await
-    .unwrap() else {
-        panic!("the first receipt creates a run")
-    };
+    .await;
     let rows_after_first = receipt_rows(&tenant).await;
     assert_eq!(
         (
@@ -39909,17 +37262,9 @@ async fn a_second_key_for_a_pipeline_owned_submission_is_an_error_not_legacy_own
 /// insert, so the receipt's checks do not see it and the insert waits for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
 
     // (a) The submission row exists with a run and no ownership row.
     let tenant = routing_tenant("conflict-pipeline-run");
@@ -40056,9 +37401,7 @@ async fn a_commit_conflict_on_ownership_or_submission_stores_nothing() {
 /// exclusive request); and once the holder commits, containment finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn containment_waits_for_a_receipt_transaction_and_is_not_starved() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("not-starved");
     // The key and the seed `PipelineService` binds (`pipeline_routing_lock`,
@@ -40180,19 +37523,11 @@ async fn commit_routing_change(
 /// discarded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_receipt_waits_for_a_routing_change_in_progress() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
 
     // (a) The staging transaction.
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = routing_tenant("change-staging");
     write_routing_as_operator(&tenant, "pipeline").await;
     service.register_default_bundle(&tenant).await.unwrap();
@@ -40359,9 +37694,7 @@ async fn repeatable_read_runtime_backend(pool_size: usize) -> Arc<PgBackend> {
 /// routing row after the lock, not from a snapshot taken before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_routing_fence_holds_under_a_repeatable_read_default() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let repeatable = repeatable_read_runtime_backend(6).await;
     let dir = tempfile::tempdir().unwrap();
     let (reached_tx, reached_rx) = std::sync::mpsc::channel();
@@ -40433,17 +37766,9 @@ async fn the_routing_fence_holds_under_a_repeatable_read_default() {
 /// longer than both, completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_admin_operation_behind_a_held_lock_fails_busy_and_the_receipt_completes() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("admin-busy");
     write_routing_as_operator(&tenant, "pipeline").await;
@@ -40587,31 +37912,15 @@ async fn an_admin_operation_behind_a_held_lock_fails_busy_and_the_receipt_comple
 /// no legacy row. A claim of an id that no run holds still writes its row.
 #[tokio::test]
 async fn a_legacy_claim_never_takes_a_submission_that_a_run_owns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
 
     // (a) The run and its ownership row come from one receipt.
     let tenant = routing_tenant("claim-owned-receipt");
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     let owned = Some(ReceiptOwnership {
         owner: ReceiptOwner::Pipeline,
         submission_id: env.submission_id,
@@ -40689,30 +37998,14 @@ async fn a_legacy_claim_never_takes_a_submission_that_a_run_owns() {
 /// rows, and the append-only triggers let the cascade through.
 #[tokio::test]
 async fn a_tenant_with_a_pipeline_receipt_can_be_deleted() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let activation = PipelineActivationStore::new(backend.clone());
     let tenant = routing_tenant("delete-tenant");
 
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_envelope(&service, &tenant, &env).await;
     assert_eq!(
         activation
             .claim_legacy_receipt(&tenant, uuid::Uuid::new_v4())
@@ -40818,16 +38111,7 @@ async fn outcome_phases(
 /// default bundle registered and active for `tenant`.
 async fn policy_test_run(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
-    created
+    submit_envelope(service, tenant, &env).await
 }
 
 /// `PausingArtifactStore` with no write held yet: a test arms it
@@ -40908,17 +38192,9 @@ impl SettlementAdapter for GatedSettlementAdapter {
 /// the policy was not runnable and says nothing after the resume.
 #[tokio::test]
 async fn a_suspended_policy_leaves_the_run_retryable_and_resumes_under_the_same_bundle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = policy_tenant("suspend");
     let created = policy_test_run(&service, &tenant).await;
     let reviewed = service
@@ -41086,17 +38362,9 @@ enum InoperableBeforeScore {
 /// `attempts_exhausted`, which reads as a fault. Nothing is scored and no
 /// settlement row is seeded.
 async fn submission_inoperable_while_held_before_score_ends_the_run(how: InoperableBeforeScore) {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(true),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(true)).await;
     let tenant = policy_tenant("inoperable-before-score");
     let created = policy_test_run(&service, &tenant).await;
     let reviewed = service
@@ -41258,9 +38526,7 @@ async fn a_run_withdrawn_while_held_before_score_ends_submission_inoperable() {
 /// completes with one outcome for each phase.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let actor = policy_actor();
 
     // Review, through the service: the approved object's write is held.
@@ -41380,13 +38646,7 @@ async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
     // suspended, and `commit_review` refuses with the label and writes nothing.
     {
         let dir = tempfile::tempdir().unwrap();
-        let (service, _, _) = test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            minimal_config(false),
-            None,
-        )
-        .await;
+        let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
         let store = service.store();
         let tenant = policy_tenant("store-review");
         let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
@@ -41724,17 +38984,9 @@ async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
 /// suspension returned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_suspension_waits_for_a_commit_that_holds_the_policy_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = policy_tenant("waits");
     service.register_default_bundle(&tenant).await.unwrap();
     let bundle_id = service.bundle_id().to_string();
@@ -41801,21 +39053,11 @@ async fn a_suspension_waits_for_a_commit_that_holds_the_policy_row() {
 /// dispatch: `a_submitted_payout_is_confirmed_while_the_settle_policy_is_suspended`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_payout_waits_for_a_suspended_settle_policy() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = policy_tenant("payout");
     let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(first.state, PipelineRunState::Complete);
@@ -41932,9 +39174,7 @@ async fn a_payout_waits_for_a_suspended_settle_policy() {
 /// exists, and the refused attempt's object and staging row are discarded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_admission_policy_suspended_before_the_receipt_commit_refuses_the_receipt() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let pausing = unarmed_pausing_store(artifact_store(&dir));
     let (service, _, _) = test_service(
@@ -42003,17 +39243,9 @@ async fn an_admission_policy_suspended_before_the_receipt_commit_refuses_the_rec
 /// refusal writes nothing: no record, and the status row as it was.
 #[tokio::test]
 async fn terminate_is_refused_and_an_unknown_action_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let store = service.store();
     let tenant = policy_tenant("refusals");
     service.register_default_bundle(&tenant).await.unwrap();
@@ -42272,17 +39504,9 @@ async fn terminate_is_refused_and_an_unknown_action_is_refused() {
 /// `runnable` can disagree with the intervention record.
 #[tokio::test]
 async fn the_policy_status_row_keeps_runnable_and_status_equal() {
-    let Some(backend) = runtime_backend(2).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(2);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = policy_tenant("shape");
     service.register_default_bundle(&tenant).await.unwrap();
     let bundle_id = service.bundle_id().to_string();
@@ -42316,17 +39540,9 @@ async fn the_policy_status_row_keeps_runnable_and_status_equal() {
 /// OPS-003: the operational summary counts the tenant's suspended policies.
 #[tokio::test]
 async fn the_summary_counts_suspended_policies() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let product = PipelineProductStore::new(backend.clone());
     let tenant = policy_tenant("summary");
     service.register_default_bundle(&tenant).await.unwrap();
@@ -42403,21 +39619,11 @@ async fn the_summary_counts_suspended_policies() {
 /// pay now. After `resume` it submits once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_direct_payout_call_does_not_dispatch_under_a_suspended_settle_policy() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = policy_tenant("direct-payout");
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(
@@ -42502,21 +39708,11 @@ async fn a_direct_payout_call_does_not_dispatch_under_a_suspended_settle_policy(
 /// retract an accepted payout, and a resume changes nothing more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_submitted_payout_is_confirmed_while_the_settle_policy_is_suspended() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = policy_tenant("confirm-suspended");
     let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
@@ -42605,21 +39801,11 @@ async fn a_submitted_payout_is_confirmed_while_the_settle_policy_is_suspended() 
 /// `failed` as it was, and re-submits it once after `resume`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_payout_is_not_resubmitted_while_the_settle_policy_is_suspended() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = policy_tenant("failed-suspended");
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     recording.fail_next();
@@ -42723,82 +39909,16 @@ impl ReadPausingStore {
 }
 
 impl TraceArtifactStore for ReadPausingStore {
-    fn serialized_json_object_key(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-    ) -> anyhow::Result<String> {
-        self.inner
-            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
-    }
-
-    fn delete_artifact_at_object_key(
-        &self,
-        expected_tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_key: &str,
-    ) -> anyhow::Result<bool> {
-        self.inner.delete_artifact_at_object_key(
-            expected_tenant_storage_ref,
-            artifact_kind,
-            object_key,
-        )
-    }
-
-    fn prepare_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        self.inner.prepare_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn publish_serialized_json(
-        &self,
-        prepared: &PreparedSerializedJsonArtifact,
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.publish_serialized_json(prepared)
-    }
-
-    fn put_serialized_json(
-        &self,
-        tenant_storage_ref: &str,
-        artifact_kind: TraceArtifactKind,
-        object_id: &str,
-        serialized_json: &[u8],
-    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
-        self.inner.put_serialized_json(
-            tenant_storage_ref,
-            artifact_kind,
-            object_id,
-            serialized_json,
-        )
-    }
-
-    fn read_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<EncryptedTraceArtifact> {
-        self.inner
-            .read_artifact(expected_tenant_storage_ref, receipt)
-    }
-
-    fn read_json(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.read_json(expected_tenant_storage_ref, receipt)
-    }
+    forward_to_inner_store!(
+        serialized_json_object_key,
+        delete_artifact_at_object_key,
+        prepare_serialized_json,
+        publish_serialized_json,
+        put_serialized_json,
+        read_artifact,
+        read_json,
+        delete_artifact
+    );
 
     fn read_json_by_object_key(
         &self,
@@ -42825,15 +39945,6 @@ impl TraceArtifactStore for ReadPausingStore {
             object_key,
             expected_ciphertext_sha256,
         )
-    }
-
-    fn delete_artifact(
-        &self,
-        expected_tenant_storage_ref: &str,
-        receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<bool> {
-        self.inner
-            .delete_artifact(expected_tenant_storage_ref, receipt)
     }
 }
 
@@ -42867,9 +39978,7 @@ fn armed_gated_adapter(
 /// and one Settle outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_suspended_settle_policy_writes_no_credit_event() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
     let (gated, reached, release) = armed_gated_adapter(
         InstrumentId::trace_credit(),
@@ -43010,9 +40119,7 @@ async fn a_suspended_settle_policy_writes_no_credit_event() {
 /// `resume` the third attempt writes exactly the entries a control run writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_suspended_settle_policy_starts_no_index_write() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
     let reads = ReadPausingStore::new(artifact_store(&dir));
     let index = IsolatedPipelineIndex::new();
@@ -43190,9 +40297,7 @@ async fn a_suspended_settle_policy_starts_no_index_write() {
 /// after `resume`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_suspended_settle_policy_dispatches_no_leg() {
-    let Some(backend) = runtime_backend(6).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(6);
     let dir = tempfile::tempdir().unwrap();
     let (first_leg, reached, release) = armed_gated_adapter(
         InstrumentId::new("storage_rebate").unwrap(),
@@ -43345,21 +40450,11 @@ async fn a_suspended_settle_policy_dispatches_no_leg() {
 /// of A's legs once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn held_payouts_do_not_block_other_payouts_or_confirmations() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let recording = Arc::new(RecordingNearAdapter::new());
     let near = CountingNearAdapter::new(recording.clone());
-    let service = payout_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        trace_credit_only_config(),
-        vec![near_rail_trace_credit_adapter()],
-        near.clone(),
-        None,
-    )
-    .await;
+    let service = trace_credit_payout_service(&backend, &dir, near.clone()).await;
     let tenant = policy_tenant("held-listing");
 
     // An earlier payout, submitted before anything is held.
@@ -44246,9 +41341,7 @@ async fn gate_outcome_rows(
 /// row, an event, or an active bundle.
 #[tokio::test]
 async fn activation_requires_every_term_of_the_gate() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44360,9 +41453,7 @@ async fn activation_requires_every_term_of_the_gate() {
 /// transaction.
 #[tokio::test]
 async fn a_refused_activation_changes_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44472,9 +41563,7 @@ async fn a_refused_activation_changes_nothing() {
 /// deployed one and refuses a third revision that has no row.
 #[tokio::test]
 async fn a_bundle_is_qualified_once_for_each_code_revision() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let qualifications = PipelineQualificationStore::new(backend.clone());
@@ -44600,9 +41689,7 @@ async fn a_bundle_is_qualified_once_for_each_code_revision() {
 /// the row in force reopens intake.
 #[tokio::test]
 async fn an_activation_names_the_routing_row_it_read() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44705,9 +41792,7 @@ async fn an_activation_names_the_routing_row_it_read() {
 /// passes.
 #[tokio::test]
 async fn a_rollback_names_the_routing_row_it_read() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44776,9 +41861,7 @@ async fn a_rollback_names_the_routing_row_it_read() {
 /// in force passes.
 #[tokio::test]
 async fn a_deactivation_prepared_for_an_earlier_containment_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44851,9 +41934,7 @@ async fn a_deactivation_prepared_for_an_earlier_containment_is_refused() {
 /// alone or beside the state. From `pipeline` a deactivation needs none.
 #[tokio::test]
 async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -44962,9 +42043,7 @@ async fn a_deactivation_of_a_contained_tenant_names_what_it_read() {
 /// (`pipeline_routing_state_changed`).
 #[tokio::test]
 async fn a_containment_with_no_expectation_passes_from_every_state() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -45068,9 +42147,7 @@ async fn a_containment_with_no_expectation_passes_from_every_state() {
 /// V93 trigger refuses even the owner.
 #[tokio::test]
 async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let service = fixture.service.clone();
@@ -45338,9 +42415,7 @@ async fn rollback_selects_an_earlier_bundle_for_new_runs_only() {
 /// `a_receipt_staged_before_an_activation_commits_on_its_bundle`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_activation_races_a_receipt_without_rebinding_it() {
-    let Some(backend) = runtime_backend(8).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(8);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -45431,9 +42506,7 @@ async fn an_activation_races_a_receipt_without_rebinding_it() {
 /// outcome that names A, while B is the active bundle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_receipt_staged_before_an_activation_commits_on_its_bundle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
@@ -45543,9 +42616,7 @@ async fn a_receipt_staged_before_an_activation_commits_on_its_bundle() {
 /// refused and writes nothing, and the rollback succeeds.
 #[tokio::test]
 async fn a_rollback_needs_no_readiness_and_an_activation_does() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let fixture = two_qualified_bundles(backend.clone(), &dir).await;
     let store = fixture.activation_store();
@@ -45763,13 +42834,12 @@ fn placeholder_settle_outcome() -> StoredPhaseResult {
 
 /// Spec C-D1 to C-D3: a compatibility run that reaches Settle writes exactly
 /// one `trace_gate_decisions` row, from its Score evidence, marked as the
-/// pipeline's and naming its run; the legacy-only columns stay NULL for the
-/// sweeps to fill.
+/// pipeline's and naming its run; the legacy-only columns stay NULL, except
+/// the four dedup columns, which Settle stamps after its commit (owner
+/// decision O4).
 #[tokio::test]
 async fn settle_writes_one_gate_decision_row_per_submission() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-{}", uuid::Uuid::new_v4());
@@ -45886,11 +42956,245 @@ async fn settle_writes_one_gate_decision_row_per_submission() {
     assert_eq!(row.vector_index_snapshot_id, None);
     assert_eq!(row.agent_prose_perplexity_micros, None);
     assert_eq!(row.attributed_token_fraction_micros, None);
+    assert_eq!(row.composite_score_micros, None);
+    // Owner decision O4: the pipeline stamps dedup after Settle, under the
+    // active algorithm, over its source envelope's metadata-free render.
+    let source = service.load_source_bytes(&run).await.unwrap();
+    let algorithm = trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM;
+    assert_eq!(
+        row.dedup_simhash,
+        Some(
+            algorithm
+                .simhash(&trace_commons_server::trace_gate_service::dedup_canonical_text(&source))
+                as i64
+        )
+    );
+    assert!(row.dedup_cluster_id.is_some(), "{row:?}");
+    assert!(
+        row.dedup_cluster_size.is_some_and(|size| size >= 1),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.dedup_signal_version.as_deref(),
+        Some(
+            trace_commons_server::trace_gate_service::dedup_signal_version_for(algorithm).as_str()
+        )
+    );
+    assert_eq!(
+        row.dedup_signal_version.as_deref(),
+        Some("events.v1+fnv1a-3shingle-set.v2")
+    );
+}
+
+/// `runtime_backend`, with a gate driver pool as well (the login
+/// `gate_driver_backend` provisions), so the Settle stamp's cluster
+/// candidate read (`list_dedup_cluster_candidates`, V145) and the dedup
+/// re-derivation lister reach the cluster table as they do in production.
+async fn runtime_backend_with_gate_driver(pool_size: usize) -> Option<Arc<PgBackend>> {
+    runtime_backend(pool_size).await?;
+    // Provisions the gate driver login once per process.
+    let _ = gate_driver_backend().await;
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
+    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    runtime_url
+        .set_username(RUNTIME_ROLE)
+        .expect("set runtime user");
+    let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
+    gate_url
+        .set_username("trace_gate_driver_pipeline_test")
+        .expect("set the gate driver user");
+    let mut config = DatabaseConfig::from_postgres_url(runtime_url.as_str(), pool_size);
+    config.gate_driver_url = Some(SecretString::from(gate_url.to_string()));
+    Some(Arc::new(
+        PgBackend::new(&config)
+            .await
+            .expect("connect as runtime role with a gate driver pool"),
+    ))
+}
+
+/// An `envelope` whose one capture turn says `text`, so a test can give two
+/// submissions the same render without sharing it with every other test's
+/// fixture (dedup clusters are cross-tenant).
+async fn envelope_saying(submission_id: uuid::Uuid, text: &str) -> TraceContributionEnvelope {
+    let now = chrono::Utc::now();
+    let raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: text.to_string(),
+            response: Some("Done.".to_string()),
+            tool_calls: Vec::new(),
+            started_at: now,
+            completed_at: Some(now + chrono::Duration::seconds(1)),
+            state: Some("complete".to_string()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(raw)
+        .await
+        .unwrap();
+    envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope
+}
+
+/// Plain words spelled from a random UUID's nibbles: text no other fixture
+/// renders, with nothing a redactor would rewrite.
+fn unique_words() -> String {
+    const WORDS: [&str; 16] = [
+        "amber", "basalt", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris",
+        "juniper", "kestrel", "lagoon", "meadow", "nectar", "orchid", "pebble",
+    ];
+    uuid::Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| WORDS[usize::from(nibble)])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The cross-tenant first-in-cluster boolean earned trust reads (V114),
+/// asked as the owner under the tenant's context.
+async fn first_in_cluster(tenant_id: &str, submission_id: uuid::Uuid) -> bool {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let first: bool = tx
+        .query_one(
+            "SELECT trace_account_trust_first_in_cluster($1,$2)",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("ask first_in_cluster")
+        .get(0);
+    tx.commit().await.unwrap();
+    first
+}
+
+/// Owner decision O4: two pipeline submissions whose envelopes render the
+/// same text (Hamming 0 under the active algorithm) join one dedup cluster
+/// at Settle; the earlier is first in it, the later is not, and the later's
+/// size snapshot counts the earlier.
+#[tokio::test]
+async fn settle_clusters_near_identical_pipeline_submissions_together() {
+    let Some(backend) = runtime_backend_with_gate_driver(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-dedup-{}", uuid::Uuid::new_v4());
+    let text = format!("Inspect the clustering fixture: {}.", unique_words());
+    let first_env = envelope_saying(uuid::Uuid::new_v4(), &text).await;
+    let first =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &first_env).await;
+    assert_eq!(first.state, PipelineRunState::Complete, "{first:?}");
+    let second_env = envelope_saying(uuid::Uuid::new_v4(), &text).await;
+    let second =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &second_env).await;
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+    let first_row = gate_decision_rows(&tenant, first.submission_id).await;
+    let second_row = gate_decision_rows(&tenant, second.submission_id).await;
+    assert_eq!(first_row.len(), 1, "{first_row:?}");
+    assert_eq!(second_row.len(), 1, "{second_row:?}");
+    let (first_row, second_row) = (&first_row[0], &second_row[0]);
+    assert_eq!(first_row.dedup_simhash, second_row.dedup_simhash);
+    assert!(first_row.dedup_cluster_id.is_some(), "{first_row:?}");
+    assert_eq!(
+        first_row.dedup_cluster_id, second_row.dedup_cluster_id,
+        "the same render joins the same cluster"
+    );
+    assert_eq!(first_row.dedup_cluster_size, Some(1));
+    assert_eq!(second_row.dedup_cluster_size, Some(2));
+    assert!(first_in_cluster(&tenant, first.submission_id).await);
+    assert!(!first_in_cluster(&tenant, second.submission_id).await);
+}
+
+/// The backfill for rows written before the Settle stamp: the dedup
+/// re-derivation pass (`POST /v1/admin/rederive-dedup`) enumerates every
+/// gate decision row with no source filter, so a `pipeline_settle` row with
+/// NULL dedup columns is on its work list, read as the legacy stamp; and the
+/// guarded stamp fills such a row while leaving a stamped one alone.
+#[tokio::test]
+async fn an_unstamped_pipeline_row_is_on_the_rederive_work_list() {
+    let Some(backend) = runtime_backend_with_gate_driver(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rederive-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let decision_id = expected_pipeline_decision_id(&tenant, run.run_id);
+    // A row written before the stamp existed.
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let cleared = tx
+            .execute(
+                "UPDATE trace_gate_decisions
+                    SET dedup_simhash = NULL, dedup_cluster_id = NULL,
+                        dedup_cluster_size = NULL, dedup_signal_version = NULL
+                  WHERE tenant_id = $1 AND decision_id = $2 AND source = 'pipeline_settle'",
+                &[&tenant, &decision_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        tx.commit().await.unwrap();
+    }
+    let db: &dyn trace_commons_server::db::Database = backend.as_ref();
+    let listed = db.list_dedup_rederive_rows(i64::MAX).await.unwrap();
+    let row = listed
+        .iter()
+        .find(|row| row.tenant_id == tenant && row.decision_id == decision_id)
+        .expect("the pipeline row is on the rederive work list");
+    assert_eq!(row.submission_id, run.submission_id);
     assert_eq!(row.dedup_simhash, None);
     assert_eq!(row.dedup_cluster_id, None);
-    assert_eq!(row.dedup_cluster_size, None);
-    assert_eq!(row.dedup_signal_version, None);
-    assert_eq!(row.composite_score_micros, None);
+    assert_eq!(
+        row.effective_signal_version(),
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
+    );
+
+    // The guarded writer fills the NULL row in one statement, then refuses
+    // to move it.
+    let stamp = trace_commons_server::trace_gate_service::dedup_signal_version_for(
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
+    );
+    let cluster = uuid::Uuid::new_v4();
+    let write =
+        |cluster_id: uuid::Uuid| trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 7,
+            dedup_cluster_id: cluster_id,
+            dedup_cluster_size: 1,
+            dedup_signal_version: stamp.clone(),
+        };
+    assert!(
+        db.update_trace_gate_decision_dedup_if_unset(&tenant, decision_id, write(cluster))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.update_trace_gate_decision_dedup_if_unset(
+            &tenant,
+            decision_id,
+            write(uuid::Uuid::new_v4())
+        )
+        .await
+        .unwrap(),
+        "a clustered row is never moved"
+    );
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows[0].dedup_cluster_id, Some(cluster));
+    assert_eq!(rows[0].dedup_simhash, Some(7));
+    assert_eq!(
+        rows[0].dedup_signal_version.as_deref(),
+        Some(stamp.as_str())
+    );
 }
 
 /// Spec C-D2: the row is idempotent per run. Settle's commit cannot run
@@ -45900,9 +43204,7 @@ async fn settle_writes_one_gate_decision_row_per_submission() {
 /// submission is refused by V116's partial unique index.
 #[tokio::test]
 async fn settle_gate_decision_row_is_idempotent_per_submission() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-idempotent-{}", uuid::Uuid::new_v4());
@@ -45948,9 +43250,7 @@ async fn settle_gate_decision_row_is_idempotent_per_submission() {
 /// Spec C-D1: a Settle commit refused for a stale lease writes no row.
 #[tokio::test]
 async fn stale_settle_writes_no_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-stale-{}", uuid::Uuid::new_v4());
@@ -45987,9 +43287,7 @@ async fn stale_settle_writes_no_gate_decision_row() {
 /// writes no row.
 #[tokio::test]
 async fn suspended_settle_policy_writes_no_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-suspended-{}", uuid::Uuid::new_v4());
@@ -46033,17 +43331,9 @@ async fn suspended_settle_policy_writes_no_gate_decision_row() {
 /// as `main`'s gate driver writes none for a submission it does not score.
 #[tokio::test]
 async fn rejected_run_writes_no_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("gate-row-rejected-{}", uuid::Uuid::new_v4());
     let parked = quarantined_and_parked(&service, &tenant).await;
     let store = service.store();
@@ -46086,17 +43376,9 @@ async fn rejected_run_writes_no_gate_decision_row() {
 /// fields, so a run under any other bundle writes no row.
 #[tokio::test]
 async fn a_non_compatibility_bundle_writes_no_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let tenant = format!("gate-row-minimal-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
@@ -46114,9 +43396,7 @@ async fn a_non_compatibility_bundle_writes_no_gate_decision_row() {
 /// row written through it proves the INSERT those grants allow.
 #[tokio::test]
 async fn pipeline_gate_decision_insert_works_under_the_runtime_role() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let member: bool = backend
         .trace_pool_for_test()
         .get()
@@ -46149,9 +43429,7 @@ async fn pipeline_gate_decision_insert_works_under_the_runtime_role() {
 /// `main`'s NoveltyUtility checks withheld the award.
 #[tokio::test]
 async fn a_withheld_award_records_its_reason_on_the_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = checked_compatibility_service(
         &backend,
@@ -46228,9 +43506,7 @@ async fn duplicate_controls_service(
 /// unchanged, and the `NoveltyUtility` leg is withheld under the same label.
 #[tokio::test]
 async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = duplicate_controls_service(
         &backend,
@@ -46304,9 +43580,7 @@ async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
 /// duplicate of A after B's credit event exists.
 #[tokio::test]
 async fn a_paid_leg_fixes_the_duplicate_verdict_across_a_settle_crash() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let mut config = CompatibilityBundleConfig::local_reference();
     config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
@@ -46333,15 +43607,7 @@ async fn a_paid_leg_fixes_the_duplicate_verdict_across_a_settle_crash() {
     let mut runs = Vec::new();
     for _ in 0..2 {
         let env = model_training_envelope(uuid::Uuid::new_v4()).await;
-        let raw = serde_json::to_vec(&env).unwrap();
-        let key = env.submission_id.to_string();
-        let PipelineReceiptResult::Created(created) =
-            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await
-                .unwrap()
-        else {
-            panic!("receipt creates a run")
-        };
+        let created = submit_envelope(&service, &tenant, &env).await;
         runs.push(created);
     }
     let (a, b) = (&runs[0], &runs[1]);
@@ -46389,9 +43655,7 @@ async fn a_paid_leg_fixes_the_duplicate_verdict_across_a_settle_crash() {
 /// credit quality.
 #[tokio::test]
 async fn a_canonical_hash_match_records_cached_on_its_gate_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = duplicate_controls_service(
         &backend,
@@ -46421,9 +43685,7 @@ async fn a_canonical_hash_match_records_cached_on_its_gate_row() {
 /// nor for anything when the controls are not configured.
 #[tokio::test]
 async fn distinct_content_and_unconfigured_controls_withhold_nothing() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = duplicate_controls_service(
         &backend,
@@ -46529,9 +43791,7 @@ async fn assert_a_duplicate_is_not_indexed(
     delta: u64,
     label: &str,
 ) {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let mut config = CompatibilityBundleConfig::local_reference();
     config.novelty_utility_microcredits = delta;
@@ -46778,9 +44038,7 @@ async fn completed_run_with_dedup_values(
 /// nothing left.
 #[tokio::test]
 async fn withdrawal_clears_pipeline_row_dedup_columns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-withdrawn-{}", uuid::Uuid::new_v4());
@@ -46798,9 +44056,7 @@ async fn withdrawal_clears_pipeline_row_dedup_columns() {
 /// too.
 #[tokio::test]
 async fn revocation_clears_pipeline_row_dedup_columns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-revoked-{}", uuid::Uuid::new_v4());
@@ -46820,9 +44076,7 @@ async fn revocation_clears_pipeline_row_dedup_columns() {
 /// them, for an expiry and for a purge.
 #[tokio::test]
 async fn retention_clears_pipeline_row_dedup_columns() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     for action in [
@@ -46849,9 +44103,7 @@ async fn retention_clears_pipeline_row_dedup_columns() {
 /// path), so a withheld award's reason stays exactly as Settle wrote it.
 #[tokio::test]
 async fn withdrawal_leaves_credit_withheld_reason_as_legacy_does() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = checked_compatibility_service(
         &backend,
@@ -46915,9 +44167,7 @@ async fn insert_legacy_gate_decision(tenant_id: &str, submission_id: uuid::Uuid)
 async fn consumers_see_pipeline_rows() {
     use trace_commons_server::db::Database as _;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let gate = gate_driver_backend().await;
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
@@ -46973,6 +44223,20 @@ async fn consumers_see_pipeline_rows() {
         }),
         "the pipeline row is a gate evaluation fact candidate"
     );
+    // V156's precondition for the outcome below: this run credited nothing.
+    let credited: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("count the run's Trace Credit ledger rows")
+        .get(0);
+    assert_eq!(
+        credited, 0,
+        "the compatibility run is zero-delta, so V156 reads its gate row as not passed"
+    );
     let outcome: Option<String> = tx
         .query_one(
             "SELECT trace_record_account_trust_fact($1, $2, 'gate_evaluation', $3)",
@@ -46981,10 +44245,14 @@ async fn consumers_see_pipeline_rows() {
         .await
         .expect("record the gate evaluation fact")
         .get(0);
+    // V156 (O3): a pipeline row passes on the pipeline's own credit, not on
+    // perplexity AND novelty. This compatibility run is zero-delta (no
+    // award, no Trace Credit ledger row), so the recorder reads it as a
+    // failed gate even though it passed both.
     assert_eq!(
         outcome.as_deref(),
-        Some("evaluated_passed"),
-        "an accepted pipeline submission that passed both gates"
+        Some("evaluated_failed"),
+        "an accepted pipeline submission that passed both gates but was credited nothing"
     );
     tx.commit().await.unwrap();
 }
@@ -46998,9 +44266,7 @@ async fn consumers_see_pipeline_rows() {
 async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
     use trace_commons_server::db::Database as _;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let gate = gate_driver_backend().await;
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
@@ -47043,9 +44309,7 @@ async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
 async fn perplexity_rescore_enumeration_skips_pipeline_submissions() {
     use trace_commons_server::db::Database as _;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let gate = gate_driver_backend().await;
     let owner = owner_backend().await;
     let dir = tempfile::tempdir().unwrap();
@@ -47085,9 +44349,7 @@ async fn perplexity_rescore_enumeration_skips_pipeline_submissions() {
 /// a legacy submission.
 #[tokio::test]
 async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-rescore-write-{}", uuid::Uuid::new_v4());
@@ -47174,9 +44436,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
 async fn legacy_gate_driver_still_skips_pipeline_submissions() {
     use trace_commons_server::db::Database as _;
 
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let gate = gate_driver_backend().await;
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
@@ -47239,9 +44499,7 @@ async fn rewrite_stored_score_evidence(tenant_id: &str, run_id: uuid::Uuid, set:
 /// and completes, instead of refusing it as incomplete after the legs paid.
 #[tokio::test]
 async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-saturated-{}", uuid::Uuid::new_v4());
@@ -47275,9 +44533,7 @@ async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
 /// no credit, no row, and no charged retries.
 #[tokio::test]
 async fn incomplete_score_evidence_fails_settle_before_any_leg_settles() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = checked_compatibility_service(
         &backend,
@@ -47334,9 +44590,7 @@ async fn incomplete_score_evidence_fails_settle_before_any_leg_settles() {
 /// with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`, leaving that row as it was.
 #[tokio::test]
 async fn a_pipeline_row_naming_another_run_refuses_settle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_row_service(&backend, &dir).await;
     let tenant = format!("gate-row-conflict-{}", uuid::Uuid::new_v4());
@@ -47479,9 +44733,7 @@ async fn seed_and_claim_review_run(
 /// refused and change nothing.
 #[tokio::test]
 async fn record_privacy_pass_commits_once_under_the_lease() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
@@ -47911,9 +45163,7 @@ async fn record_privacy_pass_commits_once_under_the_lease() {
 /// submission row with no basis reads back an empty list.
 #[tokio::test]
 async fn load_submission_receipt_privacy_reads_the_receipt_values() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = test_service_with_controls(
         backend.clone(),
@@ -47930,13 +45180,7 @@ async fn load_submission_receipt_privacy_reads_the_receipt_values() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(low) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let low = submit_created(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     let read = store
         .load_submission_receipt_privacy(&tenant, low.submission_id)
         .await
@@ -47953,11 +45197,7 @@ async fn load_submission_receipt_privacy_reads_the_receipt_values() {
         residual_risk_basis: &[ResidualRiskCondition::ConsentContentFlag],
         ..receipt(&tenant, &key, &raw, &env, NO_LIMITS)
     };
-    let PipelineReceiptResult::Created(consent) =
-        submit_registered(&service, request).await.unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let consent = submit_created(&service, request).await;
     assert_eq!(consent.admission_decision, "admit");
     let read = store
         .load_submission_receipt_privacy(&tenant, consent.submission_id)
@@ -48081,6 +45321,15 @@ async fn privacy_pass_test_service(
     )
 }
 
+/// `privacy_pass_test_service` over a store in `dir`, with no crash point.
+async fn privacy_pass_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+) -> Arc<PipelineService> {
+    privacy_pass_test_service(backend.clone(), artifact_store(dir), privacy, None).await
+}
+
 /// The builder `privacy_pass_test_service` builds, for a test that sets one
 /// more knob before it builds (Task 8's pass timeout ceiling).
 fn privacy_pass_test_builder(
@@ -48151,13 +45400,7 @@ async fn submit_with_markers(
     }
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_created(service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     (tenant, created)
 }
 
@@ -48234,9 +45477,7 @@ fn expected_pass_ref_id(run_id: uuid::Uuid) -> uuid::Uuid {
 /// pass object as its input.
 #[tokio::test]
 async fn privacy_pass_runs_once_and_feeds_review() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let boundary = CountingPassBoundary::new();
@@ -48321,18 +45562,10 @@ async fn privacy_pass_runs_once_and_feeds_review() {
 /// approved content.
 #[tokio::test]
 async fn score_never_sees_planted_prose_pii() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = CountingPassBoundary::new();
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) = submit_with_markers(&service, "pass-score", &["MARKER_SECRET"]).await;
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -48374,18 +45607,10 @@ async fn score_never_sees_planted_prose_pii() {
 /// receipt made no classifier call.
 #[tokio::test]
 async fn stored_source_is_post_deterministic() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = CountingPassBoundary::new();
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) = submit_with_markers(
         &service,
         "pass-source",
@@ -48412,9 +45637,7 @@ async fn stored_source_is_post_deterministic() {
 /// and the sweep then deletes it.
 #[tokio::test]
 async fn privacy_pass_crash_before_commit_repeats_the_call_and_commits_one_ref() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let boundary = CountingPassBoundary::new();
@@ -48425,13 +45648,7 @@ async fn privacy_pass_crash_before_commit_repeats_the_call_and_commits_one_ref()
         Some(PipelineCrashPoint::AfterPrivacyPassArtifactStorage),
     )
     .await;
-    let service_b = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service_b = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_with_markers(&service_a, "pass-crash-before", &["MARKER_SECRET"]).await;
 
@@ -48503,9 +45720,7 @@ async fn privacy_pass_crash_before_commit_repeats_the_call_and_commits_one_ref()
 /// and completes Review over it.
 #[tokio::test]
 async fn privacy_pass_crash_after_commit_does_not_call_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = CountingPassBoundary::new();
     let service_a = privacy_pass_test_service(
@@ -48515,13 +45730,7 @@ async fn privacy_pass_crash_after_commit_does_not_call_again() {
         Some(PipelineCrashPoint::AfterPrivacyPassCommit),
     )
     .await;
-    let service_b = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service_b = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_with_markers(&service_a, "pass-crash-after", &["MARKER_SECRET"]).await;
 
@@ -48570,26 +45779,12 @@ async fn privacy_pass_crash_after_commit_does_not_call_again() {
 /// only B's committed object remains.
 #[tokio::test]
 async fn privacy_pass_lease_loss_records_one_result() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
     let boundary = CountingPassBoundary::blocking_first_call();
-    let service_a = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
-    let service_b = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service_a = privacy_pass_service(&backend, &dir, boundary.clone()).await;
+    let service_b = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_with_markers(&service_a, "pass-lease-loss", &["MARKER_SECRET"]).await;
 
@@ -48692,9 +45887,7 @@ async fn privacy_pass_lease_loss_records_one_result() {
 /// before V117 commits.
 #[tokio::test]
 async fn approval_without_a_pass_is_refused() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
@@ -48903,13 +46096,7 @@ async fn submit_at_risk(
     env.privacy.residual_pii_risk = receipt_risk;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_created(service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
     (tenant, created)
 }
 
@@ -48981,19 +46168,11 @@ async fn assert_held_by_the_pass(service: &PipelineService, tenant: &str, run: &
 /// High is the only escalating risk.
 #[tokio::test]
 async fn escalated_admit_run_parks_for_a_human() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     for classifier_risk in [ResidualPiiRisk::High] {
         let dir = tempfile::tempdir().unwrap();
         let boundary = EscalatingBoundary::new(Vec::new(), Some(classifier_risk));
-        let service = privacy_pass_test_service(
-            backend.clone(),
-            artifact_store(&dir),
-            boundary.clone(),
-            None,
-        )
-        .await;
+        let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
         let (tenant, created) =
             submit_at_risk(&service, "escalated-admit", ResidualPiiRisk::Low).await;
         assert_eq!(created.admission_decision, "admit");
@@ -49040,18 +46219,10 @@ async fn escalated_admit_run_parks_for_a_human() {
 /// another reason, is refused; one that resolves it releases the run.
 #[tokio::test]
 async fn escalated_approval_must_resolve_privacy_pass_review_required() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "escalated-resolve", ResidualPiiRisk::Low).await;
     let held = service
@@ -49115,18 +46286,10 @@ async fn escalated_approval_must_resolve_privacy_pass_review_required() {
 /// Review on the recorded pass output with no second classifier call.
 #[tokio::test]
 async fn escalated_approval_resumes_without_a_second_classifier_call() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "escalated-resume", ResidualPiiRisk::Low).await;
     let held = service
@@ -49170,18 +46333,10 @@ async fn escalated_approval_resumes_without_a_second_classifier_call() {
 /// claimable for review until its pass is recorded.
 #[tokio::test]
 async fn quarantined_run_is_not_claimable_before_its_pass() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), None);
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "quarantine-before-pass", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "quarantine");
@@ -49237,18 +46392,10 @@ async fn quarantined_run_is_not_claimable_before_its_pass() {
 /// reason and the pass's; the next dispatch approves it through the policy.
 #[tokio::test]
 async fn quarantined_run_escalated_to_high_is_held_for_both_reasons() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "quarantine-to-high", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "quarantine");
@@ -49322,18 +46469,10 @@ async fn quarantined_run_escalated_to_high_is_held_for_both_reasons() {
 /// `assessment_superseded`, and cannot be claimed again.
 #[tokio::test]
 async fn assessment_recorded_before_the_pass_is_ignored() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "superseded-assessment", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "quarantine");
@@ -49385,18 +46524,10 @@ async fn assessment_recorded_before_the_pass_is_ignored() {
 /// and an approval must resolve the Admission reason.
 #[tokio::test]
 async fn admission_quarantine_not_escalated_parks_as_today() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), None);
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "quarantine-cleared", ResidualPiiRisk::Medium).await;
     let parked = service
@@ -49450,18 +46581,10 @@ async fn admission_quarantine_not_escalated_parks_as_today() {
 /// object and no review outcome, and does not call the classifier again.
 #[tokio::test]
 async fn a_recorded_pass_whose_bytes_do_not_match_its_hash_is_an_integrity_failure() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), None);
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "pass-hash-mismatch", ResidualPiiRisk::Medium).await;
     let parked = service
@@ -49561,21 +46684,13 @@ async fn stored_privacy_risk(
 /// pass output, and the row keeps the raw `medium` risk.
 #[tokio::test]
 async fn consent_flag_only_run_whose_pii_the_classifier_removed_is_cleared() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(
         vec![ResidualRiskCondition::ConsentContentFlag],
         Some(ResidualPiiRisk::Medium),
     );
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "consent-removed", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "admit");
@@ -49622,18 +46737,10 @@ async fn consent_flag_only_run_whose_pii_the_classifier_removed_is_cleared() {
 /// nothing more in is cleared and goes straight through Review.
 #[tokio::test]
 async fn cleared_consent_flag_only_run_goes_straight_to_review() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(vec![ResidualRiskCondition::ConsentContentFlag], None);
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "consent-cleared", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "admit");
@@ -49659,18 +46766,10 @@ async fn cleared_consent_flag_only_run_goes_straight_to_review() {
 /// approved content Score reads lacks the PII marker.
 #[tokio::test]
 async fn prose_pii_the_pass_removed_is_accepted_on_the_redacted_content() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_with_markers(&service, "removed-accepted", &["MARKER_SECRET"]).await;
     assert_eq!(created.admission_decision, "admit");
@@ -49790,18 +46889,10 @@ async fn review_decision_and_rule(
 /// is not called again.
 #[tokio::test]
 async fn escalated_rejection_ends_the_run_rejected() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "escalated-reject", ResidualPiiRisk::Low).await;
     assert_eq!(created.admission_decision, "admit");
@@ -49865,18 +46956,10 @@ async fn escalated_rejection_ends_the_run_rejected() {
 /// the approval's own transaction; a run the pass cleared keeps both NULL.
 #[tokio::test]
 async fn escalated_approval_links_the_assessment() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) = submit_at_risk(&service, "escalated-link", ResidualPiiRisk::Low).await;
     let held = service
         .process_run(&tenant, created.run_id)
@@ -49934,8 +47017,7 @@ async fn escalated_approval_links_the_assessment() {
     // A run the pass cleared is approved with no link.
     let quiet = EscalatingBoundary::new(Vec::new(), None);
     let dir = tempfile::tempdir().unwrap();
-    let cleared_service =
-        privacy_pass_test_service(backend.clone(), artifact_store(&dir), quiet, None).await;
+    let cleared_service = privacy_pass_service(&backend, &dir, quiet).await;
     let (tenant, created) =
         submit_at_risk(&cleared_service, "cleared-no-link", ResidualPiiRisk::Low).await;
     let reviewed = cleared_service
@@ -49959,18 +47041,10 @@ async fn escalated_approval_links_the_assessment() {
 /// without `pipeline_attempt_artifact_missing`.
 #[tokio::test]
 async fn quarantined_rejection_same_dispatch_commits_after_the_pass() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = EscalatingBoundary::new(Vec::new(), None);
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) =
         submit_at_risk(&service, "quarantine-reject-pass", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "quarantine");
@@ -50024,9 +47098,7 @@ fn scheduled_retry_seconds(run: &PipelineRunRecord) -> i64 {
 /// classifier is not on it.
 #[tokio::test]
 async fn classifier_failure_retries_then_fails_closed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = privacy_pass_test_service(
         backend.clone(),
@@ -50095,17 +47167,9 @@ async fn classifier_failure_retries_then_fails_closed() {
 /// `privacy_control_missing`, never Review on the unclassified source.
 #[tokio::test]
 async fn missing_boundary_is_an_uncharged_wait() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let receiving = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        default_privacy_boundary(),
-        None,
-    )
-    .await;
+    let receiving = privacy_pass_service(&backend, &dir, default_privacy_boundary()).await;
     let (tenant, created) = submit_with_markers(&receiving, "missing-boundary", &[]).await;
     let dispatching = test_service_with_controls(
         backend.clone(),
@@ -50141,9 +47205,7 @@ async fn missing_boundary_is_an_uncharged_wait() {
 /// classifier for as long as it takes.
 #[tokio::test]
 async fn classifier_timeout_is_a_classifier_failure() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let classifier_calls = Arc::new(AtomicUsize::new(0));
     let service = Arc::new(
@@ -50194,18 +47256,10 @@ async fn classifier_timeout_is_a_classifier_failure() {
 /// worker, which deletes the payload.
 #[tokio::test]
 async fn retention_purge_deletes_the_privacy_pass_object() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let boundary = CountingPassBoundary::new();
-    let service = privacy_pass_test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        boundary.clone(),
-        None,
-    )
-    .await;
+    let service = privacy_pass_service(&backend, &dir, boundary.clone()).await;
     let (tenant, created) = submit_with_markers(&service, "pass-purge", &["MARKER_SECRET"]).await;
     let reviewed = service
         .process_run(&tenant, created.run_id)
@@ -50298,9 +47352,7 @@ async fn retention_purge_deletes_the_privacy_pass_object() {
 /// and no human hold shows where there is none.
 #[tokio::test]
 async fn a_cleared_privacy_pass_leaves_the_submission_received() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let store = PgPipelineStore::new(backend.clone());
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
@@ -50385,11 +47437,7 @@ async fn submit_with_accept_medium(
         accept_medium_risk,
         ..receipt(&tenant, &key, &raw, &env, NO_LIMITS)
     };
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(service, request).await.unwrap()
-    else {
-        panic!("the receipt creates a run")
-    };
+    let created = submit_created(service, request).await;
     (tenant, created)
 }
 
@@ -50426,19 +47474,11 @@ async fn admission_rule_and_evidence_risk(
 /// Low run earns.
 #[tokio::test]
 async fn accept_medium_admits_a_found_and_removed_receipt_and_completes_it() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     // A config that awards both instruments, so "credit" is not 0 on both
     // sides of the comparison below.
-    let (service, _, adapters) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(false),
-        None,
-    )
-    .await;
+    let (service, _, adapters) = pipeline_service_parts(&backend, &dir, scored_config(false)).await;
     let (tenant, created) = submit_with_accept_medium(
         &service,
         "accept-medium-removed",
@@ -50564,17 +47604,9 @@ async fn accept_medium_admits_a_found_and_removed_receipt_and_completes_it() {
 /// holds.
 #[tokio::test]
 async fn accept_medium_still_holds_a_high_receipt() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let (tenant, created) = submit_with_accept_medium(
         &service,
         "accept-medium-high",
@@ -50609,17 +47641,9 @@ async fn accept_medium_still_holds_a_high_receipt() {
 /// pipeline.
 #[tokio::test]
 async fn without_accept_medium_a_found_and_removed_receipt_is_quarantined() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let (tenant, created) = submit_with_accept_medium(
         &service,
         "accept-medium-off",
@@ -50654,17 +47678,9 @@ async fn without_accept_medium_a_found_and_removed_receipt_is_quarantined() {
 /// is admitted under the bundle's own rule, as it was without the setting.
 #[tokio::test]
 async fn accept_medium_leaves_a_declared_and_a_consent_flag_medium_as_they_were() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        minimal_config(false),
-        None,
-    )
-    .await;
+    let service = pipeline_service(&backend, &dir, minimal_config(false)).await;
     let (tenant, declared) = submit_with_accept_medium(
         &service,
         "accept-medium-declared",
@@ -51015,9 +48031,7 @@ fn registered_score_service_options(
 /// compatibility Score is, and scores once the lock is free.
 #[tokio::test]
 async fn a_registered_score_policy_takes_the_tenant_score_lock() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for event in [
         PipelineTraceCreditEvent::PipelineScore,
@@ -51072,9 +48086,7 @@ async fn a_registered_score_policy_takes_the_tenant_score_lock() {
 /// compatibility run does.
 #[tokio::test]
 async fn a_registered_score_policy_writes_a_gate_decision_row() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for event in [
         PipelineTraceCreditEvent::PipelineScore,
@@ -51121,9 +48133,7 @@ async fn a_registered_score_policy_writes_a_gate_decision_row() {
 /// kept out of the index.
 #[tokio::test]
 async fn a_duplicate_earns_nothing_under_a_registered_score_policy() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for event in [
         PipelineTraceCreditEvent::PipelineScore,
@@ -51199,9 +48209,7 @@ async fn a_duplicate_earns_nothing_under_a_registered_score_policy() {
 /// gate decision row as it would without them.
 #[tokio::test]
 async fn a_registered_score_policy_award_adjustments_persist_with_its_evidence() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let adjustments = vec![
         trace_commons_gate_api::pipeline::AwardAdjustment::new(
@@ -51249,9 +48257,7 @@ async fn a_registered_score_policy_award_adjustments_persist_with_its_evidence()
 /// goes on to Settle.
 #[tokio::test]
 async fn a_registered_score_policy_can_hold_a_trace_for_operator_review() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let label = "operator_review_requested";
     let service = registered_score_service_holding(
@@ -51377,9 +48383,7 @@ async fn a_registered_score_policy_can_hold_a_trace_for_operator_review() {
 /// the release.
 #[tokio::test]
 async fn a_withdrawn_score_hold_ends_instead_of_parking_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = registered_score_service_holding(
         backend.clone(),
@@ -51508,9 +48512,7 @@ async fn claim_score_hold(
 /// Review arm never reads it, and the run cannot be claimed again.
 #[tokio::test]
 async fn an_approved_score_hold_reruns_score_with_the_approval() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = score_hold_service(&backend, &dir, true);
     let tenant = format!("score-hold-approved-{}", uuid::Uuid::new_v4());
@@ -51596,9 +48598,7 @@ async fn an_approved_score_hold_reruns_score_with_the_approval() {
 /// Score is committed and no leg exists.
 #[tokio::test]
 async fn a_policy_that_holds_again_after_approval_fails_the_run() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = score_hold_service(&backend, &dir, false);
     let tenant = format!("score-hold-repeated-{}", uuid::Uuid::new_v4());
@@ -51661,9 +48661,7 @@ async fn a_policy_that_holds_again_after_approval_fails_the_run() {
 /// with no credit, no leg, no index write and no gate decision row.
 #[tokio::test]
 async fn a_rejected_score_hold_settles_with_no_credit() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     // A policy that would price an approved trace: the rejection must not
     // reach it.
@@ -51737,9 +48735,7 @@ async fn a_rejected_score_hold_settles_with_no_credit() {
 /// `pipeline_gate_decision_evidence_incomplete`, before any leg pays.
 #[tokio::test]
 async fn a_registered_policy_missing_a_gate_row_field_fails_at_settle() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     for field in [
         "perplexity_micros",
@@ -51867,9 +48863,7 @@ const QUALIFIED_REGISTERED_SCORE_IMPLEMENTATION: &str = "substituted.score.quali
 /// implementation, as before.
 #[tokio::test]
 async fn qualify_bundle_accepts_a_registered_score_policy_only_when_qualified() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(QualifiedProductionScorer(ReferencePerplexityScorer::new()));
     let embedder = Arc::new(QualifiedProductionEmbedder(ReferenceEmbedder::new()));
@@ -52095,9 +49089,7 @@ async fn crash_after_the_paid_leg_on_the_last_attempt(
 /// removes its paid revision from the index.
 #[tokio::test]
 async fn a_paid_settle_run_that_crashes_on_its_last_attempt_completes_and_stays_indexed() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("finish-sweep-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
@@ -52153,9 +49145,7 @@ async fn a_paid_settle_run_that_crashes_on_its_last_attempt_completes_and_stays_
 /// attempt completes it.
 #[tokio::test]
 async fn a_charged_retry_that_exhausts_a_paid_settle_run_gives_it_one_extra_attempt() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("finish-retry-{}", uuid::Uuid::new_v4());
     let (service, _, _, leased) =
@@ -52189,9 +49179,7 @@ async fn a_charged_retry_that_exhausts_a_paid_settle_run_gives_it_one_extra_atte
 /// again on it fails as before, and N-7 queues its revision's removal.
 #[tokio::test]
 async fn a_finishable_run_charged_again_on_its_extra_attempt_fails_under_n7() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("finish-bounded-{}", uuid::Uuid::new_v4());
     let (service, _, _, leased) =
@@ -52230,9 +49218,7 @@ async fn a_finishable_run_charged_again_on_its_extra_attempt_fails_under_n7() {
 /// `Fail` ends it under N-7.
 #[tokio::test]
 async fn a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -52354,9 +49340,7 @@ async fn a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator() {
 /// payment.
 #[tokio::test]
 async fn an_operator_released_held_run_completes_without_paying_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
     let service = compatibility_test_service_on(
@@ -52441,9 +49425,7 @@ async fn an_operator_released_held_run_completes_without_paying_again() {
 /// novel Score records none.
 #[tokio::test]
 async fn a_near_duplicate_score_records_the_unapplied_run_it_counted() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let service = compatibility_test_service_on(
         backend.clone(),
@@ -52592,9 +49574,7 @@ async fn operator_held_at(
 /// marked for its own audit event.
 #[tokio::test]
 async fn a_released_run_whose_attempt_crashes_is_held_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("release-crash-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
@@ -52657,9 +49637,7 @@ async fn a_released_run_whose_attempt_crashes_is_held_again() {
 /// held for the operator again rather than failed under N-7.
 #[tokio::test]
 async fn a_released_run_charged_on_its_attempt_is_held_again() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("release-retry-{}", uuid::Uuid::new_v4());
     let (service, _, run_id, _) = hold_a_paid_run_for_an_operator(&backend, &dir, &tenant).await;
@@ -52693,9 +49671,7 @@ async fn a_released_run_charged_on_its_attempt_is_held_again() {
 /// `pipeline_gate_decision_evidence_incomplete`, not only as a conflict.
 #[tokio::test]
 async fn a_paid_run_refused_for_incomplete_evidence_waits_for_an_operator() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("held-incomplete-{}", uuid::Uuid::new_v4());
     let (service, _, _, leased) =
@@ -52726,9 +49702,7 @@ async fn a_paid_run_refused_for_incomplete_evidence_waits_for_an_operator() {
 /// as paid for the hold.
 #[tokio::test]
 async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
+    let backend = runtime_backend_or_skip!(4);
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("held-external-{}", uuid::Uuid::new_v4());
     let (service, _, _) = test_service(

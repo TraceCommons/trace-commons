@@ -1011,6 +1011,9 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 /// opt-in under the new scopes is exactly what arming means.
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
+    // A bound admission contribution needs the person's certified preview;
+    // a standing opt-in must not restart an unpreviewed witness job.
+    super::preview::REASON_WITNESS_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
     // Re-approving it unattended would restart the retry budget the cap
     // just spent, and the classifier would get the session every hour again.
@@ -1855,11 +1858,13 @@ impl Queue {
     /// as a fresh offer dated `now`, like [`Self::release_witness_risk_holds`].
     /// The caller decides that the device has a witness.
     ///
-    /// Released only when the scrub record is readable (`QueueEntry::scrub`
-    /// is `Scrubbed`) and the witness rule gives no reason at all
-    /// (`second_look_reasons` under `RedactionWitness::Present`): nothing
-    /// unsure, nothing trimmed. No record, or any other reason, stays held,
-    /// and so does an entry with no message from the person.
+    /// A bound scrub record is released when the witness rule gives no
+    /// reason at all (`second_look_reasons` under `RedactionWitness::Present`):
+    /// nothing unsure, nothing trimmed. A revocation can have cleared the
+    /// pin while retaining that historical record. Its zero-match counts can identify
+    /// an obsolete hold, but never certify new bytes: clear them and require
+    /// a fresh witness run. No record, or any other reason, stays held, and
+    /// so does an entry with no message from the person.
     ///
     /// A local preview pin is cleared with its counts, so the entry goes
     /// through the witness again (an upload refuses a local pin on a witness
@@ -1873,13 +1878,21 @@ impl Queue {
                 && e.reason_label.as_deref()
                     == Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED);
             let scrub = e.scrub();
-            let only_nothing_matched = matches!(scrub, Scrub::Scrubbed(_))
-                && second_look::second_look_reasons(
-                    scrub,
-                    e.subagents_dropped,
-                    RedactionWitness::Present,
-                )
-                .is_empty();
+            let historical_zero_match = e.previewed_envelope_digest.is_none()
+                && e.scrub.as_ref().is_some_and(|record| {
+                    record.counts.content_marks == 0
+                        && record.counts.unsure_spans == 0
+                        && !record.counts.unsure_unreadable
+                        && e.subagents_dropped == 0
+                });
+            let only_nothing_matched = historical_zero_match
+                || (matches!(scrub, Scrub::Scrubbed(_))
+                    && second_look::second_look_reasons(
+                        scrub,
+                        e.subagents_dropped,
+                        RedactionWitness::Present,
+                    )
+                    .is_empty());
             if !held || !only_nothing_matched || e.has_no_user_messages() {
                 continue;
             }
@@ -5007,6 +5020,62 @@ mod tests {
         q.set_state(id, QueueState::Approved, None);
         q.cancel(id).unwrap();
         assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+    }
+
+    #[test]
+    fn a_revoked_zero_match_hold_can_return_to_the_witness_without_a_stale_pin() {
+        use crate::daemon::second_look::{REASON_SECOND_LOOK_REVIEW_REQUIRED, Scrub, ScrubCounts};
+        for (content, unsure, unreadable, dropped, repinned, expected) in [
+            (0, 0, false, 0, false, 1),
+            (1, 0, false, 0, false, 0),
+            (0, 1, false, 0, false, 0),
+            (0, 0, true, 0, false, 0),
+            (0, 0, false, 1, false, 0),
+            (0, 0, false, 0, true, 0),
+        ] {
+            let mut q = Queue::new();
+            let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+            e.shape = Some(SessionShape {
+                user_turns: 1,
+                ..Default::default()
+            });
+            e.subagents_dropped = dropped;
+            let id = e.entry_id;
+            q.upsert(e, 500).unwrap();
+            assert!(q.record_previewed_envelope(id, "sha256:old", None, None));
+            assert!(q.record_scrub(
+                id,
+                "sha256:old",
+                ScrubCounts {
+                    marks: content,
+                    content_marks: content,
+                    unsure_spans: unsure,
+                    unsure_unreadable: unreadable,
+                }
+            ));
+            assert!(q.approve(id, &[], None, None, None, None));
+            assert!(q.revoke_approval_at(id, REASON_SECOND_LOOK_REVIEW_REQUIRED, Utc::now()));
+            if repinned {
+                assert!(q.record_previewed_envelope(id, "sha256:different", None, None));
+            }
+            assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+            assert!(q.get(id).unwrap().scrub.is_some());
+            assert_eq!(q.release_nothing_matched_holds(Utc::now()), expected);
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Pending);
+            assert_eq!(e.approved_inputs, None);
+            if expected == 1 {
+                assert_eq!(e.reason_label, None);
+                assert_eq!(e.previewed_envelope_digest, None);
+                assert_eq!(e.scrub, None, "historical counts cannot certify new bytes");
+                assert!(!e.approved_unattended);
+            } else {
+                assert_eq!(
+                    e.reason_label.as_deref(),
+                    Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
+                );
+            }
+        }
     }
 
     #[test]

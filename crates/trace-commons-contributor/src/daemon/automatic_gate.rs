@@ -57,7 +57,7 @@
 //! grant rather than of a send; none is evaluated here.
 
 use crate::config::{ContributorConfig, WitnessSettings};
-use crate::witness::transport::{WitnessedEnvelope, certified_redaction_pipeline_version};
+use crate::witness::transport::WitnessedEnvelope;
 
 /// Whether an unmet requirement stops an unattended approval. See the module
 /// docs for why this is off.
@@ -263,10 +263,11 @@ pub enum SessionRedaction {
 
 /// K6: whether a certified full pipeline ran for this session.
 ///
-/// Reads the version only through [`certified_redaction_pipeline_version`],
+/// Reads the version only through
+/// [`crate::witness::configuration::certified_redaction_pipeline_version`],
 /// which returns it only after the certificate's digest matches the bytes
-/// and its signature recovers to the pinned signer, so a field the
-/// signature does not cover is never consulted. The witness must also be
+/// and its signature recovers to a signer current signed routing still
+/// authorizes, so a field the signature does not cover is never consulted. The witness must also be
 /// pinned to a measurement, the same condition the approved-review path in
 /// `submit` puts on a saved certificate: an unpinned signer is a key, not an
 /// enclave.
@@ -277,6 +278,7 @@ pub enum SessionRedaction {
 pub fn session_redaction(
     witnessed: Option<&WitnessedEnvelope>,
     witness: Option<&WitnessSettings>,
+    state_dir: &std::path::Path,
 ) -> SessionRedaction {
     let (Some(response), Some(settings)) = (witnessed, witness) else {
         return SessionRedaction::NotCertified;
@@ -288,7 +290,9 @@ pub fn session_redaction(
     {
         return SessionRedaction::NotCertified;
     }
-    match certified_redaction_pipeline_version(response, &settings.signing_address) {
+    match crate::witness::configuration::certified_redaction_pipeline_version(
+        settings, state_dir, response,
+    ) {
         Ok(version)
             if trace_commons_protocol::trace_contribution::is_full_redaction_pipeline_version(
                 &version,
@@ -367,6 +371,14 @@ pub fn project_disclosure(policy: &super::policy::ProjectPolicy, project_key: &s
 mod tests {
     use super::*;
 
+    fn session_redaction(
+        response: Option<&WitnessedEnvelope>,
+        witness: Option<&WitnessSettings>,
+    ) -> SessionRedaction {
+        let dir = tempfile::tempdir().unwrap();
+        super::session_redaction(response, witness, dir.path())
+    }
+
     fn cfg(tenant: &str, scopes: &[&str], witness: bool, pii: Option<&str>) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
@@ -392,7 +404,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({
                     "url": "https://witness.example",
                     "signing_address": format!("0x{}", "ab".repeat(20)),
-                    "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                    "expected_measurements": [format!("mrtd={}", "aa".repeat(48))],
                 }))
                 .unwrap()
             }),
@@ -475,7 +487,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "url": "https://witness.example",
             "signing_address": signing_address,
-            "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+            "expected_measurements": [format!("mrtd={}", "aa".repeat(48))],
         }))
         .unwrap()
     }
@@ -656,6 +668,57 @@ mod tests {
         unpinned.expected_measurements.clear();
         assert_eq!(
             session_redaction(Some(&response), Some(&unpinned)),
+            SessionRedaction::NotCertified
+        );
+    }
+
+    #[test]
+    fn rotated_signer_certifies_until_signed_withdrawal() {
+        use crate::witness::{accepted_list, configuration};
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_accepted_list::{ListSignature, key_id_for};
+        use trace_commons_protocol::witness_configuration::WitnessConfiguration;
+        let dir = tempfile::tempdir().unwrap();
+        let (response, actual) = certified(NEAR_AI_FULL);
+        let mut enrollment = pinned_witness(&format!("0x{}", "11".repeat(20)));
+        enrollment.url = configuration::COMMONS_ENROLLMENT_URLS[0].into();
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[54; 32]).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        accepted_list::set_test_keys(dir.path(), vec![public]);
+        let now = chrono::Utc::now();
+        let mut document: WitnessConfiguration = serde_json::from_value(serde_json::json!({
+            "schema": "trace-commons.witness-configuration.v1", "version": 2, "issued_at": now,
+            "enrollment_urls": [enrollment.url, "https://replacement.example"],
+            "endpoints": [{"url": "https://replacement.example", "entries": [{
+                "measurements": format!("mrtd={}", "aa".repeat(48)),
+                "signing_address": actual.signing_address,
+                "not_before": now - chrono::Duration::minutes(1),
+                "not_after": now + chrono::Duration::hours(1)
+            }]}]
+        }))
+        .unwrap();
+        let publish = |document: &WitnessConfiguration| {
+            let payload = document.canonical_payload().unwrap();
+            let signature = ListSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+            };
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({"payload": payload, "signatures": [signature]}),
+            )
+            .unwrap();
+            configuration::install(dir.path(), &bytes, &[public], &enrollment.url).unwrap();
+        };
+        publish(&document);
+        assert_eq!(
+            super::session_redaction(Some(&response), Some(&enrollment), dir.path()),
+            SessionRedaction::CertifiedFullPipeline
+        );
+        document.version += 1;
+        document.endpoints.clear();
+        publish(&document);
+        assert_eq!(
+            super::session_redaction(Some(&response), Some(&enrollment), dir.path()),
             SessionRedaction::NotCertified
         );
     }

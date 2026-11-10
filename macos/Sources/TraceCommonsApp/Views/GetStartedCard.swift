@@ -5,12 +5,13 @@ import TCDesign
 /// owner, 2026-11-02: the Private AI tab's guide and Home's Traces
 /// walkthrough take the Insights card's design, formatting and layout).
 ///
-/// A title, then an optional line under it, then numbered steps: each a
+/// A title, then an optional line under it, then numbered steps, each in a
+/// translucent card of its own: a
 /// small number in a disc, a title and one short line, with an "i" after
 /// the line holding a step's longer explanation, and the step's action, if
 /// it has one, as a text link with an arrow under it. Given `close`, a
-/// small X in the top trailing corner closes the card. No graphic and no
-/// gradient: it is a plain card. Every word is the caller's.
+/// small X in the top trailing corner closes the card. No gradient. Every
+/// word is the caller's.
 ///
 /// `pixelField` adds a dithered grid of blues that grows from the card's
 /// bottom trailing corner and fades out before its text (owner, 2026-11-02,
@@ -43,12 +44,18 @@ struct GetStartedCard: View {
     let steps: [Step]
     var close: Close?
     var pixelField = false
+    /// The field's shape, so one card can be told from another.
+    var fieldPattern: GlassPixelField.Pattern = .corner
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(title).insightsTitle()
+                    // The title's type is a hero card's (Ron, 2026-11-05: as
+                    // Home's promo cards), and so is the line's under it.
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.display.weight(.heavy))
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
                     if !lead.isEmpty {
@@ -59,7 +66,9 @@ struct GetStartedCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if let close { GetStartedCardClose(close: close) }
             }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
+            // Each step in a card of its own, as close together as Home's
+            // stat tiles (Ron, 2026-11-09).
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                     GetStartedCardStep(number: index + 1, step: step)
                 }
@@ -67,7 +76,7 @@ struct GetStartedCard: View {
             .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background { if pixelField { GetStartedCardField() } }
+        .background { if pixelField { GetStartedCardField(pattern: fieldPattern) } }
         .insightsSection()
     }
 }
@@ -75,14 +84,15 @@ struct GetStartedCard: View {
 /// The pixel field, out to the card's own edges and corners: the card's
 /// content sits inside its padding, so the field reaches back out by that
 /// padding and is cut to the card's corner radius.
-struct GetStartedCardField: View {
+private struct GetStartedCardField: View {
     /// Three nearby blues: the kept blue, the chart blue and first run's
     /// pale beam core, which the cells drift between.
     static let palette = [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1,
                           GlassTokens.Color.firstRunBeamCore]
+    var pattern: GlassPixelField.Pattern = .corner
 
     var body: some View {
-        GlassPixelField(palette: Self.palette)
+        GlassPixelField(palette: Self.palette, pattern: pattern)
             .clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))
             .padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)
             .padding(.vertical, -GlassTokens.Space.cardPaddingVertical)
@@ -125,13 +135,21 @@ private struct GetStartedCardStep: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // A box of its own (Ron, 2026-11-09), laid out as the Not
+        // contributed card's line under its count, but darker than the card
+        // around it: the well's fill and inset edge, at the nested card's
+        // corner radius, not the well's pill.
+        .padding(.horizontal, GlassTokens.Space.s6)
+        .padding(.vertical, GlassTokens.Space.s4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassTier(.well, radius: GlassTokens.Radius.cardQuiet)
         .accessibilityElement(children: .contain)
     }
 }
 
 /// The card's X: a bare glyph in the secondary ink, primary under the
 /// pointer, as a hero card's X is drawn on its own ground.
-private struct GetStartedCardClose: View {
+struct GetStartedCardClose: View {
     let close: GetStartedCard.Close
     @State private var hovering = false
 

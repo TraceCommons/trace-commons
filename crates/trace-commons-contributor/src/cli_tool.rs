@@ -17,7 +17,7 @@
 //!   copy, and its `Contents/MacOS/near-ai` a regular executable file.
 //! - The link name is one of two fixed names.
 //! - Nothing the app did not create is overwritten: a link path holding a
-//!   file, a directory, or a symlink anywhere other than a Near.ai bundle's
+//!   file, a directory, or a symlink anywhere other than this app's bundle's
 //!   CLI is [`LinkState::Foreign`], and no script is offered for it.
 //! - The privileged script is fixed text plus single-quoted paths. Its only
 //!   writes are `mkdir` of [`LINK_DIR`] when missing, `ln` and `rm` of the
@@ -80,7 +80,7 @@ pub enum LinkState {
     NotInstalled,
     /// Our symlink, to this app's own CLI. Uninstall is offered.
     Installed,
-    /// Our symlink, to a Near.ai bundle's CLI somewhere else (the app was
+    /// Our symlink, to this app's bundle's CLI somewhere else (the app was
     /// moved, or another copy installed it). Repointing and uninstall are
     /// offered.
     Stale,
@@ -169,10 +169,12 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Whether `target` is a Near.ai app bundle's CLI: an absolute path ending
-/// `<Near.ai…>.app/Contents/MacOS/near-ai`, with no `..` or control
-/// characters. A relative target is never ours: this module only ever
-/// writes absolute ones.
+/// Whether `target` is this app's bundled CLI: an absolute path ending
+/// `<name…>.app/Contents/MacOS/near-ai`, where the bundle starts with the
+/// app's current or a former name ([`crate::brand::FORMER_APP_NAMES`]), so
+/// a link made by an install still named `Near.ai.app` is ours too. No `..`
+/// or control characters. A relative target is never ours: this module only
+/// ever writes absolute ones.
 pub fn is_ours(target: &Path) -> bool {
     if !target.is_absolute()
         || has_control_character(target)
@@ -192,7 +194,9 @@ pub fn is_ours(target: &Path) -> bool {
     };
     let bundle = names[split];
     names[split + 1..] == BUNDLED_CLI
-        && bundle.starts_with(crate::brand::APP_NAME)
+        && std::iter::once(crate::brand::APP_NAME)
+            .chain(crate::brand::FORMER_APP_NAMES.iter().copied())
+            .any(|name| bundle.starts_with(name))
         && bundle.ends_with(".app")
 }
 
@@ -442,7 +446,15 @@ mod tests {
         assert!(is_ours(&p(
             "/Users/me/Downloads/Near.ai.app/Contents/MacOS/near-ai"
         )));
+        // The current name, and its staging build.
+        assert!(is_ours(&p(
+            "/Applications/Near AI Gateway.app/Contents/MacOS/near-ai"
+        )));
+        assert!(is_ours(&p(
+            "/Applications/Near AI Gateway Staging.app/Contents/MacOS/near-ai"
+        )));
         for target in [
+            "/Applications/Near AI.app/Contents/MacOS/near-ai",
             "/opt/homebrew/bin/near-ai",
             "/Applications/Other.app/Contents/MacOS/near-ai",
             "/Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp",

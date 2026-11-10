@@ -55,7 +55,7 @@ struct ProjectsSection: View {
                     // `list_projects` keeps it so; until that call answers,
                     // "none yet" would be a count nothing reported.
                     if model.projectsRead != .answered {
-                        SettingsReadNotice(model.projectsRead, retry: model.refreshProjects)
+                        SettingsReadNotice(model.projectsRead, retry: { model.refreshProjects() })
                     } else if model.projects.isEmpty {
                         Text(SettingsLegacyWords.noProjectsYet)
                             .glassType(GlassTokens.TypeScale.caption)

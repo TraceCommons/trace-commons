@@ -17,8 +17,6 @@ import TCShellCore
 /// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
-    /// Opens the Traces tab, from the guide card's Earn credit step.
-    var openTraces: () -> Void = {}
     /// Opens the Private AI section of Settings.
     var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
@@ -65,8 +63,8 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // step-by-step card leads, with no X (product owner,
-                // 2026-10-28, 2026-11-04), then the status (a static dot and the
+                // step-by-step card leads until it is closed (product
+                // owner, 2026-10-28), then the status (a static dot and the
                 // core's sentence; the owner set aside a switch here on
                 // 2026-10-19), then the managed cards, whose tool buttons
                 // are how Private AI runs, then the calls, then the NEAR AI
@@ -75,7 +73,7 @@ struct InferenceTabView: View {
                 // where the switch, the tools and the connection are. The offer and the NEAR AI
                 // sign-in are popover notices over the tab
                 // (`MonitorNotices`).
-                PrivateAIGuideCard(openTraces: openTraces)
+                PrivateAIGuideCard()
                 PrivateAIInspectorView(store: store)
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
@@ -381,15 +379,13 @@ struct InferenceTabView: View {
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
-/// the tab, in the managed copy's words, every time and with no X (owner,
-/// 2026-11-04). Redrawn on 2026-11-05 from the owner's mockups: the title
-/// large and dark blue (`guideTitle`), the original card's lock shield faint
-/// in the top corner over the pixel field, and the three steps as a plain
-/// list, each a bold number and title over its line, a thin line between
-/// them. Earn credit opens Traces, where traces are shared.
+/// the tab, in the managed copy's words, until it is closed with its X.
+/// Closed, it stays closed on this Mac. Drawn as the Insights empty state's
+/// card is (product owner, 2026-11-02, `GetStartedCard`): a plain card, no
+/// gradient or graphic, each step a title over one line.
 struct PrivateAIGuideCard: View {
-    /// Opens the Traces tab, for the Earn credit step.
-    var openTraces: () -> Void = {}
+    static let closedKey = "privateAI.guideClosed"
+    @AppStorage(Self.closedKey) private var closed = false
     @EnvironmentObject private var model: AppModel
 
     /// Each step's title, then its line.
@@ -400,109 +396,17 @@ struct PrivateAIGuideCard: View {
     ]
 
     var body: some View {
-        PrivateAIGuide(
-            title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
-            steps: Self.steps.map { (model.managedText($0.title), model.managedText($0.line)) },
-            openTraces: openTraces)
-    }
-}
-
-/// The guide card's drawing, from its words alone.
-struct PrivateAIGuide: View {
-    let title: String
-    let lead: String
-    let steps: [(title: String, line: String)]
-    let openTraces: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                Text(title)
-                    .glassType(GlassTokens.TypeScale.number.weight(.heavy))
-                    .foregroundStyle(GlassTokens.Color.guideTitle.color)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Text(lead)
-                    .glassType(GlassTokens.TypeScale.title.weight(.medium))
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                    if index > 0 {
-                        Rectangle()
-                            .fill(GlassTokens.Color.heroAccent.color.opacity(0.25))
-                            .frame(height: 1)
-                            .padding(.leading, GlassTokens.Space.s10 + GlassTokens.Space.s8)
-                    }
-                    PrivateAIGuideStep(number: index + 1, title: step.title, line: step.line,
-                                       action: index == 0 ? openTraces : nil)
-                }
-            }
+        if !closed {
+            // The card explains; no step has a link.
+            GetStartedCard(
+                title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
+                steps: Self.steps.map { keys in
+                    GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
+                },
+                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },
+                // Tried here first (owner, 2026-11-02).
+                pixelField: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            ZStack(alignment: .topTrailing) {
-                GetStartedCardField()
-                // The original card's lock shield (product owner, 2026-10-28),
-                // faint and tilted in the corner.
-                Image(systemName: "lock.shield.fill")
-                    .glassGlyph(120, weight: .regular)
-                    .foregroundStyle(GlassTokens.Color.heroAccent.color.opacity(0.18))
-                    .rotationEffect(.degrees(-12))
-                    .offset(x: 10, y: -14)
-                    .accessibilityHidden(true)
-            }
-        }
-        .insightsSection()
-    }
-}
-
-/// One step: its number and title in bold over its line. With an action,
-/// the whole row is a button.
-private struct PrivateAIGuideStep: View {
-    let number: Int
-    let title: String
-    let line: String
-    let action: (() -> Void)?
-    @State private var hovering = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        if let action {
-            Button(action: action) { row }
-                .buttonStyle(GlassPressStyle())
-                .onHover { inside in
-                    withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isButton)
-        } else {
-            row.accessibilityElement(children: .combine)
-        }
-    }
-
-    private var row: some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s6) {
-            Text(String(number))
-                .glassType(GlassTokens.TypeScale.heading.weight(.heavy))
-                .monospacedDigit()
-                .foregroundStyle(GlassColor.textPrimary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(title)
-                    .glassType(GlassTokens.TypeScale.heading.weight(.bold))
-                    .foregroundStyle(hovering ? GlassTokens.Color.guideTitle.color : GlassColor.textPrimary)
-                Text(line)
-                    .glassType(GlassTokens.TypeScale.title.weight(.regular))
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, GlassTokens.Space.s7)
-        .padding(.vertical, GlassTokens.Space.s5)
-        .contentShape(Rectangle())
     }
 }
 

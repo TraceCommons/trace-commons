@@ -66,7 +66,8 @@
 //! # The payload's gateway host
 //!
 //! `gateway_host` is the bare host (no scheme, no path) of the compiled-in
-//! staging NEAR AI API base, `near_ai_api::NEAR_AI_API_BASE_URL`. The app
+//! staging NEAR AI inference base, `near_ai_api::NEAR_AI_INFERENCE_BASE_URL`
+//! (the attestation gateway stays on cloud-api, not cloud-platform). The app
 //! compares it, as a string, with the host of its own attestation gateway.
 //!
 //! # Output
@@ -96,7 +97,7 @@ use trace_commons_attestation::staging_pins::{
     self, CHANNEL, FORMAT, MAX_LIFETIME_SECS, REQUIRED_REGISTERS,
 };
 use trace_commons_attestation::staging_replay::{Allowlist, MARKER_EVENTS};
-use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
+use trace_commons_server::near_ai_api::NEAR_AI_INFERENCE_BASE_URL;
 use trace_commons_server::near_attestation::client::{
     AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,
 };
@@ -388,13 +389,13 @@ fn allowlist_is_complete(allowlist: &Allowlist) -> bool {
         && !allowlist.compose_actions.compose_files.is_empty()
 }
 
-/// The bare host of the compiled-in staging NEAR AI base: what a staging
-/// app compares a payload's `gateway_host` with.
+/// The bare host of the compiled-in staging NEAR AI inference base: what a
+/// staging app compares a payload's `gateway_host` with.
 fn staging_gateway_host() -> String {
-    reqwest::Url::parse(NEAR_AI_API_BASE_URL)
+    reqwest::Url::parse(NEAR_AI_INFERENCE_BASE_URL)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .expect("the compiled-in NEAR AI base is a URL with a host")
+        .expect("the compiled-in NEAR AI inference base is a URL with a host")
 }
 
 /// The sets file: one set per non-blank line, each canonicalised and naming
@@ -539,12 +540,12 @@ fn run_observe(
     for model in models {
         clients.push(
             HttpAttestationClient::new(
-                NEAR_AI_API_BASE_URL,
+                NEAR_AI_INFERENCE_BASE_URL,
                 model.as_str(),
                 SecretString::from(key.to_string()),
                 INTEL_PCS_URL,
                 CALL_TIMEOUT,
-                Some(NEAR_AI_API_BASE_URL.to_string()),
+                Some(NEAR_AI_INFERENCE_BASE_URL.to_string()),
             )
             .map_err(|_| "client_unbuildable")?,
         );

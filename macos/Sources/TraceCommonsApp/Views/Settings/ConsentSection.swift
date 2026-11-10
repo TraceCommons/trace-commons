@@ -52,14 +52,14 @@ struct ConsentSection: View {
         let optional = model.consentScopes.filter { !$0.alwaysOn && $0.grantsDataUse }
 
         GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {
-            GlassRefreshButton(SettingsLegacyWords.refreshUses, title: SettingsLegacyWords.refresh, action: model.refreshStatus)
+            GlassRefreshButton(SettingsLegacyWords.refreshUses, title: SettingsLegacyWords.refresh, action: { model.refreshStatus() })
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)
                 // Until the daemon answers, the rows below are disabled and
                 // read off (R-15); this says they are waiting, not refused.
                 if model.statusRead != .answered {
-                    SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
+                    SettingsReadNotice(model.statusRead, retry: { model.refreshStatus() })
                 }
                 ForEach(alwaysOn) { scope in
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {

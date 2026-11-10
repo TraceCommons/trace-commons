@@ -11,6 +11,7 @@ members = [
     "crates/trace-commons-gate-api",
     "crates/trace-commons-gate-enclave",
     "crates/trace-commons-ingest",
+    "crates/trace-commons-ingest-contributor-tests",
     "crates/trace-commons-mark",
     "crates/trace-commons-operator-client",
     "crates/trace-commons-protocol",

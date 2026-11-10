@@ -42,6 +42,7 @@ struct MenuBarGlassPanel: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             topRow
             privateAI
+            termsHoldRow
             nudgeRow
             settlementRow
             graph
@@ -145,7 +146,8 @@ struct MenuBarGlassPanel: View {
             }
             GlassBarGraph(
                 MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),
-                scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)
+                scaleFloor: 5, compact: true, paused: model.status.paused || model.status.termsHold,
+                hovered: $hovered)
                 .frame(height: EdgeRailGraph.height)
         }
     }
@@ -158,6 +160,30 @@ struct MenuBarGlassPanel: View {
     private var glance: some View {
         if let glance = MenuPanelData.glanceToDraw(store.glance, stale: store.stale) {
             InsightsGlanceCard(glance: glance) { open(.inference) }
+        }
+    }
+
+    // MARK: The terms hold row
+
+    /// New Terms of Service are owed: uploads are held until the person
+    /// accepts (spec section 5). Above the nudge row; opens the window on
+    /// Home with the terms sheet up.
+    @ViewBuilder
+    private var termsHoldRow: some View {
+        if let hold = model.termsHold {
+            Button {
+                model.reviewNewTermsFromMenu()
+            } label: {
+                HStack {
+                    Text(hold.menuRow)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                }
+            }
+            .buttonStyle(GlassMenuRowStyle())
+            .padding(.vertical, -GlassTokens.Space.s2)
         }
     }
 

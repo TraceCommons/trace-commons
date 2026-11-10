@@ -1,0 +1,56 @@
+{
+  "scope": "Bounded symbolic checks of repaired authorization decisions; no unbounded executable theorem",
+  "cases": [
+    {
+      "name": "tenant-owner-role-guards",
+      "model": "authorization.qnt",
+      "invariant": "Safety",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "scoped-admin-policy-and-grant",
+      "model": "scope-escalation.qnt",
+      "invariant": "noEscalation",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "export-deadline",
+      "model": "export-eligibility.qnt",
+      "invariant": "NoIneligibleExport",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "atomic-bootstrap",
+      "model": "identity-bootstrap.qnt",
+      "invariant": "FirstOnly",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "correct-rls-configuration",
+      "model": "rls-composition.qnt",
+      "invariant": "NoForeignSecret",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "inherited-resolver-refuses-startup",
+      "model": "rls-composition.qnt",
+      "init": "inheritedInit",
+      "invariant": "NoForeignSecret",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    },
+    {
+      "name": "permissive-policy-refuses-startup",
+      "model": "rls-composition.qnt",
+      "init": "extraPolicyInit",
+      "invariant": "NoForeignSecret",
+      "steps": 8,
+      "expect": "bounded-no-counterexample"
+    }
+  ]
+}

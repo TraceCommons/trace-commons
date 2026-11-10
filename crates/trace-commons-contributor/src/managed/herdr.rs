@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 /// The label of the herdr workspace every session opens in. Found by label,
 /// and created again when the person has closed it.
-pub const GROUP_LABEL: &str = "Near.ai";
+pub const GROUP_LABEL: &str = crate::brand::APP_NAME;
 
 /// herdr's own name, which shells put in `{destination}` for a grouped
 /// launch.
@@ -246,16 +246,23 @@ fn snapshot(herdr: &mut dyn Exchange) -> Result<Value, CallError> {
     result.get("snapshot").cloned().ok_or(CallError::Malformed)
 }
 
-/// The id of the first workspace labelled [`GROUP_LABEL`].
+/// The id of the first workspace labelled [`GROUP_LABEL`], else of the
+/// first one labelled with a former app name, so a workspace an older
+/// version made keeps being used after a rename instead of a second one
+/// being made beside it. New workspaces always take [`GROUP_LABEL`].
 fn group_workspace(snapshot: &Value) -> Option<String> {
-    snapshot
-        .get("workspaces")?
-        .as_array()?
-        .iter()
-        .filter(|w| w.get("label").and_then(Value::as_str) == Some(GROUP_LABEL))
-        .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
-        .find(|id| valid_public_id(id))
-        .map(str::to_string)
+    let workspaces = snapshot.get("workspaces")?.as_array()?;
+    let labelled = |label: &str| {
+        workspaces
+            .iter()
+            .filter(|w| w.get("label").and_then(Value::as_str) == Some(label))
+            .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
+            .find(|id| valid_public_id(id))
+            .map(str::to_string)
+    };
+    std::iter::once(GROUP_LABEL)
+        .chain(crate::brand::FORMER_APP_NAMES.iter().copied())
+        .find_map(labelled)
 }
 
 /// The terminal id of the pane `pane_id`.
@@ -482,7 +489,7 @@ pub fn launch(
             ticket,
         )?;
         // One launch at a time finds or creates the group, so two at once
-        // cannot each create a "Near.ai" workspace, or each start a herdr.
+        // cannot each create a "Near AI Gateway" workspace, or each start a herdr.
         let _group = GROUP_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -565,6 +572,20 @@ mod tests {
         Ok(json!({"type":"pong","version":"0.9.5","protocol":22}))
     }
 
+    /// A workspace an older version made under a former name is still the
+    /// group, unless one under the current name exists too.
+    #[test]
+    fn a_former_name_workspace_is_reused_but_the_current_one_wins() {
+        let former = json!({"workspaces":[{"workspace_id":"w1","label":"Near.ai"}]});
+        assert_eq!(group_workspace(&former).as_deref(), Some("w1"));
+        let both = json!({"workspaces":[
+            {"workspace_id":"w1","label":"Near.ai"},
+            {"workspace_id":"w2","label":"Near AI Gateway"}]});
+        assert_eq!(group_workspace(&both).as_deref(), Some("w2"));
+        let neither = json!({"workspaces":[{"workspace_id":"w3","label":"Near AI"}]});
+        assert_eq!(group_workspace(&neither), None);
+    }
+
     fn snap(workspaces: Value, panes: Value) -> Result<Value, CallError> {
         Ok(json!({"type":"session_snapshot","snapshot":{
             "version":"0.9.5","protocol":22,"workspaces":workspaces,"tabs":[],
@@ -596,7 +617,7 @@ mod tests {
     /// D3: the ticket reaches herdr only as the pane's environment, never in
     /// its argv, which herdr saves to disk and replays after a restart. The
     /// pane runs the helper's argv in the folder, as a focused tab of the
-    /// existing "Near.ai" workspace, and the handle is the pane's terminal.
+    /// existing "Near AI Gateway" workspace, and the handle is the pane's terminal.
     #[test]
     fn a_launch_adds_a_tab_to_the_group_with_the_ticket_only_in_env() {
         let seen = std::rc::Rc::default();
@@ -605,7 +626,7 @@ mod tests {
                 pong(),
                 snap(
                     json!([{"workspace_id":"w1","label":"other"},
-                           {"workspace_id":"w2","label":"Near.ai"}]),
+                           {"workspace_id":"w2","label":"Near AI Gateway"}]),
                     json!([]),
                 ),
                 applied(),
@@ -671,7 +692,7 @@ mod tests {
         }
     }
 
-    /// D5: with no "Near.ai" workspace (never made, or closed), one is
+    /// D5: with no "Near AI Gateway" workspace (never made, or closed), one is
     /// created, and the session's tab replaces the shell tab it starts with,
     /// so the group holds no stray shell.
     #[test]
@@ -680,9 +701,12 @@ mod tests {
         let mut script = Some(Script {
             replies: VecDeque::from([
                 pong(),
-                snap(json!([{"workspace_id":"w1","label":"Near.ai2"}]), json!([])),
+                snap(
+                    json!([{"workspace_id":"w1","label":"Near AI Gateway2"}]),
+                    json!([]),
+                ),
                 Ok(json!({"type":"workspace_created",
-                    "workspace":{"workspace_id":"w4","label":"Near.ai"},
+                    "workspace":{"workspace_id":"w4","label":"Near AI Gateway"},
                     "tab":{"tab_id":"w4:t1"},"root_pane":{"pane_id":"w4:t1:p1"}})),
                 applied(),
                 snap(json!([]), json!([])),
@@ -701,7 +725,7 @@ mod tests {
         assert_eq!(seen[2].0, "workspace.create");
         assert_eq!(
             seen[2].1,
-            json!({"label":"Near.ai","cwd":"/Users/a/my project","focus":true})
+            json!({"label":"Near AI Gateway","cwd":"/Users/a/my project","focus":true})
         );
         assert_eq!(seen[3].0, "layout.apply");
         assert_eq!(seen[3].1["tab_id"], "w4:t1");
@@ -724,7 +748,10 @@ mod tests {
                 Ok(Script {
                     replies: VecDeque::from([
                         pong(),
-                        snap(json!([{"workspace_id":"w1","label":"Near.ai"}]), json!([])),
+                        snap(
+                            json!([{"workspace_id":"w1","label":"Near AI Gateway"}]),
+                            json!([]),
+                        ),
                         applied(),
                         snap(json!([]), json!([])),
                     ]),
@@ -806,7 +833,10 @@ mod tests {
                     _ => Ok(Script {
                         replies: VecDeque::from([
                             pong(),
-                            snap(json!([{"workspace_id":"w1","label":"Near.ai"}]), json!([])),
+                            snap(
+                                json!([{"workspace_id":"w1","label":"Near AI Gateway"}]),
+                                json!([]),
+                            ),
                             applied(),
                             snap(json!([]), json!([])),
                         ]),
@@ -962,7 +992,12 @@ mod tests {
                 &pane(),
             )
         };
-        let group = || snap(json!([{"workspace_id":"w1","label":"Near.ai"}]), json!([]));
+        let group = || {
+            snap(
+                json!([{"workspace_id":"w1","label":"Near AI Gateway"}]),
+                json!([]),
+            )
+        };
         assert_eq!(
             run(vec![pong(), group(), Err(CallError::Refused)]),
             Err(ManagedError::LaunchUnknown)

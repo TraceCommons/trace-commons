@@ -896,16 +896,15 @@ async fn the_runtime_reads_the_cluster_columns_of_gate_decisions() {
     assert_eq!(code_of(&err), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
 }
 
-/// Boot's check of the operator's grant: a login that holds
-/// `trace_referral_resolver` (here the migrator) can assume it, and one
-/// that was never granted it cannot. Ingest refuses to start with
-/// referrals on in the second case (`referral_resolver_unprovisioned`).
+/// Boot accepts only an explicit, non-inherited resolver transition. A
+/// superuser, a missing grant, and direct or nested inherited membership
+/// all fail closed, even when SET ROLE itself would succeed.
 #[tokio::test]
 async fn only_a_login_granted_the_resolver_can_assume_it() {
     let Some(fixture) = fixture().await else {
         return;
     };
-    assert!(fixture.owner.referral_resolver_assumable().await.unwrap());
+    assert!(!fixture.owner.referral_resolver_assumable().await.unwrap());
 
     // A NOSUPERUSER login with no grant. It has a password so the check
     // runs under password authentication too.
@@ -948,6 +947,79 @@ async fn only_a_login_granted_the_resolver_can_assume_it() {
         .await
         .expect("grant the resolver");
     assert!(probe.referral_resolver_assumable().await.unwrap());
+    assert!(
+        probe
+            .trace_corpus_rls_diagnostics()
+            .await
+            .unwrap()
+            .unwrap()
+            .production_ready()
+    );
+
+    let admin = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    admin
+        .batch_execute(&format!(
+            "GRANT trace_referral_resolver TO {LOGIN} WITH INHERIT TRUE, SET TRUE"
+        ))
+        .await
+        .unwrap();
+    assert!(!probe.referral_resolver_assumable().await.unwrap());
+    assert!(
+        !probe
+            .trace_corpus_rls_diagnostics()
+            .await
+            .unwrap()
+            .unwrap()
+            .production_ready()
+    );
+
+    let group = format!("referral_probe_{}", Uuid::new_v4().simple());
+    admin
+        .batch_execute(&format!(
+            "GRANT trace_referral_resolver TO {LOGIN} WITH INHERIT FALSE, SET TRUE;
+         CREATE ROLE {group} NOLOGIN NOSUPERUSER NOBYPASSRLS;
+         GRANT trace_referral_resolver TO {group} WITH INHERIT TRUE, SET TRUE;
+         GRANT {group} TO {LOGIN} WITH INHERIT TRUE, SET TRUE"
+        ))
+        .await
+        .unwrap();
+    assert!(!probe.referral_resolver_assumable().await.unwrap());
+    admin
+        .batch_execute(&format!("REVOKE {group} FROM {LOGIN}; DROP ROLE {group}"))
+        .await
+        .unwrap();
+    assert!(probe.referral_resolver_assumable().await.unwrap());
+
+    // This suite runs serially: exercise grant drift on the actual migrated
+    // resolver, restoring each grant before asserting the observed result.
+    for (widen, restore) in [
+        (
+            "GRANT SELECT (sealed_code) ON trace_referral_codes TO trace_referral_resolver",
+            "REVOKE SELECT (sealed_code) ON trace_referral_codes FROM trace_referral_resolver",
+        ),
+        (
+            "GRANT UPDATE (disabled_at) ON trace_referral_codes TO trace_referral_resolver",
+            "REVOKE UPDATE (disabled_at) ON trace_referral_codes FROM trace_referral_resolver",
+        ),
+        (
+            "GRANT SELECT ON trace_referral_attributions TO trace_referral_resolver",
+            "REVOKE SELECT ON trace_referral_attributions FROM trace_referral_resolver",
+        ),
+        (
+            "REVOKE SELECT (code_index) ON trace_referral_codes FROM trace_referral_resolver",
+            "GRANT SELECT (code_index) ON trace_referral_codes TO trace_referral_resolver",
+        ),
+        (
+            "ALTER ROLE trace_referral_resolver LOGIN",
+            "ALTER ROLE trace_referral_resolver NOLOGIN",
+        ),
+    ] {
+        admin.batch_execute(widen).await.unwrap();
+        let accepted = probe.referral_resolver_assumable().await;
+        admin.batch_execute(restore).await.unwrap();
+        assert!(!accepted.unwrap(), "unsafe resolver configuration: {widen}");
+        assert!(probe.referral_resolver_assumable().await.unwrap());
+    }
 }
 
 /// Writes one attribution as the runtime, with the session in `zone`, and

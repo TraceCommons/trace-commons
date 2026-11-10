@@ -82,12 +82,32 @@ fn clear_parent_session(command: &mut std::process::Command) {
     command.env_remove(super::terminal::LAUNCH_TICKET_ENV);
 }
 
+/// Older daemons reject the additive acknowledgement before redeeming the
+/// ticket. Retry only that fixed parse refusal once without the new field;
+/// the returned context must still pass the native-route capability gate.
+fn redeem_with_native_responses<T>(
+    session_id: uuid::Uuid,
+    ticket: &str,
+    mut send: impl FnMut(Value) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let response = send(json!({"session_id":session_id,"ticket":ticket,"native_responses":true}));
+    match response {
+        Err(error) if error.to_string() == "managed-invalid-request" => {
+            send(json!({"session_id":session_id,"ticket":ticket}))
+        }
+        response => response,
+    }
+}
+
 pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> anyhow::Result<i32> {
     let mut signals = TerminalSignals::new()?;
-    let context: LaunchContext = call(
-        store,
-        "managed_launch_redeem",
-        json!({"session_id":prepared.session_id,"ticket":prepared.ticket.ok_or(ManagedError::LaunchUnknown)?}),
+    let context: LaunchContext = redeem_with_native_responses(
+        prepared.session_id,
+        prepared
+            .ticket
+            .as_deref()
+            .ok_or(ManagedError::LaunchUnknown)?,
+        |params| call(store, "managed_launch_redeem", params),
     )?;
     let mut spawned = false;
     let result = run_native(
@@ -603,38 +623,26 @@ fn codex_binding(
 
 /// The daemon-hosted proxy a sign-in session runs on: its loopback port,
 /// default model and NEAR AI's chat models. Without all three, no run.
-///
-/// The models are the ones the tool is offered ([`super::models::offered`]):
-/// a daemon from before a model was hidden from a tool can still list it,
-/// and name it as the default. Such a default is replaced by the tool's
-/// default among the offered models; the proxy serves any listed model. A
-/// default the daemon did not list at all is passed on unchanged.
+/// Pass the named default and catalogue through unchanged; the daemon's
+/// route owns model selection and validates requests against its catalogue.
+/// Codex also requires affirmative native Responses support: older daemons
+/// may still serve a Chat translation route that cannot carry its tool schemas.
 fn sign_in_route(
     context: &LaunchContext,
 ) -> Result<(u16, String, Vec<super::models::ChatModel>), ManagedError> {
-    let tool = context.session.tool;
     let port = context.route_port.ok_or(ManagedError::LaunchUnknown)?;
-    let named = context
+    let default = context
         .route_model
-        .as_deref()
+        .clone()
         .ok_or(ManagedError::LaunchUnknown)?;
-    let listed = context
+    let models = context
         .route_models
         .clone()
         .ok_or(ManagedError::LaunchUnknown)?;
-    let hidden = listed.iter().any(|m| m.id == named);
-    let models = super::models::offered(tool, listed);
-    let hidden = hidden && !models.iter().any(|m| m.id == named);
-    // Only a listed default this tool is not offered is replaced; one the
-    // list does not hold at all is passed on, and refused there.
-    let default = if hidden {
-        super::models::default_for(tool, &models)
-            .ok_or(ManagedError::ModelUnavailable)?
-            .id
-            .clone()
-    } else {
-        named.to_owned()
-    };
+    if context.session.tool == super::ToolId::Codex && context.route_native_responses != Some(true)
+    {
+        return Err(ManagedError::DaemonUpdateRequired);
+    }
     Ok((port, default, models))
 }
 
@@ -804,10 +812,6 @@ fn near_ai_route(
                     "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
                     "-c",
                     "model_providers.near_ai_managed.wire_api=\"responses\"",
-                    // The upstream compatibility lane is Chat Completions,
-                    // which cannot execute provider-hosted web search.
-                    "-c",
-                    "web_search=\"disabled\"",
                 ]);
             let catalog = codex_catalog
                 .and_then(|path| path.to_str())
@@ -819,6 +823,11 @@ fn near_ai_route(
                 .arg(format!("model_catalog_json={}", quoted(catalog)))
                 .arg("-c")
                 .arg(format!("model={}", quoted(default)));
+            // Hosted search only on models whose search OpenAI runs
+            // (`hosted_search_allowed`); the catalog also marks the others.
+            if !super::models::hosted_search_allowed(in_use) {
+                command.args(["-c", "web_search=\"disabled\""]);
+            }
             // Codex's reviewer (/review), subagents and memory jobs each
             // name a model of their own, which may be one NEAR AI does not
             // list or a less private one: all of them are the model in
@@ -1089,6 +1098,63 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn redeem_retries_legacy_params_once_only_for_the_fixed_parse_refusal() {
+        use serde_json::Value;
+        let id = uuid::Uuid::new_v4();
+        let ticket = "synthetic-ticket";
+        let mut sent = Vec::new();
+        let response = super::redeem_with_native_responses(id, ticket, |params| {
+            sent.push(params);
+            if sent.len() == 1 {
+                Err(anyhow::anyhow!("managed-invalid-request"))
+            } else {
+                Ok(json!({"legacy":true}))
+            }
+        })
+        .unwrap();
+        assert_eq!(response, json!({"legacy":true}));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[0],
+            json!({"session_id":id,"ticket":ticket,"native_responses":true})
+        );
+        assert_eq!(sent[1], json!({"session_id":id,"ticket":ticket}));
+        for code in [
+            "managed-conflict",
+            "managed-not-found",
+            "managed-launch-unknown",
+            "managed-daemon-update-required",
+            "managed-invalid-request: another error",
+            "timed out",
+        ] {
+            let mut calls = 0;
+            let outcome: anyhow::Result<Value> =
+                super::redeem_with_native_responses(id, ticket, |_| {
+                    calls += 1;
+                    Err(anyhow::anyhow!(code.to_owned()))
+                });
+            assert!(outcome.is_err());
+            assert_eq!(calls, 1, "{code}");
+        }
+        let mut calls = 0;
+        let outcome: anyhow::Result<Value> =
+            super::redeem_with_native_responses(id, ticket, |_| {
+                calls += 1;
+                Err(anyhow::anyhow!("managed-invalid-request"))
+            });
+        assert!(outcome.is_err());
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let _: Value = super::redeem_with_native_responses(id, ticket, |params| {
+            calls += 1;
+            assert_eq!(params["native_responses"], true);
+            Ok(json!({"accepted":true}))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+    }
+
     /// The workflows notice is the owner's approved line, from the shared
     /// copy table.
     #[test]
@@ -1337,6 +1403,7 @@ mod tests {
         serde_json::from_value(json!({
             "session": session, "proof": "p", "route_port": 4100,
             "route_model": model, "route_models": tiered(),
+            "route_native_responses": (tool == ToolId::Codex).then_some(true),
         }))
         .unwrap()
     }
@@ -1466,6 +1533,51 @@ mod tests {
         }
     }
 
+    /// Hosted search stays on only when the session starts on an `openai/`
+    /// model, whose search OpenAI runs. Any other model, including one the
+    /// session's own `--model` names over an OpenAI default, starts with
+    /// search disabled.
+    #[test]
+    fn codex_starts_with_hosted_search_only_on_openai_models() {
+        let path = std::path::Path::new("/state/managed-codex-catalogs/s.json");
+        let mut models = listed();
+        models.push(ChatModel {
+            id: "openai/gpt-6-sol".into(),
+            ..Default::default()
+        });
+        let search = |default: &str, cli_options: &[String]| {
+            let mut command = std::process::Command::new("codex");
+            near_ai_route(
+                &mut command,
+                ToolId::Codex,
+                4321,
+                default,
+                &models,
+                Some(path),
+                super::Choices {
+                    background: None,
+                    cli_options,
+                },
+            )
+            .unwrap();
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.windows(2)
+                .filter(|pair| pair[0] == "-c" && pair[1].starts_with("web_search="))
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(search("openai/gpt-6-sol", &[]).is_empty());
+        let disabled = vec!["web_search=\"disabled\"".to_owned()];
+        assert_eq!(search("deepseek-ai/DeepSeek-V3.1", &[]), disabled);
+        let private = ["--model".to_owned(), "deepseek-ai/DeepSeek-V3.1".to_owned()];
+        assert_eq!(search("openai/gpt-6-sol", &private), disabled);
+        let openai = ["-m".to_owned(), "openai/gpt-6-sol".to_owned()];
+        assert!(search("deepseek-ai/DeepSeek-V3.1", &openai).is_empty());
+    }
+
     /// Codex on a NEAR AI route reads its model list from the session's
     /// catalog file and starts on the default; without the file, no run.
     #[test]
@@ -1494,6 +1606,7 @@ mod tests {
                 .find(|pair| pair[0] == "-c" && pair[1].starts_with(&format!("{key}=")))
                 .map(|pair| pair[1][key.len() + 1..].to_owned())
         };
+        // A private model never gets hosted search; see the next test.
         assert_eq!(value("web_search").as_deref(), Some("\"disabled\""));
         assert_eq!(
             value("model_catalog_json").as_deref(),
@@ -1684,14 +1797,10 @@ mod tests {
         );
     }
 
-    /// Codex's catalog takes the prompt from the installed Codex's own
-    /// list (`debug models --bundled`), not the basic one-line prompt.
-    #[cfg(unix)]
-    /// A daemon from before a model was hidden from Codex can still hand
-    /// the launcher one: the launcher leaves it out of the picker and,
-    /// when it is the default, starts on Codex's own default instead.
+    /// The daemon's native Responses catalogue and chosen model are passed
+    /// through unchanged, including models older launchers hid from Codex.
     #[test]
-    fn a_sign_in_route_never_offers_codex_a_hidden_model() {
+    fn a_sign_in_route_preserves_codex_models_and_requires_complete_metadata() {
         use super::sign_in_route;
         use crate::managed::{models::ChatModel, sessions::LaunchContext};
         let chat = |id: &str| ChatModel {
@@ -1700,6 +1809,12 @@ mod tests {
             tier: None,
             ..Default::default()
         };
+        let listed = vec![
+            chat("openai/gpt-6.1-sol"),
+            chat("openai/gpt-6-astra"),
+            chat("openai/gpt-6-sol"),
+            chat("x/other"),
+        ];
         let context = |tool: &str, model: &str| -> LaunchContext {
             serde_json::from_value(json!({
                 "session": {
@@ -1712,22 +1827,86 @@ mod tests {
                 "proof": "proof",
                 "route_port": 4321,
                 "route_model": model,
-                "route_models": [chat("openai/gpt-6.1-sol"), chat("openai/gpt-6-sol"), chat("x/other")],
+                "route_models": listed,
+                "route_native_responses": (tool == "codex").then_some(true),
             }))
             .unwrap()
         };
-        let (port, default, models) =
-            sign_in_route(&context("codex", "openai/gpt-6.1-sol")).unwrap();
-        assert_eq!(port, 4321);
-        assert_eq!(default, "openai/gpt-6-sol");
-        assert_eq!(models, vec![chat("openai/gpt-6-sol"), chat("x/other")]);
-        // An offered default is kept as the daemon named it.
-        let (_, default, _) = sign_in_route(&context("codex", "x/other")).unwrap();
-        assert_eq!(default, "x/other");
-        // Other tools are offered every model.
+        for model in ["openai/gpt-6.1-sol", "openai/gpt-6-astra", "x/other"] {
+            let (port, default, models) = sign_in_route(&context("codex", model)).unwrap();
+            assert_eq!(port, 4321);
+            assert_eq!(default, model);
+            assert_eq!(models, listed);
+        }
         let (_, default, models) = sign_in_route(&context("claude", "openai/gpt-6.1-sol")).unwrap();
         assert_eq!(default, "openai/gpt-6.1-sol");
-        assert_eq!(models.len(), 3);
+        assert_eq!(models, listed);
+        for missing in ["port", "model", "models"] {
+            let mut incomplete = context("codex", "openai/gpt-6.1-sol");
+            match missing {
+                "port" => incomplete.route_port = None,
+                "model" => incomplete.route_model = None,
+                "models" => incomplete.route_models = None,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                sign_in_route(&incomplete),
+                Err(ManagedError::LaunchUnknown)
+            ));
+        }
+    }
+
+    /// A new launcher cannot restore native tool schemas onto an older
+    /// daemon's Chat translation route. Refuse before writing the catalogue
+    /// or changing the command that would start the native tool.
+    #[test]
+    fn codex_requires_a_native_daemon_route_before_configuring_its_command() {
+        use crate::managed::profiles::NativeProfiles;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let account = signin::entry(ToolId::Codex).unwrap();
+        for marker in [None, Some(false)] {
+            let mut context = sign_in_context(home.path(), ToolId::Codex, "openai/gpt-6-sol", None);
+            context.route_native_responses = marker;
+            let mut command = std::process::Command::new("codex");
+            assert!(matches!(
+                sign_in_route_command(
+                    &mut command,
+                    &store,
+                    &NativeProfiles::new(&store),
+                    &account,
+                    &home.path().join("must-not-be-invoked"),
+                    &context,
+                    false
+                ),
+                Err(ManagedError::DaemonUpdateRequired)
+            ));
+            assert_eq!(command.get_args().count(), 0);
+            assert_eq!(command.get_envs().count(), 0);
+            assert!(!store.dir().join(crate::managed::codex::CATALOGS).exists());
+        }
+        let context = sign_in_context(home.path(), ToolId::Codex, "openai/gpt-6-sol", None);
+        let mut old = serde_json::to_value(context).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("route_native_responses");
+        let old: LaunchContext = serde_json::from_value(old.clone()).unwrap();
+        assert!(matches!(
+            super::sign_in_route(&old),
+            Err(ManagedError::DaemonUpdateRequired)
+        ));
+        let mut malformed = serde_json::to_value(old).unwrap();
+        for value in [json!("true"), json!(1), json!([]), json!({})] {
+            malformed["route_native_responses"] = value;
+            assert!(serde_json::from_value::<LaunchContext>(malformed.clone()).is_err());
+        }
+        let mut missing = sign_in_context(home.path(), ToolId::Codex, "openai/gpt-6-sol", None);
+        missing.route_native_responses = None;
+        missing.route_port = None;
+        assert!(matches!(
+            super::sign_in_route(&missing),
+            Err(ManagedError::LaunchUnknown)
+        ));
     }
 
     // The stub Codex is a shell script made executable with Unix permissions.

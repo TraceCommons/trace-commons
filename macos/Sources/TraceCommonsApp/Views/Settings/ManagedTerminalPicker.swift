@@ -32,7 +32,7 @@ struct ManagedTerminalPicker: View {
 }
 
 /// "Group sessions in herdr", under the picker (owner decision D4,
-/// 2026-11-03): sessions open as tabs of herdr's "Near.ai" workspace, and
+/// 2026-11-03): sessions open as tabs of herdr's "Near AI Gateway" workspace, and
 /// the terminal above hosts herdr when it is not running. The label is the
 /// core's (`herdr_grouping`). Drawn only while
 /// `ManagedSnapshot.offersHerdrGrouping`; moved only by a write the daemon
