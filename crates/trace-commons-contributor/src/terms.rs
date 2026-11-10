@@ -15,6 +15,13 @@
 //! [`crate::channel::refuse_other_channel_origin`]: a staging build holds the
 //! production site on that deny list for service origins, and this is not
 //! one.
+//!
+//! Debug builds only: [`TERMS_DOCUMENT_ENV`] replaces the fetch, so tests
+//! run without the network and a developer can show an in-effect document
+//! (the Home notice, the menu bar row) without publishing one. `none` answers
+//! [`TERMS_UNAVAILABLE`] at once; any other value is a path to a terms JSON
+//! file, read and parsed as if it had been served. Release builds compile
+//! none of it, so no shipped build has a way around the published document.
 
 use reqwest::Url;
 use sha2::{Digest, Sha256};
@@ -41,8 +48,45 @@ pub struct FetchedTerms {
     pub content_sha256: String,
 }
 
+/// Debug builds only: replaces the published document (see the module
+/// documentation).
+#[cfg(debug_assertions)]
+pub const TERMS_DOCUMENT_ENV: &str = "TRACE_COMMONS_TERMS_DOCUMENT";
+
+/// What [`TERMS_DOCUMENT_ENV`]'s value stands for: nothing set, no document,
+/// or the file at that path.
+#[cfg(debug_assertions)]
+fn local_document(value: Option<std::ffi::OsString>) -> Option<Result<FetchedTerms, &'static str>> {
+    let value = value?;
+    if value == "none" {
+        return Some(Err(TERMS_UNAVAILABLE));
+    }
+    let bytes = match std::fs::read(&value) {
+        Ok(bytes) => bytes,
+        Err(_) => return Some(Err(TERMS_UNAVAILABLE)),
+    };
+    if bytes.len() > TERMS_MAX_BYTES {
+        return Some(Err(TERMS_TOO_LARGE));
+    }
+    Some(from_bytes(&bytes))
+}
+
+/// The parsed document and the hash of exactly these bytes.
+fn from_bytes(bytes: &[u8]) -> Result<FetchedTerms, &'static str> {
+    let content_sha256 = hex::encode(Sha256::digest(bytes));
+    let document = TermsDocument::parse(bytes)?;
+    Ok(FetchedTerms {
+        document,
+        content_sha256,
+    })
+}
+
 /// Fetch the published document under the production policy.
 pub async fn fetch_published() -> Result<FetchedTerms, &'static str> {
+    #[cfg(debug_assertions)]
+    if let Some(outcome) = local_document(std::env::var_os(TERMS_DOCUMENT_ENV)) {
+        return outcome;
+    }
     let url = Url::parse(crate::channel::TERMS_DOCUMENT_URL).map_err(|_| TERMS_HOST_REFUSED)?;
     // The allowed host is the document URL's own: no host is spelled here.
     let host = url.host_str().ok_or(TERMS_HOST_REFUSED)?.to_string();
@@ -92,12 +136,7 @@ pub(crate) async fn fetch_from(
         .await
         .map_err(|_| TERMS_UNAVAILABLE)?;
     let bytes = read_bounded(response, TERMS_MAX_BYTES).await?;
-    let content_sha256 = hex::encode(Sha256::digest(&bytes));
-    let document = TermsDocument::parse(&bytes)?;
-    Ok(FetchedTerms {
-        document,
-        content_sha256,
-    })
+    from_bytes(&bytes)
 }
 
 /// A 2xx response's body, read up to `max_bytes` and refused past it. A
@@ -310,5 +349,39 @@ mod tests {
         assert_eq!(url.scheme(), "https");
         assert!(url.host_str().is_some());
         assert!(url.username().is_empty() && url.password().is_none());
+    }
+
+    /// The debug-only replacement: unset means fetch, `none` means no
+    /// document and no request, a path is read and hashed as served, and a
+    /// missing or oversized file is refused like a bad answer.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn local_document_replaces_the_fetch_in_debug_builds() {
+        assert!(super::local_document(None).is_none());
+        assert_eq!(
+            super::local_document(Some("none".into())),
+            Some(Err(super::TERMS_UNAVAILABLE))
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("terms.json");
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../trace-commons-protocol/tests/fixtures/terms-v1.json"
+        ))
+        .expect("fixture");
+        std::fs::write(&path, &bytes).expect("write");
+        let fetched = super::local_document(Some(path.clone().into()))
+            .expect("replaced")
+            .expect("parsed");
+        assert_eq!(fetched.content_sha256, hex::encode(Sha256::digest(&bytes)));
+        assert_eq!(
+            super::local_document(Some(dir.path().join("missing.json").into())),
+            Some(Err(super::TERMS_UNAVAILABLE))
+        );
+        std::fs::write(&path, vec![b' '; super::TERMS_MAX_BYTES + 1]).expect("write");
+        assert_eq!(
+            super::local_document(Some(path.into())),
+            Some(Err(super::TERMS_TOO_LARGE))
+        );
     }
 }

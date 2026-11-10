@@ -109,8 +109,13 @@ struct TermsReader: View {
                 }
                 checkbox(terms)
             }
-            Link(copy.privacy, destination: copy.privacyUrl)
-                .glassType(GlassTokens.TypeScale.caption)
+            // The same terms on the website, built from the same source as
+            // the document above, then the Privacy Policy.
+            HStack(spacing: GlassTokens.Space.s4) {
+                Link(copy.terms, destination: copy.termsUrl)
+                Link(copy.privacy, destination: copy.privacyUrl)
+            }
+            .glassType(GlassTokens.TypeScale.caption)
         }
         .frame(maxWidth: TermsReaderLayout.width)
         .task {

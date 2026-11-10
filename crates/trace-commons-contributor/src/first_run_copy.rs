@@ -725,7 +725,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         // for on 2026-11-09; their wording is not approved yet.
         terms_hold: TermsHoldCopy {
             notice_title: "New Terms of Service",
-            notice_body: "Uploads are paused until you accept.",
+            notice_body: "Uploads are paused until you accept the new terms.",
             review: "Review terms",
             menu_row: "Uploads paused: new Terms of Service",
         },
@@ -1370,7 +1370,10 @@ mod tests {
         );
         assert_eq!(legal.accept_button, "Accept");
         assert_eq!(hold.notice_title, "New Terms of Service");
-        assert_eq!(hold.notice_body, "Uploads are paused until you accept.");
+        assert_eq!(
+            hold.notice_body,
+            "Uploads are paused until you accept the new terms."
+        );
         assert_eq!(hold.review, "Review terms");
         assert_eq!(hold.menu_row, "Uploads paused: new Terms of Service");
     }
