@@ -30078,27 +30078,13 @@ async fn run_credit_settlement_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "credit_settlement".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "credit_settlement",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await
         .map_err(internal_error)?;
@@ -49301,32 +49287,18 @@ async fn run_canary_read_drill(
 
     if request.record_evidence {
         for (check_name, passed) in canary_read_drill_check_statuses(&response) {
-            let evidence = TraceRolloutSmokeEvidenceResponse {
-                event_id: Uuid::new_v4(),
-                tenant_id: tenant.tenant_id.clone(),
-                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-                check_name: check_name.to_string(),
-                status: if passed {
-                    TraceRolloutSmokeEvidenceStatus::Passed
-                } else {
-                    TraceRolloutSmokeEvidenceStatus::Failed
-                },
-                evidence_hash: canary_read_drill_check_evidence_hash(
+            let evidence = record_rollout_smoke_evidence(
+                state,
+                tenant,
+                check_name,
+                passed,
+                canary_read_drill_check_evidence_hash(
                     tenant,
                     &response.evidence_hash,
                     check_name,
                     passed,
                 ),
-                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-                actor_principal_ref: tenant.principal_ref.clone(),
-                recorded_at: Utc::now(),
-            };
-            append_audit_event_with_db_mirror(
-                state,
-                tenant,
-                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-                StorageTraceAuditAction::Read,
-                StorageTraceAuditSafeMetadata::Empty,
+                Some(sha256_prefixed(&purpose)),
             )
             .await?;
             response.recorded_evidence.push(evidence);
@@ -49461,27 +49433,13 @@ async fn run_object_primary_read_drill(
     response.evidence_hash = object_primary_read_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "object_primary_reads".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: object_primary_read_drill_evidence_hash(tenant, &response),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "object_primary_reads",
+            response.ready,
+            object_primary_read_drill_evidence_hash(tenant, &response),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -49656,27 +49614,13 @@ async fn run_object_store_migration_drill(
     response.evidence_hash = object_store_migration_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "object_store_migration".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(response.migration_manifest_hash.clone()),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "object_store_migration",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(response.migration_manifest_hash.clone()),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -49729,27 +49673,13 @@ async fn run_revocation_propagation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "revocation_propagation".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "revocation_propagation",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -49987,32 +49917,18 @@ async fn run_revocation_effects_drill(
 
     if request.record_evidence {
         for (check_name, passed) in revocation_effects_drill_check_statuses(&response) {
-            let evidence = TraceRolloutSmokeEvidenceResponse {
-                event_id: Uuid::new_v4(),
-                tenant_id: tenant.tenant_id.clone(),
-                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-                check_name: check_name.to_string(),
-                status: if passed {
-                    TraceRolloutSmokeEvidenceStatus::Passed
-                } else {
-                    TraceRolloutSmokeEvidenceStatus::Failed
-                },
-                evidence_hash: revocation_effects_drill_check_evidence_hash(
+            let evidence = record_rollout_smoke_evidence(
+                state,
+                tenant,
+                check_name,
+                passed,
+                revocation_effects_drill_check_evidence_hash(
                     tenant,
                     &response.evidence_hash,
                     check_name,
                     passed,
                 ),
-                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-                actor_principal_ref: tenant.principal_ref.clone(),
-                recorded_at: Utc::now(),
-            };
-            append_audit_event_with_db_mirror(
-                state,
-                tenant,
-                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-                StorageTraceAuditAction::Read,
-                StorageTraceAuditSafeMetadata::Empty,
+                Some(sha256_prefixed(&purpose)),
             )
             .await?;
             response.recorded_evidence.push(evidence);
@@ -50083,27 +49999,13 @@ async fn run_retention_dry_run_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "retention_dry_run".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "retention_dry_run",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50180,27 +50082,13 @@ async fn run_vector_index_drill(
     response.evidence_hash = vector_index_drill_evidence_hash(tenant, &response, state);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "vector_index".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "vector_index",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50310,27 +50198,13 @@ async fn run_analytics_release_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "analytics_release".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "analytics_release",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50407,27 +50281,13 @@ async fn run_benchmark_readiness_drill(
     response.evidence_hash = benchmark_readiness_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "benchmark_pipeline".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "benchmark_pipeline",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50542,27 +50402,13 @@ async fn run_ranking_model_readiness_drill(
     response.evidence_hash = ranking_model_readiness_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "ranking_model_readiness".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "ranking_model_readiness",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50636,27 +50482,13 @@ async fn run_postgres_rls_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "postgres_rls_readiness".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "postgres_rls_readiness",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50824,27 +50656,13 @@ async fn run_db_reconciliation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "db_reconciliation_clean".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "db_reconciliation_clean",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50964,27 +50782,13 @@ async fn run_audit_chain_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "audit_chain_verification".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "audit_chain_verification",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -51158,27 +50962,13 @@ async fn run_key_rotation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "key_rotation_drill".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "key_rotation_drill",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -51356,33 +51146,56 @@ async fn run_rollback_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "rollback_flag_drill".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "rollback_flag_drill",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
     }
 
     Ok(response)
+}
+
+/// Records one drill's rollout-smoke evidence for the calling tenant:
+/// `Passed` when the drill is ready, `Failed` otherwise, appended to the
+/// audit log as a read. Returns the recorded row for the drill's response.
+async fn record_rollout_smoke_evidence(
+    state: &AppState,
+    tenant: &TenantAuth,
+    check_name: &str,
+    ready: bool,
+    evidence_hash: String,
+    evidence_ref_hash: Option<String>,
+) -> anyhow::Result<TraceRolloutSmokeEvidenceResponse> {
+    let evidence = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        check_name: check_name.to_string(),
+        status: if ready {
+            TraceRolloutSmokeEvidenceStatus::Passed
+        } else {
+            TraceRolloutSmokeEvidenceStatus::Failed
+        },
+        evidence_hash,
+        evidence_ref_hash,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        recorded_at: Utc::now(),
+    };
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await?;
+    Ok(evidence)
 }
 
 fn push_rollback_gap_count(gaps: &mut Vec<String>, label: &str, count: usize) {
@@ -85261,27 +85074,13 @@ async fn run_near_attestation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "near_attestation".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "near_attestation",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await
         .map_err(internal_error)?;

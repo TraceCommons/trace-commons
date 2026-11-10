@@ -12,6 +12,9 @@ mod scheduler_config_tests;
 #[path = "tests/operational_metrics_body_tests.rs"]
 mod operational_metrics_body_tests;
 
+#[path = "tests/drill_evidence_tests.rs"]
+mod drill_evidence_tests;
+
 #[path = "tests/bootstrap_atomicity_tests.rs"]
 mod bootstrap_atomicity_tests;
 
