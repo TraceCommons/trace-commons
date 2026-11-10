@@ -129,12 +129,10 @@ jobs:
     env:
       PG_SUITE_DATABASES: >-
         admission_test_onboarding
-        admission_test_graded_corpus
         admission_test_ledger
         admission_test_account_ledger
         admission_test_account_trust_external
         admission_test_migration
-        admission_test_ingest
         admission_test_invite
         admission_test_merge
         admission_test_rls
@@ -143,10 +141,8 @@ jobs:
         admission_test_account_trust
         admission_test_account_trust_growth
         admission_test_upload_trust_plan_ci
-        admission_test_upload_trust_scheduler_ci
         admission_test_upload_trust_upgrade_ci
         admission_test_account_trust_live
-        admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
         admission_test_upload_ownership
@@ -154,7 +150,6 @@ jobs:
         admission_test_activity_missions
         admission_test_model_training_consent
         admission_test_inference_connection
-        admission_test_inference_connection_route
         admission_test_payout_rails
         admission_test_first_run_stats
         admission_test_witness_blocked
@@ -163,15 +158,10 @@ jobs:
         admission_test_referral_codes
         admission_test_referral_bonus
         admission_test_referral_stream
-        admission_test_walletv2
-        admission_test_rebind
         admission_test_legacy_invite_link
         admission_test_legacy_payout_carry
         admission_test_device_invite_subject
         admission_test_pipeline
-        admission_test_pipeline_http
-        admission_test_pipeline_compat
-        admission_test_pipeline_parity
         admission_test_starter
         pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
@@ -274,22 +264,7 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participants
-          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
-          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
-      # The two versioned pipeline HTTP steps below withdraw through an
-      # account session, which needs the login-resolver pool. The roles are
-      # the ones the `ingest-bin-postgres` job creates, for the same reason
-      # it gives there, and they are created here before any suite migrates:
-      # V30 creates `trace_login_resolver` only if it is absent.
-      - name: Create the login-resolver roles
-        run: |
-          set -euo pipefail
-          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
-          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
-          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
-          GRANT trace_login_resolver TO tc_login_resolver_login;
-          SQL
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block (`PG_SUITE_DATABASES` above is job-wide only because no
       # suite reads it). That is not tidiness: `trace_invite_registry_pg` reads
@@ -318,20 +293,6 @@ jobs:
         run: cargo test -p trace-commons-server --lib v137_invalidates_already_enabled_pre_migration_applied_generations_once -- --ignored --test-threads=1
         env:
           TRACE_COMMONS_UPLOAD_TRUST_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_upgrade_ci
-      - name: independent upload-trust scheduler and least privilege
-        run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
-        env:
-          TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
-      # Stage 2 of the paying bundle failed Phase A on a graded package
-      # (2026-11-03): the corpus harness's production assembly dropped the
-      # package's credit rule. This runs main's corpus through that harness,
-      # in production mode over doubles, on a graded package. Ignored in the
-      # whole-bin job because it writes the corpus tenant's fixed fixtures,
-      # so it runs alone here, on its own database.
-      - name: corpus check on a graded production package
-        run: cargo test -p trace-commons-ingest --lib a_graded_production_package_passes_the_corpus_check -- --ignored --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_graded_corpus
       # NEAR AI starter advance, first slice (V131): write-once plausibility
       # features, the account read's filters, the ingest runtime's grants,
       # and the dry-run report over the earned-trust enumeration seam.
@@ -348,10 +309,6 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_live_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_LIVE_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_live
-      - name: account invite HTTP session and authority guards
-        run: cargo test -p trace-commons-ingest --lib account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_route
       # V81: the legacy invite -> NEAR account link function, run as a login
       # holding only trace_account_invite_runtime, and readiness under
       # coexistence. One sequential test, because readiness is fleet-wide.
@@ -446,10 +403,6 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
-      - name: inference connection HTTP session selection
-        run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection_route
       - name: migration_atomicity_pg
         run: cargo test -p trace-commons-server --test migration_atomicity_pg
         env:
@@ -507,11 +460,6 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test token_bundle_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
-      - name: token bundle HTTP lost-response recovery
-        run: cargo test --locked -p trace-commons-ingest --lib token_bundle_http_journey
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
-          TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
       - name: trace_corpus_pg_store
         run: cargo test -p trace-commons-server --test trace_corpus_pg_store
         env:
@@ -599,36 +547,6 @@ jobs:
             echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
             exit 1
           fi
-      # Each of the three steps below runs one named test in `<database>_pilot`,
-      # a database each test process drops and creates beside the one its URL
-      # names, so neither the xact_commit guard at the end of this job nor a
-      # commit floor can prove the test ran (the harness setup alone commits
-      # more than some of the tests do). A test name that matches nothing
-      # passes with "0 passed", so each step requires its own "1 passed" line,
-      # as the upgrade step requires its count.
-      - name: versioned pipeline real HTTP
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-ingest --lib real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
-          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
-      - name: versioned pipeline compatibility through HTTP
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-ingest --lib compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
-          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
-          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_compat
-      - name: versioned pipeline parity with legacy
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_except_pinned_differences 2>&1 | tee pipeline-parity.log
-          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
-          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -668,15 +586,6 @@ jobs:
             -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
         env:
           TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participants
-      - name: participant reward HTTP account sessions
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-ingest --lib reward_participant_http_contract -- --ignored --test-threads=1
-          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participant_http \
-            -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
-        env:
-          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participant_http
       - name: published mission authorization and catalog
         if: ${{ !cancelled() }}
         run: |
@@ -688,18 +597,8 @@ jobs:
             -c "SELECT count(*) = 1 FROM _trace_commons_migrations WHERE version = 72 AND name = 'published_mission_packages';")" = t
         env:
           TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_mission_packages
-      - name: published mission HTTP contract
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-ingest --lib public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
-          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
-            -c 'SELECT count(*) = 2 FROM trace_reward_mission_packages;')" = t
-          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
-            -c 'SELECT count(*) = 0 FROM trace_reward_reservations;')" = t
-        env:
-          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_mission_http
-      # `--ignored` is not optional for these three. Without it they report
+      # `--ignored` is not optional for these two (nor for the invite-free
+      # path, which runs in `ingest-bin-postgres`). Without it they report
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
       - name: admission_ledger_pg
@@ -711,33 +610,6 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_external_pg -- --ignored --test-threads=1
         env:
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
-      - name: the invite-free path, end to end
-        run: cargo test -p trace-commons-ingest --lib admission_pg_tests -- --ignored
-        env:
-          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
-      # Selected by module name, like the step above. #836 shipped as two
-      # halves that had never run against each other; without `--ignored` this
-      # step passes having run neither.
-      - uses: ./.github/actions/apt-update-ubuntu-only
-      - name: Install Secret Service for native enrollment fixtures
-        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
-      - name: the NEAR AI enrolment ceremony, both halves
-        run: |
-          dbus-run-session -- sh -eu -c '
-            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test -p trace-commons-ingest --lib nearai_ceremony_pg_tests -- --ignored
-          '
-        env:
-          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
-      - name: wallet v2 signed completion against PostgreSQL
-        run: cargo test -p trace-commons-ingest --lib wallet_v2_pg_tests -- --ignored
-        env:
-          TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
-      # F10: changing an account's NEAR AI login, against the real handlers.
-      - name: NEAR AI login change against PostgreSQL
-        run: cargo test -p trace-commons-ingest --lib near_ai_rebind_pg_tests -- --ignored --test-threads=1
-        env:
-          TRACE_COMMONS_REBIND_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_rebind
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
@@ -786,8 +658,30 @@ jobs:
     # every push to main, every pull request, and every merge-queue batch. A
     # required check that is skipped in the queue never reports there, and
     # the queue times the entry out instead of merging it.
+    #
+    # It also runs the named `-p trace-commons-ingest --lib` slices that used
+    # to run in `postgres-suites`, each against its own database with its own
+    # variables, as before. They are the same test binary this job builds
+    # for its whole-bin run, so here they cost only their run time, where
+    # `postgres-suites` compiled the ingest library's whole test harness a
+    # second time for them (183 s of its 866 s on the run measured).
+    # `INGEST_SUITE_DATABASES` is their `PG_SUITE_DATABASES`: no suite reads
+    # it, and the database step and the guard below both iterate it.
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      INGEST_SUITE_DATABASES: >-
+        admission_test_upload_trust_scheduler_ci
+        admission_test_graded_corpus
+        admission_test_account_trust_route
+        admission_test_inference_connection_route
+        admission_test_tokens
+        admission_test_pipeline_http
+        admission_test_pipeline_compat
+        admission_test_pipeline_parity
+        admission_test_ingest
+        admission_test_walletv2
+        admission_test_rebind
     services:
       postgres:
         image: postgres:16
@@ -823,6 +717,11 @@ jobs:
         run: |
           set -euo pipefail
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_ingest_bin
+          for db in $INGEST_SUITE_DATABASES; do
+            PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "$db"
+          done
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
           PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
           CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
           CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
@@ -844,6 +743,125 @@ jobs:
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin
+      # The named slices from `postgres-suites`, each on its own database
+      # with only its own variables. After the whole-bin run, so that run
+      # sees the same fresh server it always has; `!cancelled()` on each, so
+      # a red whole-bin run hides none of them -- in `postgres-suites` they
+      # did not depend on it either.
+      - name: independent upload-trust scheduler and least privilege
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
+      # Stage 2 of the paying bundle failed Phase A on a graded package
+      # (2026-11-03): the corpus harness's production assembly dropped the
+      # package's credit rule. This runs main's corpus through that harness,
+      # in production mode over doubles, on a graded package. Ignored in the
+      # whole-bin run above because it writes the corpus tenant's fixed
+      # fixtures, so it runs alone here, on its own database.
+      - name: corpus check on a graded production package
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib a_graded_production_package_passes_the_corpus_check -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_graded_corpus
+      - name: account invite HTTP session and authority guards
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_route
+      - name: inference connection HTTP session selection
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection_route
+      - name: token bundle HTTP lost-response recovery
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p trace-commons-ingest --lib token_bundle_http_journey
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
+          TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
+      # Each of the three steps below runs one named test in `<database>_pilot`,
+      # a database each test process drops and creates beside the one its URL
+      # names, so the commit floor at the end of this job cannot prove the
+      # test ran (the harness setup alone commits more than some of the
+      # tests do). A test name that matches nothing
+      # passes with "0 passed", so each step requires its own "1 passed" line.
+      - name: versioned pipeline real HTTP
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-ingest --lib real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
+      - name: versioned pipeline compatibility through HTTP
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-ingest --lib compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_compat
+      - name: versioned pipeline parity with legacy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_except_pinned_differences 2>&1 | tee pipeline-parity.log
+          grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
+      - name: participant reward HTTP account sessions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-ingest --lib reward_participant_http_contract -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participant_http \
+            -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_participant_http
+      - name: published mission HTTP contract
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-ingest --lib public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
+            -c 'SELECT count(*) = 2 FROM trace_reward_mission_packages;')" = t
+          test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
+            -c 'SELECT count(*) = 0 FROM trace_reward_reservations;')" = t
+        env:
+          TRACE_COMMONS_REWARDS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/reward_test_mission_http
+      # `--ignored` is not optional here. Without it the tests report
+      # `ignored` and the step passes having run nothing.
+      - name: the invite-free path, end to end
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib admission_pg_tests -- --ignored
+        env:
+          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
+      # Selected by module name, like the step above. #836 shipped as two
+      # halves that had never run against each other; without `--ignored` this
+      # step passes having run neither.
+      - name: the NEAR AI enrolment ceremony, both halves
+        if: ${{ !cancelled() }}
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p trace-commons-ingest --lib nearai_ceremony_pg_tests -- --ignored
+          '
+        env:
+          TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
+      - name: wallet v2 signed completion against PostgreSQL
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib wallet_v2_pg_tests -- --ignored
+        env:
+          TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
+      # F10: changing an account's NEAR AI login, against the real handlers.
+      - name: NEAR AI login change against PostgreSQL
+        if: ${{ !cancelled() }}
+        run: cargo test -p trace-commons-ingest --lib near_ai_rebind_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_REBIND_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_rebind
       # The same guard as `postgres-suites`: a pass count is not evidence that
       # anything reached the database. A renamed variable or a new early
       # return leaves xact_commit where createdb left it. A full run commits
@@ -860,7 +878,14 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for pair in admission_test_ingest_bin:1000 admission_test_ingest_bin_pilot:2000; do
+          # The named slices' databases are held to `postgres-suites`' floor
+          # of 5: each slice commits well above it when it runs, and a
+          # skipped one leaves createdb's 0.
+          pairs="admission_test_ingest_bin:1000 admission_test_ingest_bin_pilot:2000"
+          for db in $INGEST_SUITE_DATABASES; do
+            pairs="$pairs $db:5"
+          done
+          for pair in $pairs; do
             db=${pair%%:*}
             floor=${pair##*:}
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
