@@ -74423,26 +74423,7 @@ async fn verify_mirrored_audit_event_after_file_append(
     Ok(())
 }
 
-/// Backward-compatible shim. Prefer `append_trace_content_read_audit_per_source`
-/// when caller code can surface the list of `object_ref_id`s that were read.
-#[allow(dead_code)]
-async fn append_trace_content_read_audit(
-    state: &AppState,
-    tenant: &TenantAuth,
-    submission_id: Uuid,
-    object_ref_id: Option<Uuid>,
-    surface: &str,
-    purpose: Option<&str>,
-) -> anyhow::Result<()> {
-    let refs: &[Uuid] = match object_ref_id.as_ref() {
-        Some(id) => std::slice::from_ref(id),
-        None => &[],
-    };
-    append_trace_content_read_audit_per_source(state, tenant, submission_id, refs, surface, purpose)
-        .await
-}
-
-/// Per-source variant of the trace-content read audit helper.
+/// Trace-content read audit helper.
 ///
 /// Emits one audit row per `(submission_id, object_ref_id)` pair when
 /// `object_ref_ids` is non-empty. When `object_ref_ids` is empty the helper
