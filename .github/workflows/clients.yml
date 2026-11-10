@@ -123,6 +123,9 @@ jobs:
       - name: Glass tokens are generated from their source
         run: python3 scripts/design-tokens/generate.py --check
       - name: swift test
+        # Debug builds read no published terms: no network in tests (terms.rs).
+        env:
+          TRACE_COMMONS_TERMS_DOCUMENT: none
         working-directory: macos
         run: swift test -Xswiftc -warnings-as-errors
       # `swift test` builds Debug only, so a DEBUG-only symbol (sample
@@ -167,6 +170,9 @@ jobs:
       - name: Build the FFI dylib
         run: cargo build -p trace-commons-contributor-ffi
       - name: swift test (TCDesign and the glass shell's source scans)
+        # Debug builds read no published terms: no network in tests (terms.rs).
+        env:
+          TRACE_COMMONS_TERMS_DOCUMENT: none
         working-directory: macos
         run: swift test -Xswiftc -warnings-as-errors --filter 'TCDesignTests|GlassSurfaceRulesTests|MonitorNavigationTests|LegacyShellRetiredTests|TracesParityTests|HistoryParityTests|InferenceParityTests'
 
@@ -510,6 +516,9 @@ jobs:
       # never touches it. Its update, portal-parsing and copy logic is all
       # pure and needs no display -- but without this step nothing runs it.
       - name: Test the shell
+        # Debug builds read no published terms: no network in tests (terms.rs).
+        env:
+          TRACE_COMMONS_TERMS_DOCUMENT: none
         run: cargo test --locked --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       # Being its own workspace also puts this crate outside the root
       # `cargo fmt --all` and the root clippy job, so for as long as it has

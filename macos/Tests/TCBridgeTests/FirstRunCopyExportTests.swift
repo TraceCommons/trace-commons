@@ -68,7 +68,7 @@ final class FirstRunCopyExportTests: XCTestCase {
     func testTermsHoldCopyDecodes() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         XCTAssertEqual(copy.termsHold.noticeTitle, "New Terms of Service")
-        XCTAssertEqual(copy.termsHold.noticeBody, "Uploads are paused until you accept.")
+        XCTAssertEqual(copy.termsHold.noticeBody, "Uploads are paused until you accept the new terms.")
         XCTAssertEqual(copy.termsHold.review, "Review terms")
         XCTAssertEqual(copy.termsHold.menuRow, "Uploads paused: new Terms of Service")
     }
