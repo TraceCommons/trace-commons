@@ -266,8 +266,7 @@ jobs:
       - name: Update conformance - note on the manifest roundtrip test
         shell: pwsh
         run: Write-Host "update_manifest_roundtrip.rs intentionally skipped on Windows -- see job comment"
-      # Formerly the `windows named-pipe ACL` job (docs and source comments
-      # still call it `windows-pipe-acl`).
+      # Formerly the `windows named-pipe ACL` job.
       #
       # On Windows the daemon's named-pipe DACL is the ONLY access control on
       # the IPC socket -- there is no 0700 state directory doing that work as

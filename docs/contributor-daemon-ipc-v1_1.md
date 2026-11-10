@@ -302,7 +302,8 @@ opens the pipe as a file handle, which has no equivalent of
 > Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
 > and the control flow and nothing about whether the descriptor actually
 > excludes another user, which is a runtime property no cross-compile can observe.
-> The observation is the `windows-pipe-acl` CI job
+> The observation is the named-pipe ACL step of the `windows contributor
+> crates (tests, named-pipe ACL, update conformance)` CI job in `clients.yml`
 > (`scripts/windows/verify-pipe-acl.ps1`, driving
 > `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
 > non-administrator local account, has it attempt to open the pipe, and
