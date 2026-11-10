@@ -33,20 +33,20 @@ The short version:
   its 3,053 top-level items.
 - The cheapest real savings are fewer builds (CI steps that rebuild the same
   harness on another runner) and fewer dependencies (84 packages reach the
-  harness through one dev-dependency used by about 9 of 2,006 tests).
+  harness through one dev-dependency used by 8 of 2,006 tests).
 
 ## 1. What is compiled, and where
 
 `cargo test -p trace-commons-ingest --lib` builds one unit: the library in
-test mode. It contains `app`, its 35 sibling modules, and the test module.
+test mode. It contains `app`, its sibling modules, and the test module.
 It lists 2,006 tests (50 ignored), 1,893 under `ingest::app::tests::` and
 113 in the inline test modules of sibling files. Measured with the built
 binary's `--list`, not by counting attributes.
 
 | | files | lines |
 |---|---|---|
-| production source (`app` and siblings) | 36 | 111,810 |
 | test corpus (`tests.rs` and everything it mounts) | 39 | 164,255 |
+| everything else (`app`, its sibling modules with their inline test modules, and test files mounted from outside `tests.rs`) | 36 | 111,810 |
 
 The plain library (what the `trace-commons-ingest` binary links) is a
 different unit. A job that builds the binary and then runs a `--lib` test
@@ -66,14 +66,17 @@ library in test mode; "lib" is the plain library.
 | `... whole bin, near-ai-staging ...` | lib and one integration target, then harness | `near-ai-staging` |
 | `cargo check (near-ai-scorer)` | lib check, lib build, then harness for 1 test | `near-ai-scorer`, then `gcs-client` |
 | `cargo check (near-attestation-collateral)` | lib check, lib build, then harness for 11 tests | `near-attestation-collateral` |
-| `pipeline qualification and restore` | harness, through `pipeline.py qualify` | default |
+| `pipeline qualification and restore` | harness, through `pipeline.py keygen` and `qualify` | default |
 | `cargo clippy` | harness and lib in check mode, twice | default, then `near-ai-staging` |
 | `cargo check (default features)`, `(local-gpu-models, non-CUDA)` | lib check | various |
 | `pilot-bootstrap smoke` | lib, release profile | default |
 
-That is eight harness builds. The task brief said about seven; the eighth
-is the qualification job, whose cargo output is captured by the tool and so
-does not show in the job log.
+That is eight harness builds. Earlier counts put it at about seven; the eighth
+is the qualification job. Its cargo output is captured by the tool and does
+not show in the job log, so it is confirmed from the tool's source instead:
+`pipeline.py` runs its key writer, corpus checks and restore drill as
+`cargo test -p trace-commons-ingest --lib <name>` (`INGEST_TEST_ARGS`), and
+the job's `keygen` step, the first of them, took 2 m 37 in run 42696115058.
 
 ## 2. Measurements
 
@@ -109,8 +112,8 @@ side by side. Those two numbers are contended and are not used below.
 
 One harness build with rustc's pass timings. `-Z time-passes` is unstable,
 so this run set `RUSTC_BOOTSTRAP=1` through a `RUSTC_WRAPPER` script for the
-ingest crate only; nothing else was rebuilt. Total 60.9 s (this run was a
-little slower than the three above).
+ingest crate only; nothing else was rebuilt. Total 60.9 s, against the
+54.6 s baseline without the flag.
 
 | pass | time | share |
 |---|---|---|
@@ -131,7 +134,8 @@ the 250 MB test executable takes 0.8 s.
 
 ### 2.3 Flag experiments
 
-Same harness command, with one flag appended after `--`. Measured.
+Same harness command, with one flag appended after `--`. Measured, one
+sample each, against the single baseline sample.
 
 | flag | harness time | against 54.6 s |
 |---|---|---|
@@ -139,7 +143,8 @@ Same harness command, with one flag appended after `--`. Measured.
 | `-C codegen-units=256` | 55.2 s | +0.6 s |
 | `-C debuginfo=0` | 54.9 s | +0.3 s |
 
-Neither moves the result outside run-to-run noise.
+Three builds of the same unit within 0.6 s of each other: neither flag
+has an effect that one sample can see.
 
 ### 2.4 CI
 
@@ -161,13 +166,13 @@ for that step, which also includes the server and the dev-dependencies.
 | pipeline qualification | not visible in the log | |
 
 The harness takes 65 to 110 s on a runner, median 104 s over these 18
-samples. The "2.5 to 3 minutes each" in the brief matches the cargo step,
+samples. The usual figure of 2.5 to 3 minutes each matches the cargo step,
 not the harness: a third to a half of each step is the server and the
 dev-dependency chain.
 
 The six measurable harness builds sum to 9.0, 9.9 and 9.9 minutes per run.
-With the two that cannot be read from the logs, the harness costs an
-estimated 12 to 13 runner-minutes per run. All jobs in run 42696115058 sum
+With the two that cannot be read from the logs, at the median 104 s each,
+the harness costs an estimated 12 to 13 runner-minutes per run. All jobs in run 42696115058 sum
 to 117.6 minutes, so that is roughly a tenth of the run.
 
 Other ingest units, for scale, same runs: plain lib build 48 to 62 s; lib
@@ -199,9 +204,9 @@ crates/trace-commons-ingest/`, 7 lines):
 
 - `nearai_ceremony_pg_tests.rs`, 6 tests
 - `token_bundle_journey_test.rs`, 1 test
-- `tests/near_ai_provisioning_tests.rs`, inside one test module
+- `tests/near_ai_provisioning_tests.rs`, 1 test (both uses are inside it)
 
-About 9 tests of 2,006. In the CI collateral job, 47 to 58 s pass between
+That is 8 tests of 2,006. In the CI collateral job, 47 to 58 s pass between
 the first workspace crate starting and the harness starting.
 
 ### 2.6 What the tests reach
@@ -253,9 +258,13 @@ type-checks, borrow-checks and collects monomorphizations for a crate as
 one unit, on one thread. Those passes are 73% of the harness build, and IR
 generation, also single-threaded, is another 18%. Module boundaries change
 none of it. The codegen-unit experiment is the direct test: going from 16
-units to 256 changed the build by 0.6 s. This spec does not authorize
-splitting `trace-commons-ingest.rs` or `tests.rs` into more in-crate
-modules for compile time.
+units to 256 changed the build by 0.6 s.
+
+What this spec authorizes, for the rule on large files: moving test files,
+and tests out of `tests.rs`, into separate test targets or packages, in the
+order and behind the gates of section 6. It does not authorize splitting
+`trace-commons-ingest.rs`, or splitting `tests.rs` into more modules of the
+same crate, for compile time.
 
 **Profile settings.** Debug info is already line tables only; removing it
 entirely changed nothing. Linking is 0.8 s, so a different linker has
@@ -346,9 +355,17 @@ another executable of this size.
   `--lib <filter>` that names a moved test rewritten.
 - Risk:
   - While the move is partial, a job that runs both the harness and the
-    external target compiles the production code twice more than it does
+    external target compiles the production code once more than it does
     today, about 55 s per job on a runner. A half-finished (b) makes CI
     slower.
+  - The self dev-dependency is how other projects turn a feature on for
+    their own tests; it has not been tried in this workspace and is
+    unproven until phase 1, step 1. Cargo unifies features across the
+    packages a command selects, so once any workspace package enables
+    `test-support`, a `--workspace` build (the workspace test job, the
+    first clippy pass) only ever sees the ingest crate with it on. The
+    `-p`-selected check, release and binary builds are what still see it
+    off, and the release guard has to hold that line.
   - Filters. `ci.yml` has 19 `cargo test -p trace-commons-ingest ... --lib`
     lines. `scripts/operator/pipeline.py`, `pipeline_tooling/checks.py` and
     `pipeline_tooling/promote.py` hard-code `-p trace-commons-ingest --lib`
@@ -408,23 +425,31 @@ Not recommended. No profile change.
 
 ### (f) Take the contributor out of the harness's dependencies
 
-Not in the brief; the measurements raised it (2.5). Move the roughly 9
-tests that use `trace-commons-contributor` to
-`trace-commons-client-server-tests`, the unpublished package that already
-exists for client/server cross-checks, and drop the dev-dependency.
+Not among the options first listed; the measurements raised it (2.5). Move the 8 tests that
+use `trace-commons-contributor` out of the ingest package and drop the
+dev-dependency. Dev-dependencies are per package, so another target in the
+same package would not help; the tests need a different package.
 
 - Saving, local (measured gap): 22 s of wall time on a cold build or after
   the contributor changes, and 84 fewer packages in the ingest test graph.
   No change to a warm edit loop.
 - Saving, CI (estimate): 20 to 55 s per harness build, because CI rebuilds
-  the workspace's own crates on every run. Over eight builds, 2.5 to 7
-  runner-minutes, less about 1 minute for the contracts package building
-  the ingest lib once.
+  the workspace's own crates on every run. It applies to six builds, not
+  eight: the workspace job builds the contributor anyway, and after (a)1
+  the database-suites job no longer builds the harness. 2 to 5.5
+  runner-minutes.
 - Cost: those tests use private `app` items and `tests.rs` helpers, so they
-  need the seam from (b), at small scale. The contracts package gains a
-  dev-dependency on `trace-commons-ingest`, which is a new pinned edge in
-  `license_boundary.rs`; that list is the specification and changes only
-  with owner approval.
+  need the seam from (b), at small scale.
+- Where they go is an owner decision, because the three files carry AGPL
+  headers:
+  - `trace-commons-client-server-tests`, the unpublished package that
+    already exists for client/server cross-checks, is `MIT OR Apache-2.0`.
+    Moving the files there relicenses that test code, and adds a pinned
+    dev-dependency edge to `trace-commons-ingest` in `license_boundary.rs`.
+    That list is the specification and changes only with owner approval.
+  - A new unpublished AGPL test package keeps the licence and needs no new
+    crossing edge, but is a new crate: SPDX headers, the AGPL lists in
+    `CLAUDE.md`, `AGENTS.md` and `license_boundary.rs`.
 - Risk: the moved tests leave the three whole-bin PostgreSQL jobs. The
   ceremony tests need a database and would need their own step.
 
@@ -448,16 +473,16 @@ CI while it is half done, so it should prove itself on one group first.
 | phase | change | saving per CI run | saving per local ingest test cycle |
 |---|---|---|---|
 | 0 | (a)1: move the 14 ingest steps to the whole-bin job, with pass-count guards | 2.1 to 3.4 runner-minutes (measured step build); longest job 15.0 to an estimated 12 to 13 minutes | none |
-| 1 | The `test-support` seam and its release guard; (f): contributor tests to the contracts package | estimated net 1.5 to 6 runner-minutes | 22 s on a cold build or after a contributor change (measured gap); none warm |
+| 1 | The `test-support` seam and its release guard; (f): the 8 contributor tests out of the ingest package | estimated 2 to 5.5 runner-minutes | 22 s on a cold build or after a contributor change (measured gap); none warm |
 | 2 | Pilot (b): 21 of the files under `tests/` (147 tests, about 12,500 lines) into one `tests/it.rs` target | about zero; an estimated +55 s per job that builds both, until phase 3 | for a moved test, an estimated 3 to 8 s plus link for a test-only edit, against 55 s |
 | 3 | Only if phase 2 passes its gate: the rest of `tests.rs`, then the PostgreSQL files | about zero for full runs; an estimated 40 to 50 s for each of the two tiny feature runs | an estimated 23 s or less for a test-only edit, against 55 s; unchanged for an `app` edit |
 
 Today, for reference: the harness costs an estimated 12 to 13
 runner-minutes per CI run, and 55 s per local cycle for any edit.
 
-Phases 0 and 1 together are an estimated 3.5 to 9.5 runner-minutes per run,
-a quarter to three quarters of the harness's cost, and 2 to 3 minutes off
-the longest job. Phases 2 and 3 are for the local cycle.
+Phases 0 and 1 together are an estimated 4 to 9 runner-minutes per run, of
+about 118, and 2 to 3 minutes off the longest job. Phases 2 and 3 are for
+the local cycle.
 
 ### Phase 0
 
@@ -473,8 +498,8 @@ the job logs. Job names unchanged.
 2. Compile the three contributor-using files as external tests and count
    the privacy errors. That count, not the name-based one in 2.6, sizes the
    work. Stop and report if it is over a few dozen items.
-3. Move them to the contracts package; ask the owner for the pinned
-   dev-dependency edge; give the ceremony tests a PostgreSQL step.
+3. Ask the owner which package takes them (option (f)); move them; give
+   the ceremony tests a PostgreSQL step.
 4. Measure: `cargo tree` package count, and harness start against server
    finish in the timing report.
 
@@ -540,6 +565,14 @@ cargo check --timings -p trace-commons-ingest --lib --tests
 # Flag experiments.
 cargo rustc --timings -p trace-commons-ingest --lib --profile test -- -C codegen-units=256
 cargo rustc --timings -p trace-commons-ingest --lib --profile test -- -C debuginfo=0
+
+# Pass timings on the stable toolchain. The wrapper is a two-line script:
+#   #!/bin/sh
+#   RUSTC_BOOTSTRAP=1 exec "$@"
+# Only the ingest unit rebuilds, so only it is compiled without sccache.
+touch crates/trace-commons-ingest/src/lib.rs
+RUSTC_WRAPPER=/path/to/wrapper.sh \
+  cargo rustc -p trace-commons-ingest --lib --profile test -- -Z time-passes
 
 # Test counts, from the harness binary cargo prints.
 cargo test -p trace-commons-ingest --lib -- --list | tail -1
