@@ -123,8 +123,8 @@ jobs:
     # `admission_test_pipeline`, `admission_test_pipeline_http` and
     # `admission_test_unbound_reaper` were created but never checked.
     #
-    # This is the only job-wide variable, and it is safe as one because no
-    # suite reads it. The `reward_test_*` databases are not listed: each of
+    # These are the only job-wide variables, and they are safe as such because
+    # no suite reads them. The `reward_test_*` databases are not listed: each of
     # their steps proves its own run by querying the rows it must have written.
     env:
       PG_SUITE_DATABASES: >-
@@ -132,14 +132,12 @@ jobs:
         admission_test_ledger
         admission_test_account_ledger
         admission_test_account_trust_external
-        admission_test_migration
         admission_test_invite
         admission_test_merge
         admission_test_rls
         admission_test_store
         admission_test_tokens
         admission_test_account_trust
-        admission_test_account_trust_growth
         admission_test_upload_trust_plan_ci
         admission_test_upload_trust_upgrade_ci
         admission_test_account_trust_live
@@ -153,17 +151,22 @@ jobs:
         admission_test_payout_rails
         admission_test_first_run_stats
         admission_test_witness_blocked
-        admission_test_payout_pass
         admission_test_referral_rewards
         admission_test_referral_codes
         admission_test_referral_bonus
-        admission_test_referral_stream
         admission_test_legacy_invite_link
-        admission_test_legacy_payout_carry
         admission_test_device_invite_subject
-        admission_test_pipeline
         admission_test_starter
+      # The suites that run on the second server, `postgres_b` on port 5433;
+      # see the comment there. Created and guarded exactly like the list above.
+      PG_LANE_B_DATABASES: >-
+        admission_test_account_trust_growth
+        admission_test_legacy_payout_carry
+        admission_test_payout_pass
+        admission_test_referral_stream
+        admission_test_migration
         pipeline_test_upgrade
+        admission_test_pipeline
     # The tests in this repository that touch PostgreSQL do not run anywhere.
     # Each skips or is `#[ignore]`d without an environment variable, no job sets
     # one, and `cargo test` therefore reports them as passing or ignored while
@@ -247,6 +250,35 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # A second, separate PostgreSQL server, so that two lanes of suites can
+      # run at the same time. Not a second database on the first server:
+      # roles live in cluster-wide catalogs (`pg_authid`, `pg_auth_members`)
+      # that every database shares, 35 migrations CREATE ROLE and 26 ALTER
+      # ROLE, every suite migrates its own database from scratch, and the
+      # migration runner's and the fixtures' advisory locks are scoped to one
+      # database. Two suites migrating on one server at once can therefore
+      # race on the same role rows -- the "tuple concurrently updated" #833
+      # and #1004 fixed inside one suite. Two servers share no catalog at
+      # all, and within each lane the suites still run one after another,
+      # exactly as before.
+      #
+      # Lane B is the seven suites `PG_LANE_B_DATABASES` names, run by the
+      # "lane B" steps below from scripts/ci/pg-lane.sh. Everything else is
+      # lane A: the YAML steps, in order, on the first server.
+      postgres_b:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+          # The same reason as the first server.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -295,6 +327,104 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participants
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
+          for db in $PG_LANE_B_DATABASES; do
+            PGPASSWORD=trace createdb -h 127.0.0.1 -p 5433 -U trace "$db"
+          done
+      # Every test target the suites below run, in one cargo invocation: rustc
+      # builds them in parallel instead of one per step, and the two lanes
+      # then only run binaries, so neither waits on the other's compile (cargo
+      # holds its build lock while compiling, not while tests run). A target
+      # missing from this list still works -- its own step compiles it -- it
+      # just compiles alone.
+      - name: Build every suite's test binary
+        run: |
+          cargo test --locked -p trace-commons-server --no-run --lib \
+            --test account_merge_pg --test account_onboarding_pg \
+            --test account_trust_external_pg --test account_trust_growth_pg \
+            --test account_trust_live_pg --test account_trust_pg \
+            --test activity_missions_pg --test admission_ledger_pg \
+            --test device_invite_subject_pg --test first_run_stats_pg \
+            --test inference_connection_pg --test legacy_invite_counts \
+            --test legacy_invite_link_pg --test legacy_payout_carry_pg \
+            --test migration_atomicity_pg --test mission_publication_pg \
+            --test mission_rewards_pg --test model_training_consent_pg \
+            --test payout_pass_pg --test payout_rails_pg \
+            --test r1_pipeline_measurement --test referral_bonus_pg \
+            --test referral_codes_pg --test referral_rewards_pg \
+            --test referral_stream_pg --test reward_participant_pg \
+            --test starter_plausibility_pg --test token_bundle_pg \
+            --test trace_corpus_pg_rls --test trace_corpus_pg_store \
+            --test trace_invite_registry_pg \
+            --test trace_session_withdrawal_pg \
+            --test upload_principal_ownership_pg \
+            --test upload_trust_frontier_plan_pg \
+            --test versioned_pipeline_runtime_pg --test witness_blocked_pg \
+            --test witness_evidence_pg
+      # Lane B: the second server's suites, started in the background now and
+      # reported by "lane B: results" near the end of the job. Each `suite`
+      # line is one former step: its name, then only the variables that
+      # suite reads (the same per-suite separation as step-level `env:`
+      # below), then its command. Each writes its own log; every suite runs
+      # even when an earlier one fails.
+      - name: "lane B: start the second server's suites"
+        run: |
+          set -euo pipefail
+          . scripts/ci/pg-lane.sh
+          lane_b() {
+            # Earned account trust (shadow): fact recording, the worker's
+            # least-privilege roles and the one cross-tenant enumeration seam.
+            suite account_trust_growth_pg \
+              TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_account_trust_growth \
+              -- cargo test -p trace-commons-server --test account_trust_growth_pg
+            # V146: the legacy account payout migration. The decision-5
+            # principal claim through the real tenant link, carrying a
+            # confirmed payout link to linked legacy accounts, release on
+            # unlink, change and revocation (revoked by a non-superuser
+            # login), pooled and closed accounts, the instance-enrolled link,
+            # and readiness left alone. Runtime logins only.
+            suite legacy_payout_carry_pg \
+              TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_legacy_payout_carry \
+              -- cargo test -p trace-commons-server --test legacy_payout_carry_pg -- --test-threads=1
+            # The per-rail payout pass (payout spec sections 3, 4 and 7):
+            # exactly once across a crash on the cumulative and the keyed
+            # rail, one rail's stop or halt never reaching another, a
+            # credential refusal changing no row, closing by reads, relinks
+            # and netting. Against a loopback mock of cloud-api #1271 and the
+            # keyed test rail, as a real LOGIN role.
+            suite payout_pass_pg \
+              TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_payout_pass \
+              -- cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
+            # The referral payout stream (V142 lines and links): the second
+            # program per link, one pending line per stream, per-stream crash
+            # recovery, close with both totals, referral-only holds and
+            # ceiling, and the referral mode. Bonus rows seeded by the
+            # migrator; the pass runs as a real LOGIN role against the #1271
+            # loopback mock.
+            suite referral_stream_pg \
+              TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_referral_stream \
+              -- cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
+            suite migration_atomicity_pg \
+              TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_migration \
+              -- cargo test -p trace-commons-server --test migration_atomicity_pg
+            suite "versioned_pipeline_storage_upgrade" \
+              TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL=postgres://trace@127.0.0.1:5433/pipeline_test_upgrade \
+              -- cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored
+            # The runtime suite, then the evidence that it used its
+            # NOBYPASSRLS role: the role is created the first time it does and
+            # nowhere else, so its presence on this server is the proof.
+            suite versioned_pipeline_runtime \
+              TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://trace@127.0.0.1:5433/admission_test_pipeline \
+              -- bash -euo pipefail -c '
+                cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg
+                found=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -p 5433 -U trace postgres \
+                          -c "SELECT COUNT(*) FROM pg_roles WHERE rolname='"'"'trace_pipeline_runtime_test'"'"';")
+                if [ "${found:-0}" != "1" ]; then
+                  echo "versioned_pipeline_runtime_pg never provisioned its runtime role"
+                  exit 1
+                fi
+              '
+          }
+          lane_start pg-lane-b lane_b
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block (`PG_SUITE_DATABASES` above is job-wide only because no
       # suite reads it). That is not tidiness: `trace_invite_registry_pg` reads
@@ -309,12 +439,6 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust
-      # Earned account trust (shadow): fact recording, the worker's
-      # least-privilege roles and the one cross-tenant enumeration seam.
-      - name: account_trust_growth_pg
-        run: cargo test -p trace-commons-server --test account_trust_growth_pg
-        env:
-          TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
       - name: bounded upload-trust frontier query plans
         run: cargo test -p trace-commons-server --test upload_trust_frontier_plan_pg
         env:
@@ -346,15 +470,6 @@ jobs:
         run: cargo test -p trace-commons-server --test legacy_invite_link_pg
         env:
           TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_invite_link
-      # V146: the legacy account payout migration. The decision-5 principal
-      # claim through the real tenant link, carrying a confirmed payout link
-      # to linked legacy accounts, release on unlink, change and revocation
-      # (revoked by a non-superuser login), pooled and closed accounts, the
-      # instance-enrolled link, and readiness left alone. Runtime logins only.
-      - name: legacy_payout_carry_pg
-        run: cargo test -p trace-commons-server --test legacy_payout_carry_pg -- --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_payout_carry
       # A device reading back its own invite subject hash from the issuer,
       # onboarded through the real /v1/onboard path, with the named refusals
       # against real rows. Feeds the legacy invite link statement.
@@ -415,28 +530,6 @@ jobs:
         run: cargo test -p trace-commons-server --test witness_blocked_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_witness_blocked
-      # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
-      # once across a crash on the cumulative and the keyed rail, one rail's
-      # stop or halt never reaching another, a credential refusal changing no
-      # row, closing by reads, relinks and netting. Against a loopback mock of
-      # cloud-api #1271 and the keyed test rail, as a real LOGIN role.
-      - name: payout_pass_pg
-        run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
-      # The referral payout stream (V142 lines and links): the second
-      # program per link, one pending line per stream, per-stream crash
-      # recovery, close with both totals, referral-only holds and ceiling,
-      # and the referral mode. Bonus rows seeded by the migrator; the pass
-      # runs as a real LOGIN role against the #1271 loopback mock.
-      - name: referral_stream_pg
-        run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
-      - name: migration_atomicity_pg
-        run: cargo test -p trace-commons-server --test migration_atomicity_pg
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_migration
       - name: trace_invite_registry_pg
         run: cargo test -p trace-commons-server --test trace_invite_registry_pg
         env:
@@ -560,23 +653,6 @@ jobs:
           grep -q 'test result: ok. 5 passed; 0 failed' legacy-invite-counts.log
         env:
           TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
-      - name: versioned pipeline storage upgrade
-        run: cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored
-        env:
-          TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/pipeline_test_upgrade
-      - name: versioned pipeline runtime
-        run: cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg
-        env:
-          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline
-      - name: Refuse a pipeline run that never used its NOBYPASSRLS role
-        run: |
-          set -euo pipefail
-          found=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
-                    -c "SELECT COUNT(*) FROM pg_roles WHERE rolname='trace_pipeline_runtime_test';")
-          if [ "${found:-0}" != "1" ]; then
-            echo "::error::versioned_pipeline_runtime_pg never provisioned its runtime role"
-            exit 1
-          fi
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -640,6 +716,14 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_external_pg -- --ignored --test-threads=1
         env:
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
+      # Waits for lane B, prints each of its suites' logs in its own group,
+      # and fails naming every suite that failed. `!cancelled()`: a red lane
+      # A step must not hide lane B's results.
+      - name: "lane B: results"
+        if: ${{ !cancelled() }}
+        run: |
+          . scripts/ci/pg-lane.sh
+          lane_wait pg-lane-b
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
@@ -654,15 +738,18 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in $PG_SUITE_DATABASES; do
-            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+          check() {
+            local port=$1 db=$2 n
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -p "$port" -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
-            echo "$db committed ${n:-0} transactions"
+            echo "$db (port $port) committed ${n:-0} transactions"
             if [ "${n:-0}" -lt 5 ]; then
               echo "::error::$db shows no activity; its suite skipped instead of running"
               fail=1
             fi
-          done
+          }
+          for db in $PG_SUITE_DATABASES; do check 5432 "$db"; done
+          for db in $PG_LANE_B_DATABASES; do check 5433 "$db"; done
           exit $fail
 
   ingest-bin-postgres:
