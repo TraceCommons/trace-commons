@@ -165,6 +165,9 @@ private struct FirstRunSteps: View {
         case .privateAI:
             PrivateAIScreen(copy: copy, runner: runner, memory: memory)
                 .transition(.opacity)
+        case .terms:
+            TermsScreen(copy: copy, runner: runner)
+                .transition(.opacity)
         case .join:
             JoinScreen(copy: copy, runner: runner)
                 .transition(.opacity)

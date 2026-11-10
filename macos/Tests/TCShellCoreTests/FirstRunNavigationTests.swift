@@ -16,18 +16,20 @@ final class FirstRunNavigationTests: XCTestCase {
 
     /// The animated first run (Ron's 2026-10-21 canvas): one order for
     /// everyone, signing in last, with nothing asked about sharing until
-    /// Uses (Ron, 2026-11-05). The step thread names every step after Welcome.
+    /// Uses (Ron, 2026-11-05), and the terms on their own step just before
+    /// Join (owner, 2026-11-09). The step thread names every step after
+    /// Welcome.
     func test_theStepsRunFromWelcomeToJoin() {
-        XCTAssertEqual(FirstRunNavigation.steps, [.welcome, .tools, .privateAI, .traces, .uses, .join])
-        XCTAssertEqual(FirstRunNavigation.threadSteps, [.tools, .privateAI, .traces, .uses, .join])
+        XCTAssertEqual(FirstRunNavigation.steps, [.welcome, .tools, .privateAI, .traces, .uses, .terms, .join])
+        XCTAssertEqual(FirstRunNavigation.threadSteps, [.tools, .privateAI, .traces, .uses, .terms, .join])
         XCTAssertEqual(FirstRunState().step, .welcome, "a first run opens on Welcome")
         var state = FirstRunState()
         var visited: [FirstRunStep] = [state.step]
-        for _ in 0..<6 {
+        for _ in 0..<7 {
             state = FirstRunNavigation.next(state)
             visited.append(state.step)
         }
-        XCTAssertEqual(visited, [.welcome, .tools, .privateAI, .traces, .uses, .join, .join])
+        XCTAssertEqual(visited, [.welcome, .tools, .privateAI, .traces, .uses, .terms, .join, .join])
     }
 
     /// A step already passed, picked on the thread, is Back to it; one not

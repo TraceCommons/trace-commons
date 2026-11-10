@@ -44,6 +44,16 @@ const NOT_A_HOST: [(&str, &str, &str); 2] = [
     ),
 ];
 
+/// Channel values a staging build shares with production, by whole value.
+///
+/// Owner decision, 2026-11-09: staging has no site of its own, so a staging
+/// build reads the production Terms of Service document. That one URL is the
+/// only exception to "every host a staging build names is a staging host".
+/// Matched by the exact value, never by host, so another production URL
+/// added to a staging build still fails. Do not add to this list without an
+/// owner decision recorded beside the entry.
+const SHARED_WITH_PRODUCTION: &[&str] = &[channel::TERMS_DOCUMENT_URL];
+
 /// A NEAR AI or Trace Commons domain at the end of a host name.
 const HOST_DOMAINS: [&str; 2] = ["near.ai", "tracecommons.ai"];
 
@@ -411,16 +421,33 @@ fn assert_no_literal_outside_the_channel_module() {
     );
 }
 
-/// Every host this build's channel values name.
+/// Every host this build's channel values name, leaving out the values in
+/// [`SHARED_WITH_PRODUCTION`]. Both staging checks read this one helper, so
+/// the exception cannot be applied to one and missed in the other.
 fn channel_hosts() -> Vec<String> {
     channel::HOST_VALUES
         .iter()
+        .filter(|value| !SHARED_WITH_PRODUCTION.contains(value))
         .flat_map(|value| hosts_in(value))
         .collect()
 }
 
 fn digest(host: &str) -> String {
     hex::encode(Sha256::digest(host.as_bytes()))
+}
+
+/// The shared-with-production exception is exactly the terms document, and
+/// it is a value this build actually carries.
+#[test]
+fn only_the_terms_document_is_shared() {
+    assert_eq!(SHARED_WITH_PRODUCTION, &[channel::TERMS_DOCUMENT_URL]);
+    assert_eq!(
+        channel::TERMS_DOCUMENT_URL,
+        "https://tracecommons.ai/legal/terms.json"
+    );
+    for value in SHARED_WITH_PRODUCTION {
+        assert!(channel::HOST_VALUES.contains(value), "{value}");
+    }
 }
 
 /// A staging build: no host or identity literal outside the channel module,

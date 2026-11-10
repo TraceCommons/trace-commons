@@ -257,6 +257,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_inference_connections",
     "trace_account_inference_connection_requests",
     "trace_account_inference_connection_events",
+    "account_terms_acceptances",
     "trace_account_principals",
     "trace_device_upload_principals",
     "trace_login_links",
@@ -2141,6 +2142,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "age_carry_across_linked_identities",
         include_str!("../../../../migrations/V157__age_carry_across_linked_identities.sql"),
     ),
+    // V158: append-only record of each account's Terms of Service
+    // acceptance per org (version id, document hash, client and server
+    // times). The server never refuses an upload over terms.
+    (
+        158,
+        "account_terms_acceptances",
+        include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2379,6 +2388,30 @@ impl Database for PgBackend {
         ).await?;
         tx.commit().await?;
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_terms_acceptance(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        auth_method: &str,
+        client_kind: &str,
+        terms_version: &str,
+        content_sha256: &str,
+        accepted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError> {
+        PgBackend::record_terms_acceptance(
+            self,
+            tenant_id,
+            account_id,
+            auth_method,
+            client_kind,
+            terms_version,
+            content_sha256,
+            accepted_at,
+        )
+        .await
     }
 
     async fn select_inference_connection(
@@ -8792,6 +8825,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -8844,6 +8878,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -9781,6 +9816,73 @@ mod v157_tests {
             upper.matches("BYPASSRLS").count(),
             upper.matches("NOBYPASSRLS").count() + 1,
             "V157 names BYPASSRLS only as NOBYPASSRLS and in the privilege check"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v158_tests {
+    /// V158: the terms acceptance table is append-only for the runtime, under
+    /// forced RLS on the central tenant predicate, with shape checks on the
+    /// version id and the hash, and nothing the PostgreSQL 15 pilot lacks.
+    #[test]
+    fn v158_records_terms_acceptances_append_only() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__account_terms_acceptances.sql", 158);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            4,
+            "V158 must be named exactly four times: by the MIGRATIONS table, by the \
+             RLS registry test's central-policy and force-RLS lists, and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 158 && *name == "account_terms_acceptances"),
+            "V158 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V158__account_terms_acceptances.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for required in [
+            "CREATE TABLE IF NOT EXISTS account_terms_acceptances (",
+            "terms_version ~ '^[A-Za-z0-9._-]{1,64}$'",
+            "content_sha256 ~ '^[0-9a-f]{64}$'",
+            "UNIQUE (tenant_id, account_id, terms_version, content_sha256)",
+            "ON DELETE CASCADE",
+            "ALTER TABLE account_terms_acceptances FORCE ROW LEVEL SECURITY;",
+            "USING (tenant_id = trace_current_tenant_id())",
+            "REVOKE ALL ON account_terms_acceptances FROM PUBLIC;",
+            "GRANT SELECT ON account_terms_acceptances TO trace_ingest_runtime;",
+        ] {
+            assert!(code.contains(required), "V158 is missing `{required}`");
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "BYPASSRLS",
+            "GRANT UPDATE",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "WITH INHERIT",
+            "WITH SET",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V158 must not contain `{forbidden}`"
+            );
+        }
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V158 must not grant anything TO PUBLIC"
         );
     }
 }

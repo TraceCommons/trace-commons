@@ -121,7 +121,8 @@ final class DesignRulings20261029Tests: XCTestCase {
     /// item's do; the legend keeps its colours.
     func test_thePopoverGraphGreysWhilePaused() throws {
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains("scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)"))
+        // The terms hold greys them too (terms spec, section 5).
+        XCTAssertTrue(panel.contains("scaleFloor: 5, compact: true, paused: model.status.paused || model.status.termsHold,\n                hovered: $hovered)"))
         XCTAssertEqual(panel.components(separatedBy: "GlassBarGraph(").count - 1, 1)
     }
 

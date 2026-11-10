@@ -64,6 +64,10 @@ protocol FirstRunDaemon: AnyObject {
     /// True only once the watch-only marker is actually written. It is keyed
     /// by the daemon's config directory, so without one this answers false.
     func markWatchOnlyComplete() async -> Bool
+    /// `terms_accept`: hand the terms the person read and accepted on
+    /// Welcome to the started daemon, which keeps the record and posts it to
+    /// each org. True only once the daemon took it.
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool
     /// `unenroll`: true only once the daemon confirmed it dropped this
     /// Mac's enrollment (or held none).
     func unenroll() async -> Bool
@@ -79,6 +83,8 @@ protocol FirstRunDaemon: AnyObject {
 extension FirstRunDaemon {
     /// A daemon that cannot say: Traces shows the core's line.
     func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? { nil }
+    /// A daemon that cannot take the terms: the hold flow asks again.
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool { false }
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -120,8 +126,14 @@ enum FirstRunFailure: Equatable {
 @MainActor
 final class FirstRunRunner: ObservableObject {
     @Published var state: FirstRunState
-    /// Explicit first-run acceptance, retained when navigating Back.
-    @Published var termsAccepted = false
+    /// The terms the person scrolled through and accepted on the Terms step: the
+    /// version and hash they read, and when. Nil until then, and again if
+    /// they untick. Retained when navigating Back; held in memory only, and
+    /// handed to the daemon once, at the first commit after acceptance.
+    @Published var acceptedTerms: AcceptedTerms?
+    /// `acceptedTerms` was handed to the started daemon (taken or not), so
+    /// it is not handed again in this first run.
+    private(set) var termsHandedOver = false
     @Published var failure: FirstRunFailure?
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
@@ -172,12 +184,28 @@ final class FirstRunRunner: ObservableObject {
         self.finishedNotice = finishedNotice
     }
 
-    func canLeaveWelcome(legal: FirstRunCopy.Welcome.Legal?) -> Bool {
-        state.step == .welcome && legal != nil && termsAccepted
+    /// The Terms step is left only with this: the terms copy is present,
+    /// and the document the step's loader has loaded (`terms`) is the one
+    /// accepted, version and hash. `acceptedTerms` outlives Back while the
+    /// step's loader starts over, so an acceptance alone does not count
+    /// while the terms load, after they failed, or for another document
+    /// (spec section 2).
+    func hasAcceptedTerms(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) -> Bool {
+        guard legal != nil, let acceptedTerms, let terms else { return false }
+        return acceptedTerms.version == terms.document.version
+            && acceptedTerms.contentSHA256 == terms.contentSHA256
     }
 
-    func continueFromWelcome(legal: FirstRunCopy.Welcome.Legal?) {
-        guard canLeaveWelcome(legal: legal) else { return }
+    /// Get started on Welcome. The terms are read on their own step near
+    /// the end of the first run, not on the splash (owner, 2026-11-09).
+    func continueFromWelcome() {
+        guard state.step == .welcome else { return }
+        state = FirstRunNavigation.next(state)
+    }
+
+    /// Continue on the Terms step, only with the terms on screen accepted.
+    func continueFromTerms(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) {
+        guard state.step == .terms, hasAcceptedTerms(legal: legal, terms: terms) else { return }
         state = FirstRunNavigation.next(state)
     }
 
@@ -210,6 +238,10 @@ final class FirstRunRunner: ObservableObject {
             failure = .startFailed
             return
         }
+        // The Terms step comes after Tools started the daemon, and a first
+        // run may begin with it running: hand the terms over at the first
+        // commit after they were accepted (Join's sign-in or Start sharing).
+        if state.daemonStarted { await handOverTerms() }
         for call in FirstRunPlan.calls(for: state, at: point) {
             guard await run(call) else { return }
         }
@@ -228,6 +260,17 @@ final class FirstRunRunner: ObservableObject {
         traceLines = await daemon.firstRunCopy(traceCount: traceCount, totalBytes: totalBytes)
     }
 
+    /// Hand the accepted terms to the daemon that just started, once. A
+    /// refusal does not fail the first run: the daemon's own check and the
+    /// terms hold ask again when it matters.
+    private func handOverTerms() async {
+        guard !termsHandedOver, let acceptedTerms else { return }
+        termsHandedOver = true
+        if !(await daemon.recordTermsAcceptance(acceptedTerms)) {
+            NSLog("trace-commons: terms-handoff-refused")
+        }
+    }
+
     /// The commits that send the session roots, and so need a declaration.
     static func declaresRoots(_ point: CommitPoint) -> Bool {
         switch point {
@@ -243,6 +286,7 @@ final class FirstRunRunner: ObservableObject {
             guard await daemon.startDaemon(settingsJSON: json) else { return fail(.startFailed) }
             state.daemonStarted = true
             state.startedSettingsJSON = json
+            await handOverTerms()
         case .setSourceSettings(let changed):
             guard await daemon.setSourceSettings(settingsJSON: changed) else { return fail(.settingsFailed) }
             // The daemon merged the change, so it now holds the whole

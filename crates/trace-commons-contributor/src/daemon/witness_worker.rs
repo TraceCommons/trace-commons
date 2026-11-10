@@ -417,6 +417,7 @@ fn sends_held(shared: &DaemonShared, now: DateTime<Utc>) -> bool {
         || shared.is_paused(now)
         || shared.quiesced.load(Ordering::Relaxed)
         || shared.uploads_held.load(Ordering::SeqCst)
+        || shared.terms_held.load(Ordering::SeqCst)
         || shared.dev_dry_run
 }
 

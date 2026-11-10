@@ -448,6 +448,9 @@ struct MonitorWindowView: View {
         // The change of login's sheet (F10), raised from Settings'
         // Connection and Private AI sections, once for the window.
         .modifier(AccountLoginChangePresenter())
+        // The new-terms sheet, raised by Home's terms notice or the menu
+        // bar's row.
+        .modifier(TermsHoldPresenter())
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.

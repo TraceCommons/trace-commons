@@ -114,19 +114,10 @@ struct WelcomeScreen: View {
                     .modifier(Rise(amount: WelcomeScreenLayout.risen(
                         after: elapsed, delay: WelcomeScreenLayout.bodyDelay, reduceMotion: reduceMotion)))
                     .padding(.bottom, 38)
-                Button(copy.welcome.start) {
-                    runner.continueFromWelcome(legal: copy.welcome.legal)
-                }
+                Button(copy.welcome.start) { runner.continueFromWelcome() }
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
-                .disabled(!runner.canLeaveWelcome(legal: copy.welcome.legal))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
-                if let legal = copy.welcome.legal {
-                    FirstRunLegalPlaceholder(copy: legal, accepted: $runner.termsAccepted)
-                        .padding(.top, GlassTokens.Space.s6)
-                        .modifier(Rise(amount: WelcomeScreenLayout.risen(
-                            after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
-                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -155,29 +146,6 @@ struct WelcomeScreen: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(copy.welcome.title)
         .accessibilityAddTraits(.isHeader)
-    }
-}
-
-/// The runner owns acceptance and enforces it before leaving Welcome.
-/// This checkbox never grants trace-sharing permission.
-struct FirstRunLegalPlaceholder: View {
-    let copy: FirstRunCopy.Welcome.Legal
-    @Binding var accepted: Bool
-
-    var body: some View {
-        VStack(spacing: GlassTokens.Space.s2) {
-            Toggle(copy.accept, isOn: $accepted)
-                .toggleStyle(GlassCheckboxStyle())
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: GlassTokens.Space.s4) {
-                Link(copy.terms, destination: copy.termsUrl)
-                Link(copy.privacy, destination: copy.privacyUrl)
-            }
-            .glassType(GlassTokens.TypeScale.caption)
-        }
-        .frame(maxWidth: 340)
     }
 }
 

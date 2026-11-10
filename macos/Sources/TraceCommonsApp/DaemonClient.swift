@@ -161,6 +161,17 @@ final class DaemonClient: Sendable {
         try call("status", as: DaemonStatus.self)
     }
 
+    /// `terms_accept`: records that the person accepted `terms` and lifts
+    /// the terms hold when it was the version owed. Returns whether a hold
+    /// is still in force. Throws the daemon's `Failure`, whose `message` is
+    /// `terms-version-stale` when the version read is no longer the one
+    /// published.
+    @discardableResult
+    func termsAccept(_ terms: AcceptedTerms) throws -> Bool {
+        let result = try resultObject("terms_accept", params: terms.ipcParams)
+        return result["held"] as? Bool ?? false
+    }
+
     func listPending() throws -> [QueueEntry] {
         try DaemonDecoding.pendingEntries(from: rawResult("list_pending"))
     }

@@ -1,0 +1,14 @@
+{
+  "schema_version": "trace_commons.terms.v1",
+  "version": "2026-08-22-draft",
+  "effective": "2026-08-22",
+  "in_effect": false,
+  "title": "Terms and conditions",
+  "blocks": [
+    {"kind": "heading", "text": "1. Who we are"},
+    {"kind": "paragraph", "text": "These terms cover **Trace Commons**. See the [privacy policy](https://tracecommons.ai/about/privacy) or write to [us](mailto:legal@tracecommons.ai)."},
+    {"kind": "list", "items": ["First item with `code`", "Second item with *emphasis*"]},
+    {"kind": "table", "header": ["Scope", "What it permits"], "rows": [["`debugging_evaluation`", "Debugging and evaluation"], ["`research`", "Research use"]]},
+    {"kind": "callout", "text": "These terms are a draft."}
+  ]
+}

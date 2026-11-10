@@ -33,12 +33,13 @@ final class FirstRunFrameTests: XCTestCase {
         let copy = try words()
         XCTAssertEqual(copy.threadLabels, [
             copy.frame.stepTools, copy.frame.stepPrivateAi, copy.frame.stepTraces, copy.frame.stepUses,
-            copy.frame.stepJoin,
+            copy.frame.stepTerms, copy.frame.stepJoin,
         ])
         XCTAssertNil(copy.threadLabel(for: .welcome), "Welcome shows no thread")
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .welcome), nil)
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .tools), 0)
-        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .terms), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 5)
     }
 
     /// The stretch before a step is travelled once it is reached; the
