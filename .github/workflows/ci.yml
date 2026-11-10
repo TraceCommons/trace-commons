@@ -1599,25 +1599,38 @@ jobs:
       # Its unit tests pin how a fetch failure is classified: a 404 (with or
       # without a JSON error body) is an integrity failure the pipeline
       # charges, every other failure is transport (PR #1283 review, finding
-      # 2). A filter that matches nothing passes with "0 passed", so the step
-      # requires at least one.
-      - name: gcs-client lib tests
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-server --features gcs-client --lib trace_artifact_gcs 2>&1 | tee gcs-client-tests.log
-          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-tests.log
+      # 2).
+      #
       # The config-status surface must not leak the bucket, KMS key, credential
-      # or endpoint of a gcs provider. The test is behind `gcs-client` and its
-      # name does not match the filter above, so no job selected it. It builds
-      # state with no database (the remote store is `remote_disabled`), so a
-      # pass is not vacuous; the step still requires at least one.
-      - name: gcs-client config status test
-        timeout-minutes: 15
+      # or endpoint of a gcs provider. That test is behind `gcs-client` in the
+      # ingest library and its name does not match the server filter, so no
+      # job selected it before. It builds state with no database (the remote
+      # store is `remote_disabled`), so a pass is not vacuous.
+      #
+      # Both in one cargo invocation, so the contributor and server crates
+      # that the ingest's test build recompiles under its own feature
+      # unification are compiled once, and the two test harnesses build in
+      # parallel; run separately they took 110 s and 174 s. libtest takes
+      # several filters and runs a test matching any of them in each binary.
+      # The server's lib tests now build with the ingest's dev-dependency
+      # features unified in (tokio `test-util` and two small crates), as
+      # `cargo test --workspace` already builds them.
+      - name: gcs-client lib tests (server and ingest)
+        timeout-minutes: 20
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-ingest --features gcs-client --lib ingest::app::tests::admin_config_status_reports_gcs_provider_when_feature_enabled 2>&1 | tee gcs-client-config-status.log
-          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-config-status.log
+          cargo test -p trace-commons-server -p trace-commons-ingest --features gcs-client --lib -- \
+            trace_artifact_gcs \
+            ingest::app::tests::admin_config_status_reports_gcs_provider_when_feature_enabled \
+            2>&1 | tee gcs-client-tests.log
+          # One pass line per binary, each naming at least one test: a filter
+          # that matches nothing in one crate passes with "0 passed" there.
+          awk '
+            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
+            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
+            END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
+          ' gcs-client-tests.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1665,7 +1678,6 @@ jobs:
       # client, which is the exact call that panicked.
       - run: cargo build -p trace-commons-ingest --bin trace-commons-ingest --features near-attestation-collateral
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
-      - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
       # `--lib near_attestation` used to sweep the whole attestation module:
       # receipt, quote and measurement verification included. All three moved
       # to the permissive `trace-commons-attestation` crate, so that filter
@@ -1687,14 +1699,31 @@ jobs:
       # swept the 11 ingest tests whose names contain it. They now live in
       # the `trace-commons-ingest` crate and dropped out of that step, so the
       # step below runs them there, under the same feature, which the ingest
-      # crate forwards to the server. A filter that matches nothing passes
-      # with "0 passed", so the step requires at least one. The counts above
-      # predate both, so re-measure with `-- --list` before relying on them.
-      - name: ingest near_attestation tests (near-attestation-collateral)
+      # crate forwards to the server. The counts above predate both, so
+      # re-measure with `-- --list` before relying on them.
+      #
+      # The server's and the ingest's `--lib near_attestation` run in one
+      # cargo invocation: run separately (105 s and 160 s), the ingest's test
+      # build recompiled the contributor and server crates under its own
+      # feature unification after the server's had built them, and the two
+      # harnesses compiled one after the other. The server's lib tests now
+      # build with the ingest's dev-dependency features unified in (tokio
+      # `test-util` and two small crates), as `cargo test --workspace`
+      # already builds them. A filter that matches nothing passes with
+      # "0 passed", so the step requires at least one in each crate (the
+      # server half used to require none).
+      - name: near_attestation lib tests, server and ingest (near-attestation-collateral)
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-ingest --features near-attestation-collateral --lib near_attestation 2>&1 | tee ingest-near-attestation.log
-          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' ingest-near-attestation.log
+          cargo test -p trace-commons-server -p trace-commons-ingest --features near-attestation-collateral --lib near_attestation 2>&1 | tee near-attestation.log
+          # One pass line per binary, each naming at least one test: a filter
+          # that matches nothing in one crate passes with "0 passed" there.
+          awk '
+            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
+            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
+            END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
+          ' near-attestation.log
       - run: cargo test -p trace-commons-attestation --features collateral-client
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
