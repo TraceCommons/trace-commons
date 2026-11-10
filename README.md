@@ -1,17 +1,31 @@
-# Near AI Gateway
+# Trace Commons and Near AI Gateway
+
+This repository holds two things that work together.
+
+**Trace Commons** is a user-owned register of AI agent work. When an AI agent
+works for someone, it leaves a record of what happened. Trace Commons keeps
+that record under the contributor's control: traces are scrubbed on the
+contributor's own machine, only the scrubbed version is shared, and only with
+their consent. A server accepts records that are new and substantive, and
+contributors earn Trace Credit for what is accepted. The server, the protocol
+and the register's storage live here.
+
+**Near AI Gateway** is the Mac app people use to take part. It watches the
+coding agents you choose, scrubs and shares traces with Trace Commons on your
+terms, and can route your tools' AI requests through NEAR AI's private
+inference. The app, the contributor CLI and the background service they share
+live here too.
+
+## Near AI Gateway
 
 **A Mac app for people who work with AI coding agents.** It keeps the record
 of that work under your control, lets you earn credit for sharing it, and can
 route your tools' AI requests through NEAR AI's private inference.
 
-Near AI Gateway is the app of TraceCommons, a user-owned register of AI agent
-work. This repository holds the app, the contributor CLI, and the server
-they talk to.
-
 For macOS 14 or later, plus the contributor CLI for macOS, Linux and Windows.
 The Windows and Linux desktop apps remain on their existing releases.
 
-## What it does
+### What it does
 
 - **Watches the folders you choose.** It finds the session transcripts that
   Claude Code, Codex, Gemini CLI, Cline and OpenCode leave on your Mac, and
@@ -28,9 +42,9 @@ The Windows and Linux desktop apps remain on their existing releases.
   connect it, and requests are logged on this Mac.
 - **Insights.** A private view of your own agent work, kept on this Mac.
 
-## Install
+### Install
 
-### The Mac app
+#### The Mac app
 
 Download the DMG from the [releases page][releases], or install the Homebrew
 cask:
@@ -48,7 +62,7 @@ whichever stream was cut most recently, and an app release carries no CLI
 binary, so pick the newest release of the kind you want from the
 [releases page][releases].
 
-### The CLI
+#### The CLI
 
 Signed binaries are published per release, so contributors do not need this
 repository or a Rust toolchain. [Contributor CLI](#contributor-cli) below
@@ -73,7 +87,7 @@ irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/in
 
 [releases]: https://github.com/TraceCommons/trace-commons/releases
 
-## TraceCommons: a user-owned register of AI agent work
+## Trace Commons: a user-owned register of AI agent work
 
 When an AI agent does work for someone, it leaves a record of what actually
 happened: the tools it called, the places it failed, the result it gave back.
