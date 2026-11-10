@@ -44,7 +44,10 @@ description: >-
 #   minutes for about 2.5 GB, while `cargo check (near-ai-scorer)` saved
 #   9 minutes for its 1.7 GB, and the remaining caches still overran 10 GB.
 #   Cold, both jobs finish well inside `cargo test (default features)`, so
-#   no pull request waits longer.
+#   no pull request waits longer. (Since 2026-11-09 both restore, but do
+#   not save, the cache `ingest-bin-postgres-near-ai-staging` saves: by then
+#   their cold dependency builds were 161 s and 199 s and they were the
+#   critical path, and a restore-only step costs no storage.)
 # - This action also removes the workspace's own crates (every path package
 #   is named trace-commons-*). A fresh checkout gives each source file a
 #   new mtime, so cargo rebuilds every workspace crate on every run whatever

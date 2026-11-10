@@ -120,8 +120,9 @@ links once per crate instead of once per file.
 - Separate databases on one cluster are not enough either: every fresh
   database's migrations write cluster-wide role rows (`CREATE ROLE`, `ALTER
   ROLE`, `GRANT <guard> TO CURRENT_USER`), and two suites migrating at once
-  fail with `tuple concurrently updated`. To run the `postgres-suites` job's
-  suites locally in parallel, use `scripts/dev/pg-suites-local.sh [--jobs N]
+  fail with `tuple concurrently updated`. To run CI's PostgreSQL suites
+  (the `postgres-suites` job's and the ingest slices in `ingest-bin-postgres`)
+  locally in parallel, use `scripts/dev/pg-suites-local.sh [--jobs N]
   [--only a,b]`: it builds the test binaries once, starts one throwaway
   cluster per lane (needs `initdb`/`pg_ctl` on PATH), runs the suites
   round-robin across the lanes with each suite's log under
@@ -203,8 +204,9 @@ binaries and proc-macros are never cached, so linking costs the same.
 
 The ingest service's PostgreSQL tests (`ingest::app::`, in the
 `trace-commons-ingest` library) self-skip without
-`TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the `postgres-suites` job runs only
-named slices of them. To run all of them locally, use a fresh
+`TRACE_COMMONS_PG_TEST_DATABASE_URL`. CI runs them in the `ingest-bin-postgres`
+job: the whole library single-threaded, plus named slices with their own
+databases and env. To run all of them locally, use a fresh
 `admission_test_*` database on the literal host `127.0.0.1`, set the
 login-resolver URL (a LOGIN role that is a member of `trace_login_resolver`,
 see `docs/operator/login-resolver-role.md`), and run single-threaded, because
@@ -252,9 +254,13 @@ targeted test still runs immediately.
 
 ## CI
 
-`.github/workflows/ci.yml` holds the server-side jobs and runs every one of
-them on every PR. The lists below are not a full inventory; read the workflow
-for that.
+`.github/workflows/ci.yml` holds the server-side jobs and runs them on every
+PR, with two exceptions. A `changes` job (`scripts/ci/ci-changes.sh`) lets a
+pull request that changes only documents no other tracked file names skip the
+compiling jobs; it fails open, and push and merge-queue runs always run
+everything. And the two `near-ai-*` ingest whole-bin variants run only on
+push to `main` and in the merge queue. The lists below are not a full
+inventory; read the workflow for that.
 
 Running is not the same as blocking. **Thirteen** jobs are required status
 checks on `main`, and only those block a merge; `README.md` lists them too.
@@ -296,10 +302,20 @@ names exactly: renaming a required job drops it from the gate.
   PostgreSQL-backed tests at a real database; everywhere else they self-skip.
   Both end by refusing a run whose database shows no committed transactions,
   because a pass count alone does not prove the tests reached PostgreSQL.
+  `postgres-suites` builds every target once, then runs its suites in two
+  lanes on two separate PostgreSQL servers (lane B through
+  `scripts/ci/pg-lane.sh`, with per-suite log groups and a results step that
+  names each failure): separate databases on one server race on cluster-wide
+  role rows. The ingest lib slices run in `ingest-bin-postgres`, which builds
+  the same harness, each step with `if: !cancelled()`.
 
-### Not required (run on every PR, block nothing)
+### Not required (block nothing)
 
 - `operator-binaries smoke`.
+- `trace-commons-ingest tests, whole bin, near-ai-scorer, against PostgreSQL`
+  and `... near-ai-staging, against PostgreSQL` — run on push to `main` and in
+  the merge queue, not on pull requests, so a regression in either surfaces
+  after the PR.
 - `pipeline qualification and restore` — runs `python3
   scripts/operator/pipeline.py qualify` against its own digest-pinned
   PostgreSQL container (no `services:` block), signed with a throwaway check
@@ -313,9 +329,8 @@ names exactly: renaming a required job drops it from the gate.
 ### Client shells: `clients.yml`
 
 `.github/workflows/clients.yml` holds the client jobs: `macOS app tests`,
-`macOS 15 fallback tests`, `windows named-pipe ACL`, `windows contributor
-crate tests`, `windows update conformance`, `install.ps1 against the real
-release`, `windows contributor app`, `linux-shell desktop entry and metainfo`,
+`macOS 15 fallback tests`, `windows contributor crates (tests, named-pipe
+ACL, update conformance)`, `install.ps1 against the real release`, `windows contributor app`, `linux-shell desktop entry and metainfo`,
 `linux-shell desktop integration (weston + portal)`. It runs on every push to
 `main`, on `workflow_dispatch`, and on a pull request only when it touches a
 client path (its `paths:` filter). None of its jobs is a required status
@@ -326,7 +341,10 @@ client regression surfaces on `main` after the merge.
   job that runs the whole Swift suite (`macOS 15 fallback tests` runs a
   filtered subset). Needs `cargo build -p trace-commons-contributor-ffi`
   first, because the Swift package links that dylib.
-- `windows named-pipe ACL` — runs `scripts/windows/verify-pipe-acl.ps1`,
+- `windows contributor crates (tests, named-pipe ACL, update conformance)` —
+  one job, so one compile serves the crate tests, the pipe-ACL check and the
+  update conformance; each keeps its own named step. Its named-pipe ACL step
+  runs `scripts/windows/verify-pipe-acl.ps1`,
   which creates a second, non-administrator local account and requires it to
   be denied when opening the contributor daemon's named pipe. That DACL is
   the sole access control on the daemon IPC socket on Windows, and it is not
@@ -348,6 +366,14 @@ client regression surfaces on `main` after the merge.
   request's cache is restorable by that pull request alone, so saving one only
   evicts `main`'s from GitHub's 10 GB allowance.
 - The jobs in `clients.yml` keep no cache at all.
+- The two PostgreSQL jobs restore (never save) the `pg-ingest-bin-near-ai-staging`
+  cache, which resolves the same third-party graph; `pilot-bootstrap smoke`
+  caches its `--release` build in the same restore-trim-save shape.
+- `./.github/actions/prune-cargo-cache` runs after each save on `main` and
+  deletes that cache family's older lockfile generations (never the key just
+  saved), so `main`'s caches stay inside the allowance.
+- `./.github/actions/free-runner-disk` starts its deletions in the background
+  and waits (until done or 40 GB free) just before the first compile.
 - The three `cargo test` jobs restore through
   `./.github/actions/restore-cargo-test-cache`, which builds the key in one
   place, falls back to another job's key when asked, and warns on the run
