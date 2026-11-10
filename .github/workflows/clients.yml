@@ -73,6 +73,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      # The Swift package links the contributor FFI dylib
+      # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
+      # defaults to ../target/debug), so the dylib has to exist before
+      # `swift test` can link anything. Debug profile, to match that default.
+      - name: Build the FFI dylib
+        run: cargo build -p trace-commons-contributor-ffi
       # The whole contributor lib suite, not a filter. Several credential
       # tests are `#[cfg(target_os = "macos")]` and compile nowhere else: the
       # data-protection store's unentitled answer (a CI runner is exactly an
@@ -88,21 +94,13 @@ jobs:
       # Parsers, Insights, and OS credential/file primitives now have separate
       # crates. Keep all of their old contributor-lib coverage, including the
       # macOS-only os_secret_store tests in the platform crate.
-      #
-      # One cargo invocation for the four packages (it used to be four), so
-      # the dependency graph is resolved and built once. The FFI crate's own
-      # credential test follows, and the dylib is built after the tests, as a
-      # link over the dependencies they already compiled.
       - name: Contributor lib tests on macOS
         run: |
-          cargo test -p trace-commons-contributor -p trace-commons-contributor-sources -p trace-commons-contributor-insights -p trace-commons-contributor-platform --lib
+          cargo test -p trace-commons-contributor --lib
+          cargo test -p trace-commons-contributor-sources --lib
+          cargo test -p trace-commons-contributor-insights --lib
+          cargo test -p trace-commons-contributor-platform --lib
           cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::'
-      # The Swift package links the contributor FFI dylib
-      # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
-      # defaults to ../target/debug), so the dylib has to exist before
-      # `swift test` can link anything. Debug profile, to match that default.
-      - name: Build the FFI dylib
-        run: cargo build -p trace-commons-contributor-ffi
       # These three tests used to be part of the contributor's lib harness.
       # Keep their macOS coverage without making every client test build the server.
       - name: Native auth client/server contracts on macOS
