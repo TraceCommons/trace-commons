@@ -111,7 +111,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // `OpenMonitor` opens it, or first run while onboarding is required.
         MonitorLaunch.launch(MonitorScene(
             model: model, compute: compute, navigation: navigation,
-            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts))
+            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
+            privateInferenceMenu: privateInferenceMenu))
 
         #if DEBUG
         // The menu-bar item and popover in a window (R13 of #1173), for
@@ -214,6 +215,8 @@ struct MonitorScene: Scene {
     let navigation: MainWindowNavigation
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// The app menu's Private AI switch (`MonitorCommands`).
+    let privateInferenceMenu: PrivateInferenceMenuItem
 
     var body: some Scene {
         Window("Monitor", id: WindowID.monitor) {
