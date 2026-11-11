@@ -94,7 +94,7 @@
   <aside class="chart">
     <h2>Checked chart</h2>
     <img src="../enterprise_seat.svg" alt="Statechart with four regions: your Mac, your latest trace, the server, and the org">
-    <p>Drawn from all 259,072 model states, merged by the view in view.mts. Rendered by chart.sh; do not edit by hand. Hidden steps: changing Automatic, the Mac fetching policy, NEAR AI removing or re-adding you, the admin forbidding Automatic or accepting server terms, settlement, and server uploads. All of them still run in the model.</p>
+    <p>Drawn from all 1,217,568 model states, merged by the render view in render.mts. Redraw with chart.sh; do not edit by hand. Hidden steps: choosing Ask or Automatic, the Mac fetching policy, NEAR AI removing or re-adding you, the admin forbidding or allowing Automatic or accepting server terms, settlement, the server's own uploads, and the claim request failing. All of them still run in the model.</p>
   </aside>
   <section>
     <h2>Your Mac</h2>
@@ -240,10 +240,11 @@ Nothing is uploaded.</div></div>
     <div class="assume">
       <h2>What the model assumes</h2>
       <ul>
-        <li>Org identity is NEAR AI organization membership (decision 1); credit goes to the org only (decision 3); one enrolment per Mac (decision 4).</li>
+        <li>Org identity is NEAR AI organization membership (decision 1); credit goes to the org only (decision 3); one enrolment per Mac, except a withdraw-only personal credential for "Before you joined" (decision 4, change B).</li>
         <li>Removal opens a closing window that allows only Withdraw (decision 6). Its length is not modelled.</li>
         <li>Org sessions do not slide; an expired one is renewed only by a fresh membership check (spec 5.3).</li>
-        <li>Automatic is enforced on the Mac from the policy it last fetched; sharing off is enforced by the server.</li>
+        <li>Automatic is enforced on the Mac and by the issuer: the claim carries the policy digest and how the trace was sent (change A). Sharing off, removal, suspension and a lapsed sign-in are checked again when the upload arrives.</li>
+        <li>In an org, the Mac sends nothing while it is signed out (change C).</li>
         <li>One member, one server, one trace at a time each.</li>
       </ul>
     </div>

@@ -84,8 +84,14 @@ claim request fails" (network, any time).
   configuration profile (spec 9.1); there is no in-app join for a person who has neither.
 - Data uses, the privacy scan, scoring, dedup, payout and the admin console's own sign-in are
   outside the model.
-- The rule-9 surfaces (managed indicator, grants voided, removal) are placeholders in the mocks;
-  their wording waits on spec decision 9.
+- The rule-9 surfaces are placeholders in the mocks; their wording waits on spec decision 9.
+- Behind "holds": promise 11 also assumes you submit again after each refusal and that the Mac
+  keeps fetching policy (fairness on those steps). Promises 2 and 3 assume an honest client: how a
+  trace was sent is asserted by the Mac, and the server cannot tell a member's act from a policy
+  (spec 3.1).
+- Where checks run: the issuer checks the policy digest and Automatic; the upload's arrival
+  re-checks org status, sharing, the seat, the session (membership freshness) and, for the
+  server, the server terms. Promises 4, 5, 6, 9 and 10 depend on those arrival checks (spec 5.3).
 
 ## The chart
 
@@ -104,9 +110,13 @@ them. Every model state and step stays in; the chart draws fewer of them.
 Needs Java 21+, Quint 0.33.0, and `tla2tools.jar` 1.7.4 (sha256
 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`).
 
+Check a copy. When every promise holds, `scripts/check` draws no chart for a model this size,
+and it then deletes `enterprise_seat.mmd` and `enterprise_seat.svg` beside the flow it checked.
+
 ```sh
 export TLA2TOOLS=/path/to/tla2tools.jar JAVA=/path/to/java
-<flow-promises skill>/scripts/check enterprise_seat.qnt --view view.mts --out "$(mktemp -d)"
+tmp=$(mktemp -d) && cp -R . "$tmp" && cd "$tmp"
+<flow-promises skill>/scripts/check enterprise_seat.qnt --view view.mts --out out
 ```
 
 To redraw the merged chart: `FLOW_PROMISES=<skill dir> TLA2TOOLS=... JAVA=... ./chart.sh`. It

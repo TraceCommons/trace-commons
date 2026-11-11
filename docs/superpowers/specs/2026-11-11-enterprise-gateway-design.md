@@ -436,6 +436,9 @@ accounts in two tenants; nothing links them and nothing needs to.
 One Mac holding both a personal and an org enrolment is **not** in this
 design (decision 4). The state directory is one enrolment, and
 `contributor.json` names one tenant.
+The one exception is the withdraw-only personal credential of decision 4
+(11.1, change B): it can withdraw the personal account's traces and do
+nothing else.
 
 ### 4.4 Org policy
 
@@ -608,9 +611,14 @@ digest that is not the org's current one, and an `automatic` claim when
 `member_automatic = forbidden`; the trace goes back to Held and nothing
 leaves the Mac. Without this, Automatic is enforced only from the policy
 the Mac last fetched, and an admin's "forbid Automatic" does not stop a
-send that races the fetch. Ingest re-checks the seat and the membership
-freshness when the upload lands, so nothing is credited after removal or
-after a lapsed membership, even from an upload already in flight. The
+send that races the fetch. Ingest re-checks, when the upload lands, everything
+the issuer checked that can change while the upload is in flight: the
+org's status (`active`), `sharing`, the seat (not removed, device key
+not revoked), the member's membership freshness, and for a server seat
+the org's server-terms acceptance. So nothing is credited after
+suspension, closing, sharing off, removal or a lapsed membership, even
+from an upload already in flight. The flow model's promises 4, 5, 6, 9
+and 10 depend on these landing checks, not only on the issuer's. The
 Mac requests no claim while its org session has expired; traces stay
 Held until the member signs in again.
 
@@ -1221,9 +1229,13 @@ counterexample changed the design (owner's picks, 2026-11-11):
 - **C (promise 11).** The Mac sends nothing while its org session has
   expired (5.3).
 
-The owner also added the last two conditions of promise 11; the README
-gives the paths, what the model leaves out, and the command that checks
-it again.
+The owner also added the last two conditions of promise 11. Two more
+assumptions sit behind "holds" and are not in the owners' sentences:
+promise 11 also assumes the member submits again after each refusal and
+that the Mac keeps fetching policy; and promises 2 and 3 assume an honest
+client, because how a trace was sent is asserted by the Mac (3.1 states
+that limit). The README gives the paths, what the model leaves out, and
+the command that checks it again.
 
 ## 12. Phasing
 
@@ -1238,7 +1250,10 @@ it again.
 - Member admit path A (NEAR AI org membership). One sign-in, nothing
   else to configure.
 - Org policy with the server-enforced parts first: `sharing`, use
-  ceilings, pinned spend org. `consent_basis` on the claim.
+  ceilings, pinned spend org. `consent_basis`, `policy_digest` and how
+  the trace was sent on the claim, with the issuer and landing checks of
+  5.3 (flow changes A and C). The "Before you joined" withdraw-only
+  personal credential (change B).
 - Console: seats, devices, policy, credit totals, per-seat attribution
   (subject to decision 5), audit.
 - macOS managed mode, the managed-preferences bootstrap, locked settings.
@@ -1364,6 +1379,10 @@ design; the rest change a section.
    on the Traces tab rather than a banner, reuse the existing grant-void
    surface for the second with new copy, and decide the third with
    decision 6. None is designed as settled; rule 9 applies to all three.
+   The flow mocks (`docs/flows/enterprise-seat/mocks/`) found two more
+   places that need words: what joining changes, shown before the member
+   joins (9.1), and why a signed-out member must sign in again before
+   uploads resume (change C). Both are placeholders there.
    Trade-off: without the first, the "not silent" answer in 3.1 has
    nothing behind it and the feature should not ship.
 
@@ -1427,6 +1446,11 @@ Stated so nobody builds on them as facts.
   it to a 30-day cap (`SRV/account_native_auth.rs:66-94`, re-read). This
   spec follows the server code. The comment looks stale and was not
   chased further.
+- Whether the withdraw-only personal credential of change B (decision
+  4) can be built from today's pieces: what session or key the personal
+  account's withdraw route accepts, how long it lives on a Mac whose
+  device key now belongs to the org tenant, and how it is revoked. Not
+  checked against code.
 - Whether every settlement and payout path honours the holder key was
   checked by reading four call sites and three downstream readers (6.1),
   not by a test. Other readers of settlement keys may exist.
