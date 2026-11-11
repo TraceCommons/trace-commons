@@ -4,5 +4,7 @@
   "environment": "production",
   "capabilities": [],
   "remote_enable": [],
-  "signing_keys": []
+  "signing_keys": [
+    "49ce745bfec653ca8187c1c0bb68d18c7afc9dfc6998bc7bc9424bd4081845a5"
+  ]
 }
