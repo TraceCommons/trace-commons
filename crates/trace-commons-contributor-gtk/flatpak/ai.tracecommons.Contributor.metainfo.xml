@@ -62,6 +62,21 @@
   </provides>
 
   <releases>
+    <release version="1.0.3" date="2026-11-11">
+      <description>
+        <p>Lets traces waiting on this computer upload again: a trace no longer shows as unable to be sent because no model call went through Private AI, an upload over the daily allowance waits and retries when it resets, and a privacy check that fails because the service is briefly down is tried again.</p>
+      </description>
+    </release>
+    <release version="1.0.2" date="2026-11-11">
+      <description>
+        <p>Lowers the macOS app's CPU use while idle, which was redrawing the menu bar and app menu on every status update.</p>
+      </description>
+    </release>
+    <release version="1.0.1" date="2026-11-11">
+      <description>
+        <p>Fixes signing in to Private AI from Safari on macOS, where choosing a login showed "Not accepted."</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-11-09">
       <description>
         <p>Version 1.0. On macOS, first run asks you to read the Terms of Service before signing in, and About has a Copy button for the version.</p>
