@@ -1,8 +1,10 @@
 //! OpenCode local session and JSON export reader.
 //!
 //! Native SQLite sessions are read through `opencode_db`; both readers accept
-//! the versions in [`READABLE_VERSIONS`], and exports also take the
-//! structurally validated v2 session-transfer envelope.
+//! the 1.x versions in [`READABLE_VERSIONS`] and the structurally validated
+//! v2 session-transfer envelope (`opencode_db` reassembles OpenCode 2's
+//! `session_v2` rows into that envelope, gated on the database's migrations
+//! rather than a version).
 //! Neither source implies provider evidence or upload consent.
 //! A declared directory contains `.json` exports directly (not recursively).
 
