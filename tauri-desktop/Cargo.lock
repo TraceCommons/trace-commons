@@ -6435,7 +6435,7 @@ version = "0.1.0"
 
 [[package]]
 name = "trace-commons-contributor"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6478,7 +6478,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-insights"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6498,7 +6498,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-platform"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6514,7 +6514,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-sources"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
