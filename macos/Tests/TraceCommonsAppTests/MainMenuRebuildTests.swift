@@ -97,7 +97,7 @@ final class MainMenuRebuildTests: XCTestCase {
 
     /// A settings view with Private AI on or off, decoded the way the
     /// daemon's answer is.
-    private static func settings(privateInference on: Bool) throws -> DaemonSettingsView {
+    static func settings(privateInference on: Bool) throws -> DaemonSettingsView {
         try DaemonClient(daemon: FixedDaemon(response: """
             {"id":1,"result":{"quiescence_secs":45,"digest_interval_secs":3600,
             "local_notifications":true,"queue_ttl_days":14,"max_queue_entries":500,
