@@ -431,6 +431,7 @@ final class SettingsParityTests: XCTestCase {
             ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
         .privateAI: ("PrivateAISection", [("case .loading:", "GlassSpinner(standalone: true)")]),
+        .savedAccounts: ("SavedAccountsSection", [("if model.managedSnapshot == nil {", "connectingCard")]),
         .referrals: ("ReferralsSection", [("if read != .answered {", "SettingsReadNotice(read")]),
         .projects: ("ProjectsSection", [("if model.projectsRead != .answered {", "SettingsReadNotice(model.projectsRead")]),
         .changes: ("ChangesSection", [("if model.auditRead != .answered {", "SettingsReadNotice(model.auditRead")]),
