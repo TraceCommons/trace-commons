@@ -19,6 +19,11 @@ mod tests {
     /// names nothing defines.
     const SOURCES: &[(&str, &str)] = &[
         ("roots.rs", include_str!("roots.rs")),
+        ("insights.rs", include_str!("insights.rs")),
+        (
+            "insights_analytics.rs",
+            include_str!("insights_analytics.rs"),
+        ),
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
         ("settings.rs", include_str!("settings.rs")),
@@ -40,6 +45,7 @@ mod tests {
         "dim-label",
         "heading",
         "title",
+        "title-1",
         "subtitle",
         "body",
         "caption",
@@ -108,7 +114,12 @@ mod tests {
         let selector = format!(".{class}");
         let ends_name =
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
-        for sheet in [STYLE_CSS, BRAND_CSS] {
+        for sheet in [
+            STYLE_CSS,
+            BRAND_CSS,
+            super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
+            super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
+        ] {
             for line in sheet.lines() {
                 let line = line.trim();
                 // Only selector lines. A declaration such as `color: #fff;`

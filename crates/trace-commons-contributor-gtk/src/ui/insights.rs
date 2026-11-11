@@ -424,7 +424,15 @@ impl InsightsView {
         let switcher = gtk::StackSwitcher::new();
         switcher.set_stack(Some(&tabs));
         let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        tab_row.append(&switcher);
+        // Keep every destination reachable even when the native switcher's
+        // label minimum exceeds a narrow pane or an enlarged text setting.
+        let tab_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hexpand(true)
+            .child(&switcher)
+            .build();
+        tab_row.append(&tab_scroller);
         for setter in [
             gtk::prelude::WidgetExt::set_margin_top,
             gtk::prelude::WidgetExt::set_margin_start,
@@ -433,6 +441,7 @@ impl InsightsView {
             setter(&tab_row, 12);
         }
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.add_css_class("tc-insights");
         root.append(&tab_row);
         root.append(&tabs);
         let weak = Rc::downgrade(&analytics);
