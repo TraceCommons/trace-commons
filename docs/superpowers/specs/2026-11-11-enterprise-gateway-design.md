@@ -54,6 +54,9 @@ proof.
    and the payout rails. New surface: three tables, one role, one
    settlement arm, an org console on ingest, a managed-configuration
    reader, and an unattended mode for the Linux daemon.
+7. **One app, one download** (9.1). Enterprise is a managed state the
+   app enters only from a configuration profile or an org's enrolment
+   link; people who download it themselves never see org surfaces.
 
 ## 1. Corrections to the brief
 
@@ -1024,6 +1027,54 @@ polish.
 "trace", "Private AI" only for NEAR AI routing, and the mode names Ask,
 Automatic, Never.
 
+### 9.1 Distribution: one app, one download
+
+Owner question, 2026-11-11: "how do we distribute this app without making
+it confusing for individual prosumer users". Proposed answer: the
+enterprise version is **a state the app enters, not a second product**.
+
+- **One app, one name, one download.** The same signed `Near.ai.app`, the
+  same release feed, the same `/download/` page on the marketing site. A
+  person who downloads it for themselves sees today's first run and never
+  meets an org concept: no "personal or team?" fork, no admin wording, no
+  org pricing on the download path.
+- **An org puts a Mac into managed mode in one of two ways, and only
+  these:**
+  1. **Device management.** IT deploys the same installer plus a
+     configuration profile (5.5) through Jamf, Kandji, Intune or similar.
+     The profile carries the enrolment link and locks; first run starts
+     at the org's admit path.
+  2. **An enrolment link** for orgs without device management, sent by
+     the admin. It opens the app's join step through the existing
+     `tracecommons://enroll?invite=` handler (`C/deep_link.rs:40` (r)) or
+     an https link on the channel origin that hands off to it.
+  There is no in-app "Join your organization" entry for a person who has
+  neither. (The flow model of this design draws that control on the
+  personal screen; read it as "reached through a link or profile".)
+- **Servers** get the Linux CLI and daemon (7.3), not the Mac app, with
+  an enrolment token. They have their own install page for admins.
+- **Admins** get a separate "For teams" page: the org console, a profile
+  template, the server install. It is linked from the site's footer and
+  from the console, not from the hero or the download page.
+- **No separate "for Teams" bundle.** A second bundle id would read more
+  clearly on an IT allow-list, but it doubles release and update
+  channels, and the two would still collide on one Mac, because the
+  state directory is one enrolment (decision 4).
+
+**The overlap is the confusing moment, and it needs owner-approved
+wording.** A person already using Gateway personally whose employer then
+manages their Mac, or who follows an org link, crosses from personal to
+managed. The design's answers are fixed elsewhere (one enrolment per Mac;
+joining returns every folder to Ask; credit earned personally stays
+theirs), but the person must be told, before they join, that new credit
+goes to the org and their folders reset. That is a rule-9 surface and
+belongs to decision 9.
+
+The flow model of this design (a Quint model checked with TLC) found one
+gap at this crossing: a trace credited to the personal account, including one whose
+upload was still in flight at Join, has no Withdraw in the app once the
+Mac is managed. Fixing it is an owner choice recorded with the model.
+
 ## 10. Licensing
 
 | Piece | Crate | Licence |
@@ -1141,6 +1192,9 @@ raw tenant or account id.
   (subject to decision 5), audit.
 - macOS managed mode, the managed-preferences bootstrap, locked settings.
   The three surfaces of section 9 only as approved.
+- Distribution as in 9.1: the same app and download, a configuration
+  profile template, org enrolment links, and an admin-facing "For teams"
+  page.
 - Servers by enrolment token on long-lived Linux boxes: server profile,
   system unit, sealed-file credential backend, policy-armed roots,
   org terms acceptance.
