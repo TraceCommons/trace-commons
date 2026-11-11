@@ -447,7 +447,7 @@ Proposed wire type in `P/org_policy.rs` (permissive crate):
 |---|---|---|
 | `sharing` | `allowed`, `off` | Client: `off` applies the existing global Never override (`C/daemon/policy.rs:426-466` (r)). Server: `off` revokes the seats' contributor grants **and** the issuer refuses org seats that have no active grant. The second half is new: today a device with no grant, or a revoked one, falls back to a hardcoded floor of scopes (`SRV/trace_upload_claim_issuer.rs:2030-2077`: "a revoked grant still leaves the floor"), so revocation alone would not stop claims. |
 | `allowed_consent_scopes`, `allowed_uses` | Subsets of the existing enums | Server: tenant policy and seat grants (existing intersect rule). Client: the uses screen offers only these. |
-| `member_automatic` | `allowed`, `forbidden` | Client only. There is no `required` value. |
+| `member_automatic` | `allowed`, `forbidden` | Client, and the issuer: an org claim carries the policy digest and how the trace was sent, and the issuer refuses an Automatic claim the org forbids (5.3, flow change A). There is no `required` value. |
 | `scrub_check` | `automatic`, `manual` | Client: `manual` holds every session for the member (`C/daemon/settings.rs:614-641` (r)). An org can make review stricter, not looser. |
 | `near_ai_spend_org` | `pinned` | Client: the spend-organization chooser is fixed to the bound org. |
 | `private_ai` | `allowed`, `required_for_listed_tools`, `off` | Client. |
@@ -600,6 +600,19 @@ IdPs an org of this kind runs.
 `org_policy`). The issuer refuses `org_policy` from a `member` seat and
 `member_grant` from a `server` seat. Ingest stores it on the submission
 row. The envelope is unchanged, so no envelope digest pin moves.
+
+**Policy on the claim (flow changes A and C, 11.1).** A member seat's
+claim request also carries the `policy_digest` the Mac acted on and how
+the trace was sent (`submit` or `automatic`). The issuer refuses a
+digest that is not the org's current one, and an `automatic` claim when
+`member_automatic = forbidden`; the trace goes back to Held and nothing
+leaves the Mac. Without this, Automatic is enforced only from the policy
+the Mac last fetched, and an admin's "forbid Automatic" does not stop a
+send that races the fetch. Ingest re-checks the seat and the membership
+freshness when the upload lands, so nothing is credited after removal or
+after a lapsed membership, even from an upload already in flight. The
+Mac requests no claim while its org session has expired; traces stay
+Held until the member signs in again.
 
 ### 5.4 What replaces what
 
@@ -1049,8 +1062,9 @@ enterprise version is **a state the app enters, not a second product**.
      `tracecommons://enroll?invite=` handler (`C/deep_link.rs:40` (r)) or
      an https link on the channel origin that hands off to it.
   There is no in-app "Join your organization" entry for a person who has
-  neither. (The flow model of this design draws that control on the
-  personal screen; read it as "reached through a link or profile".)
+  neither. (The flow model in `docs/flows/enterprise-seat/` draws that
+  control on the personal screen; read it as "reached through a link or
+  profile".)
 - **Servers** get the Linux CLI and daemon (7.3), not the Mac app, with
   an enrolment token. They have their own install page for admins.
 - **Admins** get a separate "For teams" page: the org console, a profile
@@ -1070,10 +1084,11 @@ theirs), but the person must be told, before they join, that new credit
 goes to the org and their folders reset. That is a rule-9 surface and
 belongs to decision 9.
 
-The flow model of this design (a Quint model checked with TLC) found one
-gap at this crossing: a trace credited to the personal account, including one whose
+The flow model (`docs/flows/enterprise-seat/`, promise 8) found one gap
+at this crossing: a trace credited to the personal account, including one whose
 upload was still in flight at Join, has no Withdraw in the app once the
-Mac is managed. Fixing it is an owner choice recorded with the model.
+Mac is managed. The owner's fix is the "Before you joined" list
+(decision 4, 11.1 change B).
 
 ## 10. Licensing
 
@@ -1174,6 +1189,42 @@ unsealed column. Labels are sealed; issuers and subjects are hashed;
 audit metadata is counts, digests and hashed seat references, never a
 raw tenant or account id.
 
+### 11.1 Flow model and its promises
+
+`docs/flows/enterprise-seat/` holds a Quint model of one member's Mac and
+one server seat through the life of an org, checked by TLC on all
+1,217,568 of its states, with mocks of each state and the chart. Eleven
+promises, in the owner's words, all hold:
+
+1. Joining never carries your Automatic over.
+2. Your traces leave only by your act.
+3. If the org forbids Automatic, nothing of yours goes automatically.
+4. Sharing off means no new credit.
+5. Removal stops uploads, including one already in flight.
+6. Leaving the NEAR AI org stops uploads by your next sign-in.
+7. You can take back what you gave the org.
+8. What you earned personally stays withdrawable.
+9. Servers share only under the org's consent.
+10. The org closes cleanly.
+11. A submitted trace eventually lands, if you stay a member, keep
+    signing in, sharing stays on, the network works, the org stops
+    changing policy and your sign-in eventually lasts long enough.
+
+Three promises broke against this spec as first written, and each
+counterexample changed the design (owner's picks, 2026-11-11):
+
+- **A (promise 3).** The claim carries the policy digest and how the
+  trace was sent; the issuer refuses a stale digest or a forbidden
+  Automatic (5.3, 4.4).
+- **B (promise 8).** A "Before you joined" list keeps Withdraw for
+  personally credited traces (decision 4).
+- **C (promise 11).** The Mac sends nothing while its org session has
+  expired (5.3).
+
+The owner also added the last two conditions of promise 11; the README
+gives the paths, what the model leaves out, and the command that checks
+it again.
+
 ## 12. Phasing
 
 **Phase 1 -- MVP: both capabilities, least new surface.**
@@ -1272,6 +1323,11 @@ design; the rest change a section.
    state directories, two device keys and a per-folder choice of
    destination, and a way to keep org-policy folders from being sent
    personally. It is a design of its own.
+   One exception, from the flow model (11.1, change B): the Mac keeps a
+   withdraw-only credential for the personal account, so traces credited
+   to it, including one whose upload was in flight at Join, keep Withdraw
+   under "Before you joined". Without it, joining an org removes a
+   contributor right.
 
 5. **Does the admin see per-member figures, or only the org total and
    per-server rows?** Recommendation: per-seat counts and attributed
