@@ -373,7 +373,8 @@ struct MonitorCommands: Commands {
 /// value observes makes SwiftUI rebuild the whole main menu.
 @MainActor
 final class PrivateInferenceMenuItem: ObservableObject {
-    /// What the item shows, or nil before the core's Private AI words load.
+    /// What the item shows, or nil if the core's Private AI words did not
+    /// load (they are decoded once, in `AppModel`'s initializer).
     struct Item: Equatable {
         let label: String
         let on: Bool
@@ -381,37 +382,36 @@ final class PrivateInferenceMenuItem: ObservableObject {
     }
 
     @Published private(set) var state: Item?
-    private weak var model: AppModel?
+    private let model: AppModel
     private var watch: AnyCancellable?
 
     init(model: AppModel) {
         self.model = model
-        state = Self.state(of: model)
-        // objectWillChange fires before the value changes, so the item is
-        // read on the next turn, once the change has landed.
-        watch = model.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.refresh() }
+        let copy = model.privateInferenceCopy
+        state = Self.item(copy: copy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+        // Only these two values change what the item shows. A @Published
+        // value sends its new value, so the item follows in the same turn.
+        watch = model.$daemonSettings
+            .combineLatest(model.$privateInferenceBusy)
+            .map { Self.item(copy: copy, settings: $0, busy: $1) }
+            .removeDuplicates()
+            .sink { [weak self] item in self?.state = item }
     }
 
     /// The off direction, the one write the item may make
     /// (`PrivateInferenceTray.perform`).
     func turnOff() {
-        model?.applyPrivateInference(false)
-    }
-
-    private func refresh() {
-        guard let model else { return }
-        let next = Self.state(of: model)
-        if next != state { state = next }
+        model.applyPrivateInference(false)
     }
 
     static func state(of model: AppModel) -> Item? {
-        guard let copy = model.privateInferenceCopy else { return nil }
-        let on = model.daemonSettings?.privateInferenceOn ?? false
-        return Item(
-            label: PrivateInferenceTray.label(on: on, copy: copy), on: on,
-            disabled: on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+        item(copy: model.privateInferenceCopy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+    }
+
+    private static func item(copy: PrivateInferenceCopy?, settings: DaemonSettingsView?, busy: Bool) -> Item? {
+        guard let copy else { return nil }
+        let on = settings?.privateInferenceOn ?? false
+        return Item(label: PrivateInferenceTray.label(on: on, copy: copy), on: on, disabled: on && busy)
     }
 }
 
