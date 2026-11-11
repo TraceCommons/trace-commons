@@ -1564,6 +1564,12 @@ impl DaemonShared {
         if queue.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")) {
             queue.save(&store)?;
         }
+        // Older builds ended an approved session `Failed` when the account's
+        // allowance was spent. It goes back to waiting, approved as it was,
+        // and is sent once the allowance allows. Idempotent.
+        if queue.retry_account_limit_failures(Utc::now()) > 0 {
+            queue.save(&store)?;
+        }
         // One-time upgrade: retire entries that stand for a single subagent
         // transcript.
         //

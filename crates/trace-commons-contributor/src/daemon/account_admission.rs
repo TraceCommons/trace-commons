@@ -72,7 +72,7 @@ const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_millis(300);
 /// The longest a spent allowance is held without asking again, whatever
 /// `retry_after_seconds` says. Also what keeps a broken or hostile value
 /// from overflowing the clock.
-const MAX_HOLD: TimeDelta = TimeDelta::days(1);
+pub(super) const MAX_HOLD: TimeDelta = TimeDelta::days(1);
 
 /// The prefix of a native account session: `tcn1_<b64url tenant>.<secret>`.
 const NATIVE_TOKEN_PREFIX: &str = "tcn1_";
@@ -207,6 +207,22 @@ impl AccountAdmissionState {
         }
     }
 
+    /// Until when the last status read for `cfg` said its allowance is
+    /// spent, if it said so with a reset time. `None` for any other answer,
+    /// one read for another ingest or account, and no answer. The upload
+    /// pass sends nothing before then (`daemon::account_allowance_held`).
+    pub fn spent_until(&self, cfg: &ContributorConfig) -> Option<DateTime<Utc>> {
+        let key = AnswerKey::of(cfg);
+        match &*self.answer.lock().expect("account admission lock") {
+            Some(Answer {
+                key: held,
+                admission: AccountAdmission::AllowanceSpent,
+                hold_until,
+            }) if *held == key => *hold_until,
+            _ => None,
+        }
+    }
+
     /// An admission refusal from ingest: whatever it said before, it does not
     /// admit this account by account now.
     pub fn refused(&self) {
@@ -255,6 +271,26 @@ impl AccountAdmissionState {
                 retry_after_seconds: None,
             }),
             Utc::now(),
+        );
+    }
+
+    /// Record, for `cfg`, a status read at `now` saying the allowance is
+    /// spent until `retry_after_seconds` from then. Tests only.
+    #[cfg(test)]
+    pub(crate) fn record_spent_for_test(
+        &self,
+        cfg: &ContributorConfig,
+        retry_after_seconds: i64,
+        now: DateTime<Utc>,
+    ) {
+        self.record(
+            AnswerKey::of(cfg),
+            Some(StatusBody {
+                authority: "bounded".to_string(),
+                ready: false,
+                retry_after_seconds: Some(retry_after_seconds),
+            }),
+            now,
         );
     }
 

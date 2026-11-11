@@ -997,6 +997,12 @@ pub struct SubmitContext<'a> {
     /// (or a body `retry_after_seconds`) on the most recent submission; zero
     /// for none. Reset like `last_rate_limit_retry_after`.
     last_unavailable_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, ingest named when it refused the last
+    /// submission with `account_limit_reached` (the body's
+    /// `retry_after_seconds`, or `Retry-After`); zero for none, which is
+    /// what ingest sends when the allowance has no reset. Reset like
+    /// `last_rate_limit_retry_after`. Unclamped; the daemon caps it.
+    last_account_limit_retry_after: std::sync::atomic::AtomicU32,
     /// When the last submission started sending to ingest, or `None` if it
     /// stopped before any send (a hold, a local refusal, a classifier
     /// failure, a dry run). Reset at the start of each submission. The
@@ -1091,6 +1097,7 @@ impl<'a> SubmitContext<'a> {
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_account_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
@@ -2015,6 +2022,19 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// The wait, in seconds, ingest named for a spent account allowance on
+    /// the most recent submission, or `None` if it named none or did not
+    /// refuse it so. Meaningful immediately after a submission returns
+    /// `Failed` with `account_limit_reached`.
+    #[must_use]
+    pub fn last_account_limit_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_account_limit_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
     /// The wait, in seconds, ingest's rate limit asked for on the most recent
     /// submission, or `None` if it was not rate limited. Meaningful
     /// immediately after a submission returns `Failed` with
@@ -2082,6 +2102,8 @@ impl<'a> SubmitContext<'a> {
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_unavailable_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_account_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_ingest_send_at = None;
         let opts = self.opts;
@@ -2468,6 +2490,7 @@ impl<'a> SubmitContext<'a> {
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
         let mut unavailable_retry_after = None;
+        let mut account_limit_retry_after = None;
         self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
@@ -2479,9 +2502,14 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
             &mut unavailable_retry_after,
+            &mut account_limit_retry_after,
             envelope_limit,
         )
         .await;
+        if let Some(seconds) = account_limit_retry_after {
+            self.last_account_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
@@ -3402,6 +3430,9 @@ async fn upload_with_retry(
     // Written with the wait a `503` asked for (`Retry-After` or the body's
     // `retry_after_seconds`), clamped like the rate limit's.
     unavailable_retry_after: &mut Option<u32>,
+    // Written with the wait ingest named when it refused the upload with
+    // `account_limit_reached`, unclamped; left `None` when it named none.
+    account_limit_retry_after: &mut Option<u32>,
     // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
@@ -3502,6 +3533,9 @@ async fn upload_with_retry(
                 // constant for the variant that was recognised, never the
                 // string the server sent.
                 if let Some(refusal) = admission_refusal(&e) {
+                    if refusal == AdmissionRefusal::AccountLimitReached {
+                        *account_limit_retry_after = account_limit_retry_hint(&e, Utc::now());
+                    }
                     return Err(refusal.label().to_string());
                 }
                 // Sending too fast is not a verdict on the session. The
@@ -3556,6 +3590,24 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
         }
         _ => None,
     }
+}
+
+/// The wait ingest named on an `account_limit_reached` refusal: the body's
+/// `retry_after_seconds`, else `Retry-After`. `None` for none or zero, which
+/// is what ingest sends when the allowance has no reset. Unclamped.
+fn account_limit_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let OcError::ServerLabel {
+        body, retry_after, ..
+    } = e
+    else {
+        return None;
+    };
+    crate::retry_jitter::server_retry_after(
+        body_retry_after_seconds(body),
+        retry_after.as_deref(),
+        now,
+    )
+    .filter(|secs| *secs > 0)
 }
 
 /// The seconds to wait if this error is ingest's per-principal upload rate
@@ -3973,6 +4025,52 @@ mod tests {
             )),
             None,
             "only a 429"
+        );
+    }
+
+    /// The wait ingest names on `account_limit_reached` is read from the
+    /// body, else `Retry-After`, unclamped; none (an allowance with no
+    /// reset) or zero is no hint.
+    #[test]
+    fn an_account_limit_refusal_carries_its_wait() {
+        let now = Utc::now();
+        let refusal = |body: &str, header: Option<&str>| OcError::ServerLabel {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            label: "account_limit_reached".into(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        };
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":172800}"#,
+                    Some("5")
+                ),
+                now
+            ),
+            Some(172_800)
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(r#"{"error":"account_limit_reached"}"#, Some("120")),
+                now
+            ),
+            Some(120)
+        );
+        assert_eq!(
+            account_limit_retry_hint(&refusal(r#"{"error":"account_limit_reached"}"#, None), now),
+            None
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":0}"#,
+                    None
+                ),
+                now
+            ),
+            None
         );
     }
 
@@ -8603,6 +8701,7 @@ mod tests {
             &mut envelope,
             &cfg,
             witnessed,
+            &mut None,
             &mut None,
             &mut None,
             MAX_ENVELOPE_BYTES,
