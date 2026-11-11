@@ -46,7 +46,7 @@ struct CliToolRow: View {
 /// The app menu's item: the first action the core offers, which opens the
 /// system's password prompt. Absent when nothing is offered.
 struct CliToolMenuItem: View {
-    @ObservedObject private var controller = CliToolController.shared
+    @ObservedObject var controller: CliToolController
 
     var body: some View {
         if let words = MonitorWords.table?.cliTool, let action = controller.status?.primaryAction {

@@ -43,13 +43,11 @@ jobs:
       - name: Confirm tag-release credentials are configured
         if: github.event_name == 'push'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           WINGET_PKGS_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
           UPDATE_PUBLIC_KEY: ${{ vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX }}
         run: |
           set -euo pipefail
           missing=()
-          [ -n "$HOMEBREW_TAP_TOKEN" ] || missing+=(HOMEBREW_TAP_TOKEN)
           [ -n "$WINGET_PKGS_TOKEN" ] || missing+=(WINGET_PKGS_TOKEN)
           [ -n "$UPDATE_PUBLIC_KEY" ] || missing+=(TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX)
           if [ ${#missing[@]} -ne 0 ]; then
@@ -514,135 +512,6 @@ jobs:
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
             dist/*/*
-
-      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
-      # TraceCommons/homebrew-tap with contents and pull-request write.
-      # github.token cannot reach another repository, which is why this
-      # secret exists. Merging a pull request needs pull-request write and
-      # nothing beyond it, so the same secret covers the auto-merge below.
-      #
-      # This still opens a pull request rather than pushing to the tap's
-      # default branch -- the pull request is the audit trail, and the place
-      # the tap's own checks run -- but it now merges that pull request
-      # itself. Leaving the merge to a human is what left the tap on formula
-      # 0.3.0 while releases kept shipping.
-      #
-      # The verification gate is upstream of this step and unchanged: this
-      # job `needs: build`, so it only runs when the build job that signs,
-      # notarizes and checksums the macOS archives succeeded. The pull
-      # request was never the gate.
-      - name: Open a formula bump
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          V="${GITHUB_REF_NAME#contributor-v}"
-          # Both hashes come from THIS run's artifacts in dist/, never from
-          # the tap and never from an existing bump branch.
-          ARM="$(awk '{print $1}' dist/aarch64-apple-darwin/trace-commons-contributor-aarch64-apple-darwin.zip.sha256)"
-          X86="$(awk '{print $1}' dist/x86_64-apple-darwin/trace-commons-contributor-x86_64-apple-darwin.zip.sha256)"
-          # Clone with the token IN the remote URL. `gh repo clone` leaves a
-          # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
-          # raw `git push` -- which failed on the first real release with
-          # "could not read Username for https://github.com".
-          #
-          # --single-branch --depth 1 fetches the tap's DEFAULT branch and
-          # nothing else. The bump branch is never fetched, checked out or
-          # read, so a re-run rebuilds it from the tap's default branch plus
-          # the two hashes computed above; nothing a previous attempt wrote
-          # can survive into the push. That is what makes the force-push
-          # below safe, and what makes propagating a stale checksum
-          # structurally impossible rather than merely unlikely.
-          git clone --depth 1 --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
-          cd tap
-          BRANCH="bump-formula-$V"
-          git switch -c "$BRANCH"
-          sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
-          # The positional substitution below assumes the arm64 block comes
-          # first, the x86_64 second. Assert that rather than assuming it --
-          # if the formula were ever reordered, positional substitution
-          # would silently swap the hashes onto the wrong architecture.
-          if ! awk '/on_arm/{a=NR} /on_intel/{i=NR} END{exit !(a && i && a < i)}' \
-            Formula/trace-commons-contributor.rb; then
-            echo "expected on_arm to precede on_intel in Formula/trace-commons-contributor.rb" >&2
-            exit 1
-          fi
-          # Two sha256 lines in one file, so they cannot both be replaced by a
-          # blind substitution: the arm64 block comes first, the x86_64
-          # second. awk replaces them by position rather than a heredoc'd
-          # script, since a Python heredoc embedded in this indented YAML
-          # `run:` block inherits that indentation on every line, which is a
-          # syntax error for an indentation-sensitive language; awk has no
-          # such sensitivity.
-          #
-          # This positional match only fires on the two-line
-          # `sha256 "..."` form. If the formula ever used the single-line
-          # `sha256 arm: "...", x86_64: "..."` form instead, this regex would
-          # never match, no substitution would happen, and `git commit -am`
-          # would still succeed (the version sed alone changed a line) --
-          # bumping the version while silently keeping last release's
-          # hashes. The assertion after the substitution catches that.
-          awk -v arm="$ARM" -v x86="$X86" '
-            /sha256 "/ {
-              n++
-              if (n == 1) sub(/sha256 "[^"]*"/, "sha256 \"" arm "\"")
-              else if (n == 2) sub(/sha256 "[^"]*"/, "sha256 \"" x86 "\"")
-            }
-            { print }
-          ' Formula/trace-commons-contributor.rb > Formula/trace-commons-contributor.rb.tmp
-          mv Formula/trace-commons-contributor.rb.tmp Formula/trace-commons-contributor.rb
-          if ! grep -qF "$ARM" Formula/trace-commons-contributor.rb || \
-             ! grep -qF "$X86" Formula/trace-commons-contributor.rb; then
-            echo "formula bump did not apply both computed hashes; refusing to open a PR with a stale or partial checksum" >&2
-            exit 1
-          fi
-          git config user.name "trace-commons-release"
-          git config user.email "ops@tracecommons.ai"
-          if git diff --quiet; then
-            echo "the tap already carries version $V with both computed hashes; nothing to bump."
-            exit 0
-          fi
-          git commit -am "trace-commons-contributor $V"
-          # --force, not a plain push. `bump-formula-$V` already exists
-          # whenever a tag is deleted and re-cut, and the plain push is
-          # rejected with "! [rejected] (fetch first)" -- which fails this
-          # job after every artifact has already published. Forcing is only
-          # safe because of the clone above: the branch being replaced cannot
-          # have contributed a byte to what is being pushed.
-          git push --force -u origin "$BRANCH"
-          # A re-run finds its own pull request already open, and `gh pr
-          # create` exits non-zero on a duplicate head. The force-push has
-          # already updated that pull request's contents, so reuse it.
-          PR_URL="$(gh pr list --repo TraceCommons/homebrew-tap --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$PR_URL" ]; then
-            # `--repo` selects the base repository only. Name the already-pushed
-            # branch explicitly so gh does not try to infer it from this
-            # cross-repository workflow checkout.
-            PR_URL="$(gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH")"
-          fi
-          echo "formula bump: $PR_URL"
-          # Deliberately NOT merged here. Auto-merge is disabled on
-          # TraceCommons/homebrew-tap, the default branch carries no branch
-          # protection, and the tap has no CI at all -- so `--auto` would
-          # fail outright and any fallback would be an immediate, ungated
-          # merge straight to what `brew upgrade` serves. That is the direct
-          # push this step exists to avoid, wearing a pull request as a
-          # disguise.
-          #
-          # Automating the merge is wanted, but it needs something to gate
-          # on first: a cask/formula audit workflow on the tap, auto-merge
-          # enabled, and that check required. Until then the merge stays a
-          # human step, and tap-bump-staleness.yml is what stops the queue
-          # growing unnoticed the way it did through 0.4.1-0.4.6.
-          echo "::notice::formula bump open at $PR_URL -- merge it, or brew upgrade keeps serving the previous version"
-          {
-            echo "### formula bump ready to merge"
-            echo
-            echo "[$PR_URL]($PR_URL)"
-            echo
-            echo "Homebrew serves the previous version until this is merged."
-          } >> "$GITHUB_STEP_SUMMARY"
 
   winget-bump:
     name: bump the winget manifest
