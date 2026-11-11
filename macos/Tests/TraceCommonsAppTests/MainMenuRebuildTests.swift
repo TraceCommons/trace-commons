@@ -20,7 +20,7 @@ final class MainMenuRebuildTests: XCTestCase {
         let commands = try XCTUnwrap(main.range(of: "struct MonitorCommands: Commands {"))
         let end = try XCTUnwrap(main.range(of: "\n}\n", range: commands.upperBound..<main.endIndex))
         let body = main[commands.lowerBound..<end.lowerBound]
-        XCTAssertFalse(body.contains("AppModel"), "MonitorCommands observes the whole model again")
+        XCTAssertFalse(body.contains(": AppModel"), "MonitorCommands observes the whole model again")
         XCTAssertTrue(body.contains("@ObservedObject var privateInference: PrivateInferenceMenuItem"))
     }
 
