@@ -27,6 +27,26 @@ bounded time and size, and an exact digest check before execution. Browser
 URLs point to this local verified cache. Cache versions include a fresh page
 nonce to prevent execution of code cached by a prior owner of the loopback port.
 
+On 2026-11-06, the NEAR Mobile hosted executor was reviewed again after its
+unversioned URL changed. The accepted 95,222-byte response has SHA-256
+`df84681559dee638491c158377627a78819fe96fe4be7f8cbad2c756e4e913e7`.
+Its mainnet connection and message-signing methods delegate to the external
+wallet; this integration still requests no function-call key or transaction.
+Its three inline installation/link handlers match the existing CSP hashes.
+The connector SDK, wallet permissions and CSP are unchanged. Future upstream
+byte changes still fail the exact digest check; they are never accepted
+implicitly. The source URL remains unversioned, so this pin does not promise
+future availability.
+
+On 2026-11-10, the same URL was serving the 130,575-byte build again, with
+SHA-256 `539487d2ac8cf8b55a96ad771c2dbb3e37b08ce5687f39ed5a85759aa07ee465`
+(last-modified 2026-11-02). It is byte-identical to the build pinned on
+2026-11-04, so the pin returns to it; the 2026-11-06 digest above is no longer
+accepted. Its three inline installation/link handlers are again the ones
+above, each in the CSP hash list, and it contacts the same hosts. The URL has
+now served both builds alternately, so either digest can stop matching
+without notice.
+
 MyNearWallet is excluded following the product owner's retirement report.
 Intear generates and stores an application private key during connection.
 OKX returns an opaque extension access-key object whose private contents have

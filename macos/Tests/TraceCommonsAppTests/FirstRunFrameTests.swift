@@ -32,13 +32,14 @@ final class FirstRunFrameTests: XCTestCase {
     func test_theThreadNamesTheStepsInTheCoresWords() throws {
         let copy = try words()
         XCTAssertEqual(copy.threadLabels, [
-            copy.frame.stepTools, copy.frame.stepUses, copy.frame.stepTraces, copy.frame.stepPrivateAi,
-            copy.frame.stepJoin,
+            copy.frame.stepTools, copy.frame.stepPrivateAi, copy.frame.stepTraces, copy.frame.stepUses,
+            copy.frame.stepTerms, copy.frame.stepJoin,
         ])
         XCTAssertNil(copy.threadLabel(for: .welcome), "Welcome shows no thread")
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .welcome), nil)
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .tools), 0)
-        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .terms), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 5)
     }
 
     /// The stretch before a step is travelled once it is reached; the
@@ -61,7 +62,7 @@ final class FirstRunFrameTests: XCTestCase {
         let frame = try Self.source()
         XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
         let back = try XCTUnwrap(frame.range(of: "Button(copy.frame.back)"))
-        let after = String(frame[back.upperBound...].prefix(320))
+        let after = String(frame[back.upperBound...].prefix(480))
         XCTAssertTrue(after.contains("FirstRunNavigation.back(state)"))
         // While a commit runs, Back is the screen's own (Join's sign-in),
         // never a plain step back the runner could undo.

@@ -38,8 +38,7 @@ enum TracesScreenLayout {
     /// for none (nothing found or counted yet). The daemon's lines when it
     /// answered `first_run_copy`, else the core's line and its final-credit
     /// note. Either way, while the use that earns credit is off the headline
-    /// is the could-earn one and there is no note: the no-credit note sits
-    /// there instead (owner, 2026-11-04).
+    /// is the could-earn one and there is no note (owner, 2026-11-04).
     static func lines(
         found: UInt64?, served: DaemonData.FirstRunCopyLines?, coreLine: String?, coreNote: String,
         earnsCredit: Bool
@@ -82,15 +81,11 @@ enum TracesScreenLayout {
         return TCCoreCopy.firstRunEstimateLine(requestJSON: json)
     }
 
-    /// Whether Traces notes that the traces won't earn credit: the use that
-    /// earns it (`uses.creditScope`) is not ticked (owner, 2026-10-27).
+    /// Whether the use that earns credit (`uses.creditScope`) is not ticked.
+    /// Traces comes before Uses (Ron, 2026-11-05), so a first pass reads it
+    /// off, and the headline says what the traces could earn.
     static func showsNoCredit(_ state: FirstRunState, uses: FirstRunCopy.Uses) -> Bool {
         !state.scopes.contains(uses.creditScope)
-    }
-
-    /// The note's link: back to Uses, every answer kept.
-    static func backToUses(_ state: FirstRunState) -> FirstRunState {
-        FirstRunNavigation.back(to: .uses, from: state)
     }
 
     /// The count rises after the orbs start, over 1.9s.
@@ -149,12 +144,7 @@ struct TracesScreen: View {
         } title: {
             FirstRunTitle(light: copy.traces.titleLight, bold: copy.traces.titleBold)
         } content: {
-            VStack(spacing: GlassTokens.Space.s4) {
-                estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
-                if TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses) {
-                    noCredit
-                }
-            }
+            estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
         }
         .onAppear {
             openedAt = memory.tracesCounted ? .distantPast : Date()
@@ -262,22 +252,6 @@ struct TracesScreen: View {
             }
         }
         .accessibilityHidden(true)
-    }
-
-    /// A neutral note, in the caption's secondary colour, with its link.
-    private var noCredit: some View {
-        VStack(spacing: GlassTokens.Space.s2) {
-            Text(copy.traces.noCredit)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(copy.traces.backToUses) {
-                runner.state = TracesScreenLayout.backToUses(runner.state)
-            }
-            .buttonStyle(GlassButtonStyle(.link))
-        }
-        .frame(maxWidth: 460)
     }
 
     /// The headline under the count, with its note when there is one, or

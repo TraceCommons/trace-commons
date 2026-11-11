@@ -310,10 +310,7 @@ struct MonitorWindowView: View {
                             back: { tracesPage = .tree })
                     }
                 case .inference:
-                    InferenceTabView(store: inference, openTraces: {
-                        tab = .traces
-                        tracesPage = .tree
-                    }) {
+                    InferenceTabView(store: inference) {
                         navigation.requestSettings(at: .privateAI)
                         openWindow(id: WindowID.settings)
                     }
@@ -334,7 +331,12 @@ struct MonitorWindowView: View {
                             tracesPage = .history
                         },
                         openInsights: { tab = .insights },
-                        openSettings: { navigation.requestSettings(at: .consent) },
+                        // Records the section, then opens the Settings window,
+                        // as the gear and the Private AI tab's link do.
+                        openSettings: {
+                            navigation.requestSettings(at: .consent)
+                            openWindow(id: WindowID.settings)
+                        },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
@@ -446,6 +448,9 @@ struct MonitorWindowView: View {
         // The change of login's sheet (F10), raised from Settings'
         // Connection and Private AI sections, once for the window.
         .modifier(AccountLoginChangePresenter())
+        // The new-terms sheet, raised by Home's terms notice or the menu
+        // bar's row.
+        .modifier(TermsHoldPresenter())
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.

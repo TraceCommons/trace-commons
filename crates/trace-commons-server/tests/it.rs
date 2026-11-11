@@ -57,6 +57,7 @@ mod pilot_bootstrap_submitter;
 mod pilot_bootstrap_translators;
 mod routing_is_attribution_only;
 mod run_candidate_eval;
+mod store_trait_coverage;
 mod tail_floor_subcommand;
 mod trace_artifact_gcs;
 mod trace_artifact_gcs_integration;

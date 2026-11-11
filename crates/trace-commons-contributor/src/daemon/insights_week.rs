@@ -5615,17 +5615,22 @@ mod tests {
         let flag_dir = tempfile::tempdir().unwrap();
         let registry = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "registry_version": 1,
-            "flags": {"insights_skills": {"description": "Test skills", "owner": "tests",
+            "flags": {"insights_skills": {"description": "Test skills", "owner": "tests", "class": "product",
                 "default": false, "required_capabilities": [], "timing": "live"}}
         }))
         .unwrap();
         let profile = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "registry_version": 1, "environment": "staging",
-            "capabilities": [], "remote_enable": ["insights_skills"]
+            "capabilities": [], "remote_enable": ["insights_skills"], "signing_keys": []
         }))
         .unwrap();
-        shared.feature_flags =
-            crate::feature_flags::Runtime::open(registry, profile, flag_dir.path(), now()).unwrap();
+        shared.feature_flags = crate::feature_flags::Runtime::open(
+            registry,
+            crate::feature_flags::test_signing::pin(profile),
+            flag_dir.path(),
+            now(),
+        )
+        .unwrap();
         shared.settings.lock().unwrap().insights_counter_pass = true;
         let shared = Arc::new(shared);
         let mut inserted = false;
@@ -5661,7 +5666,10 @@ mod tests {
                 "flags": {"insights_skills": on}
             }))
             .unwrap();
-            shared.feature_flags.accept(&manifest, now()).unwrap();
+            shared
+                .feature_flags
+                .accept(&crate::feature_flags::test_signing::sign(&manifest), now())
+                .unwrap();
         };
 
         assert!(

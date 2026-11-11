@@ -11,6 +11,7 @@ Server components -- GNU Affero General Public License v3.0 or later
 - crates/trace-commons-gate-api
 - crates/trace-commons-gate-enclave
 - crates/trace-commons-ingest
+- crates/trace-commons-ingest-contributor-tests (tests only, unpublished)
 
 These are licensed under the GNU Affero General Public License, version 3 or
 (at your option) any later version, in LICENSE-AGPL.

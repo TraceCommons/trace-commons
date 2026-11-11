@@ -296,6 +296,67 @@ impl EstimateTableClient {
         .await
     }
 
+    /// Fetch the global signed operator configuration at the fixed origin
+    /// path, anonymously, without a selector or redirects, and with a bound.
+    pub async fn fetch_witness_configuration(&self) -> Result<Vec<u8>, EstimateTableClientError> {
+        self.get_bounded(
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_PATH,
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Fetch the signed list selected by the configured witness URL. The
+    /// selector is query-encoded without changing the configured URL. An older
+    /// server may ignore it; the caller still verifies the signature and URL
+    /// through `witness::accepted_list::install` before use or storage. Only a
+    /// bounded HTTPS URL without userinfo, query or fragment is forwarded;
+    /// invalid selectors are refused locally before any network request.
+    pub async fn fetch_witness_accepted_list_for(
+        &self,
+        witness_url: &str,
+    ) -> Result<Vec<u8>, EstimateTableClientError> {
+        // Do not forward credentials or secret URL components to ingest.
+        // Validate without reserializing: the signed URL match uses these bytes.
+        if witness_url.len() > 2048
+            || !witness_url.starts_with("https://")
+            || witness_url
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            || witness_url.contains('\\')
+        {
+            return Err(EstimateTableClientError::EndpointInvalid);
+        }
+        let parsed =
+            Url::parse(witness_url).map_err(|_| EstimateTableClientError::EndpointInvalid)?;
+        let authority = witness_url
+            .strip_prefix("https://")
+            .unwrap_or_default()
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || authority.is_empty()
+            || authority.contains('@')
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(EstimateTableClientError::EndpointInvalid);
+        }
+        let mut url = self
+            .url_for(trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH)?;
+        url.query_pairs_mut()
+            .append_pair("witness_url", witness_url);
+        self.get_url_bounded(
+            url,
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_MAX_BYTES,
+        )
+        .await
+    }
+
     /// Fetch the first run's dollar estimate per accepted trace
     /// (`GET /v1/public/first-run-estimate`): `None` when the commons
     /// publishes none. A range [`UsdMicrosRange::is_valid`] would not accept,
@@ -376,7 +437,14 @@ impl EstimateTableClient {
         path: &str,
         max_bytes: usize,
     ) -> Result<Vec<u8>, EstimateTableClientError> {
-        let url = self.url_for(path)?;
+        self.get_url_bounded(self.url_for(path)?, max_bytes).await
+    }
+
+    async fn get_url_bounded(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, EstimateTableClientError> {
         let response = self
             .http
             .get(url)
@@ -489,6 +557,91 @@ mod tests {
         assert_eq!(table.tier_count(), 3);
         assert_eq!(table.calibration_label(), "lef1.t2/cq3");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_witness_list_request_encodes_the_configured_url_without_credentials() {
+        use axum::extract::OriginalUri;
+        use trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH;
+
+        let app = Router::new().route(
+            WITNESS_ACCEPTED_LIST_PATH,
+            get(|OriginalUri(uri): OriginalUri, headers: HeaderMap| async move {
+                assert_eq!(
+                    uri.to_string(),
+                    "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness.example%2Fapi%2F%252Fproof%2F%253Fmode%253Da%2526next%253D%252Fv2%2523fragment"
+                );
+                for header in ["authorization", "cookie", "x-api-key", "x-tenant-id"] {
+                    assert!(!headers.contains_key(header), "{header} was sent");
+                }
+                // The client returns exact bytes; signature checks belong to install.
+                b"signed document bytes".to_vec()
+            }),
+        );
+        let (base, server) = serve(app).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        assert_eq!(
+            client
+                .fetch_witness_accepted_list_for(
+                    "https://witness.example/api/%2Fproof/%3Fmode%3Da%26next%3D%2Fv2%23fragment"
+                )
+                .await
+                .unwrap(),
+            b"signed document bytes"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn invalid_witness_list_selectors_are_refused_before_any_request() {
+        use trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let app = Router::new().route(
+            WITNESS_ACCEPTED_LIST_PATH,
+            get(move || {
+                let counted = Arc::clone(&counted);
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    b"document".to_vec()
+                }
+            }),
+        );
+        let (base, server) = serve(app).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        let mut invalid: Vec<String> = [
+            "https://user:secret@witness.example",
+            "https://user@witness.example",
+            "https://@witness.example",
+            "https://witness.example?token=secret",
+            "https://witness.example?",
+            "https://witness.example#secret",
+            "https://witness.example#",
+            "http://witness.example",
+            "HTTPS://witness.example",
+            "https:///witness.example",
+            "https://",
+            "https://witness.example:invalid",
+            " https://witness.example",
+            "https://witness.example/path with space",
+            "https://witness.example/\tsecret",
+            "https://witness.example/\0secret",
+            "https://witness.example/\u{0085}secret",
+            r"https://witness.example/\secret",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        invalid.push(format!("https://witness.example/{}", "a".repeat(2048)));
+        for selector in invalid {
+            assert_eq!(
+                client.fetch_witness_accepted_list_for(&selector).await,
+                Err(EstimateTableClientError::EndpointInvalid)
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
         server.abort();
     }
 

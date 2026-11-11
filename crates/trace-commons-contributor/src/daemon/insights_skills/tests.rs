@@ -288,16 +288,20 @@ fn known_source_outside_catalog_is_unavailable_instead_of_unknown() {
 fn with_feature_runtime(mut shared: DaemonShared) -> DaemonShared {
     let registry = serde_json::from_value(json!({
         "schema_version":1,"registry_version":2,
-        "flags":{"insights_skills":{"description":"Skills","owner":"tests","default":false,"required_capabilities":["insights_skills_v1"],"timing":"live"}}
+        "flags":{"insights_skills":{"description":"Skills","owner":"tests","class":"product","default":false,"required_capabilities":["insights_skills_v1"],"timing":"live"}}
     })).unwrap();
     let profile = serde_json::from_value(json!({
         "schema_version":1,"registry_version":2,"environment":"testing",
-        "capabilities":["insights_skills_v1"],"remote_enable":["insights_skills"]
+        "capabilities":["insights_skills_v1"],"remote_enable":["insights_skills"],"signing_keys":[]
     }))
     .unwrap();
-    shared.feature_flags =
-        crate::feature_flags::Runtime::open(registry, profile, shared.store.dir(), Utc::now())
-            .unwrap();
+    shared.feature_flags = crate::feature_flags::Runtime::open(
+        registry,
+        crate::feature_flags::test_signing::pin(profile),
+        shared.store.dir(),
+        Utc::now(),
+    )
+    .unwrap();
     shared
 }
 
@@ -309,7 +313,10 @@ fn set_skills_flag(shared: &DaemonShared, revision: u64, on: bool) {
         "flags":{"insights_skills":on}
     }))
     .unwrap();
-    shared.feature_flags.accept(&manifest, now).unwrap();
+    shared
+        .feature_flags
+        .accept(&crate::feature_flags::test_signing::sign(&manifest), now)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -439,10 +446,14 @@ fn a_missing_registry_flag_cannot_enable_skills() {
     let registry =
         serde_json::from_value(json!({"schema_version":1,"registry_version":2,"flags":{}}))
             .unwrap();
-    let profile = serde_json::from_value(json!({"schema_version":1,"registry_version":2,"environment":"testing","capabilities":["insights_skills_v1"],"remote_enable":[]})).unwrap();
-    shared.feature_flags =
-        crate::feature_flags::Runtime::open(registry, profile, shared.store.dir(), Utc::now())
-            .unwrap();
+    let profile = serde_json::from_value(json!({"schema_version":1,"registry_version":2,"environment":"testing","capabilities":["insights_skills_v1"],"remote_enable":[],"signing_keys":[]})).unwrap();
+    shared.feature_flags = crate::feature_flags::Runtime::open(
+        registry,
+        crate::feature_flags::test_signing::pin(profile),
+        shared.store.dir(),
+        Utc::now(),
+    )
+    .unwrap();
     shared.settings.lock().unwrap().insights_counter_pass = true;
     maybe_refresh_public(&shared);
     assert_eq!(snapshot(&shared)["enabled"], false);

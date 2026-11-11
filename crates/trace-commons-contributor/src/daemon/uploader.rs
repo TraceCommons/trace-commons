@@ -244,6 +244,29 @@ fn hold_for_review(
     }
 }
 
+/// Ordinary history can be witnessed after a person's Submit. Bound
+/// admission documents and token bundles require their own certified review.
+/// Shared by approval and the worker: routing capture can change after an
+/// approval without changing the source-file hash.
+pub(super) fn unpreviewed_witness_review_refusal(
+    cfg: &crate::config::ContributorConfig,
+    token_contribution: bool,
+    call: Option<&crate::routing::attested::AttestedCall>,
+) -> Option<&'static str> {
+    let witness = cfg.witness.as_ref()?;
+    if token_contribution {
+        return Some(super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED);
+    }
+    match crate::submit::admission_profile_for_request(
+        witness.admission_evidence,
+        call.map(|call| call.request_body()),
+    ) {
+        Ok(false) => None,
+        Ok(true) => Some(super::preview::REASON_WITNESS_REVIEW_REQUIRED),
+        Err(label) => Some(label),
+    }
+}
+
 /// Save the envelope the Scrub check held, so the entry can pin it (K4 of
 /// #1118). The same `approved_envelope::save` and `preview::envelope_digest`
 /// a preview pins with, so the held bytes are kept exactly like previewed
@@ -485,6 +508,7 @@ impl Uploader<'_, '_> {
         );
         artifact.validate(
             self.ctx.effective_cfg(),
+            self.store.dir(),
             &entry.session_hash,
             &fingerprint,
             entry.approved_verdict.as_deref(),
@@ -674,12 +698,24 @@ impl Uploader<'_, '_> {
                 Ok(loaded) => loaded,
                 Err(decision) => return Ok(WitnessJobOutcome::Decision(decision)),
             };
-        // The same refusal `upload_entry` makes for an entry with no
-        // certified token-bundle review: an ordinary witness run builds none.
-        if self.settings.token_distributions_contribution {
-            return Ok(WitnessJobOutcome::Decision(UploadDecision::ApprovalStale {
-                reason_label: super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.into(),
-            }));
+        // Re-evaluate the actual captured request here too. Routing bodies
+        // may have appeared after approval while the source-file hash stayed
+        // the same; a bound admission document still requires explicit review.
+        if let Some(label) = unpreviewed_witness_review_refusal(
+            self.ctx.effective_cfg(),
+            self.settings.token_distributions_contribution,
+            transcript.attested_call.as_deref(),
+        ) {
+            let decision = if label == "admission_request_malformed" {
+                UploadDecision::Refused {
+                    reason_label: label.into(),
+                }
+            } else {
+                UploadDecision::ApprovalStale {
+                    reason_label: label.into(),
+                }
+            };
+            return Ok(WitnessJobOutcome::Decision(decision));
         }
         let verdict = entry
             .approved_verdict
@@ -953,7 +989,9 @@ impl Uploader<'_, '_> {
                     submission_id,
                     receipt,
                     unattended_redaction: Some(super::automatic_gate::session_redaction(
-                        witnessed, witness,
+                        witnessed,
+                        witness,
+                        self.store.dir(),
                     )),
                 }
             }
@@ -1434,6 +1472,120 @@ mod tests {
             .await
             .unwrap();
         (decision, state, health)
+    }
+
+    /// Routing capture can change without changing the source-file hash. A
+    /// newly bound admission call still needs explicit certified review.
+    #[tokio::test]
+    async fn unpreviewed_witness_jobs_keep_bound_admission_in_explicit_review() {
+        use sha2::{Digest, Sha256};
+        use trace_commons_protocol::evidence_import::{
+            ImportedInference, ImportedReceipt, InferenceCoverage,
+        };
+        struct CapturedSession {
+            source: ClaudeCodeSource,
+            call: std::sync::Arc<crate::routing::attested::AttestedCall>,
+        }
+        impl TraceSource for CapturedSession {
+            fn name(&self) -> &'static str {
+                self.source.name()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                self.source.discover()
+            }
+            fn load(&self, reference: &SessionRef) -> Result<crate::source::SessionTranscript> {
+                let mut transcript = self.source.load(reference)?;
+                transcript.attested_call = Some(self.call.clone());
+                Ok(transcript)
+            }
+        }
+        let mut bound_request = serde_json::json!({"metadata": {}});
+        bound_request["metadata"][trace_commons_protocol::admission::REQUEST_METADATA_KEY] =
+            serde_json::json!({});
+        for request in [bound_request.to_string(), "{invalid-json".to_string()] {
+            let session = GrowingSession::new();
+            let (_dir, store) = temp_store();
+            let mut cfg = fixture_cfg(&store);
+            // A local failing issuer makes the pre-fix path deterministic;
+            // the fixed path must refuse before it ever asks for a claim.
+            cfg.issuer_url = spawn_stub(axum::Router::new()).await;
+            cfg.witness = Some(crate::config::WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: format!("0x{}", "ab".repeat(20)),
+                expected_measurements: vec![format!("mrtd={}", "ab".repeat(48))],
+                admission_evidence: true,
+            });
+            store.save_config(&cfg).unwrap();
+            let response = "{}";
+            let imported = ImportedInference {
+                exchange_id: "synthetic-exchange".into(),
+                coverage: InferenceCoverage::FinalCallOnly,
+                request_sha256: hex::encode(Sha256::digest(request.as_bytes())),
+                response_sha256: hex::encode(Sha256::digest(response.as_bytes())),
+                request_body: request.clone(),
+                response_body: response.into(),
+                upstream_id: "synthetic-upstream".into(),
+                served_model: None,
+                status: 200,
+                timestamp: Utc::now(),
+                receipt: ImportedReceipt {
+                    text: "synthetic".into(),
+                    signature: String::new(),
+                    signing_address: String::new(),
+                    signing_algo: String::new(),
+                    signature_kind: String::new(),
+                },
+            };
+            let source = CapturedSession {
+                source: session.source(),
+                call: std::sync::Arc::new(
+                    crate::routing::attested::AttestedCall::from_import(&imported).unwrap(),
+                ),
+            };
+            let entry = session.entry_for(&session.current_hash(), &cfg);
+            let opts = dry_run_opts();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            let mut state = DaemonState::new();
+            let mut health = HealthState::default();
+            let settings = settings();
+            let outcome = Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            }
+            .witness_entry(&source, &session.session_ref(), &entry, Utc::now())
+            .await
+            .expect("a review hold, before receipt lookup or witness HTTP");
+            let expected = if request.starts_with("{invalid") {
+                "admission_request_malformed"
+            } else {
+                super::super::preview::REASON_WITNESS_REVIEW_REQUIRED
+            };
+            let WitnessJobOutcome::Decision(decision) = outcome else {
+                panic!("explicit review must not produce a certified artifact");
+            };
+            if request.starts_with("{invalid") {
+                assert!(matches!(decision, UploadDecision::Refused { reason_label }
+                    if reason_label == expected));
+            } else {
+                assert!(
+                    matches!(decision, UploadDecision::ApprovalStale { reason_label }
+                    if reason_label == expected)
+                );
+                let held = QueueEntry {
+                    state: QueueState::Pending,
+                    reason_label: Some(expected.into()),
+                    ..entry
+                };
+                assert!(
+                    held.held_for_review(),
+                    "a standing grant cannot re-approve explicit admission review"
+                );
+            }
+            assert_eq!(uploads_recorded(&state), 0);
+        }
     }
 
     #[tokio::test]

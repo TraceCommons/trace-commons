@@ -1,0 +1,106 @@
+> [1/2] Checking whether the inductive invariant 'P13' holds in the initial state(s) defined by 'init'...
+# Usage statistics is OFF. We care about your privacy.
+# If you want to help our project, consider enabling statistics with config --enable-stats=true.
+
+Output directory: /private/tmp/tc-p13-inductive-retry-20261106/_apalache-out/server/2026-11-06T14-35-41_6283204045995168734
+# APALACHE version: 0.62.1 | build: a321771                       I@14:35:41.775
+Starting checker server on port 8833...                           I@14:35:41.778
+The Apalache server is running on port 8833. Press Ctrl-C to stop.
+Nov 06, 2026 2:35:43 PM com.google.protobuf.GeneratedMessage warnPre22Gencode
+WARNING: Vulnerable protobuf generated type in use: io.grpc.reflection.v1alpha.ServerReflectionRequest
+As of 2022/09/29 (release 21.7) makeExtensionsImmutable should not be called from protobuf gencode. If you are seeing this message, your gencode is vulnerable to a denial of service attack. You should regenerate your code using protobuf 25.6 or later. Use the latest version that meets your needs. However, if you understand the risks and wish to continue with vulnerable gencode, you can set the system property `-Dcom.google.protobuf.use_unsafe_pre22_gencode` on the command line to silence this warning. You also can set `-Dcom.google.protobuf.error_on_unsafe_pre22_gencode` to throw an error instead. See security vulnerability: https://github.com/protocolbuffers/protobuf/security/advisories/GHSA-h4h5-3hr4-j3g2
+PASS #0: SanyParser                                               I@14:35:43.828
+PASS #1: TypeCheckerSnowcat                                       I@14:35:44.450
+ > Running Snowcat .::.                                           I@14:35:44.450
+ > Your types are purrfect!                                       I@14:35:53.655
+ > All expressions are typed                                      I@14:35:53.655
+PASS #2: ConfigurationPass                                        I@14:35:53.655
+  > Set the initialization predicate to q::init                   I@14:35:53.657
+  > Set the transition predicate to q::step                       I@14:35:53.657
+  > Set an invariant to q::inductiveInv                           I@14:35:53.658
+PASS #3: DesugarerPass                                            I@14:35:53.662
+  > Desugaring...                                                 I@14:35:53.662
+PASS #4: InlinePass                                               I@14:35:53.671
+Leaving only relevant operators: CInitPrimed, q::inductiveInv, q::init, q::initPrimed, q::step I@14:35:53.671
+PASS #5: TemporalPass                                             I@14:35:53.723
+  > Rewriting temporal operators...                               I@14:35:53.723
+  > No temporal property specified, nothing to encode             I@14:35:53.723
+PASS #6: InlinePass                                               I@14:35:53.723
+Leaving only relevant operators: CInitPrimed, q::inductiveInv, q::init, q::initPrimed, q::step I@14:35:53.723
+PASS #7: PrimingPass                                              I@14:35:53.732
+  > Introducing q::initPrimed for q::init'                        I@14:35:53.733
+PASS #8: VCGen                                                    I@14:35:53.733
+  > Producing verification conditions from the invariant q::inductiveInv I@14:35:53.733
+  > VCGen produced 2 verification condition(s)                    I@14:35:53.736
+PASS #9: PreprocessingPass                                        I@14:35:53.738
+  > Before preprocessing: unique renaming                         I@14:35:53.738
+ > Applying standard transformations:                             I@14:35:53.742
+  > PrimePropagation                                              I@14:35:53.742
+  > Desugarer                                                     I@14:35:53.746
+  > UniqueRenamer                                                 I@14:35:53.753
+  > Normalizer                                                    I@14:35:53.756
+  > SetMembershipSimplifier                                       I@14:35:53.765
+  > Keramelizer                                                   I@14:35:53.771
+  > After preprocessing: UniqueRenamer                            I@14:35:53.784
+PASS #10: TransitionFinderPass                                    I@14:35:53.793
+  > Found 1 initializing transitions                              I@14:35:53.798
+  > Found 53 transitions                                          I@14:35:53.812
+  > No constant initializer                                       I@14:35:53.812
+  > Applying unique renaming                                      I@14:35:53.813
+PASS #11: OptimizationPass                                        I@14:35:53.818
+ > Applying optimizations:                                        I@14:35:53.820
+  > ConstSimplifier                                               I@14:35:53.821
+  > ExprOptimizer                                                 I@14:35:53.853
+  > SetMembershipSimplifier                                       I@14:35:53.867
+  > ConstSimplifier                                               I@14:35:53.869
+PASS #12: AnalysisPass                                            I@14:35:53.897
+ > Marking skolemizable existentials and sets to be expanded...   I@14:35:53.898
+  > Skolemization                                                 I@14:35:53.898
+  > Expansion                                                     I@14:35:53.899
+  > Remove unused let-in defs                                     I@14:35:53.908
+ > Running analyzers...                                           I@14:35:53.913
+  > Introduced expression grades                                  I@14:35:53.918
+PASS #13: BoundedChecker                                          I@14:35:53.918
+State 0: Checking 2 state invariants                              I@14:35:54.291
+State 0: state invariant 0 holds.                                 I@14:35:54.292
+State 0: state invariant 1 holds.                                 I@14:35:54.307
+Step 0: picking a transition out of 1 transition(s)               I@14:35:54.307
+The outcome is: NoError                                           I@14:35:54.316
+> [2/2] Checking whether 'step' preserves the inductive invariant 'P13'...
+PASS #0: SanyParser                                               I@14:35:54.546
+PASS #1: TypeCheckerSnowcat                                       I@14:35:54.713
+ > Running Snowcat .::.                                           I@14:35:54.713
+ > Your types are purrfect!                                       I@14:36:02.670
+ > All expressions are typed                                      I@14:36:02.671
+PASS #2: ConfigurationPass                                        I@14:36:02.671
+  > Set the initialization predicate to q::inductiveInv           I@14:36:02.671
+  > Set the transition predicate to q::step                       I@14:36:02.671
+  > Set an invariant to q::inductiveInv                           I@14:36:02.671
+PASS #3: DesugarerPass                                            I@14:36:02.672
+  > Desugaring...                                                 I@14:36:02.672
+PASS #4: InlinePass                                               I@14:36:02.676
+Leaving only relevant operators: CInitPrimed, q::inductiveInv, q::inductiveInvPrimed, q::step I@14:36:02.676
+PASS #5: TemporalPass                                             I@14:36:02.695
+  > Rewriting temporal operators...                               I@14:36:02.695
+  > No temporal property specified, nothing to encode             I@14:36:02.695
+PASS #6: InlinePass                                               I@14:36:02.695
+Leaving only relevant operators: CInitPrimed, q::inductiveInv, q::inductiveInvPrimed, q::step I@14:36:02.695
+PASS #7: PrimingPass                                              I@14:36:02.703
+  > Introducing q::inductiveInvPrimed for q::inductiveInv'        I@14:36:02.703
+PASS #8: VCGen                                                    I@14:36:02.703
+  > Producing verification conditions from the invariant q::inductiveInv I@14:36:02.703
+  > VCGen produced 2 verification condition(s)                    I@14:36:02.703
+PASS #9: PreprocessingPass                                        I@14:36:02.703
+  > Before preprocessing: unique renaming                         I@14:36:02.703
+ > Applying standard transformations:                             I@14:36:02.703
+  > PrimePropagation                                              I@14:36:02.703
+  > Desugarer                                                     I@14:36:02.706
+  > UniqueRenamer                                                 I@14:36:02.714
+  > Normalizer                                                    I@14:36:02.718
+  > SetMembershipSimplifier                                       I@14:36:02.726
+  > Keramelizer                                                   I@14:36:02.727
+  > After preprocessing: UniqueRenamer                            I@14:36:02.735
+PASS #10: TransitionFinderPass                                    I@14:36:02.738
+To understand the error, read the manual:                         I@14:36:02.740
+  [https://apalache-mc.org/docs/apalache/principles/assignments.html] I@14:36:02.740
+error: s is used before it is assigned. You need to have either `s == <expr>` or `s.in(<set>)` before doing anything else with `s` in your predicate.

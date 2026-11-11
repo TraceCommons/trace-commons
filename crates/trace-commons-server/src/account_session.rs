@@ -99,6 +99,17 @@ pub enum AccountAuthMethod {
     NativeToken,
 }
 
+impl AccountAuthMethod {
+    /// The label stored in audit and acceptance rows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccountAuthMethod::SessionCookie => "session_cookie",
+            AccountAuthMethod::DeviceBearer => "device_bearer",
+            AccountAuthMethod::NativeToken => "native_token",
+        }
+    }
+}
+
 /// Resolved account context guarding the `/v1/account/*` read surface.
 ///
 /// Producible only by the resolver (`resolve_account_ctx`) — it is the sole

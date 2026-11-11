@@ -158,6 +158,9 @@ fn quiesce_sink(slot: &EventSinkSlot) -> bool {
     if IN_EVENT_CALLBACK.with(|active| active.get())
         || tokio::runtime::Handle::try_current().is_ok()
     {
+        // Waiting here could deadlock, but delivery must still stop: the
+        // host may not free its context yet, and no further event may reach it.
+        disable_sink(slot);
         return false;
     }
     let sinks = {
@@ -376,7 +379,8 @@ impl AttachedDaemon {
     }
 
     /// A host may free its callback context only after this barrier succeeds.
-    /// Refuses inside a callback or Tokio context; nonblocking clear remains available there.
+    /// Inside a callback or Tokio context it disables delivery without waiting
+    /// and returns false: the host must then not free its context yet.
     pub fn clear_sink_and_wait(&self) -> bool {
         quiesce_sink(&self.sink)
     }
@@ -853,6 +857,52 @@ mod tests {
             data: serde_json::json!({}),
         });
         assert!(super::quiesce_sink(&slot));
+    }
+
+    /// A refused barrier still stops delivery. The host must not free its
+    /// context yet, but no further event may arrive on it.
+    #[test]
+    fn a_refused_barrier_still_disables_delivery() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Inside a Tokio context.
+        let counted = std::sync::Arc::clone(&calls);
+        let sink = std::sync::Arc::new(super::EventSink::new(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState::default()));
+        super::install_sink(&slot, std::sync::Arc::clone(&sink));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(!super::quiesce_sink(&slot), "a runtime context must refuse");
+        });
+        sink.deliver(super::Event {
+            event: "after-runtime-refusal".into(),
+            data: serde_json::json!({}),
+        });
+        // Inside the callback itself.
+        let counted = std::sync::Arc::clone(&calls);
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState::default()));
+        let weak = std::sync::Arc::downgrade(&slot);
+        let sink = std::sync::Arc::new(super::EventSink::new(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(!super::quiesce_sink(&weak.upgrade().unwrap()));
+        }));
+        super::install_sink(&slot, std::sync::Arc::clone(&sink));
+        for name in ["first", "after-callback-refusal"] {
+            sink.deliver(super::Event {
+                event: name.into(),
+                data: serde_json::json!({}),
+            });
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the delivery that refused the barrier ran"
+        );
     }
 
     use super::*;

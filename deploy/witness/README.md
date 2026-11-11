@@ -96,6 +96,10 @@ calls. That is a much larger attack surface than the witness's own code, and it
 is the largest single reduction available to a future revision of this
 deployment.
 
+## Stable hostname
+
+The `witness.tracecommons.ai` ingress terminates TLS inside this CVM through a digest-pinned sidecar. Its public custom-SNI route is currently failing and is not ready for client discovery. The original direct Phala URL remains available. See [the hostname runbook](../../docs/operator/witness-custom-domain.md) for measurements, DNS, verification, the routing blocker and client-transition limits.
+
 ## The routes are unauthenticated. That is deliberate, and it has a cost.
 
 The witness serves these routes, all unauthenticated, none rate-limited by
@@ -133,9 +137,10 @@ the design is trying not to hand it.
   fresh TDX quote over a report body of their choosing in the nonce half. The
   quote proves what it says, and nothing about a caller.
 
-A deployment is expected to put something in front of it. `gateway_enabled` is
-on, so dstack-gateway terminates TLS — that is the TLS answer and not the abuse
-answer.
+A deployment puts TLS in front of the witness HTTP listener. For the stable
+custom hostname, the gateway passes TLS through to the ingress sidecar inside
+the CVM. For the legacy direct Phala URL, dstack-gateway terminates TLS.
+Neither path supplies application-level abuse controls.
 
 **Part of the abuse answer is now in this directory, and part of it still is
 not.** Be precise about which is which.
@@ -1370,7 +1375,7 @@ against the manifest hash above, none of them should be.
 
 Stated plainly so nobody reads the rest as tested. **Revised 2026-09-06**: the
 first four items below said this had never run on a real CVM. It has — see
-"The production deployment, as of 2026-09-06" above, whose every value was read
+"The production deployment, as of 2026-11-05" above, whose every value was read
 back from the running instance. Those items are struck and replaced rather than
 deleted, because what they were wrong about is worth knowing.
 
@@ -1437,7 +1442,7 @@ Still unverified:
 - `docs/operator/pii-backstop.md` — the backstop this certificate does **not**
   replace.
 
-## The production deployment, as of 2026-09-06
+## The production deployment, as of 2026-11-05
 
 Read back from the running instance, not from what we asked for. Every value
 below came from `phala cvms get --json` or from a live certificate.
@@ -1451,14 +1456,22 @@ what was current when it was written.
 |---|---|
 | CVM | `8b8e6543-9743-41fc-ac05-a6b414888d5e` (upgraded, not recreated) |
 | App | `f1654b0beac2ac2afae4235ee3d907096cd8f3de` |
-| Image | `ghcr.io/tracecommons/trace-commons-witness@sha256:75af1945502ebcd88b597993695549553fb011d0ff578aff357657f7e78e2d5c` |
+| Image | `ghcr.io/tracecommons/trace-commons-witness@sha256:af99d33f29d2fc9401062f0b3c3ff8bd3304c6fe76d9b8871460e1f6b9e65546` |
 | Mode | `full-pipeline` (NEAR AI classifier) |
 | Signing address | `0x655a17fcf6d0b9069e1b1dd07a7f5535d0c76798` |
-| Instance `compose_hash` | `612d996cd7197803ca6deefbddb50ba3d09d32ec91174065e5f5df035fc1ebf8` |
-| Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:01612d996cd7197803ca6deefbddb50ba3d09d32ec91174065e5f5df035fc1ebf8000000000000000000000000000000` |
-| Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1` |
+| Instance `compose_hash` | `2c35c88d975ebe3685b2087304a665b56630a112c81eca9227b07afea460c1b8` |
+| Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:012c35c88d975ebe3685b2087304a665b56630a112c81eca9227b07afea460c1b8000000000000000000000000000000` |
+| Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2` |
 | `public_logs` / `public_sysinfo` / `public_tcbinfo` | `false` / `false` / `true` |
 | `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY"]` |
+
+The stable hostname, in-CVM ingress, certificate identity and DNS routing are
+recorded in [the hostname runbook](../../docs/operator/witness-custom-domain.md).
+The witness image above was built by workflow run `42035550298` from commit
+`6abd2d127`. The older `a692cad` provenance comment inside the measured compose
+was retained verbatim from the preceding deployment; it does not describe the
+current image. Use this verified build record and digest. Correct that historical
+comment with the next measured configuration rollout.
 
 **The v1 policy version covers two classifier rules; v2 starts with the
 polling witness.** Certificates labelled `...privacy-filter-near-ai-v1` from

@@ -93,12 +93,11 @@ final class OtherCollectionsLazyTests: XCTestCase {
     }
 
     func test_customizeBuildsVisibleReposAndScrollsToTheLastOne() async throws {
-        let (runner, repos, copy, candidate) = try await customize(projects: count, sessions: 0)
+        let (runner, repos, copy) = try await customize(projects: count, sessions: 0)
         let last = try XCTUnwrap(repos.projects?.last)
         OtherCollectionRowBodies.startRecording()
         defer { OtherCollectionRowBodies.stopRecording() }
-        let host = Host(ToolChecks(copy: copy, runner: runner, adding: AddToolModel(), repos: repos,
-                                   rows: [candidate], showsRepos: true, open: true, shown: true)
+        let host = Host(CustomizeRepoCard(copy: copy, runner: runner, repos: repos, kinds: [.claudeCode])
             .environmentObject(AppModel()))
         defer { host.close() }
         host.settle()
@@ -109,11 +108,10 @@ final class OtherCollectionsLazyTests: XCTestCase {
     }
 
     func test_customizeBuildsVisiblePastSessionsAndScrollsToTheLastOne() async throws {
-        let (runner, repos, copy, candidate) = try await customize(projects: 1, sessions: 500)
+        let (runner, repos, copy) = try await customize(projects: 1, sessions: 500)
         OtherCollectionRowBodies.startRecording()
         defer { OtherCollectionRowBodies.stopRecording() }
-        let host = Host(ToolChecks(copy: copy, runner: runner, adding: AddToolModel(), repos: repos,
-                                   rows: [candidate], showsRepos: true, open: true, shown: true)
+        let host = Host(CustomizeRepoCard(copy: copy, runner: runner, repos: repos, kinds: [.claudeCode])
             .environmentObject(AppModel()))
         defer { host.close() }
         host.settle()
@@ -137,7 +135,7 @@ final class OtherCollectionsLazyTests: XCTestCase {
         XCTAssertLessThan(rows, 80, "built \(rows) of \(total) \(key) rows before scrolling", file: file, line: line)
     }
 
-    private func customize(projects: Int, sessions: Int) async throws -> (FirstRunRunner, CustomizeRepos, FirstRunCopy, SourceCandidate) {
+    private func customize(projects: Int, sessions: Int) async throws -> (FirstRunRunner, CustomizeRepos, FirstRunCopy) {
         var scale = TracesScalePerfTests.Scale()
         scale.folders = projects
         scale.sessions = 0
@@ -153,9 +151,7 @@ final class OtherCollectionsLazyTests: XCTestCase {
         await repos.load(runner: runner, source: source)
         XCTAssertEqual(repos.projects?.count, projects)
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        let candidate = SourceCandidate(source: .claudeCode, path: "/sample/claude", exists: true,
-                                        sessionCount: UInt64(sessions), mostRecent: nil, relocatedByEnv: false)
-        return (runner, repos, copy, candidate)
+        return (runner, repos, copy)
     }
 
     @MainActor private final class PickerSource: FirstRunRulesSource {

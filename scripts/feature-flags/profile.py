@@ -6,6 +6,7 @@ import hashlib
 import json
 import pathlib
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,16 +28,34 @@ def identity(channel, selected=None, root=ROOT):
     source = root / "crates/trace-commons-contributor/feature-flags"
     profile = json.loads((source / "profiles" / (selected + ".json")).read_text(), object_pairs_hook=unique)
     registry = json.loads((source / "registry.json").read_text(), object_pairs_hook=unique)
-    keys = ["schema_version", "registry_version", "environment", "capabilities", "remote_enable"]
+    # Field order of the Rust `Profile`, whose serialization the digest covers.
+    keys = ["schema_version", "registry_version", "environment", "capabilities", "remote_enable", "signing_keys"]
+    sets = ["capabilities", "remote_enable", "signing_keys"]
     if set(profile) != set(keys) or profile["schema_version"] != 1 or registry["schema_version"] != 1 or profile["registry_version"] != registry["registry_version"] or profile["environment"] != selected:
         raise ValueError("feature-profile-invalid")
-    if not all(isinstance(profile[k], list) and all(isinstance(v, str) for v in profile[k]) for k in ["capabilities", "remote_enable"]):
+    if not all(isinstance(profile[k], list) and all(isinstance(v, str) for v in profile[k]) for k in sets):
         raise ValueError("feature-profile-set-invalid")
     if any(k not in registry["flags"] for k in profile["remote_enable"]):
         raise ValueError("unknown-profile-flag")
-    canonical = {k: sorted(set(profile[k])) if k in ["capabilities", "remote_enable"] else profile[k] for k in keys}
+    check_remote_enables(registry, profile)
+    canonical = {k: sorted(set(profile[k])) if k in sets else profile[k] for k in keys}
     digest = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     return {"schema_version": 1, "environment": selected, "profile_digest": digest}
+
+def check_remote_enables(registry, profile):
+    """The same guards as the Rust `Registry::validate`, without a Rust build."""
+    for definition in registry["flags"].values():
+        if definition.get("class") not in ("product", "privacy_sensitive"):
+            raise ValueError("feature-flag-class-missing")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", key) for key in profile["signing_keys"]):
+        raise ValueError("invalid-signing-key")
+    if profile["remote_enable"] and not profile["signing_keys"]:
+        raise ValueError("remote-enable-requires-signing-key")
+    for flag in profile["remote_enable"]:
+        if registry["flags"][flag]["class"] == "privacy_sensitive":
+            raise ValueError("privacy-sensitive-flag-remotely-enabled")
+        if registry["flags"][flag]["default"] is not False:
+            raise ValueError("remotely-enabled-flag-defaults-on")
 
 def verify_values(expected, cli, library, plist):
     bundled = {"schema_version": 1, "environment": plist.get("TCFeatureEnvironment"), "profile_digest": plist.get("TCFeatureProfileDigest")}

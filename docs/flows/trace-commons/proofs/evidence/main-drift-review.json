@@ -1,0 +1,22 @@
+{
+  "reviewedBaseline": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
+  "mainAtFinalReview": "828ad59f5bc539fafd4915267a45152941000639",
+  "unchangedSelectedSourceFiles": [
+    "macos/Sources/TraceCommonsApp/AppModel.swift",
+    "macos/Sources/TraceCommonsApp/Views/Settings/SharingChoiceCard.swift",
+    "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift",
+    "macos/Sources/TraceCommonsApp/SkillLearningStore.swift",
+    "macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift",
+    "crates/trace-commons-contributor/src/daemon/mod.rs",
+    "crates/trace-commons-contributor/src/daemon/uploader.rs",
+    "crates/trace-commons-contributor/src/submit.rs",
+    "crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs",
+    "crates/trace-commons-contributor/src/daemon/skill_loop.rs",
+    "crates/trace-commons-contributor/src/skill_loop/install.rs",
+    "crates/trace-commons-server/src/versioned_pipeline.rs",
+    "crates/trace-commons-server/src/versioned_pipeline_credit.rs",
+    "crates/trace-commons-server/src/payout_pass.rs",
+    "crates/trace-commons-server/src/versioned_pipeline_product.rs"
+  ],
+  "ipcDiff": "test-only managed Codex catalogue/redeem assertions; skill handlers unchanged"
+}

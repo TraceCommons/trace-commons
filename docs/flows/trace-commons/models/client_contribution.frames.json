@@ -1,0 +1,208 @@
+[
+  {
+    "label": "contribution_empty",
+    "title": "Traces",
+    "body": "No discovered trace is selected.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_pending",
+    "title": "Traces",
+    "body": "A session is waiting for a decision.",
+    "controls": [
+      "Review",
+      "Submit",
+      "Keep",
+      "Not this one",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_preview_busy",
+    "title": "Preparing preview",
+    "body": "Privacy processing and pin persistence are in flight.",
+    "controls": [
+      "Close preview",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_preview",
+    "title": "Review trace",
+    "body": "The reviewed envelope has its own immutable byte identity.",
+    "controls": [
+      "Submit",
+      "Close preview",
+      "Keep",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_approved",
+    "title": "Approved",
+    "body": "The decision is durable; a manual approval has an undo hold.",
+    "controls": [
+      "Undo",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_uploading",
+    "title": "Uploading",
+    "body": "The uploader claimed this entry; Undo is no longer accepted.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_held",
+    "title": "Review needed",
+    "body": "Witness risk or Scrub check returned this session to a person.",
+    "controls": [
+      "Review",
+      "Submit",
+      "Keep",
+      "Not this one",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_offline",
+    "title": "Waiting to retry",
+    "body": "Network failure retained the approval and scheduled another attempt.",
+    "controls": [
+      "Undo",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_failed",
+    "title": "Could not upload",
+    "body": "The retry budget was spent or the failure was permanent.",
+    "controls": [
+      "Retry",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_refused",
+    "title": "Not sent",
+    "body": "The pipeline refused this session.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_kept",
+    "title": "Kept on this Mac",
+    "body": "This session was kept locally; Undo offers it again for a person.",
+    "controls": [
+      "Undo",
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_expired",
+    "title": "Expired",
+    "body": "The unanswered offer aged out while healthy.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_superseded",
+    "title": "Session changed",
+    "body": "The old offer was superseded; a replacement is a distinct queue entry.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_uploaded",
+    "title": "Sent",
+    "body": "The queue records delivery; proof receipt status and server processing remain separate.",
+    "controls": [
+      "Choose other trace",
+      "Policy",
+      "History"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_policy",
+    "title": "Sharing settings",
+    "body": "Folder Ask/Automatic/Never is separate from the account-wide Never override. A manual approval survives a later folder Never; the global override holds every send.",
+    "controls": [
+      "Ask",
+      "Automatic",
+      "Never",
+      "Manual Scrub check",
+      "Change scopes",
+      "Change inputs",
+      "Disable source",
+      "Enable source",
+      "Back to trace",
+      "Choose other trace",
+      "Policy",
+      "History",
+      "Hold all sends",
+      "Resume all sends"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "contribution_history",
+    "title": "History",
+    "body": "Local receipts are joined with current-account server read-back.",
+    "controls": [
+      "Refresh history",
+      "Back to trace",
+      "Choose other trace",
+      "Policy",
+      "History",
+      "Withdraw"
+    ],
+    "kind": "client"
+  }
+]

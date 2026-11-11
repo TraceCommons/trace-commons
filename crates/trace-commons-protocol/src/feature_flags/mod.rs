@@ -6,6 +6,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_MANIFEST_BYTES: usize = 65_536;
 pub const MAX_VALIDITY_SECONDS: i64 = 7 * 24 * 60 * 60;
+/// How far a manifest's `issued_at` may be ahead of the client's clock.
+/// Without it a client whose clock runs behind refuses a fresh manifest,
+/// and keeps applying the previous one, which may still enable the flag
+/// the new revision turns off.
+pub const MAX_CLOCK_SKEW_SECONDS: i64 = 5 * 60;
+/// Most signatures one manifest may carry; more than one is for a key rotation.
+pub const MAX_MANIFEST_SIGNATURES: usize = 4;
+/// Prefixed to the payload before signing, so a signature made for any other
+/// document under the same key cannot be presented as a manifest signature.
+pub const MANIFEST_SIGNING_DOMAIN: &[u8] = b"trace-commons.feature-manifest.v1\n";
+const KEY_ID_HEX_LEN: usize = 16;
 #[derive(Debug, thiserror::Error)]
 #[error("invalid feature flag configuration: {0}")]
 pub struct FlagError(pub &'static str);
@@ -31,11 +42,21 @@ pub enum Timing {
     Live,
     NextStart,
 }
+/// What a flag may gate. Behavior that touches consent, what leaves the
+/// machine, upload or the witness is `privacy_sensitive`; it ships through a
+/// release, never a remote enable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagClass {
+    Product,
+    PrivacySensitive,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub description: String,
     pub owner: String,
+    pub class: FlagClass,
     pub default: bool,
     pub required_capabilities: BTreeSet<String>,
     pub timing: Timing,
@@ -56,8 +77,17 @@ pub struct Profile {
     pub environment: Environment,
     pub capabilities: BTreeSet<String>,
     pub remote_enable: BTreeSet<String>,
+    /// Raw Ed25519 public keys, lowercase hex, whose signature this build
+    /// accepts on its environment's manifest.
+    pub signing_keys: BTreeSet<String>,
 }
 impl Profile {
+    pub fn trusted_keys(&self) -> Result<Vec<[u8; 32]>, FlagError> {
+        self.signing_keys
+            .iter()
+            .map(|k| parse_public_key_hex(k).ok_or(FlagError("invalid signing key")))
+            .collect()
+    }
     pub fn digest(&self) -> Result<String, FlagError> {
         let bytes = serde_json::to_vec(self).map_err(|_| FlagError("profile serialization"))?;
         Ok(digest(&bytes))
@@ -89,6 +119,18 @@ impl Registry {
         {
             return Err(FlagError("unknown profile flag"));
         }
+        self_check_keys(profile)?;
+        for id in &profile.remote_enable {
+            let definition = &self.flags[id];
+            if definition.class == FlagClass::PrivacySensitive {
+                return Err(FlagError(
+                    "privacy-sensitive flag cannot be remotely enabled",
+                ));
+            }
+            if definition.default {
+                return Err(FlagError("remotely enabled flag must default off"));
+            }
+        }
         Ok(())
     }
 }
@@ -105,22 +147,123 @@ pub struct Manifest {
 }
 impl Manifest {
     pub fn valid_at(&self, now: DateTime<Utc>) -> bool {
-        self.issued_at <= now && now < self.expires_at
+        self.issued_at <= now + chrono::Duration::seconds(MAX_CLOCK_SKEW_SECONDS)
+            && now < self.expires_at
     }
 }
+/// The document as served: the signed manifest text, carried as a string so
+/// the bytes that were signed are the bytes that are verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedManifest {
+    pub payload: String,
+    pub signatures: Vec<ManifestSignature>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSignature {
+    /// [`key_id_for`] of the signing key.
+    pub key_id: String,
+    /// The 64-byte Ed25519 signature over [`signing_input`], lowercase hex.
+    pub signature: String,
+}
+/// The bytes a key signs: [`MANIFEST_SIGNING_DOMAIN`] then the payload.
+pub fn signing_input(payload: &[u8]) -> Vec<u8> {
+    [MANIFEST_SIGNING_DOMAIN, payload].concat()
+}
+/// The first 8 bytes of SHA-256 over the raw public key, lowercase hex.
+pub fn key_id_for(public_key: &[u8; 32]) -> String {
+    hex::encode(&Sha256::digest(public_key)[..KEY_ID_HEX_LEN / 2])
+}
+pub fn parse_public_key_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    hex::decode(text).ok()?.try_into().ok()
+}
+pub fn assemble_signed_manifest(payload: String, signatures: Vec<ManifestSignature>) -> Vec<u8> {
+    serde_json::to_vec(&SignedManifest {
+        payload,
+        signatures,
+    })
+    .expect("plain strings serialize")
+}
+/// Verify a served document against the profile's pinned keys and return
+/// the payload text. Nothing in the payload is read before a signature over
+/// it has verified.
+pub fn open_signed_manifest(bytes: &[u8], profile: &Profile) -> Result<String, FlagError> {
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(FlagError("manifest too large"));
+    }
+    let keys = profile.trusted_keys()?;
+    if keys.is_empty() {
+        return Err(FlagError("no trusted manifest signing key"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| FlagError("manifest JSON"))?;
+    if !value.is_object() {
+        return Err(FlagError("manifest JSON"));
+    }
+    let signed: SignedManifest =
+        serde_json::from_value(value).map_err(|_| FlagError("manifest JSON"))?;
+    if signed.signatures.is_empty() || signed.signatures.len() > MAX_MANIFEST_SIGNATURES {
+        return Err(FlagError("manifest signature count"));
+    }
+    let message = signing_input(signed.payload.as_bytes());
+    let verified = signed.signatures.iter().any(|signature| {
+        let Ok(bytes) = hex::decode(&signature.signature) else {
+            return false;
+        };
+        bytes.len() == 64
+            && keys
+                .iter()
+                .filter(|key| key_id_for(key) == signature.key_id)
+                .any(|key| {
+                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+                        .verify(&message, &bytes)
+                        .is_ok()
+                })
+    });
+    if !verified {
+        return Err(FlagError("manifest signature"));
+    }
+    Ok(signed.payload)
+}
+/// A verified, current manifest.
 pub fn parse_manifest(
     bytes: &[u8],
-    environment: Environment,
+    profile: &Profile,
     now: DateTime<Utc>,
 ) -> Result<Manifest, FlagError> {
-    let manifest = decode_manifest(bytes, environment)?;
+    Ok(parse_signed_manifest(bytes, profile, now)?.0)
+}
+/// [`parse_manifest`] plus the digest of the signed payload, which identifies
+/// a revision's content independently of who signed it.
+pub fn parse_signed_manifest(
+    bytes: &[u8],
+    profile: &Profile,
+    now: DateTime<Utc>,
+) -> Result<(Manifest, String), FlagError> {
+    let (manifest, payload_digest) = decode_manifest(bytes, profile)?;
     if !manifest.valid_at(now) {
         return Err(FlagError("manifest not current"));
     }
-    Ok(manifest)
+    Ok((manifest, payload_digest))
 }
-/// Structural validation also used to retain an expired cache's revision watermark.
-pub fn decode_manifest(bytes: &[u8], environment: Environment) -> Result<Manifest, FlagError> {
+/// Signature and structure, but not time: also used to retain an expired
+/// cache's revision watermark.
+pub fn decode_manifest(bytes: &[u8], profile: &Profile) -> Result<(Manifest, String), FlagError> {
+    let payload = open_signed_manifest(bytes, profile)?;
+    let manifest = decode_payload(payload.as_bytes(), profile.environment)?;
+    Ok((manifest, digest(payload.as_bytes())))
+}
+/// Structural validation of an unsigned manifest, as an operator writes it
+/// before signing.
+pub fn decode_payload(bytes: &[u8], environment: Environment) -> Result<Manifest, FlagError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(FlagError("manifest too large"));
     }
@@ -175,6 +318,13 @@ pub fn evaluate(
             )
         })
         .collect()
+}
+fn self_check_keys(profile: &Profile) -> Result<(), FlagError> {
+    profile.trusted_keys()?;
+    if !profile.remote_enable.is_empty() && profile.signing_keys.is_empty() {
+        return Err(FlagError("remote enable requires a manifest signing key"));
+    }
+    Ok(())
 }
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

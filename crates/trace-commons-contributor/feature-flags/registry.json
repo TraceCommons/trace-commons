@@ -5,6 +5,7 @@
     "insights_skills": {
       "description": "Local skill inventory, observed usage, public publisher feeds, and update detection in Insights.",
       "owner": "TraceCommons",
+      "class": "product",
       "default": false,
       "required_capabilities": [
         "insights_skills_v1"

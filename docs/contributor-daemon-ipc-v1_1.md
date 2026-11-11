@@ -302,7 +302,8 @@ opens the pipe as a file handle, which has no equivalent of
 > Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
 > and the control flow and nothing about whether the descriptor actually
 > excludes another user, which is a runtime property no cross-compile can observe.
-> The observation is the `windows-pipe-acl` CI job
+> The observation is the named-pipe ACL step of the `windows contributor
+> crates (tests, named-pipe ACL, update conformance)` CI job in `clients.yml`
 > (`scripts/windows/verify-pipe-acl.ps1`, driving
 > `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
 > non-administrator local account, has it attempt to open the pipe, and
@@ -6264,7 +6265,7 @@ setup refusal's `{terminal}` from `terminal_destination`; from a daemon
 that sends no `launch_destination`, `terminal_destination` serves for both.
 
 `managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
-managed sessions open as tabs of herdr's "Near.ai" workspace, with
+managed sessions open as tabs of herdr's "Near AI Gateway" workspace, with
 `managed_terminal` hosting herdr when no herdr client is running (see
 `docs/managed-sessions.md`). Anything that is not a boolean is `bad_params`
 / `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
@@ -9602,7 +9603,9 @@ This addendum supersedes the initial `model_spend` unavailable-only contract.
 `model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
 selected inference-key organization (or the existing first-active-organization
 fallback for a legacy session), and the fixed trusted management origin
-`https://cloud-api.near.ai`. It requests
+`https://cloud-platform.near.ai` (staging `https://cloud-platform-stg.near.ai`;
+NEAR AI moved its account, organization, usage and credit routes there from
+`cloud-api.near.ai` on 2026-11-06). It requests
 `GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
 [provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
 session-authenticated rolling 24-hour report. No registry price estimate is
@@ -9847,7 +9850,7 @@ tab, whose prompt may hold input not yet run, and the daemon no longer asks
 macOS for the System Events and Accessibility permissions that a new tab
 needed. A launch still sends Apple Events to the terminal app it opens, so
 macOS may still ask once to let the app control that terminal; the bundle's
-`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+`NSAppleEventsUsageDescription` for that prompt is "Near AI Gateway opens Private AI
 sessions in Terminal." (owner, 2026-11-03; both channels).
 
 An older app may still send two fields, which are accepted so that app keeps
@@ -10068,7 +10071,8 @@ feature snapshot: environment, profile digest, daemon-instance UUID, increasing
 snapshot generation, sampled time, source, manifest revision/expiry/freshness,
 and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
 It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
-returns `{"requested":true}` and schedules a coalesced anonymous refresh; it
+returns `{"requested":true}` and schedules a coalesced anonymous refresh (at most
+one fetch start per 30 seconds; a sooner request is deferred, not dropped); it
 cannot accept a URL or flag values. Developer dry runs allow the snapshot read
 but refuse refresh. Neither method grants any operation authorization.
 

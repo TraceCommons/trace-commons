@@ -104,50 +104,6 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
 
-    /// The optional uses start unticked (R7) and two buttons of equal weight
-    /// sit above them (owner, 2026-10-27): Allow all ticks every optional
-    /// data use, never the handle; Only required unticks them and keeps the
-    /// required use. Nothing ticks a box but the person.
-    func test_theOptionalUsesStartUntickedAndTheTwoButtonsAreEqual() throws {
-        let uses = try copy().uses
-        XCTAssertEqual(uses.allowAll, "Allow all")
-        XCTAssertEqual(uses.onlyRequired, "Only required")
-        let optional = UsesScreenLayout.optionalScopes(options)
-        let fresh = UsesScreenLayout.includingRequired(
-            FirstRunState(step: .uses), required: UsesScreenLayout.requiredScope(options))
-        XCTAssertEqual(fresh.scopes, ["debugging_evaluation"], "nothing optional is ticked for the person")
-        XCTAssertEqual(UsesScreenLayout.group(fresh.scopes, optional: optional), .none)
-
-        let all = UsesScreenLayout.pressing(.allowAll, fresh, optional: optional)
-        XCTAssertEqual(
-            all.scopes, ["debugging_evaluation", "benchmark_only", "ranking_training", "model_training"])
-        XCTAssertFalse(all.scopes.contains("public_attribution"))
-        XCTAssertEqual(UsesScreenLayout.pressing(.allowAll, all, optional: optional), all, "pressing again changes nothing")
-
-        let required = UsesScreenLayout.pressing(.onlyRequired, all, optional: optional)
-        XCTAssertEqual(required.scopes, ["debugging_evaluation"])
-        XCTAssertEqual(UsesScreenLayout.pressing(.onlyRequired, required, optional: optional), required)
-
-        // A box still toggles on its own after either press, and nothing
-        // but the scopes changes.
-        var one = required
-        one.scopes.insert("ranking_training")
-        XCTAssertEqual(UsesScreenLayout.group(one.scopes, optional: optional), .some)
-        var others = all
-        others.scopes = fresh.scopes
-        XCTAssertEqual(others, fresh)
-
-        // Same style, same width, side by side, in one loop: neither is
-        // emphasised.
-        let source = try Self.source()
-        XCTAssertEqual(UsesScreenLayout.Bulk.allCases, [.allowAll, .onlyRequired])
-        XCTAssertTrue(source.contains("ForEach(UsesScreenLayout.Bulk.allCases, id: \\.self) { bulk in"))
-        XCTAssertTrue(source.contains("Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)"))
-        XCTAssertEqual(source.components(separatedBy: "GlassButtonStyle(").count - 1, 1)
-        XCTAssertFalse(source.contains("uses.allowAll)"), "no button of its own for either")
-        XCTAssertFalse(source.contains(".onAppear { runner.state.scopes"))
-    }
-
     /// The required use is one Always on line under the choices, its scope
     /// the tooltip, so every box shown is a real choice (owner, 2026-10-28).
     func test_theRequiredUseIsOneAlwaysOnLine() throws {

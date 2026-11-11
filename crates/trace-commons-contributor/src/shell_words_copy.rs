@@ -734,7 +734,13 @@ mod tests {
             let text = value.as_str().unwrap();
             assert!(!text.is_empty(), "{key}");
             assert!(text.chars().count() <= 30, "{key} is long: {text}");
-            for banned in ["daemon", "passkey", "Near.ai", "NEAR AI"] {
+            for banned in [
+                "daemon",
+                "passkey",
+                "Near.ai",
+                crate::brand::APP_NAME,
+                "NEAR AI",
+            ] {
                 assert!(
                     !text.to_lowercase().contains(&banned.to_lowercase()),
                     "{key} says {banned}"

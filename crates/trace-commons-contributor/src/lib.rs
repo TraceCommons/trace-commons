@@ -123,6 +123,7 @@ pub mod skill_loop;
 pub mod source;
 pub mod source_copy;
 pub mod submit;
+pub mod terms;
 pub mod token_bundle;
 pub mod token_capture_client;
 pub mod token_review_lease;

@@ -54,7 +54,7 @@ final class DesignRulings20261029Tests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "let creditDetail = HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)"))
-        XCTAssertTrue(home.contains("detail: creditDetail, systemImage: HomeStatIcons.credit,"))
+        XCTAssertTrue(home.contains("detail: creditDetail,\n"))
         XCTAssertFalse(home.contains("creditDelta"))
         XCTAssertFalse(home.contains("creditTotal("))
         XCTAssertFalse(try Self.text("Views/Monitor/HomeStore.swift").contains("CreditDailyTotals"))
@@ -121,7 +121,8 @@ final class DesignRulings20261029Tests: XCTestCase {
     /// item's do; the legend keeps its colours.
     func test_thePopoverGraphGreysWhilePaused() throws {
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains("scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)"))
+        // The terms hold greys them too (terms spec, section 5).
+        XCTAssertTrue(panel.contains("scaleFloor: 5, compact: true, paused: model.status.paused || model.status.termsHold,\n                hovered: $hovered)"))
         XCTAssertEqual(panel.components(separatedBy: "GlassBarGraph(").count - 1, 1)
     }
 

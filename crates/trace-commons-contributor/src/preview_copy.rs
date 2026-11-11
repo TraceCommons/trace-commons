@@ -905,6 +905,10 @@ pub struct MonitorScreensCopy {
     /// with the ellipsis of a command that opens a window. Approved by the
     /// owner on 2026-10-29.
     pub check_for_updates: &'static str,
+    /// The app menu's About item, which opens the app's own About window
+    /// with a Copy button for the version (owner, 2026-11-09). The macOS
+    /// convention, "About" and the app's name. DRAFT, NEEDS APPROVAL.
+    pub about_app: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -1423,18 +1427,22 @@ pub struct MonitorHomeHistoryCopy {
     /// owner's words: "No data - Sign in").
     pub account_no_data: &'static str,
     /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
-    /// MVP is "contribute traces, earn credit", so it is the first and
-    /// largest card, over Private AI): its title, one line on what
-    /// contributing is and what it earns, and the way into Traces.
-    /// Approved by the product owner 2026-10-28; the title gained ", use
-    /// Private AI" on 2026-10-29 (product owner). Restored as the owner
-    /// wrote it on 2026-11-05.
+    /// MVP is "contribute traces, earn credit", so it is the first card,
+    /// over Private AI): its title and the way into Traces. No line under
+    /// the title: the steps say it (product owner, 2026-11-02: reduce the
+    /// copy). The title is DRAFT, NEEDS APPROVAL; "Start earning" was
+    /// approved 2026-10-28.
     pub traces_hero_title: &'static str,
-    pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
     /// The hero's three steps, left to right, each a title over one line
     /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
-    /// spend on Private AI. Restored as the owner wrote them on 2026-11-05.
+    /// spend on Private AI. Each line says what happens in its step, in a
+    /// sentence or two (Ron, 2026-11-09: the earlier "Traces from tools",
+    /// "For each trace" and "With your credit" were too short). The three
+    /// lines were approved by Ron on 2026-11-09, the earn line reworded the
+    /// same day to say "final" rather than "pending", which no Home word
+    /// says bare (D6); the titles are DRAFT, NEEDS APPROVAL (2026-11-02
+    /// rewrite).
     pub traces_hero_step_contribute: &'static str,
     pub traces_hero_step_contribute_detail: &'static str,
     pub traces_hero_step_earn: &'static str,
@@ -1565,6 +1573,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flagged: SECOND_LOOK_HEADING,
         open_app: concat!("Open ", crate::app_name!()),
         check_for_updates: "Check for Updates\u{2026}",
+        about_app: concat!("About ", crate::app_name!()),
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
@@ -1790,15 +1799,14 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_account: "Account",
             account_no_data: "No data",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit, use Private AI",
-            traces_hero_body: "Share the sessions from your AI coding tools. Each accepted trace earns you credit.",
+            traces_hero_title: "Your traces earn Private AI credit",
             traces_hero_action: "Start earning",
-            traces_hero_step_contribute: "Contribute traces",
-            traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",
+            traces_hero_step_contribute: "Contribute",
+            traces_hero_step_contribute_detail: "Share traces from your coding tools. Keys, emails and file paths are removed before they're sent.",
             traces_hero_step_earn: "Earn credit",
-            traces_hero_step_earn_detail: "Each accepted trace earns you credit",
+            traces_hero_step_earn_detail: "Each accepted trace earns credit. It becomes final once it settles.",
             traces_hero_step_use: "Use Private AI",
-            traces_hero_step_use_detail: "Spend your credit on Private AI",
+            traces_hero_step_use_detail: "Spend your credit on Claude Code, Codex or OpenCode sessions through Private AI.",
             no_credit_body: crate::consent_copy::NO_CREDIT_REMINDER,
             no_credit_open_settings: "Open Settings",
             credit_account_total: "{amount} across your account",

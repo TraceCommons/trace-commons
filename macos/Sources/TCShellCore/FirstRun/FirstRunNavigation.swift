@@ -6,54 +6,15 @@ import Foundation
 /// (and Back clears `grantReady`).
 public enum FirstRunNavigation {
     /// One order for everyone: there is no Quick or Custom setup any more.
-    /// Customize on Tools opens the per-repo rules in place, and signing in
-    /// is the last step.
-    public static let steps: [FirstRunStep] = [.welcome, .tools, .uses, .traces, .privateAI, .join]
+    /// Customize on Uses opens the per-repo rules in place, and signing in
+    /// is the last step. Connecting tools asks nothing about sharing: Private
+    /// AI and what the traces could earn come first, and Uses, which can be
+    /// skipped, comes next. The terms are read on a page of their own just
+    /// before sign-in, near the end (owner, 2026-11-09).
+    public static let steps: [FirstRunStep] = [.welcome, .tools, .privateAI, .traces, .uses, .terms, .join]
 
     /// The steps the step thread names: every one after Welcome.
     public static var threadSteps: [FirstRunStep] { Array(steps.dropFirst()) }
-
-    /// The steps this first run walks. Private AI only shares nothing, so
-    /// it has no Uses (how traces may be used) and no Traces (what they
-    /// could earn); Private AI and the sign-in stay.
-    public static func steps(for state: FirstRunState) -> [FirstRunStep] {
-        state.privateAIOnly ? steps.filter { $0 != .uses && $0 != .traces } : steps
-    }
-
-    /// The steps the thread names on this first run's path.
-    public static func threadSteps(for state: FirstRunState) -> [FirstRunStep] {
-        Array(steps(for: state).dropFirst())
-    }
-
-    /// Private AI only, on Tools (tester report, owner-approved
-    /// 2026-11-04): a person who installed the app for Private AI finishes
-    /// setup signed in to NEAR AI without sharing. Every tool and added
-    /// folder is answered Not used, so the daemon watches nothing and
-    /// queues nothing; nothing set under Customize is kept, and no data use
-    /// is chosen. The step does not move: Tools' commit starts the daemon
-    /// first (`CommitPoint.leaveTools`).
-    public static func choosePrivateAIOnly(_ state: FirstRunState) -> FirstRunState {
-        var chosen = state
-        for kind in chosen.toolAnswers.keys { chosen.toolAnswers[kind] = .off }
-        for kind in [SourceKind.claudeCode, .codex] { chosen.toolAnswers[kind] = .off }
-        chosen.withdrawTrajectory()
-        for folder in chosen.addedFolders { chosen.answerAdded(path: folder.path, watched: false) }
-        chosen.rules = [:]
-        chosen.pastSelections = [:]
-        chosen.scopes = []
-        chosen.privateAIOnly = true
-        return chosen
-    }
-
-    /// Continue on Tools: a person who chose Private AI only and came back
-    /// to Tools is sharing after all, so the path runs through Uses again,
-    /// where the Sharing choice is theirs. Any other state is unchanged.
-    public static func continueSharing(_ state: FirstRunState) -> FirstRunState {
-        guard state.privateAIOnly else { return state }
-        var sharing = state
-        sharing.privateAIOnly = false
-        return sharing
-    }
 
     /// The following step, or the same state on the last one.
     public static func next(_ state: FirstRunState) -> FirstRunState {
@@ -74,7 +35,6 @@ public enum FirstRunNavigation {
     /// every answer kept and the grant's ready answer cleared. A step not
     /// yet reached is not a way forward; the state is returned unchanged.
     public static func back(to step: FirstRunStep, from state: FirstRunState) -> FirstRunState {
-        let steps = steps(for: state)
         guard let target = steps.firstIndex(of: step), let current = steps.firstIndex(of: state.step), target < current
         else { return state }
         var moved = state
@@ -118,7 +78,10 @@ public enum FirstRunNavigation {
     ///   Mac is not asked (spec rule 1).
     /// - Uses: the required use known, so nobody passes Uses without
     ///   seeing it. It is not waited on: it is always included
-    ///   (`FirstRunState.includingRequiredScope`, owner 2026-10-08).
+    ///   (`FirstRunState.includingRequiredScope`, owner 2026-10-08). Nothing
+    ///   else is required: the action reads Skip until the person chooses
+    ///   something (`UsesScreenLayout.hasSelection`, Ron 2026-11-05), and a
+    ///   Sharing choice not made stays Ask, its default.
     /// - Join: the required use known, and something Start can do: finish
     ///   watching only (not while the daemon holds an enrollment, which
     ///   watching only cannot finish under), or finish an enrollment the
@@ -132,20 +95,17 @@ public enum FirstRunNavigation {
         switch state.step {
         case .welcome, .traces, .privateAI:
             return true
+        case .terms:
+            // The terms screen gates itself on the runner's acceptance,
+            // which the state does not carry.
+            return true
         case .tools:
             return state.watchesAnything && state.watchedTwice.isEmpty && state.sessionRoots.settingsJSON() != nil
         case .uses:
-            // A Sharing choice is the person's to pick; none is preselected.
-            return requiredScope != nil && state.sharingChosen
+            return requiredScope != nil
         case .join:
-            // Private AI only consents to no data use, so it waits for no
-            // required use: only an enrollment to mark complete, and
-            // nothing watched.
-            if state.privateAIOnly { return state.holdsEnrolment && !state.watchesAnything }
             guard requiredScope != nil else { return false }
             let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
-            // Watching only shares nothing, so it needs no Sharing choice.
-            guard watchesOnly || state.sharingChosen else { return false }
             return watchesOnly || state.holdsEnrolment
         }
     }
@@ -169,7 +129,6 @@ public enum FirstRunNavigation {
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {
-        let steps = steps(for: state)
         guard let index = steps.firstIndex(of: state.step) else { return state }
         let target = index + offset
         guard steps.indices.contains(target) else { return state }

@@ -5843,6 +5843,89 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
     })
 }
 
+/// The published Terms of Service (`terms::fetch_published_blocking`), as
+/// one owned JSON object:
+///
+/// ```json
+/// {"document": {"schema_version":"trace_commons.terms.v1","version":"...",
+///               "effective":"...","in_effect":false,"title":"...",
+///               "blocks":[...]},
+///  "content_sha256": "<64 lowercase hex>"}
+/// ```
+///
+/// `content_sha256` is the SHA-256 of the exact bytes the site served, the
+/// value a shell hands back with the version when the person accepts. The
+/// fetch is HTTPS-only to the document's own host, follows no redirect and
+/// sends no credential. It needs no daemon and no state directory, so the
+/// first run can call it before either exists. It blocks for up to the
+/// fetch's timeouts: call it off the UI thread. It runs on its own thread
+/// and runtime, so calling it from inside a tokio runtime is safe.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. On failure
+/// returns NULL and, when `err` is non-null, sets `*err` to an owned label
+/// (free it with [`tc_string_free`]): `terms-unavailable`,
+/// `terms-host-refused`, `terms-too-large`, a document refusal
+/// (`terms-malformed`, `terms-schema-unknown`, `terms-version-invalid`,
+/// `terms-empty`, `terms-link-refused`), or `panic`.
+///
+/// # Safety
+/// `err` must be NULL or point to a writable `char*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_terms_document_json(err: *mut *mut c_char) -> *mut c_char {
+    guarded_string(err, || {
+        // Its own thread, so a caller already inside a tokio runtime does
+        // not make the blocking fetch's runtime panic.
+        let fetched = std::thread::spawn(fetch_terms_document)
+            .join()
+            .unwrap_or(Err(TERMS_FETCH_PANICKED));
+        match fetched {
+            Ok(fetched) => {
+                let json = serde_json::json!({
+                    "document": fetched.document,
+                    "content_sha256": fetched.content_sha256,
+                });
+                Ok(to_owned_cstring(&serde_json::to_string(&json)?))
+            }
+            Err(label) => Ok(witness_fail(label, err)),
+        }
+    })
+}
+
+const TERMS_FETCH_PANICKED: &str = "panic";
+
+#[cfg(not(test))]
+fn fetch_terms_document() -> Result<trace_commons_contributor::terms::FetchedTerms, &'static str> {
+    trace_commons_contributor::terms::fetch_published_blocking()
+}
+
+/// Under test the fetch never reaches the live site: it reads the outcome a
+/// test set with [`terms_fetch_seam::set`], and is `terms-unavailable` when
+/// none was set.
+#[cfg(test)]
+fn fetch_terms_document() -> Result<trace_commons_contributor::terms::FetchedTerms, &'static str> {
+    terms_fetch_seam::take()
+}
+
+#[cfg(test)]
+mod terms_fetch_seam {
+    use std::sync::Mutex;
+    use trace_commons_contributor::terms::{FetchedTerms, TERMS_UNAVAILABLE};
+
+    static OUTCOME: Mutex<Option<Result<FetchedTerms, &'static str>>> = Mutex::new(None);
+
+    pub(super) fn set(outcome: Result<FetchedTerms, &'static str>) {
+        *OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    }
+
+    pub(super) fn take() -> Result<FetchedTerms, &'static str> {
+        OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or(Err(TERMS_UNAVAILABLE))
+    }
+}
+
 /// The first run's Traces line under the count
 /// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
 /// `traces` (the traces found) and `earns_credit`, each optional; an older
@@ -7571,5 +7654,66 @@ mod bounded_teardown_tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod terms_document_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use trace_commons_contributor::terms::{FetchedTerms, TERMS_UNAVAILABLE};
+    use trace_commons_protocol::terms::TermsDocument;
+
+    /// The fetch seam is one process-wide slot; these tests take turns on it.
+    static SEAM: Mutex<()> = Mutex::new(());
+
+    fn owned_text(pointer: *mut c_char) -> String {
+        assert!(!pointer.is_null());
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .expect("owned text is UTF-8")
+            .to_string();
+        unsafe { tc_string_free(pointer) };
+        text
+    }
+
+    #[test]
+    fn terms_document_json_tolerates_a_null_err_pointer() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        terms_fetch_seam::set(Err(TERMS_UNAVAILABLE));
+        let out = unsafe { tc_terms_document_json(std::ptr::null_mut()) };
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn terms_document_json_sets_an_owned_label() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        terms_fetch_seam::set(Err(TERMS_UNAVAILABLE));
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tc_terms_document_json(&mut err) };
+        assert!(out.is_null());
+        assert_eq!(owned_text(err), TERMS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn terms_document_json_carries_the_document_and_its_hash() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = include_bytes!("../../trace-commons-protocol/tests/fixtures/terms-v1.json");
+        let document = TermsDocument::parse(bytes).expect("fixture parses");
+        let hash = "a".repeat(64);
+        terms_fetch_seam::set(Ok(FetchedTerms {
+            document: document.clone(),
+            content_sha256: hash.clone(),
+        }));
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tc_terms_document_json(&mut err) };
+        assert!(err.is_null());
+        let value: serde_json::Value = serde_json::from_str(&owned_text(out)).unwrap();
+        assert_eq!(value["content_sha256"], hash.as_str());
+        assert_eq!(value["document"]["version"], "2026-08-22-draft");
+        assert_eq!(value["document"]["in_effect"], false);
+        let round_trip = TermsDocument::parse(value["document"].to_string().as_bytes())
+            .expect("the document crosses the boundary intact");
+        assert_eq!(round_trip, document);
     }
 }

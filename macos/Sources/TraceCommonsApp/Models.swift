@@ -259,6 +259,10 @@ struct DaemonStatus: Decodable, Equatable {
     var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
+    /// An in-effect Terms of Service version is owed: the daemon uploads
+    /// nothing until it is accepted. Separate from `paused`; Resume does not
+    /// clear it. A daemon that predates the key holds nothing.
+    let termsHold: Bool
     let queueDepth: Int
     /// The daemon's K6 count, never inferred from a pending list or queue
     /// depth. Older daemons omit it, which means unavailable, not zero.
@@ -310,6 +314,7 @@ struct DaemonStatus: Decodable, Equatable {
         case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
+        case termsHold = "terms_hold"
         case queueDepth = "queue_depth"
         case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
@@ -339,6 +344,7 @@ struct DaemonStatus: Decodable, Equatable {
         accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
+        termsHold: Bool = false,
         queueDepth: Int,
         decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
@@ -361,6 +367,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
+        self.termsHold = termsHold
         self.queueDepth = queueDepth
         self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
@@ -386,6 +393,7 @@ struct DaemonStatus: Decodable, Equatable {
         accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        termsHold = (try? c.decodeIfPresent(Bool.self, forKey: .termsHold)).flatMap { $0 } ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
         decisionsOwed = try c.decodeIfPresent(Int.self, forKey: .decisionsOwed)
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
@@ -432,7 +440,7 @@ struct DaemonStatus: Decodable, Equatable {
         DaemonStatus(
             schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
             accountScope: nil, consentScopes: consentScopes, paused: paused,
-            queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
+            termsHold: termsHold, queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
             health: health, routing: routing, grantVoids: grantVoids,
             witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
             legacyInviteMigration: .none, accountAttention: .none)

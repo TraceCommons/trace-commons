@@ -56,7 +56,7 @@ struct AccountSection: View {
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.statusRead != .answered {
-                    SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
+                    SettingsReadNotice(model.statusRead, retry: { model.refreshStatus() })
                 } else if !model.status.loggedIn {
                     Text(SettingsLegacyWords.queuedNothingSent)
                         .glassType(GlassTokens.TypeScale.caption)

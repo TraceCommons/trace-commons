@@ -713,3 +713,15 @@ status write cannot override a durable revocation tombstone in this reader.
 File-only mode does not supply database account admission or session-wide
 withdrawal. Provenance is surfaced as a label in both modes and activates no
 scoring, credit or export policy.
+
+## Automatic signed witness endpoint routing
+
+Clients with signed-endpoint support retain a stable enrollment identity and
+can automatically use new domains authorized by the commons signing key.
+Each destination has its own measurement/signing-address pairs, verified in a
+fresh nonce-bound quote before raw transmission. Manual identity edits still
+invalidate grants; signed runtime routing does not change scopes or uses.
+See [publishing endpoint configuration](witness-configuration.md) for the
+initial client release, operator host restrictions, validity windows,
+pre-send fallback and rollback rules. Older clients continue using their
+configured URL and the V1 accepted-measurements list.
