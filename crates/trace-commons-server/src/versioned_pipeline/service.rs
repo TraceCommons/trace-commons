@@ -5431,7 +5431,20 @@ impl PipelineService {
             &[principal_ref.to_string()],
         )
         .await?;
-        let settlement_key = crate::db::settlement_group_key(principal_ref, &principal_to_account);
+        // An org tenant settles to its holder account (enterprise spec 6.1),
+        // through the same resolver the settlement route uses. An org tenant
+        // that cannot say where its credit goes is an error, never a
+        // per-seat line.
+        let org_target =
+            crate::org::org_settlement_target_for(self.backend.as_ref(), tenant_id).await?;
+        if let crate::org::OrgSettlementTarget::Blocked(label) = org_target {
+            anyhow::bail!("pipeline credit settlement refused: {label}");
+        }
+        let settlement_key = crate::org::tenant_settlement_group_key(
+            principal_ref,
+            &principal_to_account,
+            &org_target,
+        );
         let hold = match crate::db::settlement_key_account_id(&settlement_key) {
             Some(account_id) => match crate::db::Database::resolve_payout_near_account_id(
                 self.backend.as_ref(),

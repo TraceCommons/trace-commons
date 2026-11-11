@@ -2547,3 +2547,21 @@ mod integration_tests {
         assert!(!shared.store.dir().join("managed-profiles").exists());
     }
 }
+
+/// Spawn a process whose name and argv carry `name` and that stays alive
+/// until it is killed: a `/bin/sh` script in `dir` that blocks reading a
+/// piped stdin. A symlink to `/bin/sleep` cannot stand in, because a
+/// multicall coreutils (uutils, the default since Ubuntu 25.10) dispatches
+/// on argv[0] and exits at once for an unknown name. The `read` is a shell
+/// builtin, so killing the child leaves nothing behind.
+#[cfg(all(test, unix))]
+pub(crate) fn spawn_named_idle_process(dir: &std::path::Path, name: &str) -> std::process::Child {
+    use std::os::unix::fs::PermissionsExt as _;
+    let executable = dir.join(name);
+    std::fs::write(&executable, "#!/bin/sh\nread _ignored\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::process::Command::new(&executable)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}

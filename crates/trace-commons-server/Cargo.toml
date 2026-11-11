@@ -295,6 +295,10 @@ path = "tests/model_training_consent_pg.rs"
 [[test]]
 name = "terms_acceptance_pg"
 path = "tests/terms_acceptance_pg.rs"
+# PostgreSQL suite: its own process, like every other `_pg` file.
+[[test]]
+name = "org_pg"
+path = "tests/org_pg.rs"
 [[test]]
 name = "onboarding_retention_pg"
 path = "tests/onboarding_retention_pg.rs"

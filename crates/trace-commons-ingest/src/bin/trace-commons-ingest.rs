@@ -35,6 +35,8 @@ mod inference_connection_routes;
 mod legacy_invite_link_routes;
 #[path = "trace_commons_ingest_internal/model_training_consent.rs"]
 mod model_training_consent;
+#[path = "trace_commons_ingest_internal/org.rs"]
+mod org_routes;
 #[path = "trace_commons_ingest_internal/payout_link.rs"]
 mod payout_link_routes;
 #[path = "trace_commons_ingest_internal/payout_rails.rs"]
@@ -153,7 +155,7 @@ use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     ACCOUNT_SETTLEMENT_KEY_PREFIX, CreditSettlementAdvisoryLock, Database, PayoutHoldReason,
-    PayoutResolution, TraceCorpusRlsDiagnostics, settlement_group_key,
+    PayoutResolution, TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
@@ -184,6 +186,7 @@ use trace_commons_server::near_credit::{
     NearCreditReceipt, NearCreditReceiptCall, trace_credit_settlement_attestation_hash,
     trace_credit_settlement_issuer_signature_hash,
 };
+use trace_commons_server::org::{OrgSettlementTarget, tenant_settlement_group_key};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
     KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper, WrappedDek,
@@ -8796,6 +8799,10 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             4096,
         )
         .merge(legacy_invite_link_routes::routes())
+        // The org console (`/v1/org/*`) and the seat's own policy read
+        // (enterprise spec 8): an account session whose org seat is an admin,
+        // resolved per request.
+        .merge(org_routes::routes())
         .merge(inference_connection_routes::routes())
         // Payout recipient links (payout spec section 5): start, confirm and
         // status on the signed-in account session (owner, 2026-10-23).
@@ -16369,6 +16376,10 @@ async fn submit_trace_handler_authenticated(
         HourlyCeilingCharge::Upload,
     )
     .await?;
+    // An org tenant's re-checks (enterprise spec 5.3) and its admission arm:
+    // refused here, before admission reserves anything, when the org, its
+    // policy or the uploading seat no longer allows the upload.
+    org_routes::check_submission(state.as_ref(), &authenticated_tenant, &envelope).await?;
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
@@ -19836,9 +19847,23 @@ async fn account_auth_middleware(
     // already-authenticated caller — and return early so no `Set-Cookie` is
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    // An org seat that may no longer make this request (a removed member
+    // outside its withdraw-only routes) is refused here. The refusal still
+    // carries a rotated credential below, so a refused request never costs
+    // the session its next token.
+    let org_gate = org_routes::gate_account_request(
+        state.as_ref(),
+        &ctx,
+        request.method(),
+        request.uri().path(),
+    )
+    .await;
     if native_rotation {
         request.extensions_mut().insert(ctx);
-        let mut response = next.run(request).await;
+        let mut response = match org_gate {
+            Ok(()) => next.run(request).await,
+            Err(refusal) => refusal.into_response(),
+        };
         if let Some((token, expires_at)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
@@ -19867,7 +19892,10 @@ async fn account_auth_middleware(
     }
 
     request.extensions_mut().insert(ctx);
-    let mut response = next.run(request).await;
+    let mut response = match org_gate {
+        Ok(()) => next.run(request).await,
+        Err(refusal) => refusal.into_response(),
+    };
 
     if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -30552,14 +30580,27 @@ async fn run_credit_settlement_unlocked(
         HashMap::new()
     };
 
+    // An org tenant settles every principal's credit to the org's holder
+    // account, under the org's own cap (enterprise spec 6.1, 4.5). An org
+    // tenant that cannot say where its credit goes stops here with a named
+    // blocker; it never settles to the seats instead.
+    let org_target = credit_settlement_org_target(state, &tenant.tenant_id).await?;
+    let settlement_cap_micros = match &org_target {
+        OrgSettlementTarget::Holder { cap_micros, .. } => Some(*cap_micros),
+        OrgSettlementTarget::NotOrg | OrgSettlementTarget::Blocked(_) => {
+            state.credit_settlement_max_micros_per_account
+        }
+    };
+
     let (
         mut selected_events,
         settlement_policy_excluded_source_event_count,
         settlement_policy_excluded_reason_counts,
     ) = apply_credit_settlement_account_cap(
         selected_events,
-        state.credit_settlement_max_micros_per_account,
+        settlement_cap_micros,
         &principal_to_account,
+        &org_target,
     );
     selected_events.sort_by_key(|event| event.event_id);
     if let Some(limit) = limit {
@@ -30606,7 +30647,11 @@ async fn run_credit_settlement_unlocked(
 
     let mut grouped = BTreeMap::<String, Vec<TraceCommonsCreditLedgerRecord>>::new();
     for event in selected_events {
-        let resolved_key = settlement_group_key(&event.auth_principal_ref, &principal_to_account);
+        let resolved_key = tenant_settlement_group_key(
+            &event.auth_principal_ref,
+            &principal_to_account,
+            &org_target,
+        );
         grouped.entry(resolved_key).or_default().push(event);
     }
 
@@ -30842,8 +30887,36 @@ fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult
     Ok(limit)
 }
 
+/// Where `tenant_id`'s credit settles. Not an org tenant: as before, with no
+/// database read. An org tenant reads its org record; with no database, no
+/// record, or a record that names no usable holder or cap, settlement for
+/// the tenant is refused with the blocker's label.
+async fn credit_settlement_org_target(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<OrgSettlementTarget> {
+    if !trace_commons_protocol::org_policy::uses_org_namespace(tenant_id) {
+        return Ok(OrgSettlementTarget::NotOrg);
+    }
+    let org = match state.db_mirror.as_ref() {
+        Some(db) => db.get_org(tenant_id).await.map_err(internal_error)?,
+        None => None,
+    };
+    match trace_commons_server::org::org_settlement_target(tenant_id, org.as_ref()) {
+        OrgSettlementTarget::Blocked(label) => {
+            tracing::warn!(
+                blocker = label,
+                "credit settlement refused for an org tenant"
+            );
+            Err(api_error(StatusCode::CONFLICT, label))
+        }
+        target => Ok(target),
+    }
+}
+
 /// The key a credit event settles under: its contributor account when the
-/// principal resolves to one, else the raw principal.
+/// principal resolves to one, else the raw principal. In an org tenant, the
+/// org's holder account ([`tenant_settlement_group_key`]).
 ///
 /// Single definition on purpose. The settlement cap and the line-item
 /// grouping must agree on this key exactly -- if the cap groups by principal
@@ -30854,6 +30927,7 @@ fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,
     principal_to_account: &HashMap<String, Uuid>,
+    org_target: &OrgSettlementTarget,
 ) -> (
     Vec<TraceCommonsCreditLedgerRecord>,
     usize,
@@ -30865,9 +30939,10 @@ fn apply_credit_settlement_account_cap(
     let mut account_totals = BTreeMap::<String, i64>::new();
     for event in &events {
         *account_totals
-            .entry(settlement_group_key(
+            .entry(tenant_settlement_group_key(
                 &event.auth_principal_ref,
                 principal_to_account,
+                org_target,
             ))
             .or_insert(0) += credit_delta_micros(event.credit_points_delta);
     }
@@ -30882,9 +30957,10 @@ fn apply_credit_settlement_account_cap(
     let selected = events
         .into_iter()
         .filter(|event| {
-            let excluded = blocked_accounts.contains(&settlement_group_key(
+            let excluded = blocked_accounts.contains(&tenant_settlement_group_key(
                 &event.auth_principal_ref,
                 principal_to_account,
+                org_target,
             ));
             if excluded {
                 excluded_count += 1;

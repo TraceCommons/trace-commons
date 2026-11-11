@@ -47,6 +47,7 @@ pub mod near_ai_transfer;
 pub mod near_attestation;
 pub mod near_credit;
 pub mod near_legion_claim;
+pub mod org;
 pub mod payout_accrual;
 pub mod payout_pass;
 pub mod payout_rate;

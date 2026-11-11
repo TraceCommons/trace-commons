@@ -582,6 +582,9 @@ async fn issues_claim_with_public_attribution_scope() {
         allowed_uses: Vec::new(),
         subject: None,
         requested_at: Utc::now(),
+        consent_basis: None,
+        policy_digest: None,
+        send_mode: None,
     };
     let response = state
         .issue_claim(&workload, request)
@@ -632,6 +635,9 @@ async fn workload_path_refuses_a_device_shaped_actor() {
             allowed_uses: vec![TraceAllowedUse::Debugging],
             subject: None,
             requested_at: Utc::now(),
+            consent_basis: None,
+            policy_digest: None,
+            send_mode: None,
         };
         let error = state
             .issue_claim(&workload, request)
@@ -671,6 +677,9 @@ async fn rejects_public_attribution_request_when_workload_lacks_it() {
         allowed_uses: Vec::new(),
         subject: None,
         requested_at: Utc::now(),
+        consent_basis: None,
+        policy_digest: None,
+        send_mode: None,
     };
     assert!(
         state.issue_claim(&workload, request).await.is_err(),
@@ -715,6 +724,9 @@ async fn issues_claim_with_mixed_public_attribution_and_trace_scopes() {
         allowed_uses: vec![TraceAllowedUse::Debugging],
         subject: None,
         requested_at: Utc::now(),
+        consent_basis: None,
+        policy_digest: None,
+        send_mode: None,
     };
     let response = state
         .issue_claim(&workload, request)
@@ -759,6 +771,9 @@ async fn rejects_requests_exceeding_workload_allowances() {
         allowed_uses: vec![TraceAllowedUse::ModelTraining],
         subject: None,
         requested_at: Utc::now(),
+        consent_basis: None,
+        policy_digest: None,
+        send_mode: None,
     };
     assert!(state.issue_claim(&workload, request).await.is_err());
 }
@@ -792,6 +807,9 @@ fn upload_claim_request(tenant_id: Option<&str>) -> TraceUploadClaimRequest {
         allowed_uses: vec![TraceAllowedUse::Debugging],
         subject: None,
         requested_at: Utc::now(),
+        consent_basis: None,
+        policy_digest: None,
+        send_mode: None,
     }
 }
 
@@ -3167,4 +3185,370 @@ pub(crate) mod invite_lookup {
             );
         }
     }
+}
+
+// ---- Org tenants (enterprise spec 5.3, 11) ----
+
+/// A device-key registry and grant store holding one org, one seat for the
+/// device, and the device's grants.
+struct StubOrgDb {
+    device_keys: std::collections::HashMap<(String, String), crate::db::DeviceKeyRecord>,
+    org: Option<crate::org::OrgRecord>,
+    seat: Option<crate::org::OrgSeatRecord>,
+    grants: Vec<TraceTenantAccessGrantRecord>,
+}
+
+#[async_trait::async_trait]
+impl crate::trace_corpus_storage::TraceCorpusStore for StubOrgDb {
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _tenant_id: &str,
+        principal_ref: &str,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        Ok(self
+            .grants
+            .iter()
+            .filter(|grant| grant.principal_ref == principal_ref)
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::db::Database for StubOrgDb {
+    async fn bind_device_upload_principal(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(&self, _p: InstanceUserProvision) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn get_device_key(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+    ) -> Result<Option<DeviceKeyRecord>, DatabaseError> {
+        Ok(self
+            .device_keys
+            .get(&(tenant_id.to_string(), device_key_id.to_string()))
+            .cloned())
+    }
+
+    async fn get_org(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<crate::org::OrgRecord>, DatabaseError> {
+        Ok(self.org.clone())
+    }
+
+    async fn get_org_seat_for_device(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        Ok(self.seat.clone())
+    }
+}
+
+const ORG_TEST_TENANT: &str =
+    "org-abababababababababababababababababababababababababababababababab";
+
+fn org_test_record() -> crate::org::OrgRecord {
+    let policy = trace_commons_protocol::org_policy::OrgPolicy::conservative_default();
+    crate::org::OrgRecord {
+        tenant_id: ORG_TEST_TENANT.to_string(),
+        status: trace_commons_protocol::org_policy::OrgStatus::Active,
+        holder_account_id: Some(Uuid::new_v4()),
+        holder_account_open: true,
+        near_ai_org_bound: true,
+        policy_digest: policy.digest(),
+        policy,
+        policy_version: 1,
+        seat_limit: 10,
+        server_limit: 2,
+        settlement_cap_micros: Some(1_000_000),
+    }
+}
+
+fn org_test_member_seat() -> crate::org::OrgSeatRecord {
+    crate::org::OrgSeatRecord {
+        account_id: Uuid::new_v4(),
+        kind: trace_commons_protocol::org_policy::OrgSeatKind::Member,
+        org_role: Some(trace_commons_protocol::org_policy::OrgRole::Member),
+        membership_proved_at: Some(Utc::now()),
+        requires_membership_proof: true,
+        joined_at: Utc::now(),
+        removed_at: None,
+    }
+}
+
+fn org_claim_body(digest: Option<&str>, send_mode: &str, basis: &str) -> serde_json::Value {
+    let mut body = device_claim_request_body(ORG_TEST_TENANT, None);
+    body["consent_scopes"] = json!(["debugging_evaluation", "model_training"]);
+    body["allowed_uses"] = json!([]);
+    body["consent_basis"] = json!(basis);
+    body["send_mode"] = json!(send_mode);
+    if let Some(digest) = digest {
+        body["policy_digest"] = json!(digest);
+    }
+    body
+}
+
+/// Post a signed device claim into the org test tenant. `grant` gives the
+/// device a contributor grant for every scope and use when true.
+async fn post_org_device_claim(
+    org: Option<crate::org::OrgRecord>,
+    seat: Option<crate::org::OrgSeatRecord>,
+    grant: bool,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    use ring::signature::KeyPair;
+    use std::sync::Arc;
+    use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
+
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keypair generates");
+    let kp = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair parses");
+    let pk = kp.public_key().as_ref();
+    let device_key_id = device_key_id_from_public_key_bytes(pk);
+    let mut device_keys = std::collections::HashMap::new();
+    device_keys.insert(
+        (ORG_TEST_TENANT.to_string(), device_key_id.clone()),
+        DeviceKeyRecord {
+            device_key_id: device_key_id.clone(),
+            tenant_id: ORG_TEST_TENANT.to_string(),
+            public_key: base64::engine::general_purpose::STANDARD.encode(pk),
+            invite_subject_hash: Some("sha256:stub".to_string()),
+            client_info: json!({}),
+            created_at: Utc::now(),
+            revoked_at: None,
+        },
+    );
+    let mut grants = Vec::new();
+    if grant {
+        let mut record = test_tenant_access_grant(
+            Utc::now(),
+            TraceTenantAccessGrantRole::Contributor,
+            vec![
+                "debugging_evaluation",
+                "model_training",
+                "public_attribution",
+            ],
+            vec!["debugging", "evaluation", "model_training"],
+            None,
+            None,
+            None,
+        );
+        record.tenant_id = ORG_TEST_TENANT.to_string();
+        record.principal_ref =
+            crate::account_trust::device_principal_ref(ORG_TEST_TENANT, &device_key_id);
+        grants.push(record);
+    }
+    let db = Arc::new(StubOrgDb {
+        device_keys,
+        org,
+        seat,
+        grants,
+    });
+    let config = TraceUploadClaimIssuerConfig {
+        onboarding_device_key_db: Some(db.clone() as Arc<dyn crate::db::Database>),
+        tenant_access_grant_db: Some(db as Arc<dyn crate::db::Database>),
+        ..test_config()
+    };
+    let signature = kp.sign(body.to_string().as_bytes());
+    let signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+    post_device_claim(config, &device_key_id, &signature, body).await
+}
+
+#[tokio::test]
+async fn org_member_claim_is_narrowed_by_policy_and_records_consent_basis() {
+    let org = org_test_record();
+    let digest = org.policy_digest.clone();
+    let (status, body) = post_org_device_claim(
+        Some(org),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(Some(&digest), "submit", "member_grant"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let claims = decode_issued_claims(&body);
+    assert_eq!(claims["consent_basis"], "member_grant");
+    // The grant allows model training; the org policy does not, so the claim
+    // carries only what both allow.
+    assert_eq!(
+        claims["allowed_consent_scopes"],
+        json!(["debugging_evaluation"])
+    );
+    assert_eq!(claims["allowed_uses"], json!(["debugging", "evaluation"]));
+}
+
+#[tokio::test]
+async fn org_claim_refusals_fail_closed() {
+    let org = org_test_record();
+    let digest = org.policy_digest.clone();
+    let ok_body = || org_claim_body(Some(&digest), "submit", "member_grant");
+
+    // No org record for an org-namespace tenant.
+    let (status, body) =
+        post_org_device_claim(None, Some(org_test_member_seat()), true, ok_body()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "org_record_missing");
+
+    // A device with no seat.
+    let (status, body) = post_org_device_claim(Some(org.clone()), None, true, ok_body()).await;
+    assert_eq!(body["error"], "org_seat_missing", "{status}");
+
+    // No grant: no floor in an org tenant.
+    let (status, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        false,
+        ok_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "org_seat_grant_missing");
+
+    // Automatic while the org forbids it.
+    let (_, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(Some(&digest), "automatic", "member_grant"),
+    )
+    .await;
+    assert_eq!(body["error"], "org_automatic_forbidden");
+
+    // A stale digest, and none at all.
+    let (_, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(
+            Some(&format!("sha256:{}", "00".repeat(32))),
+            "submit",
+            "member_grant",
+        ),
+    )
+    .await;
+    assert_eq!(body["error"], "org_policy_digest_stale");
+    let (_, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(None, "submit", "member_grant"),
+    )
+    .await;
+    assert_eq!(body["error"], "org_policy_digest_missing");
+
+    // A member claiming the org's consent.
+    let (_, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(Some(&digest), "submit", "org_policy"),
+    )
+    .await;
+    assert_eq!(body["error"], "org_consent_basis_mismatch");
+
+    // A removed seat, and a stale membership.
+    let mut removed = org_test_member_seat();
+    removed.removed_at = Some(Utc::now());
+    let (_, body) = post_org_device_claim(Some(org.clone()), Some(removed), true, ok_body()).await;
+    assert_eq!(body["error"], "org_seat_removed");
+    let mut stale = org_test_member_seat();
+    stale.membership_proved_at = Some(Utc::now() - Duration::days(2));
+    let (_, body) = post_org_device_claim(Some(org.clone()), Some(stale), true, ok_body()).await;
+    assert_eq!(body["error"], "org_membership_stale");
+
+    // A per-user subject has no meaning for an org seat.
+    let mut with_subject = ok_body();
+    with_subject["subject"] = json!("user-1");
+    let (_, body) = post_org_device_claim(
+        Some(org.clone()),
+        Some(org_test_member_seat()),
+        true,
+        with_subject,
+    )
+    .await;
+    assert_eq!(body["error"], "org_subject_unsupported");
+
+    // Sharing off.
+    let mut off = org.clone();
+    off.policy.sharing = trace_commons_protocol::org_policy::OrgSharing::Off;
+    off.policy_digest = off.policy.digest();
+    let off_digest = off.policy_digest.clone();
+    let (_, body) = post_org_device_claim(
+        Some(off),
+        Some(org_test_member_seat()),
+        true,
+        org_claim_body(Some(&off_digest), "submit", "member_grant"),
+    )
+    .await;
+    assert_eq!(body["error"], "org_sharing_off");
+}
+
+#[tokio::test]
+async fn ordinary_tenant_claims_carry_no_consent_basis() {
+    let tenant_id = "test-device-tenant";
+    let mut body = device_claim_request_body(tenant_id, None);
+    // A consent basis sent to an ordinary tenant is ignored, not recorded.
+    body["consent_basis"] = json!("org_policy");
+    let (status, response, _) = post_signed_device_claim_for_tenant(tenant_id, body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(
+        decode_issued_claims(&response)
+            .get("consent_basis")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn workload_tokens_cannot_mint_into_an_org_tenant() {
+    let state = test_config().build_state().expect("state builds");
+    let workload = WorkloadClaims {
+        sub: Some("workload-1".to_string()),
+        principal_ref: None,
+        tenant_id: Some(ORG_TEST_TENANT.to_string()),
+        iss: None,
+        aud: None,
+        exp: (Utc::now() + Duration::minutes(5)).timestamp(),
+        iat: None,
+        allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+        allowed_uses: vec![TraceAllowedUse::Debugging],
+        invite_code: None,
+    };
+    let request: TraceUploadClaimRequest =
+        serde_json::from_value(device_claim_request_body(ORG_TEST_TENANT, None)).unwrap();
+    let error = state
+        .issue_claim(&workload, request)
+        .await
+        .expect_err("org tenant refused on the workload path");
+    assert_eq!(error.message, "org_workload_unsupported");
 }

@@ -881,14 +881,10 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("codex");
-        std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
-        let mut child = OwnedChild(
-            std::process::Command::new(&executable)
-                .arg("30")
-                .spawn()
-                .unwrap(),
-        );
+        let mut child = OwnedChild(crate::daemon::subscription_usage::spawn_named_idle_process(
+            dir.path(),
+            "codex",
+        ));
         // No saved renewal time: the token needs renewal, so only the native
         // client may handle it.
         std::fs::write(

@@ -135,7 +135,7 @@ fn login(root: &std::path::Path) -> LoginSpec {
 }
 
 /// A process the Codex process guard recognizes, alive for the test's duration.
-/// Unix only, like every test that needs one (it symlinks `/bin/sleep`).
+/// Unix only, like every test that needs one (it runs a `/bin/sh` script).
 #[cfg(unix)]
 struct RunningCodex(std::process::Child);
 #[cfg(unix)]
@@ -147,14 +147,9 @@ impl Drop for RunningCodex {
 }
 #[cfg(unix)]
 fn running_codex(dir: &std::path::Path) -> RunningCodex {
-    let executable = dir.join("codex");
-    std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
-    RunningCodex(
-        std::process::Command::new(&executable)
-            .arg("30")
-            .spawn()
-            .unwrap(),
-    )
+    RunningCodex(crate::daemon::subscription_usage::spawn_named_idle_process(
+        dir, "codex",
+    ))
 }
 
 const USAGE: &str = r#"{

@@ -51,6 +51,7 @@ use trace_commons_protocol::onboarding::{
     derive_user_tenant_id, device_key_id_from_public_key_bytes,
     instance_enroll_attestation_signing_bytes, user_subject_hash,
 };
+use trace_commons_protocol::org_policy::{ConsentBasis, OrgSendMode, uses_org_namespace};
 use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 
 pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
@@ -878,6 +879,20 @@ struct TraceUploadClaimRequest {
     #[serde(default)]
     subject: Option<String>,
     requested_at: DateTime<Utc>,
+    /// Org tenants only (enterprise spec 5.3): on whose authority the trace
+    /// is sent. Required from every org seat; the issuer refuses one that is
+    /// not the seat kind's. Ignored, and never written to a claim, outside an
+    /// org tenant.
+    #[serde(default)]
+    consent_basis: Option<ConsentBasis>,
+    /// Org member seats: the org policy digest the device acted on. Refused
+    /// unless it is the org's current digest.
+    #[serde(default)]
+    policy_digest: Option<String>,
+    /// Org member seats: whether the member submitted the trace or a folder
+    /// armed for Automatic sent it.
+    #[serde(default)]
+    send_mode: Option<OrgSendMode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -942,6 +957,8 @@ struct AuthorizedUploadClaimActor {
     allowed_consent_scopes: Vec<ConsentScope>,
     allowed_uses: Vec<TraceAllowedUse>,
     policy_label: Option<String>,
+    /// Set only for an org seat, after [`crate::org::check_org_claim`].
+    consent_basis: Option<ConsentBasis>,
 }
 
 #[derive(Debug, Serialize)]
@@ -967,6 +984,11 @@ struct UploadClaimClaims {
     /// no schema change.
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_label: Option<String>,
+    /// Org tenants only: the consent basis the issuer checked against the
+    /// seat (enterprise spec 5.3). Omitted for every other tenant, so their
+    /// claims are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consent_basis: Option<ConsentBasis>,
 }
 
 #[derive(Debug)]
@@ -994,6 +1016,18 @@ impl IssuerError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "failed to issue upload claim",
+        }
+    }
+
+    /// An org tenant's refusal, by its label.
+    fn org_refusal(refusal: crate::org::OrgRefusal) -> Self {
+        Self::forbidden(refusal.label())
+    }
+
+    fn org_unavailable(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
         }
     }
 
@@ -1524,6 +1558,7 @@ pub fn mint_test_upload_claim() -> anyhow::Result<String> {
         allowed_consent_scopes,
         allowed_uses,
         policy_label: None,
+        consent_basis: None,
     };
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(state.signing_kid.clone());
@@ -1975,6 +2010,13 @@ impl TraceUploadClaimIssuerState {
             );
             return Err(IssuerError::workload_tenant_missing());
         };
+        // An org tenant admits devices of its seats only. Workload identity
+        // for org servers is a separate verifier (enterprise spec 7.1) and is
+        // not this path: an operator workload token must not mint a claim
+        // into an org.
+        if uses_org_namespace(&tenant_id) {
+            return Err(IssuerError::forbidden("org_workload_unsupported"));
+        }
         // Attribution only: when the request names a tenant it must agree
         // exactly with the token's. A blank-but-present value stays a
         // bad-request, as before.
@@ -2021,11 +2063,119 @@ impl TraceUploadClaimIssuerState {
                 allowed_consent_scopes: workload.allowed_consent_scopes.clone(),
                 allowed_uses: workload.allowed_uses.clone(),
                 policy_label,
+                consent_basis: None,
             },
             request,
             now,
         )
         .await
+    }
+
+    /// The ceiling for a device's claim, and the consent basis it records.
+    ///
+    /// Outside the org namespace this is [`Self::resolve_device_scope_ceiling`]
+    /// and no consent basis. In an org tenant (enterprise spec 5.3, 11) every
+    /// rule fails closed:
+    ///
+    /// - the org record, the device's seat and the grant registry must all be
+    ///   readable, or the claim is refused;
+    /// - [`crate::org::check_org_claim`] decides the org, the seat, the
+    ///   consent basis, the policy digest, the send mode and membership
+    ///   freshness;
+    /// - there is **no scope floor and no sign-up backfill**: a seat with no
+    ///   active contributor grant gets no claim, so revoking its grant or
+    ///   removing the seat stops it;
+    /// - the ceiling is the grants' union narrowed by the org's policy;
+    /// - a per-user `subject` is refused, because an org seat's attribution
+    ///   is its own account.
+    async fn resolve_device_claim_ceiling(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        grant_principal_ref: &str,
+        request: &TraceUploadClaimRequest,
+        now: DateTime<Utc>,
+    ) -> Result<
+        (
+            Vec<ConsentScope>,
+            Vec<TraceAllowedUse>,
+            Option<ConsentBasis>,
+        ),
+        IssuerError,
+    > {
+        if !uses_org_namespace(tenant_id) {
+            let (scopes, uses) = self
+                .resolve_device_scope_ceiling(tenant_id, device_key_id, grant_principal_ref, now)
+                .await?;
+            return Ok((scopes, uses, None));
+        }
+        if request.subject.is_some() {
+            return Err(IssuerError::forbidden("org_subject_unsupported"));
+        }
+        let org_db = self
+            .onboarding_device_key_db
+            .as_ref()
+            .ok_or_else(|| IssuerError::org_unavailable("org_registry_unconfigured"))?;
+        let org = org_db.get_org(tenant_id).await.map_err(|_| {
+            tracing::warn!(
+                error_class = "OrgRecordUnreadable",
+                "upload-claim refused: org record unreadable"
+            );
+            IssuerError::internal()
+        })?;
+        let seat = match org.as_ref() {
+            Some(_) => org_db
+                .get_org_seat_for_device(tenant_id, device_key_id)
+                .await
+                .map_err(|_| IssuerError::internal())?,
+            None => None,
+        };
+        let assertion = crate::org::OrgClaimAssertion {
+            consent_basis: request.consent_basis,
+            policy_digest: request.policy_digest.clone(),
+            send_mode: request.send_mode,
+        };
+        let consent_basis =
+            crate::org::check_org_claim(org.as_ref(), seat.as_ref(), &assertion, now).map_err(
+                |refusal| {
+                    tracing::info!(
+                        refusal = refusal.label(),
+                        "upload-claim refused for an org seat"
+                    );
+                    IssuerError::org_refusal(refusal)
+                },
+            )?;
+        let org = org.ok_or_else(IssuerError::internal)?;
+        let grant_db = self
+            .tenant_access_grant_db
+            .as_ref()
+            .ok_or_else(|| IssuerError::org_unavailable("org_grant_registry_unconfigured"))?;
+        let grants =
+            active_contributor_grants(grant_db.as_ref(), tenant_id, grant_principal_ref, now)
+                .await?;
+        if grants.is_empty() {
+            return Err(IssuerError::org_refusal(
+                crate::org::OrgRefusal::GrantMissing,
+            ));
+        }
+        let mut scope_union: BTreeSet<ConsentScope> = BTreeSet::new();
+        let mut use_union: BTreeSet<TraceAllowedUse> = BTreeSet::new();
+        for grant in &grants {
+            scope_union.extend(parse_storage_grant_values::<ConsentScope>(
+                &grant.allowed_consent_scopes,
+                "tenant_access_grant.allowed_consent_scopes",
+            )?);
+            use_union.extend(parse_storage_grant_values::<TraceAllowedUse>(
+                &grant.allowed_uses,
+                "tenant_access_grant.allowed_uses",
+            )?);
+        }
+        let (scopes, uses) = crate::org::org_policy_ceiling(
+            &org.policy,
+            scope_union.into_iter().collect(),
+            use_union.into_iter().collect(),
+        );
+        Ok((scopes, uses, Some(consent_basis)))
     }
 
     /// Ceiling for a device principal: parsed scopes from active contributor
@@ -2147,8 +2297,14 @@ impl TraceUploadClaimIssuerState {
             &device_key_id,
             subject.as_deref(),
         );
-        let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(&tenant_id, &device_key_id, &grant_principal_ref, now)
+        let (ceiling_scopes, ceiling_uses, consent_basis) = self
+            .resolve_device_claim_ceiling(
+                &tenant_id,
+                &device_key_id,
+                &grant_principal_ref,
+                &request,
+                now,
+            )
             .await?;
         let granted_scopes = intersect_requested_with_ceiling(
             &request.consent_scopes,
@@ -2169,6 +2325,7 @@ impl TraceUploadClaimIssuerState {
                     allowed_consent_scopes: granted_scopes,
                     allowed_uses: granted_uses,
                     policy_label: None,
+                    consent_basis,
                 },
                 request,
                 now,
@@ -2212,11 +2369,12 @@ impl TraceUploadClaimIssuerState {
         let actor = crate::account_trust::device_claim_actor(&tenant_id, &auth.device_key_id, None);
         let grant_principal_ref =
             crate::account_trust::device_principal_ref(&tenant_id, &auth.device_key_id);
-        let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(
+        let (ceiling_scopes, ceiling_uses, consent_basis) = self
+            .resolve_device_claim_ceiling(
                 &tenant_id,
                 &auth.device_key_id,
                 &grant_principal_ref,
+                &request,
                 now,
             )
             .await?;
@@ -2239,6 +2397,7 @@ impl TraceUploadClaimIssuerState {
                     allowed_consent_scopes: granted_scopes,
                     allowed_uses: granted_uses,
                     policy_label: None,
+                    consent_basis,
                 },
                 request,
                 now,
@@ -2325,6 +2484,7 @@ impl TraceUploadClaimIssuerState {
             allowed_consent_scopes: consent_scopes,
             allowed_uses,
             policy_label: actor.policy_label,
+            consent_basis: actor.consent_basis,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
