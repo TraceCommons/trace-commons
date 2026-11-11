@@ -40,6 +40,7 @@ on:
       - "crates/trace-commons-contributor-ffi/**"
       - "crates/trace-commons-contributor-gtk/**"
       - "crates/trace-commons-protocol/**"
+      - "crates/ironwire_*/**"
       - ".github/workflows/clients.yml"
       - ".github/actions/**"
 
