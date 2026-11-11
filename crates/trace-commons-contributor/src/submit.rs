@@ -655,7 +655,9 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 
 /// Whether a witness failure label says its evidence could not be fetched,
 /// so nothing was judged: the witness ran past its deadline
-/// (`witness_timeout`), could not be reached (`witness_unreachable`), or did
+/// (`witness_timeout`), could not be reached or answered that it cannot
+/// serve right now (`witness_unreachable`: a `5xx` such as `503
+/// witness_signing_unavailable`, or a gateway with nothing behind it), or did
 /// not hand over its attestation (`witness_attestation_unavailable`: a
 /// non-success answer, a body with no quote, a broken connection) or Intel's
 /// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
@@ -664,7 +666,7 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 /// spent. A busy witness (`witness_saturated`) is not covered: it names its
 /// own retry delay and has its own path.
 ///
-/// Fetching is the only thing these labels say failed. Evidence that was
+/// Fetching or serving is the only thing these labels say failed. Evidence that was
 /// fetched and did not verify has labels of its own
 /// ([`witness_trust_hold`]), and every other witness label is a
 /// judgement or a local refusal that stays one. Nothing is uploaded without a
