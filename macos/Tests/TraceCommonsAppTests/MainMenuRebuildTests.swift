@@ -1,4 +1,6 @@
 import Combine
+import TCBridge
+import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
@@ -38,4 +40,50 @@ final class MainMenuRebuildTests: XCTestCase {
         XCTAssertEqual(published, 0)
         XCTAssertEqual(item.state, PrivateInferenceMenuItem.state(of: model))
     }
+
+    /// Turning Private AI on or off does reach the menu: the item
+    /// republishes, and its label is the switch's own for the new state.
+    /// Without this, an item that never refreshed would pass the test above.
+    func testTurningPrivateAIOnOrOffRepublishesTheItem() async throws {
+        let model = AppModel()
+        guard let copy = model.privateInferenceCopy else {
+            return XCTFail("the core's Private AI words did not load")
+        }
+        let item = PrivateInferenceMenuItem(model: model)
+        var published = 0
+        let watch = item.objectWillChange.sink { published += 1 }
+        defer { watch.cancel() }
+
+        for on in [true, false] {
+            let before = published
+            model.setDaemonSettingsForTesting(try Self.settings(privateInference: on))
+            // The item reads the model on the next turn of the run loop.
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertGreaterThan(published, before, "the menu was not told Private AI turned \(on ? "on" : "off")")
+            XCTAssertEqual(item.state?.on, on)
+            XCTAssertEqual(item.state?.label, PrivateInferenceTray.label(on: on, copy: copy))
+        }
+    }
+
+    /// A settings view with Private AI on or off, decoded the way the
+    /// daemon's answer is.
+    private static func settings(privateInference on: Bool) throws -> DaemonSettingsView {
+        try DaemonClient(daemon: FixedDaemon(response: """
+            {"id":1,"result":{"quiescence_secs":45,"digest_interval_secs":3600,
+            "local_notifications":true,"queue_ttl_days":14,"max_queue_entries":500,
+            "max_uploads_per_day":100,"near_ai_configured":false,
+            "claude_root_configured":true,"codex_root_configured":true,
+            "private_inference":\(on),"private_inference_offer_seen":true,
+            "private_inference_state":{"state":"\(on ? "running" : "off")","port":null}}}
+            """)).settings()
+    }
+}
+
+/// Answers every call with one frame.
+private final class FixedDaemon: DaemonCalling {
+    let response: String
+    init(response: String) { self.response = response }
+    func call(_ method: String, params paramsJSON: String) -> String { response }
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }
