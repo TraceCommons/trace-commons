@@ -183,10 +183,14 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     }
 }
 
-/// Native/export format refusal, shared by all native health surfaces.
-pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode session version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str =
-    "Supported: OpenCode 1.19.0 databases and sessions from 1.18.29 or 1.19.0.";
+/// Refusal for traces saved by an OpenCode version the reader does not
+/// accept, shared by all native health surfaces. The versions match the
+/// readers in `trace-commons-contributor-sources` (`opencode`, `opencode_db`).
+/// Approved by the owner 2026-11-10.
+pub const OPENCODE_VERSION_TITLE: &str =
+    "Some OpenCode traces are from a version Trace Commons can't read yet.";
+pub const OPENCODE_VERSION_DETAIL: &str = "Trace Commons reads traces saved by OpenCode 1.18.29 \
+     and 1.19.0. Traces from other versions are left out.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -393,8 +397,13 @@ mod tests {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("OpenCode 1.18.29 and 1.19.0"));
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
     }
 
     #[test]
@@ -450,8 +459,13 @@ mod tests {
         }
         assert!(source_check_line(SourceTool::OpenCode, "unset").contains("only managed launches"));
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("OpenCode 1.18.29 and 1.19.0"));
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
         assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));
     }
 
