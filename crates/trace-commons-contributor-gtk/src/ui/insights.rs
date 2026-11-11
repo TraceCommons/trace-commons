@@ -28,6 +28,8 @@ use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionI
 mod analytics;
 #[path = "insights_evidence.rs"]
 mod evidence;
+#[path = "insights_live.rs"]
+mod live;
 
 /// A chooser belongs to the selection and view lifetime that opened it.
 #[derive(Clone)]
@@ -197,6 +199,12 @@ fn label(text: &str) -> gtk::Label {
 }
 
 impl InsightsView {
+    /// Connected windows reuse their existing worker; standalone analysis never
+    /// creates a backend merely to show this page.
+    pub(super) fn bind_app(&self, app: &Rc<super::App>) {
+        self.analytics.bind_app(app);
+    }
+
     pub fn new(window: &adw::ApplicationWindow) -> Rc<Self> {
         Self::with_store(window, None)
     }
@@ -711,6 +719,7 @@ impl InsightsView {
             application.connect_shutdown(move |_| {
                 if let Some(view) = weak.upgrade() {
                     view.flight.borrow_mut().closed = true;
+                    view.analytics.suspend();
                 }
             });
         }
@@ -721,6 +730,18 @@ impl InsightsView {
         window.connect_close_request(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.analytics.invalidate();
+                // Other close handlers may keep the window open for confirmation.
+                // Restore a canceled in-flight read only if this view still has a
+                // mapped surface after those handlers; real hide/unmap suspends it.
+                let weak = Rc::downgrade(&view);
+                gtk::glib::idle_add_local_once(move || {
+                    if let Some(view) = weak.upgrade() {
+                        if view.root.is_mapped() && !view.flight.borrow().closed {
+                            view.analytics.resume();
+                        }
+                    }
+                });
                 view.mutation_notice.set_text("");
                 view.episode_success_notice.borrow_mut().take();
                 view.invalidate_choosers();
@@ -733,6 +754,7 @@ impl InsightsView {
         window.connect_hide(move |_| {
             if let Some(view) = weak.upgrade() {
                 view.flight.borrow_mut().cancelled = true;
+                view.analytics.suspend();
                 view.mutation_notice.set_text("");
                 view.episode_success_notice.borrow_mut().take();
                 view.invalidate_choosers();
@@ -760,11 +782,13 @@ impl InsightsView {
                 view.invalidate_episode_draft();
                 view.invalidate_cards();
                 view.flight.borrow_mut().cancelled = true;
+                view.analytics.suspend();
             }
         });
         let weak = Rc::downgrade(&view);
         view.root.connect_map(move |_| {
             if let Some(view) = weak.upgrade() {
+                view.analytics.resume();
                 view.mutation_notice.set_text("");
                 view.episode_success_notice.borrow_mut().take();
                 view.invalidate_episode_draft();
