@@ -3,27 +3,13 @@ use chrono::{Duration, TimeZone};
 pub(super) fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000, 0).unwrap()
 }
-/// A fixed throwaway key for tests only. Never a real manifest key.
-pub(super) fn test_key() -> ring::signature::Ed25519KeyPair {
-    ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap()
-}
 pub(super) fn fixtures() -> (Registry, Profile) {
-    use ring::signature::KeyPair as _;
     let registry=serde_json::from_value(serde_json::json!({"schema_version":1,"registry_version":1,"flags":{"live":{"description":"Test","owner":"tests","class":"product","default":false,"required_capabilities":["v1"],"timing":"live"},"restart":{"description":"Test","owner":"tests","class":"product","default":false,"required_capabilities":[],"timing":"next_start"},"blocked":{"description":"Test","owner":"tests","class":"product","default":false,"required_capabilities":["v2"],"timing":"live"}}})).unwrap();
-    let profile=serde_json::from_value(serde_json::json!({"schema_version":1,"registry_version":1,"environment":"staging","capabilities":["v1"],"remote_enable":["live","restart","blocked"],"signing_keys":[hex::encode(test_key().public_key().as_ref())]})).unwrap();
-    (registry, profile)
+    let profile=serde_json::from_value(serde_json::json!({"schema_version":1,"registry_version":1,"environment":"staging","capabilities":["v1"],"remote_enable":["live","restart","blocked"],"signing_keys":[]})).unwrap();
+    (registry, super::test_signing::pin(profile))
 }
 pub(super) fn sign(payload: &[u8]) -> Vec<u8> {
-    use ring::signature::KeyPair as _;
-    let key = test_key();
-    let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
-    assemble_signed_manifest(
-        String::from_utf8(payload.to_vec()).unwrap(),
-        vec![ManifestSignature {
-            key_id: key_id_for(&public),
-            signature: hex::encode(key.sign(&signing_input(payload)).as_ref()),
-        }],
-    )
+    super::test_signing::sign(payload)
 }
 pub(super) fn doc_until(revision: u64, on: bool, expires_at: DateTime<Utc>) -> Vec<u8> {
     sign(&serde_json::to_vec(&serde_json::json!({"schema_version":1,"environment":"staging","revision":revision,"issued_at":now(),"expires_at":expires_at,"flags":{"live":on,"restart":on,"blocked":on}})).unwrap())

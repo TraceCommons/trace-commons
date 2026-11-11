@@ -299,3 +299,32 @@ fn remaining_deadline(manifest: &Manifest, now: DateTime<Utc>) -> Option<Instant
 }
 #[cfg(test)]
 mod tests;
+/// Signing for tests anywhere in the crate. The key is a fixed throwaway,
+/// never a real manifest key, and is pinned only into test profiles.
+#[cfg(test)]
+pub(crate) mod test_signing {
+    use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+    pub(crate) fn key() -> Ed25519KeyPair {
+        Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("fixed test seed")
+    }
+    /// The profile, also trusting the test key.
+    pub(crate) fn pin(mut profile: Profile) -> Profile {
+        profile
+            .signing_keys
+            .insert(hex::encode(key().public_key().as_ref()));
+        profile
+    }
+    /// The served document for `payload`, signed with the test key.
+    pub(crate) fn sign(payload: &[u8]) -> Vec<u8> {
+        let key = key();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().expect("32 bytes");
+        assemble_signed_manifest(
+            String::from_utf8(payload.to_vec()).expect("UTF-8 manifest"),
+            vec![ManifestSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(&signing_input(payload)).as_ref()),
+            }],
+        )
+    }
+}
