@@ -170,7 +170,7 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             ))
         );
         let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
-        let row = entry_value(&entry, s.admission_evidence());
+        let row = entry_value(&entry, s.eligibility_applies());
         assert_eq!(
             row["attested_inference"],
             serde_json::json!({"state": "uncertified", "reason": "no_attested_call"})

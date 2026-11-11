@@ -32,10 +32,9 @@ pub const WITNESS_CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
 pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
 /// The error label a witness answers with when its own request deadline
-/// ran out (`504`). The server's spelling, in
-/// `trace_commons_server::witness_service::http`; the client cannot depend
-/// on that crate, so it is written here and pinned by a test.
-pub const WITNESS_REQUEST_TIMED_OUT: &str = "witness_request_timed_out";
+/// ran out (`504`). One spelling, shared with the witness through
+/// `trace_commons_protocol::witness_refusal`.
+pub use trace_commons_protocol::witness_refusal::WITNESS_REQUEST_TIMED_OUT;
 
 /// A contributor's attestation nonce: exactly 32 bytes, fresh per
 /// verification.
@@ -835,10 +834,9 @@ pub(crate) async fn fetch_collateral(
 /// The status alone cannot separate "declined your receipt" from
 /// "answered nonsense", and those are opposite instructions to a
 /// contributor. The body is attacker-influenceable, so it selects
-/// nothing: it is matched against the protocol's closed set, must
-/// agree with the status, and anything else -- an unknown label, a
-/// body that is not JSON, no body at all -- keeps the answer this
-/// client gave before.
+/// nothing by itself: it is matched against the protocol's closed set and
+/// must agree with the status (`witness_refusal::classify_witness_refusal`).
+/// Only the status can make an answer retryable.
 ///
 /// Only the head of the body is read. A refusal envelope is a few
 /// dozen bytes, and a witness that answers a refusal with megabytes
@@ -848,8 +846,11 @@ async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
     let retry_after_secs = saturation_retry_after(response.headers());
     let body = match response.bytes().await {
         Ok(body) => body,
-        // A body that never finishes is the witness not answering in time.
-        Err(error) => return send_failure(&error, WitnessTrustError::WitnessResponseMalformed),
+        // A body that never finishes is the witness not answering in time;
+        // one that breaks off otherwise is read by its status alone.
+        Err(error) => {
+            return send_failure(&error, refusal_from_parts(status, retry_after_secs, None));
+        }
     };
     refusal_from_parts(status, retry_after_secs, refusal_label(&body).as_deref())
 }
@@ -871,29 +872,40 @@ fn refusal_from_parts(
     retry_after_secs: u32,
     label: Option<&str>,
 ) -> WitnessTrustError {
-    // Capacity first, and only on the exact pair: a witness that is
-    // busy judged nothing, so this is the one refusal a session is
-    // held through rather than refused on.
-    if label.is_some_and(|label| {
-        trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
-    }) {
-        return WitnessTrustError::WitnessSaturated { retry_after_secs };
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    use trace_commons_protocol::witness_refusal::{WitnessRefusalClass, classify_witness_refusal};
+    // A declined receipt on the evidence route. Every other refusal in
+    // that set belongs to the ingest gate, which is not what answered here.
+    if label.and_then(|label| AdmissionRefusal::from_response(status, label))
+        == Some(AdmissionRefusal::EvidenceRefused)
+    {
+        return WitnessTrustError::WitnessAdmissionEvidenceRefused;
     }
-    // The witness's own deadline ran out and it certified nothing.
-    // The same instruction to a person as this client's deadline
-    // running out, so the same label.
-    if status == 504 && label == Some(WITNESS_REQUEST_TIMED_OUT) {
-        return WitnessTrustError::WitnessTimeout;
-    }
-    match label.and_then(|label| {
-        trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
-    }) {
-        Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
+    match classify_witness_refusal(status, label) {
+        // Capacity, and only on the exact pair: a witness that is busy
+        // judged nothing and names its own delay.
+        WitnessRefusalClass::Saturated => WitnessTrustError::WitnessSaturated { retry_after_secs },
+        // The witness's own deadline, or a gateway's, ran out and nothing
+        // was certified. The same instruction to a person as this client's
+        // deadline running out, so the same label.
+        WitnessRefusalClass::TimedOut => WitnessTrustError::WitnessTimeout,
+        // The witness, or the gateway in front of it, cannot serve right
+        // now: a 5xx, or a gateway 404 with no instance behind it. Nothing
+        // was judged, so it is the label the daemon already retries on the
+        // transient backoff (`submit::witness_failure_is_transient`), and
+        // holds for a person once that budget is spent. Never a refusal.
+        WitnessRefusalClass::Unavailable => WitnessTrustError::WitnessUnreachable,
+        // The witness's own size bound: the same instruction as this
+        // client's local one.
+        WitnessRefusalClass::TooLarge => WitnessTrustError::WitnessPayloadTooLarge,
+        // The deployment declined the receipt behind this session under its
+        // attested-inference policy: the same decision, and the same words
+        // to a person, as a declined admission receipt.
+        WitnessRefusalClass::InferenceDeclined => {
             WitnessTrustError::WitnessAdmissionEvidenceRefused
         }
-        // Every other refusal in that set belongs to the ingest gate,
-        // which is not what answered here.
-        _ => WitnessTrustError::WitnessResponseMalformed,
+        // A client error this build does not recognise. Terminal, as before.
+        WitnessRefusalClass::Unrecognised => WitnessTrustError::WitnessResponseMalformed,
     }
 }
 
@@ -1516,10 +1528,16 @@ impl HttpWitnessTransport {
                     retry_after_secs,
                     Some(label),
                 ))),
-                // No label: an answer this client cannot read, as it was
-                // for the single request. A gateway that no longer routes
-                // to the instance drops the connection, which is the
-                // send failure above.
+                // No label from a gateway that cannot serve (a 5xx, or a
+                // 404 with no instance behind it): something other than
+                // the witness answered, so the job's instance is as good
+                // as unreachable and the job is resubmitted once.
+                None if refusal_from_parts(status.as_u16(), retry_after_secs, None)
+                    == WitnessTrustError::WitnessUnreachable =>
+                {
+                    Err(PollMiss::InstanceUnreachable)
+                }
+                // Any other unlabelled answer is read by its status alone.
                 None => Err(PollMiss::Final(refusal_from_parts(
                     status.as_u16(),
                     retry_after_secs,
@@ -2644,17 +2662,30 @@ mod tests {
         assert_eq!(err.refusal_label(), refusal.label());
     }
 
-    /// The fail-closed half: a non-2xx that carries no label this client
-    /// knows is still what it always was.
+    /// The fail-closed half: a client error this client does not recognise
+    /// stays terminal, and is still the malformed answer it always was. A
+    /// witness that cannot serve right now (any 5xx, whatever its label) is
+    /// a retryable `witness_unreachable`, never a refusal of the session.
     #[tokio::test]
-    async fn an_unlabelled_failure_is_still_a_malformed_response() {
+    async fn only_an_unrecognised_client_error_is_still_a_malformed_response() {
         let signer = test_signer("witness");
-        for answer in [
-            // No body at all.
-            None,
-            // A label on a status it is never sent with.
-            Some((500, "admission_evidence_refused")),
-            Some((403, "something_else_entirely")),
+        for (answer, expected) in [
+            // A 503 with no body: the witness's own double when it has no
+            // answer, and what a gateway sends with nothing behind it.
+            (None, WitnessTrustError::WitnessUnreachable),
+            // A label on a status it is never sent with: the status wins.
+            (
+                Some((500, "admission_evidence_refused")),
+                WitnessTrustError::WitnessUnreachable,
+            ),
+            (
+                Some((403, "something_else_entirely")),
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
+            (
+                Some((400, "witness_request_malformed")),
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
         ] {
             let server = local_witness(Answers {
                 witness_refusal: answer,
@@ -2670,12 +2701,135 @@ mod tests {
                 witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
                     .await
                     .expect_err("a failed witness call is a refusal");
+            assert_eq!(err, expected, "{answer:?}");
+        }
+    }
+
+    /// Every refusal the witness sends maps to one client refusal, by status
+    /// and label together. Before this, everything outside saturation, the
+    /// witness's own timeout and a declined receipt read as
+    /// `witness_response_malformed`, a terminal refusal: a witness outage
+    /// refused every approved session that met it.
+    #[test]
+    fn each_witness_refusal_maps_to_one_client_refusal() {
+        use WitnessTrustError::*;
+        use trace_commons_protocol::witness_refusal::{
+            WITNESS_INFERENCE_REFUSALS, WITNESS_REQUEST_TOO_LARGE, WITNESS_UNAVAILABLE_REFUSALS,
+        };
+        let mut table: Vec<(u16, Option<&str>, WitnessTrustError)> = vec![
+            (
+                503,
+                Some("witness_saturated"),
+                WitnessSaturated {
+                    retry_after_secs: 7,
+                },
+            ),
+            (504, Some(WITNESS_REQUEST_TIMED_OUT), WitnessTimeout),
+            (504, None, WitnessTimeout),
+            (
+                403,
+                Some("admission_evidence_refused"),
+                WitnessAdmissionEvidenceRefused,
+            ),
+            (413, Some(WITNESS_REQUEST_TOO_LARGE), WitnessPayloadTooLarge),
+            (413, None, WitnessPayloadTooLarge),
+            // A crashed or oversized job's sealed answer.
+            (503, Some("witness_redaction_failed"), WitnessUnreachable),
+            // Gateway answers while the witness VM is down.
+            (404, None, WitnessUnreachable),
+            (502, None, WitnessUnreachable),
+            (503, None, WitnessUnreachable),
+            (500, None, WitnessUnreachable),
+            (429, None, WitnessUnreachable),
+            // Client errors and unknown 4xx labels stay terminal.
+            (
+                400,
+                Some("witness_request_malformed"),
+                WitnessResponseMalformed,
+            ),
+            (
+                400,
+                Some("witness_workload_malformed"),
+                WitnessResponseMalformed,
+            ),
+            (403, None, WitnessResponseMalformed),
+            (403, Some("something_else"), WitnessResponseMalformed),
+            // A label never makes a 4xx retryable.
+            (
+                404,
+                Some("witness_redaction_failed"),
+                WitnessResponseMalformed,
+            ),
+        ];
+        for label in WITNESS_UNAVAILABLE_REFUSALS {
+            table.push((503, Some(label), WitnessUnreachable));
+        }
+        for label in WITNESS_INFERENCE_REFUSALS {
+            table.push((403, Some(label), WitnessAdmissionEvidenceRefused));
+        }
+        for (status, label, expected) in table {
             assert_eq!(
-                err,
-                WitnessTrustError::WitnessResponseMalformed,
-                "{answer:?}"
+                refusal_from_parts(status, 7, label),
+                expected,
+                "{status} {label:?}"
             );
         }
+    }
+
+    /// The retryable ones are retryable downstream: `submit` keeps the
+    /// session `Failed` rather than refusing it, and the daemon retries it
+    /// on the transient-upload backoff.
+    #[test]
+    fn a_witness_that_cannot_serve_is_a_transient_failure_downstream() {
+        for (status, label) in [
+            (503, Some("witness_signing_unavailable")),
+            (503, Some("witness_contribution_path_unavailable")),
+            (502, None),
+            (404, None),
+            (504, None),
+        ] {
+            let label_out = refusal_from_parts(status, 0, label).refusal_label();
+            assert!(
+                crate::submit::witness_failure_is_transient(label_out),
+                "{status} {label:?} -> {label_out}"
+            );
+        }
+        for (status, label) in [
+            (413, Some("witness_request_too_large")),
+            (403, Some("witness_inference_receipt_unverified")),
+            (400, Some("witness_request_malformed")),
+        ] {
+            let label_out = refusal_from_parts(status, 0, label).refusal_label();
+            assert!(
+                !crate::submit::witness_failure_is_transient(label_out),
+                "{status} {label:?} -> {label_out}"
+            );
+        }
+    }
+
+    /// A genuine parse failure of a success answer is still malformed: a
+    /// 200 with no certificate header.
+    #[tokio::test]
+    async fn a_success_answer_without_its_certificate_is_still_malformed() {
+        let app = Router::new().route(
+            "/v1/witness",
+            post(|| async { (StatusCode::OK, "not an envelope").into_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
+        });
+        let transport = transport_for(&url, permissive());
+        let key = test_signer("malformed");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("no certificate, no certified answer");
+        assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+        task.abort();
     }
 
     #[tokio::test]
@@ -2814,27 +2968,35 @@ mod tests {
         }
     }
 
-    /// Only the exact pair is saturation. A 503 with another label, and the
-    /// saturation label on another status, keep the fail-closed reading.
+    /// Only the exact pair is saturation. A 503 with another label is a
+    /// witness that cannot serve (`witness_unreachable`, retried on the
+    /// transient backoff rather than the witness's own delay), and the
+    /// saturation label on another status is no capacity refusal either.
     #[tokio::test]
     async fn only_the_exact_saturation_pair_is_a_capacity_refusal() {
-        let replies: [fn() -> Response; 2] = [
-            || {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({"error": "something_else"})),
-                )
-                    .into_response()
-            },
-            || {
-                (
-                    StatusCode::FORBIDDEN,
-                    axum::Json(serde_json::json!({"error": "witness_saturated"})),
-                )
-                    .into_response()
-            },
+        let replies: [(fn() -> Response, WitnessTrustError); 2] = [
+            (
+                || {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error": "something_else"})),
+                    )
+                        .into_response()
+                },
+                WitnessTrustError::WitnessUnreachable,
+            ),
+            (
+                || {
+                    (
+                        StatusCode::FORBIDDEN,
+                        axum::Json(serde_json::json!({"error": "witness_saturated"})),
+                    )
+                        .into_response()
+                },
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
         ];
-        for reply in replies {
+        for (reply, expected) in replies {
             let (url, _seen, task) = capacity_witness(reply).await;
             let transport = transport_for(&url, permissive());
             let key = test_signer("capacity");
@@ -2844,7 +3006,7 @@ mod tests {
                 witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
                     .await
                     .expect_err("a refusal");
-            assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+            assert_eq!(err, expected);
             task.abort();
         }
     }

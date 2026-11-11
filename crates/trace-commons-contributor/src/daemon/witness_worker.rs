@@ -640,6 +640,7 @@ fn record(
                 clock.now(),
                 &observed_at,
                 None,
+                None,
             );
             if super::note_witness_blocked(shared, &applied) {
                 let mut state = shared.state.lock().expect("state lock");

@@ -1564,6 +1564,12 @@ impl DaemonShared {
         if queue.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")) {
             queue.save(&store)?;
         }
+        // Older builds ended an approved session `Failed` when the account's
+        // allowance was spent. It goes back to waiting, approved as it was,
+        // and is sent once the allowance allows. Idempotent.
+        if queue.retry_account_limit_failures(Utc::now()) > 0 {
+            queue.save(&store)?;
+        }
         // One-time upgrade: retire entries that stand for a single subagent
         // transcript.
         //
@@ -2346,16 +2352,24 @@ impl DaemonShared {
             .is_some()
     }
 
-    /// Whether this contributor is admitted on evidence rather than on an
-    /// invite -- `WitnessSettings::admission_evidence`.
+    /// Whether the eligibility question applies to this contributor now:
+    /// admitted on evidence, and ingest has not said it admits by account.
+    /// See `contribution_eligibility::applies`.
     ///
     /// `None` when the config could not be read, which is a different fact
     /// from "off" and is kept apart from it here so callers do not have to
-    /// guess. `add_admission_setting` reports the same three-way answer on
-    /// the wire.
-    pub(crate) fn admission_evidence(&self) -> Option<bool> {
+    /// guess.
+    pub(crate) fn eligibility_applies(&self) -> Option<bool> {
         let cfg = self.store.load_config().ok()?;
-        Some(super::contribution_eligibility::evidence_flag(cfg.as_ref()))
+        Some(self.eligibility_applies_for(cfg.as_ref()))
+    }
+
+    /// [`Self::eligibility_applies`] for a config the caller already read.
+    pub(crate) fn eligibility_applies_for(
+        &self,
+        cfg: Option<&crate::config::ContributorConfig>,
+    ) -> bool {
+        super::contribution_eligibility::applies(cfg, self.account_admission.current(cfg))
     }
 
     /// Whether this device sends every session through a redaction witness
@@ -3476,7 +3490,7 @@ impl DaemonShared {
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
-        let admission_evidence = self.admission_evidence();
+        let admission_evidence = self.eligibility_applies();
         let witness = self.redaction_witness();
         let pending: Vec<serde_json::Value> = {
             let queue = self.queue.lock().expect("queue lock");
@@ -4333,7 +4347,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     serde_json::json!({
                         "entry": entry_value_with(
                             e,
-                            shared.admission_evidence(),
+                            shared.eligibility_applies(),
                             shared.redaction_witness(),
                         ),
                         "preview_requires_async": true,
@@ -4660,7 +4674,7 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // Read once for the whole list, and outside the queue lock: it reads the
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
-    let admission_evidence = shared.admission_evidence();
+    let admission_evidence = shared.eligibility_applies();
     let witness = shared.redaction_witness();
     // How many matched contribution missions each pending entry fits, worked
     // out before any lock below is taken: it reads the history file and
@@ -4912,7 +4926,7 @@ async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> R
 /// K5: every session kept on this Mac, in the `list_pending` entry shape,
 /// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
 fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
-    let admission_evidence = shared.admission_evidence();
+    let admission_evidence = shared.eligibility_applies();
     let witness = shared.redaction_witness();
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
@@ -5132,9 +5146,8 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // `contributable_count` is ABSENT when eligibility does not apply, on
     // the same rule as the entry field: an invited contributor has no
     // "3 of 7" to be told about, and `pending_count` alone is their answer.
-    let group_filters = super::contribution_eligibility::evidence_flag(
-        shared.store.load_config().ok().flatten().as_ref(),
-    );
+    let group_filters =
+        shared.eligibility_applies_for(shared.store.load_config().ok().flatten().as_ref());
     // `include_found` (the first run's Customize): the repos found in the
     // watched tools' sessions on disk as well -- the walk the past-session
     // picker takes -- which the daemon may hold no rule for and have queued
@@ -7757,7 +7770,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     //
     // A single `entry_id` is deliberately NOT filtered -- see
     // `contribution_eligibility::contributable_in_a_group`.
-    let group_filters = super::contribution_eligibility::evidence_flag(cfg.as_ref());
+    let group_filters = shared.eligibility_applies_for(cfg.as_ref());
     // How many pending entries a group selector left out for being
     // ineligible. Reported so a shell can say what became of the rest rather
     // than infer it from a count that came back smaller than the one it drew
@@ -8870,7 +8883,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
                 // Re-read: the build above recorded its counts on the pinned
                 // entry, and the entry this response describes should say so.
                 let entry = entry_by_id(shared, req, id).unwrap_or(entry);
-                value["entry"] = entry_value_with(&entry, shared.admission_evidence(), witness);
+                value["entry"] = entry_value_with(&entry, shared.eligibility_applies(), witness);
                 Response::ok(req.id, value)
             }
             Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
@@ -8919,7 +8932,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             // just named, while a cached summary outlives that state.
             let witness = shared.redaction_witness();
             let mut value = preview_card_value(&summary, witness);
-            value["entry"] = entry_value_with(&entry, shared.admission_evidence(), witness);
+            value["entry"] = entry_value_with(&entry, shared.eligibility_applies(), witness);
             Response::ok(req.id, value)
         }
         Err(error) => Response::err(
@@ -13733,6 +13746,103 @@ mod tests {
         // ineligible rows are left behind.
         assert_eq!(result["excluded_ineligible"], 3, "{result}");
         assert_eq!(result["skipped"].as_array().unwrap().len(), 2, "{result}");
+    }
+
+    /// Record what ingest said about account admission for the saved config.
+    fn ingest_says(s: &DaemonShared, authority: &str, ready: bool) {
+        let cfg = s.store.load_config().unwrap().expect("a saved config");
+        s.account_admission.record_for_test(&cfg, authority, ready);
+    }
+
+    /// **Ingest admitting by account ends the eligibility question.** An
+    /// account upload needs no Private AI call, so a session without one is
+    /// not "cannot be sent": the row carries no verdict, the project row no
+    /// "of", and a group approve selects every pending row. Rows recorded
+    /// `ineligible_permanent` before the answer arrived are covered too,
+    /// because the wire reads the rule when it renders.
+    ///
+    /// A spent allowance counts as admission by account: the sends wait for
+    /// the period to reset, they are not refused for want of a call.
+    #[tokio::test]
+    async fn account_admission_lifts_the_eligibility_question() {
+        for (authority, ready) in [("bounded", true), ("bounded", false), ("invited", true)] {
+            let s = shared();
+            admit_on_evidence(&s);
+            let key = "/tmp/mixedproj";
+            seed_mixed_project(&s, key);
+            ingest_says(&s, authority, ready);
+
+            let listed = handle_request_async(&s, &req("list_pending", serde_json::json!({})))
+                .await
+                .result
+                .unwrap();
+            for row in listed["pending"].as_array().expect("entries") {
+                let row = row.as_object().unwrap();
+                assert!(
+                    !row.contains_key("eligibility") && !row.contains_key("eligibility_reason"),
+                    "{authority}/{ready}: {row:?}"
+                );
+            }
+
+            let project = projects_of(&s)
+                .into_iter()
+                .find(|p| p["project_id"] == serde_json::json!(project_id_for(key)))
+                .expect("the project is listed");
+            assert!(
+                !project
+                    .as_object()
+                    .unwrap()
+                    .contains_key("contributable_count"),
+                "{authority}/{ready}: {project}"
+            );
+
+            let r =
+                handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
+            let result = r.result.expect("approve answers");
+            assert!(
+                !result
+                    .as_object()
+                    .unwrap()
+                    .contains_key("excluded_ineligible"),
+                "{authority}/{ready}: {result}"
+            );
+            assert_eq!(
+                result["skipped"].as_array().unwrap().len(),
+                5,
+                "{authority}/{ready}: every pending row is selected: {result}"
+            );
+        }
+    }
+
+    /// And `legacy_evidence`, or no answer at all, keeps today's rule: the
+    /// server still needs per-session evidence there.
+    #[tokio::test]
+    async fn legacy_evidence_keeps_the_eligibility_question() {
+        for answer in [Some(("legacy_evidence", false)), None] {
+            let s = shared();
+            admit_on_evidence(&s);
+            seed_mixed_project(&s, "/tmp/mixedproj");
+            if let Some((authority, ready)) = answer {
+                ingest_says(&s, authority, ready);
+            }
+
+            let listed = handle_request_async(&s, &req("list_pending", serde_json::json!({})))
+                .await
+                .result
+                .unwrap();
+            assert!(
+                listed["pending"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.get("eligibility").is_some()),
+                "{answer:?}: {listed}"
+            );
+            let r =
+                handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
+            let result = r.result.expect("approve answers");
+            assert_eq!(result["excluded_ineligible"], 3, "{answer:?}: {result}");
+        }
     }
 
     /// **One reply, one deadline, covering everything it approved.**
