@@ -2349,6 +2349,14 @@ impl Queue {
     /// behalf here. One whose file already has a live entry stays, as in
     /// [`Self::reoffer_refused_for_reason`]: the session grew and is offered
     /// as it is now. Idempotent: a moved entry is no longer `Failed`.
+    ///
+    /// A `Failed` entry pins nothing, so the sweep has already removed any
+    /// certified bytes it was pinned to. An unattended approval's pin is the
+    /// witness's own certificate, not bytes a person was shown, so it is
+    /// dropped and the session is witnessed again, as a fresh unattended
+    /// approval is. A person's pin is kept: the upload then finds its bytes
+    /// gone and puts the session back in front of them, since they approved
+    /// those bytes and no others.
     pub fn retry_account_limit_failures(&mut self, now: DateTime<Utc>) -> usize {
         let limit = REASON_ACCOUNT_LIMIT_REACHED;
         let live_paths: HashSet<PathBuf> = self
@@ -2371,6 +2379,11 @@ impl Queue {
             {
                 e.state = QueueState::Approved;
                 e.retry_after = Some(now);
+                if e.approved_unattended {
+                    e.previewed_envelope_digest = None;
+                    e.attested_inference = None;
+                    e.would_send_bytes = None;
+                }
                 moved += 1;
             }
         }
@@ -3566,9 +3579,27 @@ mod tests {
             QueueState::Failed,
             Some("admission_refused".into()),
         );
+        for e in [&failed, &by_hand] {
+            q.entry_mut_for_test(e.entry_id)
+                .unwrap()
+                .previewed_envelope_digest = Some("sha256:pinned".into());
+        }
         let before = q.clone();
 
         assert_eq!(q.retry_account_limit_failures(now), 2);
+        // The unattended pin goes, so the witness certifies it again; the
+        // person's stays, so they are asked rather than sent other bytes.
+        assert_eq!(
+            q.get(failed.entry_id).unwrap().previewed_envelope_digest,
+            None
+        );
+        assert_eq!(
+            q.get(by_hand.entry_id)
+                .unwrap()
+                .previewed_envelope_digest
+                .as_deref(),
+            Some("sha256:pinned")
+        );
         for id in [failed.entry_id, by_hand.entry_id] {
             let e = q.get(id).unwrap();
             let was = before.get(id).unwrap();

@@ -6263,6 +6263,99 @@ mod tests {
         );
     }
 
+    /// On a witness device the certified bytes the refused upload carried
+    /// are kept with the waiting entry and sent after the wait, without
+    /// asking the witness again.
+    #[tokio::test]
+    async fn a_witnessed_session_waiting_on_the_account_limit_is_sent_under_its_pin() {
+        let h = TransientRetryHarness::with_witness().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 600}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.reason_label.as_deref(), Some("account_limit_reached"));
+        let pin = held.previewed_envelope_digest.clone().expect("a pin");
+        let witness_calls = h.witness_calls.lock().unwrap().len();
+
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(held.retry_after.unwrap()).await;
+        let sent = h.entry();
+        assert_eq!(sent.state, queue::QueueState::Uploaded, "{sent:?}");
+        assert_eq!(
+            sent.previewed_envelope_digest.as_deref(),
+            Some(pin.as_str())
+        );
+        assert_eq!(h.witness_calls.lock().unwrap().len(), witness_calls);
+    }
+
+    /// Make the harness's entry what an older build left after a spent
+    /// allowance: `Failed` under the label, its approval kept, and its
+    /// stored envelope swept, since a `Failed` entry pins nothing.
+    fn fail_as_an_older_build_did(h: &TransientRetryHarness) {
+        let mut q = h.shared.queue.lock().unwrap();
+        let id = q.all()[0].entry_id;
+        q.record_attempt(id, None);
+        q.set_state(
+            id,
+            queue::QueueState::Failed,
+            Some("account_limit_reached".into()),
+        );
+        q.save(&h.shared.store).unwrap();
+        approved_envelope::sweep(&h.shared.store, &q.pinned_entry_ids()).unwrap();
+    }
+
+    /// After the update, a session an older build failed for a spent
+    /// allowance is approved again on load and sent by the next pass.
+    #[tokio::test]
+    async fn an_account_limit_failure_from_an_older_build_is_sent_after_the_update() {
+        let h = TransientRetryHarness::new().await;
+        fail_as_an_older_build_did(&h);
+        let reloaded = ipc::DaemonShared::load(h.shared.store.clone()).unwrap();
+        let migrated = reloaded.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(migrated.state, queue::QueueState::Approved, "{migrated:?}");
+        assert!(migrated.approved_unattended);
+
+        let now = TransientRetryHarness::now();
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .retry_account_limit_failures(now);
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// The same on a witness device, where the older build had pinned the
+    /// certified bytes and the sweep has since removed them: an unattended
+    /// session is witnessed again and sent, not handed to a person.
+    #[tokio::test]
+    async fn a_witnessed_account_limit_failure_from_an_older_build_is_witnessed_again() {
+        let h = TransientRetryHarness::with_witness().await;
+        *h.ingest_reply.lock().unwrap() =
+            account_limit_reply(serde_json::json!({"error": "account_limit_reached"}));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert!(h.entry().previewed_envelope_digest.is_some());
+        fail_as_an_older_build_did(&h);
+        *h.ingest_reply.lock().unwrap() = None;
+
+        let later = now + chrono::Duration::days(2);
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .retry_account_limit_failures(later);
+        h.pass(later).await;
+        let sent = h.entry();
+        assert_eq!(sent.state, queue::QueueState::Uploaded, "{sent:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+    }
+
     /// Every other admission refusal still ends the entry: a refusal of the
     /// account, and the per-session evidence budget.
     #[tokio::test]
