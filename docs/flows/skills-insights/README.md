@@ -1,15 +1,15 @@
 # Skills insights flow
 
 Review [the design surface](mocks/index.html), [inventory chart](FLOW.svg),
-[usage chart](USAGE.svg), or [detail chart](DETAIL.svg). Each image has adjacent
+[usage chart](USAGE.svg), or [detail chart](DETAIL.svg), [delegated traces](DELEGATED.svg), or [OpenCode normalization](OPENCODE.svg). Each image has adjacent
 Mermaid source. All charts are generated from TLC's complete transition dump,
 then rendered by the flow-promises skill's Pele renderer. No chart is hand drawn.
 
 ## What was checked
 
 This is a bounded **design model**, not verification of the Rust or Swift binary.
-The user selected these five promises. TLC exhaustively explored **1,338 states**
-and **18,795 transitions** with no constraint or symmetry reduction. All five
+The user selected these five promises. TLC exhaustively explored **74,288 states**
+and **1,578,878 transitions** with no constraint or symmetry reduction. All five
 invariants hold; the helper's additional NoDeadlock check also holds.
 
 | Selected promise | Model result | Representation |
@@ -20,15 +20,16 @@ invariants hold; the helper's additional NoDeadlock check also holds.
 | Analysis off still permits inventory but produces no usage. | Holds, with reachability witness | Safety invariant plus initial → Refresh → scan finds skills, with analysis false throughout. |
 | Failed reads and catalog listings never count as use. | Holds | `evidence` is the provenance of the representative counted output; failed reads/catalog observations do not write it. |
 
-The [raw checker summary](check-report.md) and [projection counts](projection.json)
+The [raw checker summary](check-report.md), [full-exploration output](exploration-report.txt),
+[model hashes](model-hashes.json), and [projection counts](projection.json)
 record this run. No liveness promise was selected. Work may hang indefinitely;
 `TheWorldWaits` makes that explicit rather than imposing fairness. A UI-only
 control that starts no work does not count as a new job.
 
 ## Model scope and abstraction
 
-`FLOW.qnt` represents one folder, one installed definition and one representative
-usage event. Inventory, extraction and detail have independent request lanes,
+`FLOW.qnt` represents one parent folder, one child trace, one installed definition, and one
+representative direct, delegated and normalized OpenCode event. Inventory, extraction and detail have independent request lanes,
 so completions can interleave. Each lane is idle/current/stale. This is a
 relative-generation abstraction, **not** a two-value numeric generation counter:
 once invalidated, a request remains stale through any number of re-enables or
@@ -45,7 +46,7 @@ transitions and must produce counterexamples (see mutation results below).
 
 The model omits concrete paths, symlink resolution, provider parsing, persistent
 store crashes, transport reordering beyond these lanes, multiple simultaneous
-requests within a lane, process restart, numeric counts/deduplication, time
+requests within a lane, process restart, general numeric totals and multi-event deduplication, time
 windows/timezones, retention, catalog/follow operations, sorting and search.
 Read failures and unavailable definitions are merged; the model does not claim
 the UI currently exposes every illustrated state. Evidence detail reads share
@@ -57,15 +58,18 @@ until new results arrive (except on exclusion/feature disable).
 
 The checker budget is 500 states, so the ordinary check produces no chart.
 The full model was retained and a second TLC run dumped **all** states/actions.
-`render-graph.mts` uses the skill's DOT parser and projects that dump three ways:
+`render-graph.mts` uses the skill's DOT parser and projects that dump five ways:
 
 - Inventory: feature/permission state, scan activity, empty/partial/available result.
 - Usage: feature/permission and analysis state, extraction activity, complete/partial/unsupported result.
 - Detail: feature/permission state, current/stale pending read, shown/closed preview.
+- Delegated: parent/child exclusions, independent extraction, missing/partial child evidence.
+- OpenCode: running/failed calls versus one accepted invocation/load; repeated database/export observations are visible self-loops.
 
 Each projection merges other variables and edges with identical endpoint labels;
 all action labels on each resulting arrow are retained. Every source state is
-represented. Same-label transitions become internal steps (counted in
+represented. Same-label transitions become internal steps, except explicit duplicate-copy
+self-loops in the OpenCode view (counted in
 `projection.json`); no cross-label arrow is hidden. A chart arrow is existential:
 some underlying states admit it, not every state with that label. In particular,
 re-enabling can show an outstanding stale request while it drains; the result
@@ -125,10 +129,12 @@ cp FLOW.cfg /tmp/skills-full-new/FLOW.cfg
 "$JAVA" -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 \
   -dump dot,actionlabels graph -config FLOW.cfg FLOW
 # Back in this directory:
-node render-graph.mts "$FLOW_SKILL" /tmp/skills-full-new/graph.dot .
+NODE_OPTIONS=--max-old-space-size=8192 node render-graph.mts "$FLOW_SKILL" /tmp/skills-full-new/graph.dot .
 node "$FLOW_SKILL/scripts/render.mjs" FLOW.mmd FLOW.svg
 node "$FLOW_SKILL/scripts/render.mjs" USAGE.mmd USAGE.svg
 node "$FLOW_SKILL/scripts/render.mjs" DETAIL.mmd DETAIL.svg
+node "$FLOW_SKILL/scripts/render.mjs" DELEGATED.mmd DELEGATED.svg
+node "$FLOW_SKILL/scripts/render.mjs" OPENCODE.mmd OPENCODE.svg
 ```
 
 Do not check generated compiler/cache folders into the repository. All diagrams
@@ -137,8 +143,15 @@ legible labels/edges/colors, not product UI behavior.
 
 ## Negative controls
 
-All five deliberately broken models produced the expected TLC counterexample.
-These are model mutations, not reproduced product defects:
+All five original deliberately broken models produced the expected TLC counterexample.
+Two extension-specific negative controls additionally exercise the same selected
+promises: counting a running OpenCode call and retaining child evidence after
+parent exclusion.
+These are model mutations, not reproduced product defects. Some mutation runs
+reach the checker's 100,000-state post-failure exploration bound before its
+additional NoDeadlock check completes; the named invariant counterexample is
+already established. This bound does not apply to the successful base-model
+exploration reported above:
 
 | Invariant | Deliberate mutation | Shortest action path |
 | --- | --- | --- |
@@ -147,6 +160,8 @@ These are model mutations, not reproduced product defects:
 | OldResultsStayRemoved | Publish a stale scan and record its stale provenance | Refresh → flag off → old scan returns (3 steps) |
 | AnalysisOff | Retain usage state on analysis disable | Enable analysis → disable analysis (2 steps) |
 | OnlyObservedUse | Attribute a failed read as counted output | Enable analysis → analysis starts → failed read (3 steps) |
+| OnlyObservedUse | Count a running OpenCode call | Enable analysis → analysis starts → running call (3 steps) |
+| ExcludedFolders | Retain child evidence on parent exclusion | Child available → enable analysis → child analysis starts → child invocation → exclude parent (5 steps) |
 
 [Raw mutation reports](mutation-report.md) retain the exact checker paths.
 
@@ -154,3 +169,54 @@ These are model mutations, not reproduced product defects:
 the repository, runs the skill checker sequentially, and requires each named
 invariant to break. The compiler uses a local backend, so running these compile
 jobs concurrently can contend; the recorded successful checks were sequential.
+
+## OpenCode and delegated extension
+
+The same five user-selected promises cover the new variables; no new promise
+selection is assumed. The complete dump additionally checks every observed
+duplicate transition for unchanged `accepted`, and every running/failed/catalog
+transition for unchanged `accepted`. These are explicit model consistency
+checks, not proof that the production normalizer implements this abstraction.
+`projection.json` records 36,288 duplicate-observation transitions and 99,792
+incomplete/failed/catalog transitions; every one preserves accepted evidence.
+
+`call` models one stable OpenCode session/event identity, seen in database and/or
+export form. A final invocation or successful definition load sets `accepted=1`;
+re-observing either representation keeps it at one. Running/failed calls and
+catalog records produce no accepted event. An explicit invocation and a load are
+alternative representative event kinds here; real traces may contain both as
+separate observations. No assumption that text-only name matching is sufficient
+for attribution is made. Timestamp merging, cross-version event identity,
+multiple calls, export import order, parse failures and real database adapter
+behavior require fixture and integration tests outside this model.
+
+The child lane has its own current/stale generation abstraction. Parent exclusion
+invalidates both lanes; child exclusion invalidates only child work. Clear and
+feature/analysis disable remove delegated evidence and invalidate pending writes.
+A missing child removes its representative observation and remains a distinct
+coverage state. Complete and partial children may be reanalyzed; version-triggered
+backfill is abstracted by another admission, without a numeric parser-version
+variable. Parent and child populations are separate and never summed in the
+model. The parent identity is fixed implicitly; this model cannot prove code
+preserves or rejects arbitrary/malicious parent IDs.
+
+**Current product coverage:** the delegated implementation uses existing Claude
+spawned traces. Codex automatic parent attribution remains unsupported. Claude
+children normally inherit the parent's project permission; the physical child
+transcript directory is not itself a new project-policy identity. The model's
+independent child exclusion represents filtering an independently scoped stored
+child, where such a policy identity exists. It is a conservative design case,
+not a claim of a new UI permission toggle or generic provider lineage support.
+
+The first extension check found a missing model invalidation: enable analysis →
+start analysis → accept database invocation → turn Skills off retained new fields.
+The extension was corrected to clear those fields and stale the child lane on
+feature disable; the promise was unchanged. This was a model construction defect,
+not a reproduced implementation bug.
+
+Additional replay targets: database then export then database for the same source
+event; running call then successful completion; failed call/catalog listing only;
+parent exclusion during child extraction; child removal during extraction; clear
+then reanalysis then old child completion; missing child remains partial rather
+than a zero-use claim. Keep direct/delegated counts and parent drill references
+separate in every case.

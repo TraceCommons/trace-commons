@@ -8,6 +8,8 @@ const graph = parseDot(fs.readFileSync(dump,'utf8'));
 const inventory = (v:any) => !v.featureOn ? 'Skills disabled' : !v.allowed ? 'Folder excluded' : v.scan !== 'idle' ? 'Scanning inventory' : ({none:'Inventory pending',empty:'No skills found',ready:'Inventory available',partial:'Inventory incomplete'}[v.inventory]);
 const usage = (v:any) => !v.featureOn ? 'Skills disabled' : !v.analysis ? 'Usage unavailable — analysis off' : !v.allowed ? 'Folder excluded' : v.extract !== 'idle' ? 'Analyzing local history' : ({off:'Usage pending',pending:'Usage pending',complete:'Analysis complete',partial:'Partial history',unsupported:'Usage unavailable — unsupported'}[v.usage]);
 const detail = (v:any) => !v.featureOn ? 'Skills disabled' : !v.allowed ? 'Folder excluded' : v.preview ? 'Definition available' : v.detail === 'current' ? 'Reading definition' : v.detail === 'stale' ? 'Old detail request pending' : 'Detail closed or unavailable';
+const delegated = (v:any) => !v.featureOn ? 'Skills disabled' : !v.allowed ? 'Parent folder excluded' : !v.childAllowed ? 'Child folder excluded' : !v.analysis ? 'Delegated usage unavailable' : ({missing:'Child trace missing',available:'Child ready for analysis',current:'Analyzing child trace',stale:'Old child result pending',ready:'Delegated observations available',partial:'Partial child history'}[v.child]);
+const normalized = (v:any) => !v.featureOn ? 'Skills disabled' : !v.allowed ? 'Folder excluded' : !v.analysis ? 'Usage unavailable — analysis off' : v.accepted === 1 ? (v.call === 'load' ? 'One accepted load' : 'One accepted invocation') : ({absent:'No accepted OpenCode event',running:'Call incomplete — not counted',failed:'Call failed — not counted'}[v.call]);
 const initial = [...graph.states.entries()].find(([,s]:any)=>s.start)![0];
 let cursor = initial; const witness = [];
 for (const action of ['YouPressRefresh','TheScanFindsSkills']) {
@@ -17,12 +19,25 @@ for (const action of ['YouPressRefresh','TheScanFindsSkills']) {
 }
 const reached=graph.states.get(cursor).vars;
 if (reached.analysis || reached.inventory!=='ready' || reached.evidence!=='none') throw Error('Invalid witness');
-const result:any={states:graph.states.size,steps:graph.steps.length,views:{},analysisOffInventoryWitness:witness};
-for (const [name,view] of [['FLOW',inventory],['USAGE',usage],['DETAIL',detail]] as const) {
+let duplicateTransitions = 0, incompleteTransitions = 0;
+for (const edge of graph.steps) {
+ const from=graph.states.get(edge.from).vars, to=graph.states.get(edge.to).vars;
+ if (/^The(Database|Export)ReportsSuccessful/.test(edge.action) && from.accepted===1) {
+  if(to.accepted!==from.accepted) throw Error('Duplicate normalized event inflated accepted evidence');
+  duplicateTransitions++;
+ }
+ if(['TheOpenCodeCallIsRunning','TheOpenCodeCallFails','TheOpenCodeCatalogIsObserved'].includes(edge.action)) {
+  if(to.accepted!==from.accepted) throw Error('Incomplete/failed/catalog observation counted');
+  incompleteTransitions++;
+ }
+}
+if(!duplicateTransitions || !incompleteTransitions) throw Error('Normalization checks are vacuous');
+const result:any={states:graph.states.size,steps:graph.steps.length,views:{},analysisOffInventoryWitness:witness,duplicateTransitions,incompleteTransitions};
+for (const [name,view] of [['FLOW',inventory],['USAGE',usage],['DETAIL',detail],['DELEGATED',delegated],['OPENCODE',normalized]] as const) {
  const ids=new Map<string,string>();const id=(s:string)=>{if(!ids.has(s))ids.set(s,`s${ids.size}`);return ids.get(s)};
  const starts=new Set<string>();for(const s of graph.states.values()){const label=view(s.vars);id(label);if(s.start)starts.add(label)}
  const edges=new Map<string,Set<string>>();let internal=0;
- for(const e of graph.steps){const from=view(graph.states.get(e.from).vars),to=view(graph.states.get(e.to).vars); const key=JSON.stringify([from,to]);if(from===to){internal++;continue;} if(!edges.has(key))edges.set(key,new Set());edges.get(key)!.add(e.action.replace(/([a-z])([A-Z])/g,'$1 $2').toLowerCase());}
+ for(const e of graph.steps){const from=view(graph.states.get(e.from).vars),to=view(graph.states.get(e.to).vars); const key=JSON.stringify([from,to]);if(from===to && !(name === "OPENCODE" && graph.states.get(e.from).vars.accepted === 1 && /^The(Database|Export)ReportsSuccessful/.test(e.action))){internal++;continue;} if(!edges.has(key))edges.set(key,new Set());edges.get(key)!.add(e.action.replace(/([a-z])([A-Z])/g,'$1 $2').toLowerCase());}
  let m='stateDiagram-v2\n  direction TB\n';for(const [label,node] of ids)m+=`  state "${label}" as ${node}\n`;
  for(const s of starts)m+=`  [*] --> ${id(s)}\n`;
  for(const [key,actions] of edges){const [from,to]=JSON.parse(key);m+=`  ${id(from)} --> ${id(to)} : ${[...actions].sort().join(' / ')}\n`;}

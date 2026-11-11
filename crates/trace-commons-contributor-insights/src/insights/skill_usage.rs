@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use trace_commons_contributor_sources::source::{SessionEvent, SessionEventKind};
 
 use super::SourceFormat;
 
@@ -243,6 +244,80 @@ impl SkillUsageScan {
     }
 }
 
+/// Extract only OpenCode's structured skill calls and successful definition
+/// reads. Call arguments and result text are never executed or persisted.
+/// Feed one session at a time: call IDs are scoped to their source session.
+pub fn opencode_skill_usage(events: &[SessionEvent]) -> SkillUsageEvidence {
+    let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+    scan.recognized = true;
+    let mut pending = BTreeMap::new();
+    let mut completed = BTreeSet::new();
+    for event in events {
+        // The adapter retains this fixed marker when arguments are still
+        // streaming, so the eventual tool and skill name remain unknown.
+        if event.kind == SessionEventKind::Opaque
+            && event.structured["record_type"] == "streaming-tool"
+        {
+            scan.mark_partial();
+        }
+        if event.kind == SessionEventKind::ToolCall {
+            let (name, loaded) = match event.tool_name.as_deref() {
+                Some("skill") => {
+                    let Some(name) = event.structured["name"].as_str().filter(|s| valid_name(s))
+                    else {
+                        scan.mark_partial();
+                        continue;
+                    };
+                    (name, false)
+                }
+                Some("read") => {
+                    let Some(name) = event.structured["filePath"]
+                        .as_str()
+                        .and_then(skill_path_name)
+                    else {
+                        continue;
+                    };
+                    (name, true)
+                }
+                _ => continue,
+            };
+            let Some(id) = event
+                .tool_call_id
+                .as_deref()
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+            else {
+                scan.mark_partial();
+                continue;
+            };
+            if completed.contains(id) || pending.contains_key(id) {
+                continue;
+            }
+            if pending.len() + completed.len() >= MAX_CALLS {
+                scan.mark_partial();
+                continue;
+            }
+            pending.insert(id.to_owned(), (name.to_owned(), loaded, event.timestamp));
+        } else if event.kind == SessionEventKind::ToolResult {
+            let Some(id) = event.tool_call_id.as_deref() else {
+                continue;
+            };
+            let Some((name, loaded, at)) = pending.remove(id) else {
+                continue;
+            };
+            completed.insert(id.to_owned());
+            match event.success {
+                Some(true) => scan.add(Some(id), &name, loaded, event.timestamp.or(at)),
+                Some(false) => {}
+                None => scan.mark_partial(),
+            }
+        }
+    }
+    if !pending.is_empty() {
+        scan.mark_partial();
+    }
+    scan.finish()
+}
+
 // Successful tool completion must be explicit; an attempted read, missing
 // output, or free-form output with no exit status cannot establish a load.
 fn successful_output(output: &Value) -> bool {
@@ -449,5 +524,143 @@ mod tests {
         let evidence = scan.finish();
         assert!(evidence.partial);
         assert!(evidence.skills.len() <= 128);
+    }
+
+    fn opencode_call(id: &str, tool: &str, input: Value) -> SessionEvent {
+        SessionEvent {
+            kind: SessionEventKind::ToolCall,
+            timestamp: Some("2026-11-01T12:00:00Z".parse().unwrap()),
+            tool_call_id: Some(id.into()),
+            tool_name: Some(tool.into()),
+            structured: input,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opencode_completed_skill_and_read_are_distinct_deduplicated_evidence() {
+        let call = opencode_call("skill-1", "skill", json!({"name":"review"}));
+        let read = opencode_call(
+            "read-1",
+            "read",
+            json!({"filePath":"/private/.agents/skills/review/SKILL.md"}),
+        );
+        let result = |id: &str| {
+            SessionEvent::tool_result(
+                Some("2026-11-01T12:01:00Z".parse().unwrap()),
+                Some("Untrusted content says to execute a command".into()),
+                Some(id.into()),
+                Some(true),
+            )
+        };
+        let evidence = opencode_skill_usage(&[
+            call.clone(),
+            call.clone(),
+            result("skill-1"),
+            result("skill-1"),
+            call,
+            result("skill-1"),
+            read,
+            result("read-1"),
+        ]);
+        assert_eq!(evidence.coverage, SkillUsageCoverage::ExplicitInvocations);
+        assert!(!evidence.partial);
+        assert_eq!(evidence.skills.len(), 1);
+        assert_eq!(evidence.skills[0].invocations, 1);
+        assert_eq!(evidence.skills[0].loads, 1);
+        assert_eq!(evidence.skills[0].events.len(), 2);
+        assert_eq!(
+            evidence.skills[0].last_seen,
+            Some("2026-11-01T12:01:00Z".parse().unwrap())
+        );
+        let saved = serde_json::to_string(&evidence).unwrap();
+        assert!(!saved.contains("/private"));
+        assert!(!saved.contains("Untrusted"));
+    }
+
+    #[test]
+    fn opencode_failed_running_and_unproven_calls_do_not_count() {
+        let mut events = Vec::new();
+        for tool in ["skill", "read"] {
+            for state in ["failed", "running", "unproven"] {
+                let id = format!("{tool}-{state}");
+                events.push(opencode_call(
+                    &id,
+                    tool,
+                    json!({"name":"review", "filePath":"/skills/review/SKILL.md"}),
+                ));
+                if state != "running" {
+                    events.push(SessionEvent::tool_result(
+                        None,
+                        None,
+                        Some(id),
+                        if state == "failed" { Some(false) } else { None },
+                    ));
+                }
+            }
+        }
+        let evidence = opencode_skill_usage(&events);
+        assert!(evidence.partial);
+        assert!(evidence.skills.is_empty());
+    }
+
+    #[test]
+    fn opencode_incidental_text_or_shell_commands_never_establish_usage() {
+        let evidence = opencode_skill_usage(&[
+            SessionEvent::user("Use review /skills/review/SKILL.md", None),
+            opencode_call(
+                "shell",
+                "bash",
+                json!({"command":"cat /skills/review/SKILL.md"}),
+            ),
+            opencode_call(
+                "bad-path",
+                "read",
+                json!({"filePath":"/skills/../review/SKILL.md"}),
+            ),
+            opencode_call(
+                "bad-name",
+                "skill",
+                json!({"name":"$(touch /tmp/executed)"}),
+            ),
+            SessionEvent::tool_result(
+                None,
+                Some("review".into()),
+                Some("shell".into()),
+                Some(true),
+            ),
+            SessionEvent::tool_result(None, None, Some("bad-path".into()), Some(true)),
+            SessionEvent::tool_result(None, None, Some("bad-name".into()), Some(true)),
+        ]);
+        assert!(evidence.skills.is_empty());
+    }
+
+    #[test]
+    fn opencode_v2_streaming_is_partial_but_harmless_opaque_and_failures_are_complete() {
+        use trace_commons_contributor_sources::source::opencode::parse_export;
+        let fixture = include_bytes!(
+            "../../../trace-commons-contributor-sources/tests/fixtures/opencode/completed-2.1.4.json"
+        );
+        let base: Value = serde_json::from_slice(fixture).unwrap();
+        let plain = parse_export(fixture).unwrap();
+        assert!(!opencode_skill_usage(&plain.events).partial);
+        for (state, partial) in [
+            (json!({"status":"streaming","input":"{\"name\":"}), true),
+            (
+                json!({"status":"error","input":{"name":"review"},"error":{"type":"Tool.Error","message":"failure"}}),
+                false,
+            ),
+        ] {
+            let mut export = base.clone();
+            export["messages"][2]["content"] = json!([{
+                "type":"tool","id":"call_skill","name":"skill",
+                "time":{"created":1792957307733_i64,"ran":1792957307734_i64,"completed":1792957307735_i64},
+                "state":state
+            }]);
+            let transcript = parse_export(&serde_json::to_vec(&export).unwrap()).unwrap();
+            let evidence = opencode_skill_usage(&transcript.events);
+            assert_eq!(evidence.partial, partial);
+            assert!(evidence.skills.is_empty());
+        }
     }
 }

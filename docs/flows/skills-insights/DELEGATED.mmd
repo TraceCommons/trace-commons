@@ -1,0 +1,80 @@
+stateDiagram-v2
+  direction TB
+  state "Delegated usage unavailable" as s0
+  state "Child folder excluded" as s1
+  state "Skills disabled" as s2
+  state "Parent folder excluded" as s3
+  state "Child trace missing" as s4
+  state "Child ready for analysis" as s5
+  state "Analyzing child trace" as s6
+  state "Delegated observations available" as s7
+  state "Partial child history" as s8
+  state "Old child result pending" as s9
+  [*] --> s0
+  s0 --> s1 : you exclude the child folder
+  s0 --> s2 : the skills flag turns off
+  s0 --> s3 : you exclude the folder
+  s0 --> s4 : you enable local analysis
+  s0 --> s5 : you enable local analysis
+  s1 --> s0 : you permit the child folder
+  s1 --> s2 : the skills flag turns off
+  s1 --> s3 : you exclude the folder
+  s2 --> s0 : the skills flag turns on
+  s3 --> s2 : the skills flag turns off
+  s3 --> s0 : you permit the folder
+  s4 --> s5 : achild trace becomes available
+  s4 --> s1 : you exclude the child folder
+  s4 --> s2 : the skills flag turns off
+  s4 --> s3 : you exclude the folder
+  s4 --> s0 : you disable local analysis
+  s5 --> s6 : the child analysis starts
+  s5 --> s1 : you exclude the child folder
+  s5 --> s4 : the child trace disappears / you clear local analysis
+  s5 --> s2 : the skills flag turns off
+  s5 --> s3 : you exclude the folder
+  s5 --> s0 : you disable local analysis
+  s2 --> s1 : the skills flag turns on
+  s3 --> s1 : you permit the folder
+  s1 --> s4 : you permit the child folder
+  s2 --> s3 : the skills flag turns on
+  s2 --> s4 : the skills flag turns on
+  s3 --> s4 : you permit the folder
+  s6 --> s7 : the child analysis completes
+  s6 --> s8 : the child analysis is partial
+  s6 --> s1 : you exclude the child folder
+  s6 --> s9 : the child trace disappears / you clear local analysis
+  s6 --> s2 : the skills flag turns off
+  s6 --> s3 : you exclude the folder
+  s6 --> s0 : you disable local analysis
+  s2 --> s5 : the skills flag turns on
+  s7 --> s6 : the child analysis starts
+  s7 --> s1 : you exclude the child folder
+  s7 --> s4 : the child trace disappears / you clear local analysis
+  s7 --> s2 : the skills flag turns off
+  s7 --> s3 : you exclude the folder
+  s7 --> s0 : you disable local analysis
+  s8 --> s6 : the child analysis starts
+  s8 --> s1 : you exclude the child folder
+  s8 --> s4 : the child trace disappears / you clear local analysis
+  s8 --> s2 : the skills flag turns off
+  s8 --> s3 : you exclude the folder
+  s8 --> s0 : you disable local analysis
+  s1 --> s9 : you permit the child folder
+  s9 --> s4 : the old child analysis returns
+  s9 --> s1 : you exclude the child folder
+  s9 --> s2 : the skills flag turns off
+  s9 --> s3 : you exclude the folder
+  s9 --> s0 : you disable local analysis
+  s2 --> s9 : the skills flag turns on
+  s3 --> s9 : you permit the folder
+  s0 --> s9 : you enable local analysis
+  class s0 teal
+  class s1 tan
+  class s2 tan
+  class s3 tan
+  class s4 teal
+  class s5 teal
+  class s6 yellow
+  class s7 teal
+  class s8 teal
+  class s9 teal

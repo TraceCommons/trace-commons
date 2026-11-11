@@ -3,6 +3,30 @@
 pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "date"];
 
 pub const COPY: &[(&str, &str)] = &[
+    ("skills_population_direct", "Direct observations"),
+    ("skills_population_delegated", "Delegated observations"),
+    ("skills_population_unknown", "Observation origin unknown"),
+    ("skills_evidence_links", "Trace evidence"),
+    ("skills_evidence_child", "Open child trace {count}"),
+    ("skills_evidence_parent", "Open parent"),
+    (
+        "skills_evidence_accessibility",
+        "Open trace {count} for {name}",
+    ),
+    (
+        "skills_evidence_child_accessibility",
+        "Open child trace {count} for {name}",
+    ),
+    (
+        "skills_evidence_parent_accessibility",
+        "Open parent trace for {name} evidence {count}",
+    ),
+    ("skills_agent_child_sessions", "Child traces"),
+    ("skills_agent_claude_child_sessions", "Claude child traces"),
+    ("skills_agent_codex_child_sessions", "Codex child traces"),
+    ("skills_coverage_partial", "Partial skill evidence"),
+    ("skills_coverage_pending", "Skill evidence pending"),
+    ("skills_coverage_unknown", "Skill evidence unknown"),
     (
         "skills_daily_retained",
         "Daily observations · retained history within 90 days, independent of the selected window",
@@ -54,7 +78,7 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_earliest", "Earliest retained evidence {date}"),
     (
         "skills_usage_semantics",
-        "Traces used counts each trace with an observed invocation or successful definition load once. Loads do not prove successful application. Windows include dated evidence only; retained history may be shorter than the selected window.",
+        "Traces used counts each trace with an observed invocation or successful definition load once, separately for direct and delegated observations. Parent links provide context and do not add to usage totals. Loads do not prove successful application. Windows include dated evidence only; retained history may be shorter than the selected window.",
     ),
     (
         "skills_definition_status_invalid",

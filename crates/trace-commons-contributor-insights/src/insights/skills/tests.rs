@@ -800,3 +800,27 @@ fn never_alias_under_symlinked_root_is_not_lost_during_listing() {
     assert!(inventory.skills.is_empty());
     assert!(inventory.partial);
 }
+
+#[test]
+fn native_skill_paths_use_repository_separators_without_relaxing_external_paths() {
+    let expected = Some("skills/example/SKILL.md".to_string());
+    let native = Path::new("skills").join("example").join("SKILL.md");
+    assert_eq!(provenance::native_skill_path(&native), expected);
+    assert_eq!(
+        provenance::native_skill_path(Path::new("skills/example/SKILL.md")),
+        expected
+    );
+    assert!(provenance::native_skill_path(Path::new("../skills/example/SKILL.md")).is_none());
+    assert!(provenance::native_skill_path(Path::new("/skills/example/SKILL.md")).is_none());
+    // External repository paths remain strict on every OS: a backslash is
+    // never accepted as a separator in a manifest or lockfile identity.
+    assert!(normalize_skill_path(r"skills\example\SKILL.md").is_none());
+    #[cfg(windows)]
+    assert_eq!(
+        provenance::native_skill_path(Path::new(r"skills\example\SKILL.md")),
+        expected
+    );
+    // On Unix these backslashes are literal filename bytes, not separators.
+    #[cfg(unix)]
+    assert!(provenance::native_skill_path(Path::new(r"skills\example\SKILL.md")).is_none());
+}

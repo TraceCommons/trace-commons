@@ -323,7 +323,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_skills", params: ["skill_id": skillID], as: DaemonData.SkillDefinition.self)
     }
     public func skillEvidence(sessionRef: String) async throws -> DaemonData.SkillEvidence {
-        try await call("insights_session_drill", params: ["session_ref": sessionRef, "tz": TimeZone.current.secondsFromGMT()], as: DaemonData.SkillEvidence.self)
+        if sessionRef.hasPrefix("os.") {
+            return try await call("insights_skills", params: ["session_ref": sessionRef], as: DaemonData.SkillEvidence.self)
+        }
+        return try await call("insights_session_drill", params: ["session_ref": sessionRef, "tz": TimeZone.current.secondsFromGMT()], as: DaemonData.SkillEvidence.self)
     }
     public func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot {
         try await call("insights_skills", params: ["refresh": refresh], as: DaemonData.SkillsSnapshot.self)

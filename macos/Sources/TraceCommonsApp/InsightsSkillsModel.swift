@@ -62,7 +62,7 @@ final class InsightsSkillsModel {
         do {
             let result = try await evidenceReader(reference)
             guard !Task.isCancelled, selectedEvidence == reference, evidenceGeneration == generation else { return }
-            evidence = result; evidenceFailure = !result.enabled || result.readable != true || result.session == nil
+            evidence = result; evidenceFailure = !result.enabled || result.readable != true || (result.session == nil && result.skillUsage == nil)
         } catch { if !Task.isCancelled, selectedEvidence == reference, evidenceGeneration == generation { evidenceFailure = true } }
     }
     func text(_ key: String, values: [String: String] = [:]) -> String {
@@ -110,7 +110,7 @@ final class InsightsSkillsModel {
                 ["codex", "claude_code", "opencode"].contains($0.agent) && $0.status != "unsupported"
             }.map(\.agent))
             return snapshot.usage.skills.filter { $0.name == skill.name && supported.contains($0.agent) }
-                .sorted { $0.agent < $1.agent }
+                .sorted { $0.identity < $1.identity }
         }
         return snapshot.usage.skills.filter { $0.agent == skill.agent && $0.name == skill.name }
     }
@@ -134,7 +134,7 @@ final class InsightsSkillsModel {
         }
         guard coverage.contains(where: { $0.status != "unsupported" }) else { return "skills_usage_unavailable" }
         if hasUsageCollision(skill, in: snapshot) { return "skills_usage_unattributed" }
-        if snapshot.usage.partial || snapshot.usage.lastAnalysisAt == nil { return "skills_usage_pending" }
+        if coverage.contains(where: { ["partial", "pending", "unknown"].contains($0.status) }) || snapshot.usage.partial || snapshot.usage.lastAnalysisAt == nil { return "skills_usage_pending" }
         return "skills_no_usage"
     }
 
@@ -156,6 +156,17 @@ final class InsightsSkillsModel {
     func scopeLabel(_ scope: String) -> String {
         let label = text("skills_scope_\(scope)")
         return label.isEmpty ? scope : label
+    }
+
+    func populationLabel(_ population: String) -> String {
+        text("skills_population_" + (["direct", "delegated"].contains(population) ? population : "unknown"))
+    }
+
+    /// Evidence is already bounded by the daemon; never use it to reconstruct totals.
+    func evidenceLinks(for row: DaemonData.SkillsUsageRow) -> [DaemonData.SkillsUsageEvidence] {
+        let links = row.evidence.isEmpty ? row.sessionRefs.map { DaemonData.SkillsUsageEvidence(sessionRef: $0) } : row.evidence
+        var seen = Set<String>()
+        return links.filter { seen.insert($0.sessionRef).inserted }
     }
 
     func usageSummary(_ row: DaemonData.SkillsUsageRow, coverage: [DaemonData.SkillsUsageCoverage]) -> String {

@@ -190,6 +190,7 @@ struct Runtime {
 /// A leaf lock: never held while taking daemon settings, policy, or counter locks.
 #[derive(Default)]
 pub(crate) struct SkillsService {
+    opencode: Mutex<opencode::State>,
     runtime: Mutex<Runtime>,
 }
 
@@ -787,7 +788,7 @@ fn inventory_policy(shared: &DaemonShared) -> Result<InventoryPolicy, ()> {
     })
 }
 
-struct SnapshotScope {
+pub(crate) struct SnapshotScope {
     flags: u64,
     cleared: u64,
     analysis: bool,
@@ -795,7 +796,7 @@ struct SnapshotScope {
 }
 
 impl SnapshotScope {
-    fn capture(shared: &DaemonShared) -> Option<Self> {
+    pub(crate) fn capture(shared: &DaemonShared) -> Option<Self> {
         // Each guard ends before acquiring the next daemon lock.
         let flags = shared.feature_flags.generation();
         let cleared = shared.insights_counter.clear_generation();
@@ -809,7 +810,7 @@ impl SnapshotScope {
         })
     }
 
-    fn is_current(&self, shared: &DaemonShared) -> bool {
+    pub(crate) fn is_current(&self, shared: &DaemonShared) -> bool {
         feature_enabled(shared)
             && self.flags == shared.feature_flags.generation()
             && self.cleared == shared.insights_counter.clear_generation()
@@ -1036,8 +1037,12 @@ fn updates(inventory: &Inventory, state: &PublicState, now: DateTime<Utc>) -> Ve
 }
 
 mod detail;
+pub(crate) mod opencode;
 
 pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
+    if req.params.get("session_ref").is_some() {
+        return super::run_blocking(|| opencode::detail(shared, req));
+    }
     if req.params.get("skill_id").is_some() {
         return super::run_blocking(|| detail::handle(shared, req));
     }

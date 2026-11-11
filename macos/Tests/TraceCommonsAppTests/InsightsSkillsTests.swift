@@ -4,6 +4,38 @@ import TCShellCore
 
 @MainActor
 final class InsightsSkillsTests: XCTestCase {
+    func testDirectAndDelegatedUsageRemainSeparateForOneInstallation() {
+        let model = InsightsSkillsModel()
+        let skill = DaemonData.InstalledSkill(id: "local", name: "review", description: "", agent: "opencode", scope: "global", location: "local", sha256: "hash")
+        let direct = DaemonData.SkillsUsageRow(name: "review", agent: "opencode", invocations: 1, loads: 0, sessions: 1)
+        let delegated = DaemonData.SkillsUsageRow(name: "review", agent: "opencode", invocations: 2, loads: 0, sessions: 1,
+            population: "delegated", evidence: [.init(sessionRef: "child", parentSessionRef: "parent"), .init(sessionRef: "child", parentSessionRef: "parent")])
+        let snapshot = DaemonData.SkillsSnapshot(inventory: .init(skills: [skill]), usage: .init(enabled: true, skills: [direct, delegated], coverage: [.init(agent: "opencode", status: "explicit_invocations")]))
+        XCTAssertEqual(model.usageRows(for: skill, in: snapshot).count, 2)
+        XCTAssertNil(model.usage(for: skill, in: snapshot), "Do not combine direct and delegated trace totals")
+        XCTAssertEqual(model.evidenceLinks(for: delegated), [.init(sessionRef: "child", parentSessionRef: "parent")])
+        XCTAssertEqual(delegated.sessions, 1, "Parent context is not another observed trace")
+    }
+
+    func testPartialOpenCodeCoverageCannotClaimNoUsage() {
+        let model = InsightsSkillsModel()
+        let skill = DaemonData.InstalledSkill(id: "local", name: "review", description: "", agent: "opencode", scope: "global", location: "local", sha256: "hash")
+        for status in ["partial", "pending", "unknown"] {
+            let snapshot = DaemonData.SkillsSnapshot(inventory: .init(skills: [skill]), usage: .init(enabled: true, lastAnalysisAt: "today", partial: false, coverage: [.init(agent: "opencode", status: status)]))
+            XCTAssertEqual(model.usageState(for: skill, in: snapshot), "skills_usage_pending")
+        }
+    }
+
+    func testOpenCodeSkillEvidenceDoesNotRequireTokenDrill() async {
+        let model = InsightsSkillsModel(evidenceReader: { _ in
+            try JSONDecoder().decode(DaemonData.SkillEvidence.self, from: Data(#"{"enabled":true,"readable":true,"agent":"opencode","population":"unknown","skill_usage":{"coverage":"explicit_invocations","partial":true,"skills":[{"name":"review","invocations":1,"loads":0}]}}"#.utf8))
+        })
+        await model.loadEvidence("os.opaque")
+        XCTAssertFalse(model.evidenceFailure)
+        XCTAssertNil(model.evidence?.session)
+        XCTAssertEqual(model.evidence?.skillUsage?.skills.first?.name, "review")
+    }
+
     func testInventorySearchFiltersAndUsageSort() {
         let model = InsightsSkillsModel()
         let alpha = DaemonData.InstalledSkill(id: "a", name: "Alpha", description: "Reviews code", agent: "codex", scope: "global", location: "hidden", sha256: "a")
@@ -234,12 +266,12 @@ final class InsightsSkillsTests: XCTestCase {
     func testLoadsOnlyDoesNotPresentAnUnknownInvocationCountAsZero() {
         let model = InsightsSkillsModel(copy: ["skills_invocations": "{count} invocations",
             "skills_no_invocations": "No observed invocations", "skills_loads": "{count} loads",
-            "skills_sessions": "{count} sessions"])
+            "skills_sessions": "{count} traces"])
         let row = DaemonData.SkillsUsageRow(name: "review", agent: "codex", invocations: 0, loads: 3, sessions: 2)
         XCTAssertEqual(model.usageSummary(row, coverage: [.init(agent: "codex", status: "loads_only")]),
-                       "3 loads · 2 sessions")
+                       "3 loads · 2 traces")
         XCTAssertEqual(model.usageSummary(row, coverage: [.init(agent: "codex", status: "explicit_invocations")]),
-                       "No observed invocations · 3 loads · 2 sessions")
+                       "No observed invocations · 3 loads · 2 traces")
     }
 
     func testExplicitInvocationCoverageDoesNotPresentUnobservedClaudeLoadsAsZero() {

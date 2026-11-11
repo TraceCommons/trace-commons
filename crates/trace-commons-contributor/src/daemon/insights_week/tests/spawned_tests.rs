@@ -274,3 +274,210 @@ fn a_store_with_no_sub_agents_is_written_as_before() {
     let text = f.rows_text();
     assert!(!text.contains("spawned"), "{text}");
 }
+
+fn run_family_skills(f: &Fixture, family: &Family) -> PassSummary {
+    f.pass
+        .run_pass_from(
+            std::slice::from_ref(&family.parent),
+            &family.spawned,
+            &NeverFolders::NONE,
+            now(),
+            QUIET,
+            &mut |_| (PROJECT.to_owned(), false),
+            f.pass.cleared.load(Ordering::SeqCst),
+            true,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn skills_backfill_children_separately_and_resolve_only_permitted_family() {
+    let f = Fixture::new();
+    let mut fam = family(&f, "skills");
+    let invocation = serde_json::json!({
+        "type":"assistant", "timestamp": now(),
+        "message":{"content":[{"type":"tool_use","id":"skill-1","name":"Skill","input":{"skill":"review"}}]}
+    });
+    for candidate in std::iter::once(&mut fam.parent)
+        .chain(fam.spawned.iter_mut().map(|child| &mut child.candidate))
+    {
+        let mut bytes = std::fs::read(&candidate.path).unwrap();
+        bytes.extend_from_slice(format!("\n{invocation}\n").as_bytes());
+        std::fs::write(&candidate.path, bytes).unwrap();
+        candidate.size_bytes = std::fs::metadata(&candidate.path).unwrap().len();
+    }
+    run_family(&f, std::slice::from_ref(&fam.parent), &fam.spawned, false);
+    let unknown = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+    assert_eq!(unknown["usage"]["delegated_sessions_unknown"], 2);
+    let before = f.week(&[]);
+    let backfill = run_family_skills(&f, &fam);
+    assert_eq!(backfill.read, 1);
+    assert_eq!(backfill.spawned_read, 2);
+    let unchanged = run_family_skills(&f, &fam);
+    assert_eq!(unchanged.read, 0);
+    assert_eq!(unchanged.spawned_read, 0);
+    let after = f.week(&[]);
+    // Backfill replaces rows and intentionally invalidates their old opaque
+    // references. Every accounting field must remain identical.
+    let mut before_rollup = before["rollup"].clone();
+    let mut after_rollup = after["rollup"].clone();
+    for rollup in [&mut before_rollup, &mut after_rollup] {
+        for session in rollup["sessions"].as_array_mut().unwrap() {
+            assert!(
+                session
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("session_ref")
+                    .is_some()
+            );
+        }
+    }
+    assert_eq!(before_rollup, after_rollup);
+    let usage = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+    assert_eq!(usage["usage"]["sessions_observed"], 1);
+    assert_eq!(usage["usage"]["delegated_sessions_observed"], 2);
+    assert_eq!(usage["usage"]["delegated_sessions_unknown"], 0);
+    let rows = usage["usage"]["skills"].as_array().unwrap();
+    let direct = rows
+        .iter()
+        .find(|row| row["population"] == "direct")
+        .unwrap();
+    let delegated = rows
+        .iter()
+        .find(|row| row["population"] == "delegated")
+        .unwrap();
+    assert_eq!(direct["invocations"], 1);
+    assert_eq!(delegated["invocations"], 2);
+    assert_eq!(
+        delegated["parent_session_refs"][0],
+        direct["session_refs"][0]
+    );
+    let reference = delegated["session_refs"][0].as_str().unwrap();
+    assert!(reference.starts_with('c'));
+    assert!(
+        f.pass
+            .drill_value(true, reference, &NeverFolders::NONE, utc())
+            .is_ok()
+    );
+    assert!(
+        f.pass
+            .drill_value(true, reference, &NeverFolders::Every, utc())
+            .is_err()
+    );
+    let key = f.pass.keys.load().unwrap().unwrap();
+    let retained = store(&f);
+    assert!(
+        find_listed(
+            &key,
+            &retained,
+            &never_digests(&key, &NeverFolders::NONE),
+            reference
+        )
+        .is_none()
+    );
+    let mut orphaned = (*retained).clone();
+    orphaned.rows.clear();
+    f.pass.save(orphaned).unwrap();
+    assert!(
+        f.pass
+            .drill_value(true, reference, &NeverFolders::NONE, utc())
+            .is_err()
+    );
+    assert!(
+        f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"]["skills"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn skills_deferred_children_are_unknown_until_their_own_read() {
+    let f = Fixture::new();
+    let mut fam = family(&f, "pending");
+    fam.spawned[0].candidate.modified_at = now() - Duration::seconds(1);
+    let summary = run_family_skills(&f, &fam);
+    assert_eq!(summary.spawned_read, 1);
+    let usage = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+    assert_eq!(usage["usage"]["delegated_sessions_observed"], 1);
+    assert_eq!(usage["usage"]["delegated_sessions_unknown"], 1);
+    assert_eq!(usage["usage"]["partial"], true);
+}
+
+#[test]
+fn child_drill_rpc_requires_skills_before_enable_and_after_disable() {
+    use crate::daemon::insights_sessions::handle_session_drill;
+    use crate::daemon::ipc::Request;
+
+    let f = Fixture::new();
+    let fam = family(&f, "rpc-scope");
+    run_family_skills(&f, &fam);
+    let tag = f.pass.store_tag();
+    let retained = store(&f);
+    let parent = retained.rows.values().next().unwrap().listed_reference(tag);
+    let child = format!(
+        "c{}.{tag}",
+        retained.spawned.values().next().unwrap().row.seq
+    );
+    let (_dir, config) = crate::config::tests_support::temp_store();
+    let mut shared = DaemonShared::load(config).unwrap();
+    shared.insights_counter = f.pass;
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    let registry = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "registry_version": 1,
+        "flags": {"insights_skills": {"description": "Test skills", "owner": "tests", "class": "product",
+            "default": false, "required_capabilities": [], "timing": "live"}}
+    })).unwrap();
+    let profile = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "registry_version": 1, "environment": "staging",
+        "capabilities": [], "remote_enable": ["insights_skills"], "signing_keys": []
+    }))
+    .unwrap();
+    let flags_dir = tempfile::tempdir().unwrap();
+    shared.feature_flags = crate::feature_flags::Runtime::open(
+        registry,
+        crate::feature_flags::test_signing::pin(profile),
+        flags_dir.path(),
+        now(),
+    )
+    .unwrap();
+    let drill = |reference: &str| {
+        handle_session_drill(
+            &shared,
+            &Request {
+                id: 1,
+                method: "insights_session_drill".into(),
+                params: serde_json::json!({"session_ref": reference, "tz": 0}),
+            },
+        )
+    };
+    let accept = |revision, on| {
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "environment": "staging", "revision": revision,
+            "issued_at": now(), "expires_at": now() + Duration::hours(1),
+            "flags": {"insights_skills": on}
+        }))
+        .unwrap();
+        shared
+            .feature_flags
+            .accept(&crate::feature_flags::test_signing::sign(&manifest), now())
+            .unwrap();
+    };
+    // The child exists for other local analytics, but a guessed reference
+    // must not bypass a flag that has never been enabled.
+    assert_eq!(
+        drill(&child).error.unwrap().message,
+        crate::daemon::insights_sessions::ERR_SESSION_UNKNOWN
+    );
+    assert!(drill(&parent).result.unwrap()["session"].is_object());
+    accept(1, true);
+    assert!(drill(&child).result.unwrap()["session"].is_object());
+    accept(2, false);
+    assert_eq!(
+        drill(&child).error.unwrap().message,
+        crate::daemon::insights_sessions::ERR_SESSION_UNKNOWN
+    );
+    assert!(drill(&parent).result.unwrap()["session"].is_object());
+}

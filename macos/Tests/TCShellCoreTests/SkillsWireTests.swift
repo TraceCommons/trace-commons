@@ -15,6 +15,59 @@ final class SkillsWireTests: XCTestCase {
         XCTAssertEqual(snapshot.followedPublishers, ["owner"])
     }
 
+    func testDelegatedEvidencePreservesPopulationAndParentWithoutAddingTotals() throws {
+        let json = #"""
+        {"enabled":true,"usage":{"sessions_observed":2,"delegated_sessions_observed":3,"delegated_sessions_unknown":1,"unclassified_sessions_observed":4,"unclassified_sessions_unknown":2,"skills":[
+          {"name":"review","agent":"opencode","population":"direct","invocations":1,"loads":0,"sessions":1},
+          {"name":"review","agent":"opencode","population":"delegated","invocations":2,"loads":0,"sessions":1,"parent_session_refs":["parent"],"evidence":[{"session_ref":"child","parent_session_ref":"parent"}]}]}}
+        """#
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.usage.sessionsObserved, 2)
+        XCTAssertEqual(snapshot.usage.delegatedSessionsObserved, 3)
+        XCTAssertEqual(snapshot.usage.delegatedSessionsUnknown, 1)
+        XCTAssertEqual(snapshot.usage.unclassifiedSessionsObserved, 4)
+        XCTAssertEqual(snapshot.usage.unclassifiedSessionsUnknown, 2)
+        let rows = snapshot.usage.skills
+        XCTAssertNotEqual(rows[0].identity, rows[1].identity)
+        XCTAssertEqual(rows[1].evidence.first?.parentSessionRef, "parent")
+        XCTAssertEqual(rows[1].evidence.first?.sessionRef, "child")
+        XCTAssertEqual(rows[1].sessions, 1)
+        XCTAssertEqual(try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+    }
+
+    func testOlderUsageDoesNotClaimDelegatedCoverage() throws {
+        let json = #"{"usage":{"skills":[{"name":"review","agent":"codex","invocations":0,"loads":1,"sessions":1}]}}"#
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
+        XCTAssertNil(snapshot.usage.delegatedSessionsObserved)
+        XCTAssertNil(snapshot.usage.delegatedSessionsUnknown)
+        XCTAssertEqual(snapshot.usage.skills.first?.population, "direct")
+        XCTAssertEqual(snapshot.usage.skills.first?.evidence, [])
+    }
+
+    func testEvidenceClientPreservesOpaqueChildAndParentReferences() async throws {
+        let transport = FakeTransport(response: #"{"id":0,"result":{"enabled":true,"readable":true,"session":{"source":"claude_code"}}}"#)
+        let client = LiveDaemonClient(transport: transport)
+        for reference in ["c42.storetag", "parent-storetag"] {
+            _ = try await client.skillEvidence(sessionRef: reference)
+        }
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_session_drill", "insights_session_drill"])
+        let parameters = try transport.calls.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.params.utf8)) as? [String: Any]) }
+        XCTAssertEqual(parameters[0]["session_ref"] as? String, "c42.storetag")
+        XCTAssertEqual(parameters[1]["session_ref"] as? String, "parent-storetag")
+    }
+
+    func testOpenCodeEvidenceUsesSkillOnlyDrill() async throws {
+        let transport = FakeTransport(response: #"{"id":0,"result":{"enabled":true,"readable":true,"agent":"opencode","population":"unknown","skill_usage":{"coverage":"explicit_invocations","partial":true,"skills":[{"name":"review","invocations":2,"loads":0}]}}}"#)
+        let result = try await LiveDaemonClient(transport: transport).skillEvidence(sessionRef: "os.opaque")
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_skills"])
+        let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(transport.calls[0].params.utf8)) as? [String: Any])
+        XCTAssertEqual(parameters["session_ref"] as? String, "os.opaque")
+        XCTAssertNil(result.session)
+        XCTAssertEqual(result.population, "unknown")
+        XCTAssertEqual(result.skillUsage?.skills.first?.invocations, 2)
+        XCTAssertEqual(result.skillUsage?.partial, true)
+    }
+
     func testDisabledOlderShapeHasConservativeDefaults() throws {
         let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(#"{"enabled":false}"#.utf8))
         XCTAssertFalse(snapshot.enabled)
