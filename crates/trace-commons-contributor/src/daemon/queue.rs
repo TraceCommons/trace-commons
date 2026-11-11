@@ -810,6 +810,7 @@ impl QueueEntry {
                 crate::submit::REASON_TRANSIENT_REDACTION
                     | crate::submit::REASON_WITNESS_SATURATED
                     | crate::submit::REASON_RATE_LIMITED
+                    | REASON_ACCOUNT_LIMIT_REACHED
                     | crate::submit::REASON_INGEST_UNREACHABLE
                     | super::health::LABEL_CLAIM_MINT_FAILED
             )
@@ -821,6 +822,15 @@ impl QueueEntry {
                 trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
                     == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
             })
+    }
+
+    /// Whether this entry is approved and waiting, at `now`, for an account
+    /// allowance ingest said was spent. While any entry is, the upload pass
+    /// sends nothing (`daemon::account_allowance_held`).
+    pub(crate) fn waiting_on_account_allowance(&self, now: DateTime<Utc>) -> bool {
+        self.state == QueueState::Approved
+            && self.reason_label.as_deref() == Some(REASON_ACCOUNT_LIMIT_REACHED)
+            && self.retry_after.is_some_and(|due| due > now)
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -915,6 +925,13 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// this exact string. Changing it in one place and not the other would
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
+
+/// Ingest refused the upload because the account's allowance for the period
+/// is spent (`AdmissionRefusal::AccountLimitReached`, in the server's own
+/// spelling). Not a verdict on the session: the entry keeps its approval and
+/// waits, `Approved` under this label, until `retry_after`.
+pub const REASON_ACCOUNT_LIMIT_REACHED: &str =
+    trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
 
 /// The reason label `keep` records: the contributor chose "Keep on this Mac"
 /// for this session (K5, open decision #4 in #1118).
@@ -2314,6 +2331,52 @@ impl Queue {
         changed
     }
 
+    /// Send again, once its account allowance allows, every approved
+    /// session an older build ended `Failed` with `account_limit_reached`,
+    /// returning how many moved.
+    ///
+    /// A spent allowance says nothing about the session: ingest refuses
+    /// every send until the period resets. Builds before this rule recorded
+    /// it as a final failure, so those sessions were never sent. Each goes
+    /// back to `Approved` under the same label, due `now`, with every term
+    /// of its approval as it was, so nobody is asked again and the usual
+    /// send-time checks still apply. The upload pass then holds the queue
+    /// again if the allowance is still spent.
+    ///
+    /// Only `Failed` entries with exactly this label that still carry an
+    /// approval (`approved_scopes`) move: a dismissed, kept or withdrawn
+    /// entry is in another state, and nothing is approved on anyone's
+    /// behalf here. One whose file already has a live entry stays, as in
+    /// [`Self::reoffer_refused_for_reason`]: the session grew and is offered
+    /// as it is now. Idempotent: a moved entry is no longer `Failed`.
+    pub fn retry_account_limit_failures(&mut self, now: DateTime<Utc>) -> usize {
+        let limit = REASON_ACCOUNT_LIMIT_REACHED;
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
+        let mut moved = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Failed
+                && e.reason_label.as_deref() == Some(limit)
+                && e.approved_scopes.is_some()
+                && !live_paths.contains(&e.path)
+            {
+                e.state = QueueState::Approved;
+                e.retry_after = Some(now);
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     /// Revoke an unattended approval and pin the certified review the
     /// witness has just produced for it, so a person opening the entry sees
     /// those bytes instead of running the witness again (the spec's R5).
@@ -3438,6 +3501,109 @@ mod tests {
             discovered_at: at(discovered),
             ..Default::default()
         }
+    }
+
+    /// Older builds ended an approved session `Failed` when the account's
+    /// allowance was spent. Such an entry goes back to approved and waiting,
+    /// due now, with its approval as it was; once only, since it is then no
+    /// longer `Failed`. A dismissed or kept entry, one whose approval was
+    /// revoked, one with another failure, and one whose file already has a
+    /// live entry all stay where they are.
+    #[test]
+    fn an_account_limit_failure_from_an_older_build_waits_to_be_sent_again() {
+        let limit =
+            trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
+        let now = at("2026-11-11T00:00:00Z");
+        let mut failed = entry("failed", "2026-11-01T00:00:00Z");
+        failed.path = PathBuf::from("/s/failed.jsonl");
+        let mut by_hand = entry("by-hand", "2026-11-01T00:00:00Z");
+        by_hand.path = PathBuf::from("/s/by-hand.jsonl");
+        let mut dismissed = entry("dismissed", "2026-11-01T00:00:00Z");
+        dismissed.path = PathBuf::from("/s/dismissed.jsonl");
+        let mut kept = entry("kept", "2026-11-01T00:00:00Z");
+        kept.path = PathBuf::from("/s/kept.jsonl");
+        let mut revoked = entry("revoked", "2026-11-01T00:00:00Z");
+        revoked.path = PathBuf::from("/s/revoked.jsonl");
+        let mut other = entry("other", "2026-11-01T00:00:00Z");
+        other.path = PathBuf::from("/s/other.jsonl");
+        let mut stale = entry("stale", "2026-11-01T00:00:00Z");
+        stale.path = PathBuf::from("/s/grew.jsonl");
+        let mut live = entry("live", "2026-11-02T00:00:00Z");
+        live.path = PathBuf::from("/s/grew.jsonl");
+        let mut q = Queue::new();
+        for e in [
+            &failed, &by_hand, &dismissed, &kept, &revoked, &other, &stale, &live,
+        ] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        let scopes = vec!["debugging_evaluation".to_string()];
+        for e in [&failed, &dismissed, &kept, &other, &stale] {
+            assert!(q.approve_unattended(e.entry_id, &scopes, Some("inputs")));
+        }
+        let approved_at = at("2026-11-02T00:00:00Z");
+        assert!(q.approve(
+            by_hand.entry_id,
+            &scopes,
+            None,
+            None,
+            None,
+            Some(approved_at)
+        ));
+        for e in [&failed, &by_hand, &stale] {
+            q.record_attempt(e.entry_id, None);
+            q.set_state(e.entry_id, QueueState::Failed, Some(limit.into()));
+        }
+        q.set_state(
+            dismissed.entry_id,
+            QueueState::Refused,
+            Some(REASON_DISMISSED.into()),
+        );
+        q.set_state(kept.entry_id, QueueState::Refused, Some(REASON_KEPT.into()));
+        // Failed with the label, but nothing says it was approved.
+        q.set_state(revoked.entry_id, QueueState::Failed, Some(limit.into()));
+        q.set_state(
+            other.entry_id,
+            QueueState::Failed,
+            Some("admission_refused".into()),
+        );
+        let before = q.clone();
+
+        assert_eq!(q.retry_account_limit_failures(now), 2);
+        for id in [failed.entry_id, by_hand.entry_id] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Approved, "{e:?}");
+            assert_eq!(e.reason_label.as_deref(), Some(limit));
+            assert_eq!(e.retry_after, Some(now));
+            assert!(e.ready_for_upload(now));
+            assert_eq!(e.approved_scopes, was.approved_scopes);
+            assert_eq!(e.approved_inputs, was.approved_inputs);
+            assert_eq!(e.approved_at, was.approved_at);
+            assert_eq!(e.approved_unattended, was.approved_unattended);
+        }
+        assert!(q.get(failed.entry_id).unwrap().approved_unattended);
+        assert_eq!(
+            q.get(by_hand.entry_id).unwrap().approved_at,
+            Some(approved_at)
+        );
+        for id in [
+            dismissed.entry_id,
+            kept.entry_id,
+            revoked.entry_id,
+            other.entry_id,
+            stale.entry_id,
+            live.entry_id,
+        ] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(
+                (e.state, e.reason_label.as_deref()),
+                (was.state, was.reason_label.as_deref()),
+                "{e:?}"
+            );
+        }
+
+        assert_eq!(q.retry_account_limit_failures(now), 0, "once only");
     }
 
     /// A trace refused because its redaction panicked is offered again once

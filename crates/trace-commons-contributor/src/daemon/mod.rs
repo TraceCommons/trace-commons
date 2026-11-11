@@ -1106,6 +1106,49 @@ fn cancel_account_admission_on_refusal(shared: &ipc::DaemonShared, reason_label:
     }
 }
 
+/// How long an entry refused for a spent account allowance waits when
+/// ingest named no reset (an allowance with no period) and nothing else says
+/// when it might lift.
+const ACCOUNT_LIMIT_DEFAULT_RETRY: chrono::Duration = chrono::Duration::hours(1);
+
+/// How long to wait after an `account_limit_reached` refusal: the wait ingest
+/// named, else [`ACCOUNT_LIMIT_DEFAULT_RETRY`], capped at the status read's
+/// own longest hold (`account_admission::MAX_HOLD`), with a small random
+/// extra so contributors whose allowances reset together do not all return
+/// in the same second.
+fn account_limit_retry_wait(hint_secs: Option<u32>, random: u64) -> chrono::Duration {
+    let cap = u32::try_from(account_admission::MAX_HOLD.num_seconds()).unwrap_or(u32::MAX);
+    let default = u32::try_from(ACCOUNT_LIMIT_DEFAULT_RETRY.num_seconds()).unwrap_or(cap);
+    let hint = hint_secs.unwrap_or(default).clamp(1, cap);
+    chrono::Duration::seconds(i64::from(crate::retry_jitter::hint_with_extra_secs(
+        hint, cap, random,
+    )))
+}
+
+/// Whether the account's allowance is known to be spent at `now`, so the
+/// upload pass sends nothing: an entry is waiting out an
+/// `account_limit_reached` refusal (persisted, so it survives a restart), or
+/// the last status read said the allowance is spent until a time still
+/// ahead (`account_admission`). Every send would be refused until then;
+/// sending them anyway would spend a request a pass finding that out again.
+fn account_allowance_held(
+    shared: &ipc::DaemonShared,
+    cfg: &crate::config::ContributorConfig,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    shared
+        .account_admission
+        .spent_until(cfg)
+        .is_some_and(|until| until > now)
+        || shared
+            .queue
+            .lock()
+            .expect("queue lock")
+            .all()
+            .iter()
+            .any(|e| e.waiting_on_account_allowance(now))
+}
+
 /// The diagnostics event an upload stopped in flight records, label-only.
 pub(crate) const UPLOAD_STOPPED_EVENT: &str = "upload_stopped";
 
@@ -1443,6 +1486,11 @@ async fn drain_approved(
     if crate::config::consent_hold(Some(&cfg)).is_some() {
         return Ok(());
     }
+    // The account's allowance is spent: every entry stays approved, as it
+    // is, and goes once the period has reset.
+    if account_allowance_held(shared, &cfg, now) {
+        return Ok(());
+    }
     let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
         s.near_ai.clone()
@@ -1508,6 +1556,9 @@ async fn drain_approved(
     // one. Either ends the pass; what is left stays approved for the next.
     let mut claimed_this_pass: usize = 0;
     let mut rate_limited = false;
+    // Whether ingest refused an entry because the account's allowance is
+    // spent. Ends the pass the same way.
+    let mut account_limited = false;
     // Whether ingest or the issuer was unavailable for an entry this pass
     // (#1358). Ends the pass the same way.
     let mut outage = false;
@@ -1699,16 +1750,19 @@ async fn drain_approved(
             now,
             &observed_at,
             ctx.last_unavailable_retry_after(),
+            ctx.last_account_limit_retry_after(),
         );
         note_witness_blocked(shared, &applied);
         uploaded_this_pass |= applied.uploaded;
         rate_limited |= applied.rate_limited;
+        account_limited |= applied.account_limited;
         outage |= applied.outage;
         changed = true;
-        if rate_limited || outage {
-            // The limit is per device, not per session, and an outage is
-            // server-wide: every entry after this one would be turned away
-            // the same way. They stay approved, untouched, for the next pass.
+        if rate_limited || account_limited || outage {
+            // The limit is per device, not per session, the allowance is per
+            // account, and an outage is server-wide: every entry after this
+            // one would be turned away the same way. They stay approved,
+            // untouched, for the next pass.
             break;
         }
     }
@@ -1770,6 +1824,9 @@ struct AppliedDecision {
     witness_busy_until: Option<(chrono::DateTime<Utc>, u32)>,
     /// Ingest's rate limit refused this entry; the pass ends.
     rate_limited: bool,
+    /// Ingest refused this entry because the account's allowance is spent;
+    /// the pass ends.
+    account_limited: bool,
     /// Ingest or the issuer was unavailable; the pass ends.
     outage: bool,
     /// The witness kept this entry from being sent, and why
@@ -1810,6 +1867,7 @@ fn apply_upload_decision(
     now: chrono::DateTime<Utc>,
     observed_at: &dyn Fn() -> chrono::DateTime<Utc>,
     unavailable_retry_after: Option<u32>,
+    account_limit_retry_after: Option<u32>,
 ) -> AppliedDecision {
     let mut applied = AppliedDecision {
         witness_blocked: uploader::witness_blocked_label(&decision),
@@ -2007,6 +2065,25 @@ fn apply_upload_decision(
                     queue::QueueState::Approved,
                     Some(reason_label),
                 );
+            } else if reason_label == queue::REASON_ACCOUNT_LIMIT_REACHED {
+                // The account's allowance for the period is spent. Not a
+                // verdict on the session: it keeps its approval, and every
+                // guard a send re-runs, and waits until the allowance has
+                // reset. No attempt limit, since the wait is ingest's own.
+                // While it waits nothing else is sent either
+                // (`account_allowance_held`).
+                let retry_at = observed_at()
+                    + account_limit_retry_wait(
+                        account_limit_retry_after,
+                        crate::retry_jitter::random_u64(),
+                    );
+                q.record_attempt(entry.entry_id, Some(retry_at));
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(reason_label),
+                );
+                applied.account_limited = true;
             } else if let Some(kind) = transient_upload_kind(&reason_label) {
                 // Nothing was judged (#1358). The entry keeps its
                 // approval, and with it every guard a retry re-runs,
@@ -6015,6 +6092,195 @@ mod tests {
             due <= now + pass_took + uploader::BURST_WINDOW + chrono::Duration::seconds(1),
             "{due}"
         );
+    }
+
+    /// Ingest's `429 account_limit_reached` with this body.
+    fn account_limit_reply(body: serde_json::Value) -> Option<(StatusCode, serde_json::Value)> {
+        Some((StatusCode::TOO_MANY_REQUESTS, body))
+    }
+
+    /// The jitter `retry_jitter::hint_with_extra_secs` may add on top of a
+    /// wait, at most.
+    fn account_limit_extra() -> chrono::Duration {
+        chrono::Duration::seconds(i64::from(crate::retry_jitter::HINT_EXTRA_MAX_SECS))
+    }
+
+    /// A spent account allowance is not a verdict on the session: the entry
+    /// keeps its approval (and so is not asked about again) and waits for
+    /// the period ingest named, instead of ending `Failed`.
+    #[tokio::test]
+    async fn an_account_limit_refusal_keeps_the_approval_and_waits() {
+        let h = TransientRetryHarness::new().await;
+        let before = h.entry();
+        assert!(before.approved_unattended);
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 1800}),
+        );
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.reason_label.as_deref(), Some("account_limit_reached"));
+        assert!(held.approved_unattended, "{held:?}");
+        assert_eq!(held.approved_scopes, before.approved_scopes);
+        assert!(held.approved_scopes.is_some());
+        let due = held.retry_after.expect("a retry time");
+        let wait = chrono::Duration::seconds(1800);
+        assert!(
+            due >= now + wait && due <= now + pass_took + wait + account_limit_extra(),
+            "{due}"
+        );
+        assert!(!held.ready_for_upload(now + chrono::Duration::seconds(60)));
+    }
+
+    /// With no wait in the refusal and no hold from the status read, the
+    /// entry waits the bounded default.
+    #[tokio::test]
+    async fn an_account_limit_refusal_without_a_hint_waits_the_default() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() =
+            account_limit_reply(serde_json::json!({"error": "account_limit_reached"}));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        let due = held.retry_after.expect("a retry time");
+        let wait = ACCOUNT_LIMIT_DEFAULT_RETRY;
+        assert!(
+            due >= now + wait && due <= now + pass_took + wait + account_limit_extra(),
+            "{due}"
+        );
+    }
+
+    /// A status read that says the allowance is spent, with a reset time,
+    /// holds every upload until that time; then they go.
+    #[tokio::test]
+    async fn a_spent_allowance_from_the_status_read_holds_uploads_until_its_reset() {
+        let h = TransientRetryHarness::new().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        let now = TransientRetryHarness::now();
+        h.shared
+            .account_admission
+            .record_spent_for_test(&cfg, 7200, now);
+        h.pass(now).await;
+        h.pass(now + chrono::Duration::seconds(3600)).await;
+        assert_eq!(
+            h.uploads.load(Ordering::SeqCst),
+            0,
+            "held by the status read"
+        );
+        let waiting = h.entry();
+        assert_eq!(waiting.state, queue::QueueState::Approved, "{waiting:?}");
+        assert_eq!(waiting.attempts, 0, "nothing was tried");
+
+        h.pass(now + chrono::Duration::seconds(7200)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// A wait past a day is capped at a day, as the status read's hold is.
+    #[tokio::test]
+    async fn an_account_limit_wait_is_capped_at_a_day() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 30 * 86_400}),
+        );
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+        let due = h.entry().retry_after.expect("a retry time");
+        assert!(
+            due <= now + pass_took + account_admission::MAX_HOLD,
+            "{due}"
+        );
+        assert!(
+            due >= now + account_admission::MAX_HOLD - account_limit_extra(),
+            "{due}"
+        );
+    }
+
+    /// Once the wait has passed, the next pass sends the session again.
+    #[tokio::test]
+    async fn a_session_waiting_on_the_account_limit_is_sent_after_the_wait() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 600}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        let due = h.entry().retry_after.expect("a retry time");
+
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(due - chrono::Duration::seconds(1)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "not before the wait");
+        h.pass(due).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// While the allowance is known to be spent nothing else is sent: one
+    /// refusal holds the whole queue, so a backlog does not spend one
+    /// request a pass finding out again.
+    #[tokio::test]
+    async fn a_spent_account_allowance_holds_every_other_upload() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "0badc0de-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "second session, then mail alice.smith@example.org",
+        )
+        .await;
+        assert_eq!(
+            h.entries()
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            2
+        );
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 1800}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "the pass stops");
+        h.pass(now + chrono::Duration::seconds(60)).await;
+        h.pass(now + chrono::Duration::seconds(600)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "held until the wait");
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved),
+            "{:?}",
+            h.entries()
+        );
+    }
+
+    /// Every other admission refusal still ends the entry: a refusal of the
+    /// account, and the per-session evidence budget.
+    #[tokio::test]
+    async fn other_admission_refusals_still_end_failed() {
+        for (status, label) in [
+            (StatusCode::FORBIDDEN, "admission_refused"),
+            (StatusCode::TOO_MANY_REQUESTS, "admission_limit_reached"),
+        ] {
+            let h = TransientRetryHarness::new().await;
+            *h.ingest_reply.lock().unwrap() = Some((
+                status,
+                serde_json::json!({"error": label, "retry_after_seconds": 60}),
+            ));
+            h.pass(TransientRetryHarness::now()).await;
+            let ended = h.entry();
+            assert_eq!(ended.state, queue::QueueState::Failed, "{label}: {ended:?}");
+            assert_eq!(ended.reason_label.as_deref(), Some(label));
+        }
     }
 
     /// A hint past the cap is clamped rather than parking the session.
