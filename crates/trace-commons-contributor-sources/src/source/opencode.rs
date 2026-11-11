@@ -1,7 +1,7 @@
 //! OpenCode local session and JSON export reader.
 //!
 //! Native SQLite sessions are read through `opencode_db`; both readers accept
-//! the versions in [`READABLE_VERSIONS`], and exports also take the
+//! the versions in [`READABLE_RANGES`], and exports also take the
 //! structurally validated v2 session-transfer envelope.
 //! Neither source implies provider evidence or upload consent.
 //! A declared directory contains `.json` exports directly (not recursively).
@@ -24,23 +24,46 @@ use std::{
 mod v2;
 
 pub const QUALIFIED_VERSION: &str = "1.18.29";
-/// Every OpenCode version whose saved sessions both readers (exports and the
-/// native database) accept. Anything else is refused as
-/// [`UnsupportedExportVersion`]. 1.19.1 to 1.19.5 change no storage, schema,
-/// migration or export code against 1.19.0 (anomalyco/opencode, compare
-/// v1.19.0...v1.19.5: the storage-adjacent changes are app and TUI screens,
-/// one package version, and two deleted re-export modules). Add a release
-/// only after the same check.
-/// The user-facing list is `source_copy::OPENCODE_VERSION_DETAIL`.
-pub const READABLE_VERSIONS: &[&str] = &[
-    QUALIFIED_VERSION,
-    "1.19.0",
-    "1.19.1",
-    "1.19.2",
-    "1.19.3",
-    "1.19.4",
-    "1.19.5",
-];
+/// The OpenCode releases whose saved sessions both readers (exports and the
+/// native database) accept, as (minor, first patch, last patch) of 1.x.
+/// Anything else is refused as [`UnsupportedExportVersion`].
+///
+/// - 1.14.28 and 1.14.29: same `session`/`message`/`part` tables and export
+///   shape (anomalyco/opencode `packages/opencode/src/session/session.sql.ts`
+///   and `cli/cmd/export.ts` at v1.14.29), and real sessions written by both
+///   read with every tool call matched by its result.
+/// - 1.18.0 to 1.18.35: `packages/core/src/session/sql.ts`,
+///   `packages/schema/src/v1/session.ts`, `cli/cmd/export.ts` and the
+///   migration list are byte-identical to 1.18.29 ([`QUALIFIED_VERSION`]).
+/// - 1.19.0 to 1.19.5: no storage, schema, migration or export change against
+///   1.19.0, which matches 1.18.29 in those files.
+///
+/// Add a release only after the same check. The user-facing list is
+/// `source_copy::OPENCODE_VERSION_DETAIL`, tied to this by a test.
+pub const READABLE_RANGES: &[(u32, u32, u32)] = &[(14, 28, 29), (18, 0, 35), (19, 0, 5)];
+
+/// Whether `version` is exactly a release in [`READABLE_RANGES`], written as
+/// plain `1.<minor>.<patch>` with no leading zeros or suffix.
+pub fn is_readable(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let number = |part: &str| -> Option<u32> {
+        let plain = !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'));
+        plain.then(|| part.parse().ok()).flatten()
+    };
+    let (Some(1), Some(minor), Some(patch)) = (number(major), number(minor), number(patch)) else {
+        return false;
+    };
+    READABLE_RANGES
+        .iter()
+        .any(|&(m, first, last)| m == minor && (first..=last).contains(&patch))
+}
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
 /// Also caps the flat count `source::discovery::describe_opencode` gives for
@@ -380,7 +403,7 @@ fn parse_export_with_record_budget(
         return v2::parse(&doc, bytes, record_budget);
     }
     let session_id = id(info, "id")?;
-    if !READABLE_VERSIONS.contains(&field(info, "version")?) {
+    if !is_readable(field(info, "version")?) {
         return Err(UnsupportedExportVersion.into());
     }
     let cwd = field(info, "directory")?.to_owned();
@@ -668,13 +691,17 @@ mod tests {
             "opencode_malformed_json"
         );
         assert!(mutated(|v| v["info"]["version"] = "99.0".into()).is_err());
-        for version in ["1.19.1", "1.19.2", "1.19.3", "1.19.4", "1.19.5"] {
+        for version in [
+            "1.14.28", "1.14.29", "1.18.0", "1.18.35", "1.19.1", "1.19.5",
+        ] {
             assert!(
                 mutated(|v| v["info"]["version"] = version.into()).is_ok(),
                 "{version}"
             );
         }
-        for version in ["1.19.99", "1.20.0", "2.0.0", "2.1.4"] {
+        for version in [
+            "1.14.27", "1.17.9", "1.18.36", "1.19.99", "1.20.0", "2.0.0", "2.1.4",
+        ] {
             assert!(
                 mutated(|v| v["info"]["version"] = version.into()).is_err(),
                 "{version}"

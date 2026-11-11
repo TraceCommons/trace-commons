@@ -19,7 +19,7 @@ public class HealthCopyTests
         var health = Assert.IsType<HealthCopy>(HealthCopy.ForLabel("opencode-export-version-unsupported"));
         Assert.Equal(shared.OpenCodeVersionTitle, health.Title);
         Assert.Equal(shared.OpenCodeVersionDetail, health.Detail);
-        Assert.Contains("OpenCode 1.18.29 and 1.19.0 to 1.19.5", health.Detail);
+        Assert.Contains("OpenCode 1.14.28 to 1.14.29, 1.18.0 to 1.18.35 and 1.19.0 to 1.19.5", health.Detail);
         Assert.DoesNotContain("session", health.Title, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("database", health.Detail);
         Assert.Null(health.ActionLabel);

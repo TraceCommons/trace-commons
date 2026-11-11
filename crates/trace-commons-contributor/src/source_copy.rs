@@ -185,13 +185,13 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
 
 /// Refusal for traces saved by an OpenCode version the reader does not
 /// accept, shared by all native health surfaces. The versions match the
-/// readers' `READABLE_VERSIONS` in `trace-commons-contributor-sources`.
+/// readers' `READABLE_RANGES` in `trace-commons-contributor-sources`.
 /// Approved by the owner 2026-11-10; "this app" per the 2026-11-02 rule that
 /// the commons' name never appears in user-visible copy.
 pub const OPENCODE_VERSION_TITLE: &str =
     "Some OpenCode traces are from a version this app can't read yet.";
-pub const OPENCODE_VERSION_DETAIL: &str = "This app reads traces saved by OpenCode 1.18.29 and \
-     1.19.0 to 1.19.5. Traces from other versions are left out.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This app reads traces saved by OpenCode 1.14.28 to \
+     1.14.29, 1.18.0 to 1.18.35 and 1.19.0 to 1.19.5. Traces from other versions are left out.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -393,31 +393,15 @@ mod tests {
         assert_ne!(row["watching"], row["off"]);
     }
 
-    /// The banner's version list is the readers' list: 1.18.29, then the
-    /// contiguous 1.19 releases written as a range.
+    /// The banner's version list is the readers' ranges, in order, each
+    /// written "1.m.first to 1.m.last".
     fn assert_opencode_detail_names_every_readable_version() {
-        let versions = crate::source::opencode::READABLE_VERSIONS;
-        let minors: Vec<&str> = versions
+        let ranges: Vec<String> = crate::source::opencode::READABLE_RANGES
             .iter()
-            .copied()
-            .filter(|v| v.starts_with("1.19."))
+            .map(|(m, first, last)| format!("1.{m}.{first} to 1.{m}.{last}"))
             .collect();
-        let others: Vec<&str> = versions
-            .iter()
-            .copied()
-            .filter(|v| !v.starts_with("1.19."))
-            .collect();
-        assert_eq!(others, ["1.18.29"]);
-        let patches: Vec<u32> = minors.iter().map(|v| v[5..].parse().unwrap()).collect();
-        assert!(
-            patches.windows(2).all(|w| w[1] == w[0] + 1),
-            "1.19 releases must be contiguous to be written as a range"
-        );
-        let expected = format!(
-            "OpenCode 1.18.29 and {} to {}.",
-            minors[0],
-            minors[minors.len() - 1]
-        );
+        let (last, rest) = ranges.split_last().unwrap();
+        let expected = format!("OpenCode {} and {last}.", rest.join(", "));
         assert!(
             OPENCODE_VERSION_DETAIL.contains(&expected),
             "{OPENCODE_VERSION_DETAIL} lacks {expected}"
