@@ -1,11 +1,13 @@
-//! Bounded, read-only reader for the qualified OpenCode SQLite transcript schema.
-//! Only session/message/part data is read; account and credential tables are never queried.
+//! Bounded, read-only reader for the qualified OpenCode SQLite transcript schemas.
+//! OpenCode 1.x sessions are read from `session`/`message`/`part`; OpenCode 2
+//! sessions from `session_v2`/`session_message`, gated on the applied
+//! migrations in `migration`. Account and credential tables are never queried.
 //! SQLite may coordinate readers through an existing WAL shared-memory file.
 use super::{SOURCE_OPENCODE, SessionRef, SessionTooLarge, SessionTranscript};
 use anyhow::{Result, anyhow, bail};
 use chrono::DateTime;
 use rusqlite::{Connection, OpenFlags, Transaction};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -178,68 +180,296 @@ fn open(root: &Path) -> Result<Option<Reader>> {
         snapshot,
     }))
 }
-fn schema(tx: &Transaction<'_>) -> Result<()> {
+/// Every migration id OpenCode 1.18.29 through 2.1.4 records in its
+/// `migration` table, in order: the list in
+/// `packages/core/src/database/migration.gen.ts` at anomalyco/opencode tag
+/// v2.1.4. Its first 38 are 1.19.5's whole list; the last 12 are 2.0.0's to
+/// 2.1.4's. A 2.x store that has applied any other migration has a schema
+/// nobody checked, so it is refused rather than guessed at. Add ids only
+/// after reading the new migrations' effect on `session_v2` and
+/// `session_message`.
+const KNOWN_MIGRATIONS: &[&str] = &[
+    "20260127222353_familiar_lady_ursula",
+    "20260211171708_add_project_commands",
+    "20260213144116_wakeful_the_professor",
+    "20260225215848_workspace",
+    "20260227213759_add_session_workspace_id",
+    "20260228203230_blue_harpoon",
+    "20260303231226_add_workspace_fields",
+    "20260309230000_move_org_to_state",
+    "20260312043431_session_message_cursor",
+    "20260323234822_events",
+    "20260410174513_workspace-name",
+    "20260413175956_chief_energizer",
+    "20260423070820_add_icon_url_override",
+    "20260427172553_slow_nightmare",
+    "20260428004200_add_session_path",
+    "20260501142318_next_venus",
+    "20260504145000_add_sync_owner",
+    "20260507164347_add_workspace_time",
+    "20260510033149_session_usage",
+    "20260511000411_data_migration_state",
+    "20260511173437_session-metadata",
+    "20260601010001_normalize_storage_paths",
+    "20260601202201_amazing_prowler",
+    "20260602002951_lowly_union_jack",
+    "20260602182828_add_project_directories",
+    "20260603001617_session_message_projection_indexes",
+    "20260603040000_session_message_projection_order",
+    "20260603141458_session_input_inbox",
+    "20260603160727_jittery_ezekiel_stane",
+    "20260604172448_event_sourced_session_input",
+    "20260605003541_add_session_context_snapshot",
+    "20260605042240_add_context_epoch_agent",
+    "20260611035744_credential",
+    "20260611192811_lush_chimera",
+    "20260612174303_project_dir_strategy",
+    "20260622142730_simplify_session_context_epoch",
+    "20260622170816_reset_v2_session_state",
+    "20260622202450_simplify_session_input",
+    "20260804233008_loose_psylocke",
+    "20260805200742_import_legacy_credentials",
+    "20260808023530_workspace_domain",
+    "20260811161259_execution_claim_attempts",
+    "20260812181746_session_inbox",
+    "20260812213948_worktree",
+    "20260819222447_session_viewed_state",
+    "20260823191254_nullable_workspace_binding",
+    "20260910120000_clear_v1_session_permission",
+    "20260923013825_project_time_active",
+    "20261007190000_azure_cli_external_credential",
+    "20261010180456_project_time_archived",
+];
+const MIGRATION_BUDGET: u64 = 4096;
+const LEGACY_TABLES: [(&str, &[&str]); 3] = [
+    (
+        "session",
+        &["id", "directory", "version", "time_created", "time_updated"],
+    ),
+    (
+        "message",
+        &["id", "session_id", "time_created", "time_updated", "data"],
+    ),
+    (
+        "part",
+        &[
+            "id",
+            "session_id",
+            "message_id",
+            "time_created",
+            "time_updated",
+            "data",
+        ],
+    ),
+];
+/// The OpenCode 2 tables and the columns read from them
+/// (`packages/core/src/session/sql.ts` at v2.1.4).
+const V2_TABLES: [(&str, &[&str]); 3] = [
+    (
+        "session_v2",
+        &[
+            "id",
+            "project_id",
+            "directory",
+            "version",
+            "cost",
+            "tokens_input",
+            "tokens_output",
+            "tokens_reasoning",
+            "tokens_cache_read",
+            "tokens_cache_write",
+            "time_created",
+            "time_updated",
+        ],
+    ),
+    (
+        "session_message",
+        &[
+            "id",
+            "session_id",
+            "type",
+            "seq",
+            "time_created",
+            "time_updated",
+            "data",
+        ],
+    ),
+    ("migration", &["id"]),
+];
+/// Which session stores a database holds. OpenCode 1.x writes `session`,
+/// `message` and `part`. OpenCode 2 writes `session_v2` and
+/// `session_message`; upgrading a 1.x database leaves the 1.x tables in
+/// place, frozen, and copies each session into `session_v2` under the same
+/// id. 1.19.x already has a `session_message` table and a `migration`
+/// table of its own, so only `session_v2` marks a 2.x store.
+#[derive(Clone, Copy)]
+struct Layout {
+    legacy: bool,
+    v2: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Store {
+    Legacy,
+    V2,
+}
+/// Whether `name` is a table; any other kind of object by that name is
+/// refused.
+fn table(tx: &Transaction<'_>, name: &str) -> Result<bool> {
+    let mut stmt = sql(tx.prepare("SELECT type FROM sqlite_master WHERE name=?1"))?;
+    let kinds = sql(stmt.query_map([name], |r| r.get::<_, String>(0)))?;
+    let kinds = sql(kinds.collect::<rusqlite::Result<Vec<_>>>())?;
+    match kinds.as_slice() {
+        [] => Ok(false),
+        [kind] if kind == "table" => Ok(true),
+        _ => bail!("opencode-database-schema-unsupported"),
+    }
+}
+fn columns(tx: &Transaction<'_>, table: &str, columns: &[&str]) -> Result<()> {
+    let mut stmt = sql(tx.prepare(&format!("PRAGMA table_info({table})")))?;
+    let rows = sql(stmt.query_map([], |r| r.get::<_, String>(1)))?;
+    let names = sql(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+    if !columns.iter().all(|c| names.iter().any(|n| n == c)) {
+        bail!("opencode-database-schema-unsupported");
+    }
+    Ok(())
+}
+fn schema(tx: &Transaction<'_>) -> Result<Layout> {
     let version: i64 = sql(tx.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
     if version != 0 {
         bail!("opencode-database-schema-unsupported");
     }
-    for (table, columns) in [
-        (
-            "session",
-            &["id", "directory", "version", "time_created", "time_updated"][..],
-        ),
-        (
-            "message",
-            &["id", "session_id", "time_created", "time_updated", "data"][..],
-        ),
-        (
-            "part",
-            &[
-                "id",
-                "session_id",
-                "message_id",
-                "time_created",
-                "time_updated",
-                "data",
-            ][..],
-        ),
-    ] {
-        let kind: String = sql(tx.query_row(
-            "SELECT type FROM sqlite_master WHERE name=?1",
-            [table],
-            |r| r.get(0),
-        ))?;
-        if kind != "table" {
-            bail!("opencode-database-schema-unsupported");
-        }
-        let mut stmt = sql(tx.prepare(&format!("PRAGMA table_info({table})")))?;
-        let rows = sql(stmt.query_map([], |r| r.get::<_, String>(1)))?;
-        let names = sql(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-        if !columns.iter().all(|c| names.iter().any(|n| n == c)) {
-            bail!("opencode-database-schema-unsupported");
+    let legacy = table(tx, "session")?;
+    if legacy {
+        for (name, wanted) in LEGACY_TABLES {
+            if !table(tx, name)? {
+                bail!("opencode-database-schema-unsupported");
+            }
+            columns(tx, name, wanted)?;
         }
     }
-    Ok(())
+    let v2 = table(tx, "session_v2")?;
+    if v2 {
+        for (name, wanted) in V2_TABLES {
+            if !table(tx, name)? {
+                bail!("opencode-database-schema-unsupported");
+            }
+            columns(tx, name, wanted)?;
+        }
+        // Gate the 2.x store on its schema, not on any version column:
+        // every applied migration must be one of the pinned ones.
+        let (count, untyped): (u64, u64) = sql(tx.query_row(
+            "SELECT count(*), count(*) FILTER (WHERE typeof(id)<>'text' OR length(CAST(id AS BLOB))>256) FROM migration",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ))?;
+        if count > MIGRATION_BUDGET || untyped > 0 {
+            bail!("opencode-database-schema-unsupported");
+        }
+        let mut stmt = sql(tx.prepare("SELECT id FROM migration"))?;
+        let ids = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
+        for id in ids {
+            if !KNOWN_MIGRATIONS.contains(&sql(id)?.as_str()) {
+                bail!("opencode-database-schema-unsupported");
+            }
+        }
+    }
+    if !legacy && !v2 {
+        bail!("opencode-database-schema-unsupported");
+    }
+    Ok(Layout { legacy, v2 })
 }
-fn bounds(tx: &Transaction<'_>, id: &str) -> Result<(u64, u64)> {
+/// Where `id` is described and read from. discover and load both decide
+/// here, so they never disagree.
+///
+/// An id only in one store is read from it. An id in both is a legacy
+/// session OpenCode 2 copied into `session_v2`; it stays on the legacy
+/// path, so its observation and transcript hash are unchanged by the
+/// upgrade, until it is continued under 2.x (see [`CONTINUED`]).
+fn store_of(tx: &Transaction<'_>, layout: Layout, id: &str) -> Result<Store> {
+    if !layout.v2 {
+        return Ok(Store::Legacy);
+    }
+    if !layout.legacy {
+        return Ok(Store::V2);
+    }
+    let (in_v2, in_legacy): (bool, bool) = sql(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?1), EXISTS(SELECT 1 FROM session WHERE id=?1)",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ))?;
+    Ok(match (in_v2, in_legacy) {
+        (true, false) => Store::V2,
+        (false, _) => Store::Legacy,
+        (true, true) => {
+            let continued: bool = sql(tx.query_row(CONTINUED, [id], |r| r.get(0)))?;
+            if continued { Store::V2 } else { Store::Legacy }
+        }
+    })
+}
+/// Whether a copied session has `session_message` content OpenCode 2's
+/// V1-to-V2 migration cannot have written (core/src/database/v1-migration.bun.ts
+/// at v2.1.4). The migration writes, per legacy message it keeps:
+/// - a row under the legacy message's own id (`row()`, lines 975-994,
+///   called with `id: item.row.id`), whose `time_created` and
+///   `time_updated` are that message's (lines 989-990; a compaction's
+///   `time_updated` is the larger of two legacy messages', line 300);
+/// - for a user message with synthetic text, a `synthetic` row, and for
+///   the last row possibly a `system` notice (lines 446-462), each under
+///   `syntheticID` (lines 1166-1180): the source id's first 16
+///   characters (`source.slice(0, 16)`, so all of a shorter id) plus 14
+///   more, at the source message's `time_created`. The prefix is
+///   `s.id` less its last 14 characters, and a legacy id matches when its
+///   own first 16 characters equal it.
+///
+/// Any other row, or any row whose `time_updated` is later than every
+/// legacy message's (drizzle stamps `time_updated` on every update,
+/// core/src/database/schema.sql.ts), was written by OpenCode 2 afterwards.
+/// A wrong answer only picks between two readers of the same session; a
+/// clock running backwards can only make a continued session look
+/// untouched, which reads it as before the upgrade.
+const CONTINUED: &str = "SELECT EXISTS(SELECT 1 FROM session_message s WHERE s.session_id=?1 AND (
+    s.time_updated > (SELECT max(time_updated) FROM message WHERE session_id=?1)
+    OR (NOT EXISTS (SELECT 1 FROM message m WHERE m.id=s.id AND m.session_id=?1)
+        AND NOT (s.type IN ('synthetic','system') AND length(s.id) BETWEEN 15 AND 30
+            AND EXISTS (SELECT 1 FROM message m
+            WHERE m.id>=substr(s.id,1,length(s.id)-14) AND m.id<substr(s.id,1,length(s.id)-14)||'~'
+            AND substr(m.id,1,16)=substr(s.id,1,length(s.id)-14)
+            AND m.session_id=?1 AND m.time_created=s.time_created)))))";
+fn bounds(tx: &Transaction<'_>, id: &str, store: Store) -> Result<(u64, u64)> {
     // SQLite evaluates byte lengths without materializing the JSON in Rust. Include
     // identity/metadata and JSON framing overhead conservatively in the byte bound.
-    let (bytes, count): (u64,u64) = sql(tx.query_row(
-        "SELECT coalesce(sum(n),0), count(*) FROM (
+    let query = match store {
+        Store::Legacy => "SELECT coalesce(sum(n),0), count(*) FROM (
          SELECT length(CAST(data AS BLOB))+length(CAST(id AS BLOB))*2+length(CAST(session_id AS BLOB))+128 AS n FROM message WHERE session_id=?1
          UNION ALL SELECT length(CAST(data AS BLOB))+length(CAST(id AS BLOB))*2+length(CAST(session_id AS BLOB))+length(CAST(message_id AS BLOB))+128 FROM part WHERE session_id=?1
-         UNION ALL SELECT length(CAST(directory AS BLOB))+length(CAST(id AS BLOB))+length(CAST(version AS BLOB))+256 FROM session WHERE id=?1)", [id], |r| Ok((r.get(0)?,r.get(1)?))))?;
+         UNION ALL SELECT length(CAST(directory AS BLOB))+length(CAST(id AS BLOB))+length(CAST(version AS BLOB))+256 FROM session WHERE id=?1)",
+        // Unsettled messages are counted too, though they are not read.
+        Store::V2 => "SELECT coalesce(sum(n),0), count(*) FROM (
+         SELECT length(CAST(data AS BLOB))+length(CAST(id AS BLOB))*2+length(CAST(type AS BLOB))*2+128 AS n FROM session_message WHERE session_id=?1
+         UNION ALL SELECT length(CAST(directory AS BLOB))+length(CAST(id AS BLOB))+length(CAST(version AS BLOB))+length(CAST(project_id AS BLOB))+512 FROM session_v2 WHERE id=?1)",
+    };
+    let (bytes, count): (u64, u64) =
+        sql(tx.query_row(query, [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
     Ok((bytes, count.saturating_sub(1)))
 }
-fn reference(tx: &Transaction<'_>, root: &Path, id: &str) -> Result<SessionRef> {
-    let (bytes, _) = bounds(tx, id)?;
-    let metadata_bytes: u64 = sql(tx.query_row("SELECT length(CAST(directory AS BLOB))+length(CAST(version AS BLOB)) FROM session WHERE id=?1", [id], |r|r.get(0)))?;
+fn reference(tx: &Transaction<'_>, root: &Path, id: &str, store: Store) -> Result<SessionRef> {
+    let (bytes, _) = bounds(tx, id, store)?;
+    let (metadata, times) = match store {
+        Store::Legacy => (
+            "SELECT length(CAST(directory AS BLOB))+length(CAST(version AS BLOB)) FROM session WHERE id=?1",
+            "SELECT directory,time_created,(SELECT max(t) FROM (SELECT time_updated AS t FROM session WHERE id=?1 UNION ALL SELECT time_updated FROM message WHERE session_id=?1 UNION ALL SELECT time_updated FROM part WHERE session_id=?1)) FROM session WHERE id=?1",
+        ),
+        Store::V2 => (
+            "SELECT length(CAST(directory AS BLOB))+length(CAST(version AS BLOB))+length(CAST(project_id AS BLOB)) FROM session_v2 WHERE id=?1",
+            "SELECT directory,time_created,(SELECT max(t) FROM (SELECT time_updated AS t FROM session_v2 WHERE id=?1 UNION ALL SELECT time_updated FROM session_message WHERE session_id=?1)) FROM session_v2 WHERE id=?1",
+        ),
+    };
+    let metadata_bytes: u64 = sql(tx.query_row(metadata, [id], |r| r.get(0)))?;
     if metadata_bytes > 65536 {
         bail!("opencode-database-metadata-too-large");
     }
-    let (cwd, created, updated): (String, i64, i64) = sql(tx.query_row(
-        "SELECT directory,time_created,(SELECT max(t) FROM (SELECT time_updated AS t FROM session WHERE id=?1 UNION ALL SELECT time_updated FROM message WHERE session_id=?1 UNION ALL SELECT time_updated FROM part WHERE session_id=?1)) FROM session WHERE id=?1",
-        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))))?;
+    let (cwd, created, updated): (String, i64, i64) =
+        sql(tx.query_row(times, [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
     let started_at = DateTime::from_timestamp_millis(created)
         .filter(|_| created >= 0)
         .ok_or_else(|| anyhow!("opencode-database-invalid-timestamp"))?;
@@ -261,6 +491,11 @@ fn reference(tx: &Transaction<'_>, root: &Path, id: &str) -> Result<SessionRef> 
         group_member_count: 0,
     })
 }
+fn ids(tx: &Transaction<'_>, query: &str) -> Result<Vec<String>> {
+    let mut stmt = sql(tx.prepare(query))?;
+    let rows = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
+    sql(rows.collect::<rusqlite::Result<_>>())
+}
 /// Lists the database's sessions. A session that cannot be described (an
 /// invalid id, a bad timestamp, oversized metadata, or queries over the
 /// work budget) is left out rather than hiding every other session; it
@@ -272,23 +507,55 @@ pub fn discover(root: &Path) -> Result<Vec<SessionRef>> {
     let work = Arc::clone(&reader.work);
     let refs = {
         let tx = sql(reader.conn.transaction())?;
-        schema(&tx)?;
-        let count: u64 = sql(tx.query_row("SELECT count(*) FROM session", [], |r| r.get(0)))?;
+        let layout = schema(&tx)?;
+        // A legacy session OpenCode 2 has copied is listed once, under
+        // its `session_v2` id; `store_of` picks which store describes it.
+        let legacy_only = if layout.v2 {
+            " AND NOT EXISTS (SELECT 1 FROM session_v2 WHERE session_v2.id=session.id)"
+        } else {
+            ""
+        };
+        let mut count = 0u64;
+        if layout.v2 {
+            work.store(0, Ordering::Relaxed);
+            count += sql(tx.query_row("SELECT count(*) FROM session_v2", [], |r| {
+                r.get::<_, u64>(0)
+            }))?;
+        }
+        if layout.legacy {
+            work.store(0, Ordering::Relaxed);
+            count += sql(tx.query_row(
+                &format!("SELECT count(*) FROM session WHERE 1{legacy_only}"),
+                [],
+                |r| r.get::<_, u64>(0),
+            ))?;
+        }
         if count > SESSION_BUDGET as u64 {
             bail!("opencode-database-session-budget");
         }
-        let ids: Vec<String> = {
-            let mut stmt = sql(tx.prepare(
-                "SELECT id FROM session WHERE typeof(id)='text' AND length(CAST(id AS BLOB))<=256 ORDER BY id",
-            ))?;
-            let rows = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-            sql(rows.collect::<rusqlite::Result<_>>())?
-        };
-        let mut refs = Vec::new();
-        for id in ids.iter().filter(|id| valid_id(id)) {
-            // A fresh WORK_BUDGET for each session's queries.
+        let mut found: Vec<String> = Vec::new();
+        const LISTABLE: &str = "typeof(id)='text' AND length(CAST(id AS BLOB))<=256";
+        if layout.v2 {
             work.store(0, Ordering::Relaxed);
-            if let Ok(found) = reference(&tx, root, id) {
+            found.extend(ids(
+                &tx,
+                &format!("SELECT id FROM session_v2 WHERE {LISTABLE}"),
+            )?);
+        }
+        if layout.legacy {
+            work.store(0, Ordering::Relaxed);
+            let query = format!("SELECT id FROM session WHERE {LISTABLE}{legacy_only}");
+            found.extend(ids(&tx, &query)?);
+        }
+        found.sort();
+        let mut refs = Vec::new();
+        for id in found.iter().filter(|id| valid_id(id)) {
+            // A fresh WORK_BUDGET for each session's queries. The store is
+            // chosen as `load` chooses it.
+            work.store(0, Ordering::Relaxed);
+            let described =
+                store_of(&tx, layout, id).and_then(|store| reference(&tx, root, id, store));
+            if let Ok(found) = described {
                 refs.push(found);
             }
         }
@@ -327,8 +594,9 @@ pub fn load(root: &Path, reference: &SessionRef) -> Result<SessionTranscript> {
 }
 fn read_session(conn: &mut Connection, root: &Path, id: &str) -> Result<SessionTranscript> {
     let tx = sql(conn.transaction())?;
-    schema(&tx)?;
-    let (bytes, count) = bounds(&tx, id)?;
+    let layout = schema(&tx)?;
+    let store = store_of(&tx, layout, id)?;
+    let (bytes, count) = bounds(&tx, id, store)?;
     if count > RECORD_BUDGET {
         bail!("opencode-database-record-budget");
     }
@@ -340,7 +608,13 @@ fn read_session(conn: &mut Connection, root: &Path, id: &str) -> Result<SessionT
         }
         .into());
     }
-    let current = self::reference(&tx, root, id)?;
+    let current = self::reference(&tx, root, id, store)?;
+    match store {
+        Store::Legacy => read_legacy(&tx, id, current),
+        Store::V2 => read_v2(&tx, id, current),
+    }
+}
+fn read_legacy(tx: &Transaction<'_>, id: &str, current: SessionRef) -> Result<SessionTranscript> {
     let version: String = sql(tx.query_row(
         "SELECT version FROM session WHERE id=?1",
         [id],
@@ -393,6 +667,218 @@ fn read_session(conn: &mut Connection, root: &Path, id: &str) -> Result<SessionT
     let bytes =
         serde_json::to_vec(&export).map_err(|_| anyhow!("opencode-database-export-failed"))?;
     super::opencode::parse_export(&bytes)
+}
+/// Reassembles an OpenCode 2 session as the transfer envelope its own
+/// `opencode export` writes (`{info, messages}`, core/src/session/transfer.ts
+/// at v2.1.4) and hands it to the same parser exports go through.
+fn read_v2(tx: &Transaction<'_>, id: &str, current: SessionRef) -> Result<SessionTranscript> {
+    // Only the columns the transcript needs: title, metadata, revert and
+    // permissions are never read. `info` is built as `fromRow` builds it
+    // (core/src/session/info.ts), less those fields.
+    let (version, project, cost, tokens, created, updated): (
+        String,
+        String,
+        f64,
+        [i64; 5],
+        i64,
+        i64,
+    ) = sql(tx.query_row(
+        "SELECT version,project_id,cost,tokens_input,tokens_output,tokens_reasoning,tokens_cache_read,tokens_cache_write,time_created,time_updated FROM session_v2 WHERE id=?1",
+        [id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?],
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        },
+    ))?;
+    // OpenCode reads messages in `seq` order (`SessionStore.messages`,
+    // core/src/session/store.ts); `id` only makes a corrupt tie visible.
+    let mut stmt = sql(tx.prepare(
+        "SELECT id,type,seq,data FROM session_message WHERE session_id=?1 ORDER BY seq,id",
+    ))?;
+    let rows = sql(stmt.query_map([id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    }))?;
+    let mut messages = Vec::new();
+    let mut previous = None;
+    for row in rows {
+        let (mid, kind, seq, data) = sql(row)?;
+        if previous.is_some_and(|p| p >= seq) {
+            bail!("opencode-database-ambiguous-order");
+        }
+        previous = Some(seq);
+        // The row's data is the message less `id` and `type`, which are
+        // columns; as in `rowInput` (core/src/session/history.ts) the data
+        // is upgraded first and the columns then supply both.
+        let Value::Object(data) = object(data, &[("type", &kind)])? else {
+            unreachable!("object() returns an object");
+        };
+        let mut message = legacy_message(&kind, data);
+        if message.get("id").is_some_and(|v| v.as_str() != Some(&mid)) || !valid_id(&mid) {
+            bail!("opencode-database-ambiguous-id");
+        }
+        message.insert("id".into(), Value::String(mid));
+        if settled(&kind, &message) {
+            messages.push(Value::Object(message));
+        }
+    }
+    let export = json!({
+        "info": {
+            "id": id,
+            "projectID": project,
+            "cost": cost,
+            "tokens": {
+                "input": tokens[0],
+                "output": tokens[1],
+                "reasoning": tokens[2],
+                "cache": {"read": tokens[3], "write": tokens[4]},
+            },
+            "location": {"directory": current.cwd},
+            "time": {"created": created, "updated": updated},
+        },
+        "messages": messages,
+    });
+    let bytes =
+        serde_json::to_vec(&export).map_err(|_| anyhow!("opencode-database-export-failed"))?;
+    let mut transcript = super::opencode::parse_export(&bytes)?;
+    // A label only: forks inherit it, imports carry the importer's, and
+    // development builds write `local`, so it never gates the read.
+    transcript.agent_version = Some(version);
+    Ok(transcript)
+}
+/// OpenCode's export keeps only settled messages: `isSettled` in
+/// core/src/session/transfer.ts at v2.1.4. An assistant whose `time` is
+/// not an object is kept, so the parser refuses it rather than it being
+/// dropped unseen.
+fn settled(kind: &str, message: &Map<String, Value>) -> bool {
+    match kind {
+        "assistant" => !message
+            .get("time")
+            .and_then(Value::as_object)
+            .is_some_and(|time| !time.contains_key("completed")),
+        "shell" | "compaction" => message.get("status").and_then(Value::as_str) != Some("running"),
+        _ => true,
+    }
+}
+/// Upgrades a message row written before OpenCode 2.1, as
+/// `SessionLegacy.message` does (packages/schema/src/session-legacy.ts at
+/// v2.1.4) before OpenCode decodes any stored message. The renamed fields
+/// are provider-native data the parser never reads; upgrading them anyway
+/// keeps the envelope the shape OpenCode itself would export.
+fn legacy_message(kind: &str, data: Map<String, Value>) -> Map<String, Value> {
+    match kind {
+        "assistant" => legacy_content(rename(data, "providerState", "native")),
+        "compaction" => provider_context(recent(rename(data, "providerState", "native"))),
+        _ => data,
+    }
+}
+fn legacy_content(mut data: Map<String, Value>) -> Map<String, Value> {
+    if let Some(Value::Array(content)) = data.get_mut("content") {
+        for part in content.iter_mut() {
+            if let Value::Object(map) = part {
+                let map = std::mem::take(map);
+                *part = Value::Object(match map.get("type").and_then(Value::as_str) {
+                    Some("text" | "reasoning") => rename(map, "state", "native"),
+                    // A tool part's own `state` is its lifecycle status.
+                    Some("tool") => tool_result(rename(map, "providerState", "native")),
+                    _ => map,
+                });
+            }
+        }
+    }
+    data
+}
+/// The kept text a summary compaction stored before `metadata.keepID`.
+fn recent(mut data: Map<String, Value>) -> Map<String, Value> {
+    match data.remove("recent") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            let mut metadata = Map::new();
+            metadata.insert("recent".into(), Value::String(text));
+            if let Some(Value::Object(existing)) = data.remove("metadata") {
+                metadata.extend(existing);
+            }
+            data.insert("metadata".into(), Value::Object(metadata));
+            data
+        }
+        _ => data,
+    }
+}
+/// The replacement window moves to `native.messages`, replacing `native`.
+fn provider_context(mut data: Map<String, Value>) -> Map<String, Value> {
+    let Some(Value::Object(mut context)) = data.remove("providerContext") else {
+        return data;
+    };
+    let mut native = Map::new();
+    if let Some(messages) = context.remove("messages") {
+        native.insert(
+            "messages".into(),
+            match messages {
+                Value::Array(items) => Value::Array(items.into_iter().map(media).collect()),
+                other => other,
+            },
+        );
+    }
+    data.insert("native".into(), Value::Object(native));
+    data
+}
+/// Before 2.0.15 a window's media part stored `mediaType` and base64 `data`
+/// directly.
+fn media(mut message: Value) -> Value {
+    if let Some(Value::Array(content)) = message.get_mut("content") {
+        for part in content.iter_mut() {
+            let Value::Object(map) = part else { continue };
+            if map.get("type").and_then(Value::as_str) != Some("media")
+                || map.contains_key("media")
+                || !map.get("data").is_some_and(Value::is_string)
+            {
+                continue;
+            }
+            let data = map.remove("data").expect("checked above");
+            let mut source = Map::new();
+            source.insert("type".into(), "base64".into());
+            source.insert("data".into(), data);
+            if let Some(media_type) = map.remove("mediaType") {
+                source.insert("mediaType".into(), media_type);
+            }
+            map.insert("media".into(), json!({"source": source}));
+        }
+    }
+    message
+}
+/// Result native data merges into the tool's single `native`.
+fn tool_result(mut value: Map<String, Value>) -> Map<String, Value> {
+    let Some(result) = value.remove("providerResultState") else {
+        return value;
+    };
+    let Value::Object(result) = result else {
+        return value;
+    };
+    let mut native = match value.remove("native") {
+        Some(Value::Object(native)) => native,
+        _ => Map::new(),
+    };
+    native.extend(result);
+    value.insert("native".into(), Value::Object(native));
+    value
+}
+/// The current name wins when a payload carries both.
+fn rename(mut value: Map<String, Value>, from: &str, to: &str) -> Map<String, Value> {
+    if let Some(moved) = value.remove(from) {
+        if !value.contains_key(to) {
+            value.insert(to.into(), moved);
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -717,6 +1203,743 @@ mod tests {
             fallback
         );
     }
+    /// OpenCode 2.1.4's `session_v2`, `session_message` and `migration`
+    /// tables, as `packages/core/src/database/schema.gen.ts` and
+    /// `migration.ts` create them at anomalyco/opencode v2.1.4 (the
+    /// `project` foreign key is left out: no project rows are needed).
+    const V2_DDL: &str = "CREATE TABLE `migration` (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+        CREATE TABLE `session_message` (`id` text PRIMARY KEY, `session_id` text NOT NULL, `type` text NOT NULL,
+          `seq` integer NOT NULL, `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL,
+          CONSTRAINT `fk_session_message_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session_v2`(`id`) ON DELETE CASCADE);
+        CREATE TABLE `session_v2` (`id` text PRIMARY KEY, `project_id` text NOT NULL, `workspace_id` text, `parent_id` text,
+          `fork_session_id` text, `fork_boundary` text, `slug` text NOT NULL, `directory` text NOT NULL, `path` text,
+          `title` text, `version` text NOT NULL, `share_url` text, `summary_additions` integer, `summary_deletions` integer,
+          `summary_files` integer, `summary_diffs` text, `metadata` text, `cost` real DEFAULT 0 NOT NULL,
+          `tokens_input` integer DEFAULT 0 NOT NULL, `tokens_output` integer DEFAULT 0 NOT NULL,
+          `tokens_reasoning` integer DEFAULT 0 NOT NULL, `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+          `tokens_cache_write` integer DEFAULT 0 NOT NULL, `revert` text, `permission` text, `agent` text, `model` text,
+          `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `time_idle` integer, `time_viewed` integer,
+          `idle_outcome` text, `time_compacting` integer, `time_archived` integer, `time_suspended` integer,
+          `resume_attempts` integer DEFAULT 0 NOT NULL);
+        CREATE UNIQUE INDEX `session_message_session_seq_idx` ON `session_message` (`session_id`,`seq`);
+        CREATE INDEX `session_message_session_type_seq_idx` ON `session_message` (`session_id`,`type`,`seq`);
+        CREATE INDEX `session_message_session_time_created_id_idx` ON `session_message` (`session_id`,`time_created`,`id`);
+        CREATE INDEX `session_message_time_created_idx` ON `session_message` (`time_created`);
+        CREATE INDEX `session_v2_project_idx` ON `session_v2` (`project_id`);";
+    const V2_ASSISTANT: &str = r#"{"agent":"build","model":{"id":"fixture-model","providerID":"trace-managed","variant":"default"},"content":[{"type":"reasoning","text":"Synthetic thought","time":{"created":1101,"completed":1102}},{"type":"text","text":"Synthetic answer"},{"type":"tool","id":"call_ok","name":"bash","time":{"created":1103,"ran":1104,"completed":1105},"state":{"status":"completed","input":{"command":"echo synthetic"},"content":[{"type":"text","text":"synthetic"}]}},{"type":"tool","id":"call_err","name":"bash","time":{"created":1106,"ran":1107,"completed":1108},"state":{"status":"error","input":{"command":"false"},"error":{"type":"Tool.Error","message":"synthetic failure"}}}],"finish":"stop","cost":0,"tokens":{"input":1,"output":2,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1100,"streamed":1150,"completed":1200}}"#;
+    /// Writes a 2.1.4 session, `ses_fixture2x`, into the database at
+    /// `root`. Message ids sort, and are inserted, in a different order
+    /// from `seq`, and the `time_created` column runs backwards, so only
+    /// `seq` gives the conversation's order.
+    fn add_v2(root: &Path, migrations: &[&str]) {
+        let db = Connection::open(root.join(DB)).unwrap();
+        db.execute_batch(V2_DDL).unwrap();
+        for id in migrations {
+            db.execute("INSERT INTO migration VALUES(?1,0)", [id])
+                .unwrap();
+        }
+        db.execute_batch(
+            "INSERT INTO session_v2(id,project_id,slug,directory,version,cost,tokens_input,tokens_output,tokens_reasoning,tokens_cache_read,tokens_cache_write,model,title,time_created,time_updated)
+             VALUES('ses_fixture2x','prj_synthetic','synthetic-slug','/synthetic/project2x','2.1.4',0.25,10,20,3,4,5,'{\"id\":\"fixture-model\",\"providerID\":\"trace-managed\"}','Synthetic title',1000,1300);
+             INSERT INTO session_message VALUES('msg_b_idle','ses_fixture2x','idle',3,1,1300,'{\"outcome\":\"succeeded\",\"time\":{\"created\":1300}}');",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES('msg_a_assistant','ses_fixture2x','assistant',2,2,1200,?1)",
+            [V2_ASSISTANT],
+        )
+        .unwrap();
+        db.execute_batch("INSERT INTO session_message VALUES('msg_c_user','ses_fixture2x','user',1,3,1000,'{\"text\":\"Synthetic question\",\"files\":[],\"time\":{\"created\":1000}}');").unwrap();
+    }
+    fn fresh_v2() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        dir
+    }
+    /// The same conversation, as OpenCode 2.1.4's `opencode export` writes it.
+    fn v2_export() -> Value {
+        let mut assistant: Value = serde_json::from_str(V2_ASSISTANT).unwrap();
+        assistant["id"] = "msg_a_assistant".into();
+        assistant["type"] = "assistant".into();
+        json!({"info":{"id":"ses_fixture2x","projectID":"prj_synthetic",
+            "model":{"id":"fixture-model","providerID":"trace-managed","variant":"default"},
+            "cost":0.25,"tokens":{"input":10,"output":20,"reasoning":3,"cache":{"read":4,"write":5}},
+            "time":{"created":1000,"updated":1300},"title":"Synthetic title",
+            "location":{"directory":"/synthetic/project2x"}},
+          "messages":[
+            {"id":"msg_c_user","type":"user","text":"Synthetic question","files":[],"time":{"created":1000}},
+            assistant,
+            {"id":"msg_b_idle","type":"idle","outcome":"succeeded","time":{"created":1300}}]})
+    }
+    fn assert_same_events(actual: &SessionTranscript, expected: &SessionTranscript) {
+        assert_eq!(actual.events.len(), expected.events.len());
+        for (actual, expected) in actual.events.iter().zip(&expected.events) {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.timestamp, expected.timestamp);
+            assert_eq!(actual.content, expected.content);
+            assert_eq!(actual.structured, expected.structured);
+            assert_eq!(actual.tool_name, expected.tool_name);
+            assert_eq!(actual.tool_call_id, expected.tool_call_id);
+            assert_eq!(actual.token_counts, expected.token_counts);
+            assert_eq!(actual.served_by, expected.served_by);
+            assert_eq!(actual.success, expected.success);
+        }
+    }
+    fn kinds(transcript: &SessionTranscript) -> Vec<super::super::SessionEventKind> {
+        transcript.events.iter().map(|e| e.kind.clone()).collect()
+    }
+
+    #[test]
+    fn the_pinned_migration_list_is_opencode_2_1_4s() {
+        assert_eq!(KNOWN_MIGRATIONS.len(), 50);
+        assert_eq!(KNOWN_MIGRATIONS[0], "20260127222353_familiar_lady_ursula");
+        assert_eq!(
+            KNOWN_MIGRATIONS[37],
+            "20260622202450_simplify_session_input"
+        );
+        assert_eq!(KNOWN_MIGRATIONS[38], "20260804233008_loose_psylocke");
+        assert_eq!(KNOWN_MIGRATIONS[49], "20261010180456_project_time_archived");
+        let mut sorted = KNOWN_MIGRATIONS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, KNOWN_MIGRATIONS);
+    }
+
+    #[test]
+    fn a_fresh_2x_database_is_listed_and_read_without_changing_it() {
+        let dir = fresh_v2();
+        let before = std::fs::read(dir.path().join(DB)).unwrap();
+        let refs = discover(dir.path()).unwrap();
+        assert_eq!(refs.len(), 1);
+        let reference = &refs[0];
+        assert_eq!(reference.path, dir.path().join(DB).join("ses_fixture2x"));
+        assert!(accepts_path(dir.path(), &reference.path));
+        assert_eq!(reference.cwd.as_deref(), Some("/synthetic/project2x"));
+        assert_eq!(reference.project.as_deref(), Some("project2x"));
+        assert_eq!(reference.started_at.unwrap().timestamp_millis(), 1000);
+        assert_eq!(
+            reference.group_modified_at.unwrap().timestamp_millis(),
+            1300
+        );
+        assert!(reference.size_bytes > V2_ASSISTANT.len() as u64);
+        let transcript = load(dir.path(), reference).unwrap();
+        use super::super::SessionEventKind::*;
+        assert_eq!(
+            kinds(&transcript),
+            [
+                User, Reasoning, Assistant, ToolCall, ToolResult, ToolCall, ToolResult, Opaque
+            ]
+        );
+        assert_eq!(
+            transcript.events[0].content.as_deref(),
+            Some("Synthetic question")
+        );
+        assert_eq!(
+            transcript.events[1].content.as_deref(),
+            Some("Synthetic thought")
+        );
+        assert_eq!(
+            transcript.events[2].content.as_deref(),
+            Some("Synthetic answer")
+        );
+        assert_eq!(transcript.events[4].success, Some(true));
+        assert_eq!(transcript.events[6].success, Some(false));
+        assert_eq!(
+            transcript.events[6].content.as_deref(),
+            Some("synthetic failure")
+        );
+        assert_eq!(transcript.conversation_id.as_deref(), Some("ses_fixture2x"));
+        assert_eq!(transcript.agent_version.as_deref(), Some("2.1.4"));
+        assert_eq!(
+            transcript.model.as_deref(),
+            Some("trace-managed/fixture-model")
+        );
+        assert_eq!(transcript.cwd.as_deref(), Some("/synthetic/project2x"));
+        assert_eq!(before, std::fs::read(dir.path().join(DB)).unwrap());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_2x_database_session_reads_like_its_export() {
+        let dir = fresh_v2();
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let actual = load(dir.path(), &reference).unwrap();
+        let expected =
+            super::super::opencode::parse_export(&serde_json::to_vec(&v2_export()).unwrap())
+                .unwrap();
+        assert_eq!(actual.conversation_id, expected.conversation_id);
+        assert_eq!(actual.source, expected.source);
+        assert_eq!(actual.source_session, expected.source_session);
+        assert_eq!(actual.model, expected.model);
+        assert_eq!(actual.project, expected.project);
+        assert_eq!(actual.cwd, expected.cwd);
+        assert_eq!(actual.started_at, expected.started_at);
+        assert_same_events(&actual, &expected);
+        // The export carries no producer version; the database row does.
+        assert_eq!(expected.agent_version, None);
+        assert_eq!(actual.agent_version.as_deref(), Some("2.1.4"));
+        assert!(actual.attested_call.is_none() && actual.routing.is_empty());
+    }
+
+    /// OpenCode's export leaves out messages still being written
+    /// (`isSettled`, core/src/session/transfer.ts); so does the reader.
+    /// The unsettled assistant's content would refuse the session if read.
+    #[test]
+    fn unsettled_messages_are_left_out() {
+        let dir = fresh_v2();
+        change(
+            dir.path(),
+            r#"INSERT INTO session_message VALUES('msg_d_streaming','ses_fixture2x','assistant',4,1400,1400,'{"agent":"build","model":{"id":"fixture-model","providerID":"trace-managed"},"content":[{"type":"secret_future_part"}],"time":{"created":1400}}');
+               INSERT INTO session_message VALUES('msg_e_shell','ses_fixture2x','shell',5,1500,1500,'{"shellID":"shl_x","command":"secret","status":"running","time":{"created":1500}}');
+               INSERT INTO session_message VALUES('msg_f_compacting','ses_fixture2x','compaction',6,1600,1600,'{"status":"running","reason":"auto","summary":"","time":{"created":1600}}');
+               INSERT INTO session_message VALUES('msg_g_compacted','ses_fixture2x','compaction',7,1700,1700,'{"status":"completed","reason":"auto","summary":"Synthetic summary","time":{"created":1700}}');"#,
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let transcript = load(dir.path(), &reference).unwrap();
+        assert_eq!(transcript.events.len(), 9);
+        assert_eq!(
+            transcript.events[8].kind,
+            super::super::SessionEventKind::Opaque
+        );
+        assert_eq!(
+            transcript.events[8].timestamp.unwrap().timestamp_millis(),
+            1700
+        );
+        // Settled, the same assistant is read, and its unknown part refuses.
+        change(
+            dir.path(),
+            r#"UPDATE session_message SET data=json_set(data,'$.time.completed',1450) WHERE id='msg_d_streaming'"#,
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert_eq!(
+            load(dir.path(), &reference).unwrap_err().to_string(),
+            "opencode_unknown_part"
+        );
+    }
+
+    #[test]
+    fn messages_are_read_in_seq_order() {
+        let dir = fresh_v2();
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let first = load(dir.path(), &reference).unwrap();
+        assert_eq!(first.events[0].kind, super::super::SessionEventKind::User);
+        // Swapping the user and idle sequence numbers puts the idle first,
+        // whose later time then makes the conversation run backwards.
+        change(
+            dir.path(),
+            "UPDATE session_message SET seq=seq+10; UPDATE session_message SET seq=1 WHERE id='msg_b_idle';
+             UPDATE session_message SET seq=3 WHERE id='msg_c_user';",
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert_eq!(
+            load(dir.path(), &reference).unwrap_err().to_string(),
+            "opencode_reordered_messages"
+        );
+    }
+
+    /// Copies the fixture's legacy session `ses_fixture` into `session_v2`
+    /// the way OpenCode 2's V1-to-V2 migration does
+    /// (core/src/database/v1-migration.bun.ts at v2.1.4): same session and
+    /// message ids, `seq` from 0, each row's `time_created` and
+    /// `time_updated` copied from its legacy message, and the extra
+    /// `synthetic` and `system` rows it may add under an id built from the
+    /// first 16 characters of a legacy message id plus 14 more, at that
+    /// message's `time_created`.
+    fn migrate_fixture(root: &Path) {
+        change(
+            root,
+            r#"INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
+                 VALUES('ses_fixture','global','copied-slug','/synthetic/project',(SELECT version FROM session WHERE id='ses_fixture'),1000,2000);
+               INSERT INTO session_message VALUES('msg_fixture','ses_fixture','user',0,1000,2000,'{"text":"Copied into session_v2","time":{"created":1000}}');
+               INSERT INTO session_message VALUES('msg_fixtureAbCdEfGhIjKlMn','ses_fixture','synthetic',1,1000,2000,'{"text":"Copied synthetic","time":{"created":1000}}');
+               INSERT INTO session_message VALUES('msg_fixtureZyXwVuTsRqPoNm','ses_fixture','system',2,1000,2000,'{"text":"Copied notice","time":{"created":1000}}');"#,
+        );
+    }
+    /// A message OpenCode 2 writes after the migration: a new id, a later
+    /// `seq` and times.
+    const CONTINUE: &str = r#"INSERT INTO session_message VALUES('msg_zz_continued','ses_fixture','user',3,3000,3000,'{"text":"Continued under 2.x","time":{"created":3000}}')"#;
+    fn by_id(refs: &[SessionRef], id: &str) -> SessionRef {
+        refs.iter()
+            .find(|r| r.path.file_name().unwrap() == id)
+            .unwrap()
+            .clone()
+    }
+
+    /// An upgraded 1.x database keeps its legacy tables, and OpenCode 2
+    /// copies each legacy session into `session_v2` under the same id.
+    /// Each id is listed once. A copy not continued under 2.x is still
+    /// described and read through the legacy tables, so its observation
+    /// and transcript hash are exactly what they were before the upgrade;
+    /// a legacy session not yet copied reads as before.
+    #[test]
+    fn an_upgraded_database_lists_each_session_once() {
+        let dir = fixture();
+        change(
+            dir.path(),
+            r#"INSERT INTO session VALUES('ses_legacyonly','/synthetic/legacy','1.19.5',1000,2000);
+               INSERT INTO message VALUES('msg_legacyonly','ses_legacyonly',1000,2000,'{"role":"user","time":{"created":1000}}');
+               INSERT INTO part VALUES('prt_legacyonly','msg_legacyonly','ses_legacyonly',1000,2000,'{"type":"text","text":"Legacy only"}');"#,
+        );
+        let legacy_refs = discover(dir.path()).unwrap();
+        let legacy_read = load(dir.path(), &by_id(&legacy_refs, "ses_fixture")).unwrap();
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        migrate_fixture(dir.path());
+        let before = std::fs::read(dir.path().join(DB)).unwrap();
+        let refs = discover(dir.path()).unwrap();
+        let ids: Vec<_> = refs
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, ["ses_fixture", "ses_fixture2x", "ses_legacyonly"]);
+        for id in ["ses_fixture", "ses_legacyonly"] {
+            assert_eq!(
+                format!("{:?}", by_id(&refs, id)),
+                format!("{:?}", by_id(&legacy_refs, id)),
+                "{id}"
+            );
+        }
+        let copied = load(dir.path(), &refs[0]).unwrap();
+        assert_eq!(copied.session_hash, legacy_read.session_hash);
+        assert_eq!(copied.conversation_id, legacy_read.conversation_id);
+        assert_eq!(copied.agent_version, legacy_read.agent_version);
+        assert_same_events(&copied, &legacy_read);
+        assert_eq!(copied.events[0].content.as_deref(), Some("Synthetic test"));
+        assert_eq!(load(dir.path(), &refs[1]).unwrap().events.len(), 8);
+        let legacy = load(dir.path(), &refs[2]).unwrap();
+        assert_eq!(legacy.events[0].content.as_deref(), Some("Legacy only"));
+        assert_eq!(legacy.agent_version.as_deref(), Some("1.19.5"));
+        assert_eq!(before, std::fs::read(dir.path().join(DB)).unwrap());
+    }
+
+    /// Any message the migration could not have written, or any migrated
+    /// row changed after it, means the session was continued under 2.x;
+    /// it is then described and read from `session_v2`.
+    #[test]
+    fn a_copy_continued_under_2x_is_read_from_session_v2() {
+        for continued in [
+            CONTINUE,
+            // A migrated row changed after the migration.
+            "UPDATE session_message SET time_updated=2500 WHERE id='msg_fixture'",
+            // A new message sharing a legacy id's 16-character prefix and
+            // time, but of a kind the migration does not mint such ids for.
+            r#"INSERT INTO session_message VALUES('msg_fixtureQqQqQqQqQqQqQq','ses_fixture','user',3,1000,2000,'{"text":"Continued under 2.x","time":{"created":1000}}')"#,
+            // A synthetic row whose time matches no legacy message.
+            r#"INSERT INTO session_message VALUES('msg_fixtureQqQqQqQqQqQqQq','ses_fixture','synthetic',3,1500,1500,'{"text":"Continued under 2.x","time":{"created":1500}}')"#,
+        ] {
+            let dir = fixture();
+            add_v2(dir.path(), KNOWN_MIGRATIONS);
+            migrate_fixture(dir.path());
+            change(dir.path(), continued);
+            let refs = discover(dir.path()).unwrap();
+            assert_eq!(refs.len(), 2, "{continued}");
+            let reference = by_id(&refs, "ses_fixture");
+            let transcript = load(dir.path(), &reference).unwrap();
+            assert_eq!(
+                transcript.events[0].content.as_deref(),
+                Some("Copied into session_v2"),
+                "{continued}"
+            );
+            if continued == CONTINUE {
+                assert_eq!(
+                    transcript.events.last().unwrap().content.as_deref(),
+                    Some("Continued under 2.x")
+                );
+                // Described from session_v2 too: its newest message.
+                assert_eq!(
+                    reference.group_modified_at.unwrap().timestamp_millis(),
+                    3000
+                );
+            }
+            if continued.starts_with("UPDATE") {
+                assert_eq!(
+                    reference.group_modified_at.unwrap().timestamp_millis(),
+                    2500
+                );
+            }
+        }
+    }
+
+    /// OpenCode message ids are 30 characters, so the migration's synthetic
+    /// ids share a legacy id's first 16 and differ in the last 14.
+    #[test]
+    fn synthetic_rows_match_full_length_legacy_ids_by_prefix() {
+        let legacy = "msg_0123456789ABcdefghijklmnop";
+        let synthetic = "msg_0123456789ABQqQqQqQqQqQqQq";
+        let unrelated = "msg_0123456789AXQqQqQqQqQqQqQq";
+        assert_eq!(legacy.len(), 30);
+        for (id, time, continued) in [
+            (synthetic, 1000, false),
+            (synthetic, 1001, true),
+            (unrelated, 1000, true),
+        ] {
+            let dir = fixture();
+            change(
+                dir.path(),
+                &format!(
+                    "UPDATE message SET id='{legacy}'; UPDATE part SET message_id='{legacy}';"
+                ),
+            );
+            let legacy_ref = discover(dir.path()).unwrap().remove(0);
+            add_v2(dir.path(), KNOWN_MIGRATIONS);
+            change(
+                dir.path(),
+                &format!(
+                    r#"INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
+                         VALUES('ses_fixture','global','s','/synthetic/project','1.19.0',1000,2000);
+                       INSERT INTO session_message VALUES('{legacy}','ses_fixture','user',0,1000,2000,'{{"text":"Copied into session_v2","time":{{"created":1000}}}}');
+                       INSERT INTO session_message VALUES('{id}','ses_fixture','synthetic',1,{time},2000,'{{"text":"Copied synthetic","time":{{"created":{time}}}}}');"#
+                ),
+            );
+            let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+            let transcript = load(dir.path(), &reference).unwrap();
+            let from_v2 = transcript.events[0].content.as_deref() == Some("Copied into session_v2");
+            assert_eq!(from_v2, continued, "{id} {time}");
+            if !continued {
+                assert_eq!(format!("{reference:?}"), format!("{legacy_ref:?}"));
+            }
+        }
+    }
+
+    /// A legacy session from a release the 1.x reader refuses is refused
+    /// as before while its copy is untouched, and read as the 2.x session
+    /// it became once continued.
+    #[test]
+    fn an_unreadable_legacy_version_reads_only_once_continued_under_2x() {
+        let dir = fixture();
+        change(dir.path(), "UPDATE session SET version='1.17.0'");
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        migrate_fixture(dir.path());
+        let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+        assert!(
+            load(dir.path(), &reference)
+                .unwrap_err()
+                .downcast_ref::<super::super::opencode::UnsupportedExportVersion>()
+                .is_some()
+        );
+        change(dir.path(), CONTINUE);
+        let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+        let transcript = load(dir.path(), &reference).unwrap();
+        assert_eq!(transcript.agent_version.as_deref(), Some("1.17.0"));
+        assert_eq!(
+            transcript.events.last().unwrap().content.as_deref(),
+            Some("Continued under 2.x")
+        );
+        assert_eq!(
+            reference.group_modified_at.unwrap().timestamp_millis(),
+            3000
+        );
+    }
+
+    /// A session_v2 copy is read whatever its version column says: a copy
+    /// of a session from a release the legacy reader refuses still reads.
+    #[test]
+    fn the_version_column_labels_but_does_not_gate_2x_sessions() {
+        let dir = fresh_v2();
+        for version in ["2.1.4", "2.0.0", "local", "99.0.0"] {
+            change(
+                dir.path(),
+                &format!("UPDATE session_v2 SET version='{version}'"),
+            );
+            let reference = discover(dir.path()).unwrap().remove(0);
+            let transcript = load(dir.path(), &reference).unwrap();
+            assert_eq!(transcript.agent_version.as_deref(), Some(version));
+        }
+    }
+
+    #[test]
+    fn an_unknown_migration_refuses_the_2x_store() {
+        for applied in [
+            &["20261101000000_future_migration"][..],
+            &[KNOWN_MIGRATIONS[0], "20260730195856_optional_session_title"][..],
+        ] {
+            let dir = fresh_v2();
+            let reference = discover(dir.path()).unwrap().remove(0);
+            for id in applied {
+                change(
+                    dir.path(),
+                    &format!("INSERT OR IGNORE INTO migration VALUES('{id}',0)"),
+                );
+            }
+            assert_eq!(
+                discover(dir.path()).unwrap_err().to_string(),
+                "opencode-database-schema-unsupported"
+            );
+            assert_eq!(
+                load(dir.path(), &reference).unwrap_err().to_string(),
+                "opencode-database-schema-unsupported"
+            );
+        }
+        // In an upgraded database the refusal covers the legacy sessions
+        // too: the whole database was last written by an unchecked release.
+        let dir = fixture();
+        let legacy = discover(dir.path()).unwrap().remove(0);
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        assert_eq!(discover(dir.path()).unwrap().len(), 2);
+        change(
+            dir.path(),
+            "INSERT INTO migration VALUES('20261101000000_future_migration',0)",
+        );
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+        assert_eq!(
+            load(dir.path(), &legacy).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+        // A subset of the known list (an older 2.x) is accepted.
+        let dir = tempfile::tempdir().unwrap();
+        add_v2(dir.path(), &KNOWN_MIGRATIONS[..40]);
+        assert_eq!(discover(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_2x_store_without_its_migration_table_or_columns_refuses() {
+        let dir = fresh_v2();
+        change(dir.path(), "DROP TABLE migration");
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+        let dir = fresh_v2();
+        change(
+            dir.path(),
+            "ALTER TABLE session_message DROP COLUMN time_updated",
+        );
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+        let dir = fresh_v2();
+        change(dir.path(), "INSERT INTO migration VALUES(7,0)");
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+    }
+
+    /// A database with neither session table gets a schema label, not
+    /// `unreadable`.
+    #[test]
+    fn a_database_without_session_tables_is_a_schema_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        Connection::open(dir.path().join(DB))
+            .unwrap()
+            .execute_batch("CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)")
+            .unwrap();
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-schema-unsupported"
+        );
+    }
+
+    /// 1.19.x already has a `session_message` table and a `migration`
+    /// table (its 38 migrations are the first 38 here). Without
+    /// `session_v2` neither is consulted, so a pure 1.x database reads as
+    /// before, whatever its migration rows say.
+    #[test]
+    fn a_1x_database_never_consults_session_message_or_migrations() {
+        let dir = fixture();
+        change(
+            dir.path(),
+            "CREATE TABLE migration(id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+             INSERT INTO migration VALUES('20261101000000_future_migration',0);
+             CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+             INSERT INTO session_message VALUES('msg_x','ses_fixture','user',0,'not json');",
+        );
+        let refs = discover(dir.path()).unwrap();
+        assert_eq!(refs.len(), 1);
+        let transcript = load(dir.path(), &refs[0]).unwrap();
+        assert_eq!(transcript.events.len(), 1);
+        assert_eq!(transcript.agent_version.as_deref(), Some("1.19.0"));
+    }
+
+    /// Rows written by 2.0.x carry pre-2.1 field names; they are upgraded
+    /// as OpenCode's `SessionLegacy.message` (schema/src/session-legacy.ts)
+    /// does before decoding.
+    #[test]
+    fn legacy_2_0_field_names_are_upgraded_like_opencode_does() {
+        let upgrade = |kind: &str, data: Value| {
+            Value::Object(legacy_message(kind, data.as_object().unwrap().clone()))
+        };
+        assert_eq!(
+            upgrade(
+                "assistant",
+                json!({"providerState":{"a":1},"content":[
+                    {"type":"text","text":"t","state":{"s":1}},
+                    {"type":"reasoning","text":"r","state":{"s":2},"native":{"kept":true}},
+                    {"type":"tool","id":"c","state":{"status":"completed"},"providerState":{"p":1},"providerResultState":{"r":2}},
+                    {"type":"tool","id":"d","state":{"status":"error"},"native":{"n":0},"providerResultState":{"n":3}},
+                    {"type":"tool","id":"e","state":{"status":"running"},"providerResultState":"not a record"},
+                    "not a record"]})
+            ),
+            json!({"native":{"a":1},"content":[
+                {"type":"text","text":"t","native":{"s":1}},
+                {"type":"reasoning","text":"r","native":{"kept":true}},
+                {"type":"tool","id":"c","state":{"status":"completed"},"native":{"p":1,"r":2}},
+                {"type":"tool","id":"d","state":{"status":"error"},"native":{"n":3}},
+                {"type":"tool","id":"e","state":{"status":"running"}},
+                "not a record"]})
+        );
+        // The current name wins when both are present.
+        assert_eq!(
+            upgrade(
+                "assistant",
+                json!({"providerState":1,"native":2,"content":"x"})
+            ),
+            json!({"native":2,"content":"x"})
+        );
+        assert_eq!(
+            upgrade(
+                "compaction",
+                json!({"status":"completed","recent":"kept text","metadata":{"keepID":"msg_k","recent":"newer"},
+                    "native":{"dropped":true},
+                    "providerContext":{"messages":[
+                        {"content":[{"type":"media","mediaType":"image/png","data":"AAAA","name":"n"},{"type":"text","text":"x"}]},
+                        {"content":[{"type":"media","media":{"kept":true},"data":"AAAA"}]}]}})
+            ),
+            json!({"status":"completed","metadata":{"recent":"newer","keepID":"msg_k"},
+                "native":{"messages":[
+                    {"content":[{"type":"media","name":"n","media":{"source":{"type":"base64","data":"AAAA","mediaType":"image/png"}}},{"type":"text","text":"x"}]},
+                    {"content":[{"type":"media","media":{"kept":true},"data":"AAAA"}]}]}})
+        );
+        assert_eq!(
+            upgrade(
+                "compaction",
+                json!({"recent":"","providerContext":"x","metadata":"m"})
+            ),
+            json!({"metadata":"m"})
+        );
+        assert_eq!(
+            upgrade("compaction", json!({"recent":"t","providerContext":{}})),
+            json!({"metadata":{"recent":"t"},"native":{}})
+        );
+        for kind in ["user", "idle", "shell"] {
+            let data =
+                json!({"providerState":1,"recent":"x","content":[{"type":"text","state":1}]});
+            assert_eq!(upgrade(kind, data.clone()), data);
+        }
+    }
+
+    #[test]
+    fn a_2_0_shaped_session_reads_like_its_2_1_shape() {
+        let dir = fresh_v2();
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let current = load(dir.path(), &reference).unwrap();
+        change(
+            dir.path(),
+            r#"UPDATE session_message SET data=json_set(json_remove(data,'$.content[0].native'),'$.providerState',json('{"step":1}'),'$.content[1].state',json('{"s":1}'),'$.content[2].providerResultState',json('{"r":1}')) WHERE id='msg_a_assistant'"#,
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let legacy = load(dir.path(), &reference).unwrap();
+        assert_same_events(&legacy, &current);
+    }
+
+    #[test]
+    fn malformed_and_ambiguous_2x_rows_fail_closed() {
+        for (statement, label) in [
+            (
+                "UPDATE session_message SET data='not json' WHERE id='msg_b_idle'",
+                "opencode-database-malformed-json",
+            ),
+            (
+                "UPDATE session_message SET data='[1]' WHERE id='msg_b_idle'",
+                "opencode-database-malformed-json",
+            ),
+            (
+                r#"UPDATE session_message SET data=json_set(data,'$.id','msg_other') WHERE id='msg_b_idle'"#,
+                "opencode-database-ambiguous-id",
+            ),
+            (
+                r#"UPDATE session_message SET data=json_set(data,'$.type','user') WHERE id='msg_b_idle'"#,
+                "opencode-database-ambiguous-id",
+            ),
+            (
+                "UPDATE session_message SET id='bad id!' WHERE id='msg_b_idle'",
+                "opencode-database-ambiguous-id",
+            ),
+            (
+                "UPDATE session_v2 SET tokens_input=-1",
+                "opencode_invalid_v2_session",
+            ),
+            (
+                "UPDATE session_v2 SET time_updated=500",
+                "opencode_invalid_timestamp",
+            ),
+        ] {
+            let dir = fresh_v2();
+            let reference = discover(dir.path()).unwrap().remove(0);
+            change(dir.path(), statement);
+            assert_eq!(
+                load(dir.path(), &reference).unwrap_err().to_string(),
+                label,
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_sequence_numbers_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        change(
+            dir.path(),
+            "DROP INDEX session_message_session_seq_idx; UPDATE session_message SET seq=1 WHERE id='msg_b_idle'",
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert_eq!(
+            load(dir.path(), &reference).unwrap_err().to_string(),
+            "opencode-database-ambiguous-order"
+        );
+    }
+
+    #[test]
+    fn budgets_bound_2x_sessions() {
+        let dir = fresh_v2();
+        change(
+            dir.path(),
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000)
+               INSERT INTO session_message SELECT 'msg_n'||x,'ses_fixture2x','idle',x+10,2000,2000,'{}' FROM n",
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert_eq!(
+            load(dir.path(), &reference).unwrap_err().to_string(),
+            "opencode-database-record-budget"
+        );
+        let dir = fresh_v2();
+        change(
+            dir.path(),
+            "UPDATE session_message SET data=zeroblob(16777217) WHERE id='msg_b_idle'",
+        );
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert!(
+            load(dir.path(), &reference)
+                .unwrap_err()
+                .downcast_ref::<SessionTooLarge>()
+                .is_some()
+        );
+        let dir = fresh_v2();
+        change(
+            dir.path(),
+            "UPDATE session_v2 SET directory='/'||hex(zeroblob(40000))",
+        );
+        // Oversized metadata leaves the session out of the listing.
+        assert!(discover(dir.path()).unwrap().is_empty());
+        let dir = fixture();
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        change(
+            dir.path(),
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<65535)
+               INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
+               SELECT 'ses_n'||x,'global','s','/synthetic','2.1.4',1000,2000 FROM n",
+        );
+        // One legacy session plus 65,536 in session_v2 is over the budget.
+        assert_eq!(
+            discover(dir.path()).unwrap_err().to_string(),
+            "opencode-database-session-budget"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn refuses_database_and_sidecar_symlinks() {
