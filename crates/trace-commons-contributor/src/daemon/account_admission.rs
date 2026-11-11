@@ -382,14 +382,34 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         state.forget();
         return;
     };
+    // The answer also decides whether queue rows read "cannot be sent"
+    // (`contribution_eligibility::applies`), so a change in what that rule
+    // says is a change to every row: shells are told to read the queue again.
+    let rows_before = shared.eligibility_applies_for(Some(&cfg));
+    read_answer(shared, &cfg, now, dry_run).await;
+    if shared.eligibility_applies_for(Some(&cfg)) != rows_before {
+        shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+}
+
+/// One pass's read of the status, or the decision not to ask.
+async fn read_answer(
+    shared: &DaemonShared,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    dry_run: bool,
+) {
+    let state = &shared.account_admission;
+    // Asked when something is armed, for R3, and for an evidence-admitted
+    // contributor with nothing armed, whose rows the answer decides.
     if !trace_commons_protocol::admission::is_anchored_tenant(&cfg.tenant_id)
         || dry_run
-        || !anything_armed(shared)
+        || !(anything_armed(shared) || super::contribution_eligibility::evidence_flag(Some(cfg)))
     {
         state.forget();
         return;
     }
-    let key = AnswerKey::of(&cfg);
+    let key = AnswerKey::of(cfg);
     if !state.should_ask(&key, now) {
         return;
     }
@@ -407,7 +427,7 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         state.record(key, None, now);
         return;
     }
-    let reply = fetch_status(&cfg, &session.session.access_token).await;
+    let reply = fetch_status(cfg, &session.session.access_token).await;
     if let Some(rotated) = reply.rotated_token {
         // Stored against the snapshot the session was read under, so a
         // sign-out in the meantime is not overwritten. Either way the held
@@ -1041,6 +1061,30 @@ mod tests {
             1,
             "asked once something is armed"
         );
+    }
+
+    /// An evidence-admitted contributor is asked with nothing armed: the
+    /// answer also decides whether their queue rows read "cannot be sent"
+    /// (`contribution_eligibility::applies`), which every contributor sees.
+    #[tokio::test]
+    async fn an_evidence_contributor_is_asked_with_nothing_armed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let base = serve(status_router(StatusCode::OK, yes(), None, hits.clone())).await;
+        let mut d = Daemon::new(&base, &token("original"));
+        d.arm(false);
+        d.cfg.witness = Some(
+            serde_json::from_value(serde_json::json!({
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                "admission_evidence": true,
+            }))
+            .unwrap(),
+        );
+        d.shared.store.save_config(&d.cfg).unwrap();
+        d.refresh().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(d.current(), AccountAdmission::Advertised);
     }
 
     /// A dry run sends nothing, so it asks nothing either.
