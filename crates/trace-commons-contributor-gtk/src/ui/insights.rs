@@ -424,7 +424,15 @@ impl InsightsView {
         let switcher = gtk::StackSwitcher::new();
         switcher.set_stack(Some(&tabs));
         let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        tab_row.append(&switcher);
+        // Keep every destination reachable even when the native switcher's
+        // label minimum exceeds a narrow pane or an enlarged text setting.
+        let tab_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hexpand(true)
+            .child(&switcher)
+            .build();
+        tab_row.append(&tab_scroller);
         for setter in [
             gtk::prelude::WidgetExt::set_margin_top,
             gtk::prelude::WidgetExt::set_margin_start,
@@ -433,6 +441,7 @@ impl InsightsView {
             setter(&tab_row, 12);
         }
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.add_css_class("tc-insights");
         root.append(&tab_row);
         root.append(&tabs);
         let weak = Rc::downgrade(&analytics);
@@ -2360,6 +2369,69 @@ pub(super) fn local_first_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_insights_tabs_have_visible_labels_and_switch_pages() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let window = adw::ApplicationWindow::builder()
+            .default_width(980)
+            .default_height(720)
+            .build();
+        let store = std::env::temp_dir().join(format!("tc-insights-nav-{}", uuid::Uuid::new_v4()));
+        let view = InsightsView::with_store(&window, Some(store));
+        window.set_content(Some(&view.root));
+        window.present();
+        let settle = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while std::time::Instant::now() < end {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        settle();
+        let row = view.root.first_child().unwrap();
+        let scroller = row
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        let viewport = scroller.child().unwrap();
+        let switcher = viewport
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::StackSwitcher>()
+            .unwrap();
+        let stack = switcher.stack().unwrap();
+        let mut button = switcher.first_child();
+        for tab in analytics::Tab::ALL {
+            let widget = button.take().expect("one control per destination");
+            let control = widget.clone().downcast::<gtk::ToggleButton>().unwrap();
+            let label = control.child().unwrap().downcast::<gtk::Label>().unwrap();
+            assert_eq!(label.text(), copy(tab.title_key()));
+            assert!(label.is_mapped() && label.width() > 0 && label.height() > 0);
+            assert!(control.grab_focus());
+            control.emit_clicked();
+            settle();
+            assert_eq!(stack.visible_child_name().as_deref(), Some(tab.name()));
+            let bounds = label.compute_bounds(&scroller).unwrap();
+            assert!(
+                bounds.x() >= 0.0 && bounds.y() >= 0.0,
+                "label clipped at start"
+            );
+            assert!(
+                bounds.x() + bounds.width() <= scroller.width() as f32,
+                "label clipped at end"
+            );
+            button = widget.next_sibling();
+        }
+        assert!(button.is_none());
+        window.close();
+    }
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
