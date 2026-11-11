@@ -38,7 +38,11 @@ fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
         assert!(!runtime.snapshot().is_enabled("insights_skills"));
         let mut unsupported = profile;
         unsupported.capabilities.clear();
-        let blocked = Runtime::open(registry.clone(), unsupported, dir.path(), now()).unwrap();
+        // Its own state directory: the rollback watermark is per environment,
+        // so revision 1 here would be refused after revision 2 above.
+        let blocked_dir = tempfile::tempdir().unwrap();
+        let blocked =
+            Runtime::open(registry.clone(), unsupported, blocked_dir.path(), now()).unwrap();
         blocked.accept(&manifest(1, true), now()).unwrap();
         assert!(!blocked.snapshot().is_enabled("insights_skills"));
         assert!(blocked.snapshot().flags["insights_skills"].capability_blocked);
