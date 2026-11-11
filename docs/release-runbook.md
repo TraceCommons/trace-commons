@@ -11,8 +11,10 @@ against real credentials — is covered by the manual gates below.
 
 ## What an `app-v*` tag releases: macOS only
 
-Native macOS is the lead client, and the Windows, Linux (GTK flatpak) and
-Tauri shells are frozen. Since `app-v0.23.0`, an `app-v*` tag push in
+Native macOS is the lead client. The Windows and Tauri shells are frozen,
+and the Linux GTK app, back in development since 2026-11-11, is not
+released on tags until it catches up. Since `app-v0.23.0`, an `app-v*`
+tag push in
 `release-apps.yml` builds and publishes the macOS DMG alone: the GitHub
 Release, `updates/latest.json` and the Sparkle appcast. The Homebrew cask
 is bumped by hand (see "Publishing, and the manual tap bump").

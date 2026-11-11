@@ -2,8 +2,9 @@
 # `app-v0.2.0`.
 #
 # A tag push builds and publishes macOS ONLY. Native macOS is the lead
-# client, and the Windows, Linux (GTK flatpak) and Tauri shells are frozen,
-# so the `windows`, `windows-app` and `linux-flatpak` jobs run only on a
+# client, the Windows and Tauri shells are frozen, and the Linux GTK app
+# (back in development) is not released on tags until it catches up, so
+# the `windows`, `windows-app` and `linux-flatpak` jobs run only on a
 # workflow_dispatch that names them (platform=all, windows or linux). A
 # dispatch never publishes: every publication step below is guarded on
 # `github.event_name == 'push'`, so those jobs' own publish steps are now
