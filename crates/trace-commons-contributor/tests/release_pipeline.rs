@@ -280,8 +280,9 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
-/// Native macOS is the lead client and the Windows, Linux and Tauri shells
-/// are frozen, so an `app-v*` tag push builds and publishes macOS alone.
+/// Native macOS is the lead client, the Windows and Tauri shells are frozen,
+/// and the Linux GTK app is in development but not yet released on tags, so
+/// an `app-v*` tag push builds and publishes macOS alone.
 /// The other build jobs stay reachable from a workflow_dispatch, which never
 /// publishes. Each job's `if:` must therefore require a dispatch, not merely
 /// omit `push`: a later edit that adds `github.event_name == 'push' ||` back

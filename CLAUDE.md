@@ -26,10 +26,12 @@ holds both sides of Trace Commons.
 
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
 Tauri work on macOS, and the Tauri app is retired there once the native
-screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
-(#1173 D13, a default for now). Native macOS is also the lead client and the
-parity target: GTK, Windows and Tauri match its terminology, states, flows
-and affordances, and Tauri drift is low priority.
+screens match. Windows stays on Tauri, frozen, until macOS ships (#1173
+D13, a default for now). The Linux GTK app is unfrozen for development
+(owner, 2026-11-11): GTK work is in scope again. Its releases stay off until
+it catches up, so an `app-v*` tag still builds macOS only. Native macOS is
+also the lead client and the parity target: GTK, Windows and Tauri match its
+terminology, states, flows and affordances, and Tauri drift is low priority.
 
 Ironclaw is a separate project and does not live in this tree; the surface it
 shares with this repo is `crates/trace-commons-protocol`. There is **no
