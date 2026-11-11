@@ -378,21 +378,63 @@ fn schema(tx: &Transaction<'_>) -> Result<Layout> {
     }
     Ok(Layout { legacy, v2 })
 }
-/// Where `id` is read from: `session_v2` whenever it holds the id, so a
-/// session OpenCode 2 has copied is read once, from its copy.
+/// Where `id` is described and read from. discover and load both decide
+/// here, so they never disagree.
+///
+/// An id only in one store is read from it. An id in both is a legacy
+/// session OpenCode 2 copied into `session_v2`; it stays on the legacy
+/// path, so its observation and transcript hash are unchanged by the
+/// upgrade, until it is continued under 2.x (see [`CONTINUED`]).
 fn store_of(tx: &Transaction<'_>, layout: Layout, id: &str) -> Result<Store> {
-    if layout.v2 {
-        let found: bool = sql(tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?1)",
-            [id],
-            |r| r.get(0),
-        ))?;
-        if found || !layout.legacy {
-            return Ok(Store::V2);
-        }
+    if !layout.v2 {
+        return Ok(Store::Legacy);
     }
-    Ok(Store::Legacy)
+    if !layout.legacy {
+        return Ok(Store::V2);
+    }
+    let (in_v2, in_legacy): (bool, bool) = sql(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?1), EXISTS(SELECT 1 FROM session WHERE id=?1)",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ))?;
+    Ok(match (in_v2, in_legacy) {
+        (true, false) => Store::V2,
+        (false, _) => Store::Legacy,
+        (true, true) => {
+            let continued: bool = sql(tx.query_row(CONTINUED, [id], |r| r.get(0)))?;
+            if continued { Store::V2 } else { Store::Legacy }
+        }
+    })
 }
+/// Whether a copied session has `session_message` content OpenCode 2's
+/// V1-to-V2 migration cannot have written (core/src/database/v1-migration.bun.ts
+/// at v2.1.4). The migration writes, per legacy message it keeps:
+/// - a row under the legacy message's own id (`row()`, lines 975-994,
+///   called with `id: item.row.id`), whose `time_created` and
+///   `time_updated` are that message's (lines 989-990; a compaction's
+///   `time_updated` is the larger of two legacy messages', line 300);
+/// - for a user message with synthetic text, a `synthetic` row, and for
+///   the last row possibly a `system` notice (lines 446-462), each under
+///   `syntheticID` (lines 1166-1180): the source id's first 16
+///   characters (`source.slice(0, 16)`, so all of a shorter id) plus 14
+///   more, at the source message's `time_created`. The prefix is
+///   `s.id` less its last 14 characters, and a legacy id matches when its
+///   own first 16 characters equal it.
+///
+/// Any other row, or any row whose `time_updated` is later than every
+/// legacy message's (drizzle stamps `time_updated` on every update,
+/// core/src/database/schema.sql.ts), was written by OpenCode 2 afterwards.
+/// A wrong answer only picks between two readers of the same session; a
+/// clock running backwards can only make a continued session look
+/// untouched, which reads it as before the upgrade.
+const CONTINUED: &str = "SELECT EXISTS(SELECT 1 FROM session_message s WHERE s.session_id=?1 AND (
+    s.time_updated > (SELECT max(time_updated) FROM message WHERE session_id=?1)
+    OR (NOT EXISTS (SELECT 1 FROM message m WHERE m.id=s.id AND m.session_id=?1)
+        AND NOT (s.type IN ('synthetic','system') AND length(s.id) BETWEEN 15 AND 30
+            AND EXISTS (SELECT 1 FROM message m
+            WHERE m.id>=substr(s.id,1,length(s.id)-14) AND m.id<substr(s.id,1,length(s.id)-14)||'~'
+            AND substr(m.id,1,16)=substr(s.id,1,length(s.id)-14)
+            AND m.session_id=?1 AND m.time_created=s.time_created)))))";
 fn bounds(tx: &Transaction<'_>, id: &str, store: Store) -> Result<(u64, u64)> {
     // SQLite evaluates byte lengths without materializing the JSON in Rust. Include
     // identity/metadata and JSON framing overhead conservatively in the byte bound.
@@ -466,7 +508,8 @@ pub fn discover(root: &Path) -> Result<Vec<SessionRef>> {
     let refs = {
         let tx = sql(reader.conn.transaction())?;
         let layout = schema(&tx)?;
-        // Legacy sessions OpenCode 2 has copied are listed from the copy.
+        // A legacy session OpenCode 2 has copied is listed once, under
+        // its `session_v2` id; `store_of` picks which store describes it.
         let legacy_only = if layout.v2 {
             " AND NOT EXISTS (SELECT 1 FROM session_v2 WHERE session_v2.id=session.id)"
         } else {
@@ -490,24 +533,29 @@ pub fn discover(root: &Path) -> Result<Vec<SessionRef>> {
         if count > SESSION_BUDGET as u64 {
             bail!("opencode-database-session-budget");
         }
-        let mut found: Vec<(String, Store)> = Vec::new();
+        let mut found: Vec<String> = Vec::new();
         const LISTABLE: &str = "typeof(id)='text' AND length(CAST(id AS BLOB))<=256";
         if layout.v2 {
             work.store(0, Ordering::Relaxed);
-            let query = format!("SELECT id FROM session_v2 WHERE {LISTABLE}");
-            found.extend(ids(&tx, &query)?.into_iter().map(|id| (id, Store::V2)));
+            found.extend(ids(
+                &tx,
+                &format!("SELECT id FROM session_v2 WHERE {LISTABLE}"),
+            )?);
         }
         if layout.legacy {
             work.store(0, Ordering::Relaxed);
             let query = format!("SELECT id FROM session WHERE {LISTABLE}{legacy_only}");
-            found.extend(ids(&tx, &query)?.into_iter().map(|id| (id, Store::Legacy)));
+            found.extend(ids(&tx, &query)?);
         }
         found.sort();
         let mut refs = Vec::new();
-        for (id, store) in found.iter().filter(|(id, _)| valid_id(id)) {
-            // A fresh WORK_BUDGET for each session's queries.
+        for id in found.iter().filter(|id| valid_id(id)) {
+            // A fresh WORK_BUDGET for each session's queries. The store is
+            // chosen as `load` chooses it.
             work.store(0, Ordering::Relaxed);
-            if let Ok(found) = reference(&tx, root, id, *store) {
+            let described =
+                store_of(&tx, layout, id).and_then(|store| reference(&tx, root, id, store));
+            if let Ok(found) = described {
                 refs.push(found);
             }
         }
@@ -1389,23 +1437,53 @@ mod tests {
         );
     }
 
-    /// An upgraded 1.x database keeps its legacy tables. OpenCode 2 copies
-    /// each legacy session into `session_v2` under the same id; the copy is
-    /// what is listed and read. A legacy session not yet copied is read
-    /// from the legacy tables as before.
+    /// Copies the fixture's legacy session `ses_fixture` into `session_v2`
+    /// the way OpenCode 2's V1-to-V2 migration does
+    /// (core/src/database/v1-migration.bun.ts at v2.1.4): same session and
+    /// message ids, `seq` from 0, each row's `time_created` and
+    /// `time_updated` copied from its legacy message, and the extra
+    /// `synthetic` and `system` rows it may add under an id built from the
+    /// first 16 characters of a legacy message id plus 14 more, at that
+    /// message's `time_created`.
+    fn migrate_fixture(root: &Path) {
+        change(
+            root,
+            r#"INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
+                 VALUES('ses_fixture','global','copied-slug','/synthetic/project',(SELECT version FROM session WHERE id='ses_fixture'),1000,2000);
+               INSERT INTO session_message VALUES('msg_fixture','ses_fixture','user',0,1000,2000,'{"text":"Copied into session_v2","time":{"created":1000}}');
+               INSERT INTO session_message VALUES('msg_fixtureAbCdEfGhIjKlMn','ses_fixture','synthetic',1,1000,2000,'{"text":"Copied synthetic","time":{"created":1000}}');
+               INSERT INTO session_message VALUES('msg_fixtureZyXwVuTsRqPoNm','ses_fixture','system',2,1000,2000,'{"text":"Copied notice","time":{"created":1000}}');"#,
+        );
+    }
+    /// A message OpenCode 2 writes after the migration: a new id, a later
+    /// `seq` and times.
+    const CONTINUE: &str = r#"INSERT INTO session_message VALUES('msg_zz_continued','ses_fixture','user',3,3000,3000,'{"text":"Continued under 2.x","time":{"created":3000}}')"#;
+    fn by_id(refs: &[SessionRef], id: &str) -> SessionRef {
+        refs.iter()
+            .find(|r| r.path.file_name().unwrap() == id)
+            .unwrap()
+            .clone()
+    }
+
+    /// An upgraded 1.x database keeps its legacy tables, and OpenCode 2
+    /// copies each legacy session into `session_v2` under the same id.
+    /// Each id is listed once. A copy not continued under 2.x is still
+    /// described and read through the legacy tables, so its observation
+    /// and transcript hash are exactly what they were before the upgrade;
+    /// a legacy session not yet copied reads as before.
     #[test]
-    fn an_upgraded_database_lists_each_session_once_and_prefers_session_v2() {
+    fn an_upgraded_database_lists_each_session_once() {
         let dir = fixture();
-        add_v2(dir.path(), KNOWN_MIGRATIONS);
         change(
             dir.path(),
-            r#"INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
-                 VALUES('ses_fixture','global','copied-slug','/synthetic/project','1.19.0',1000,2000);
-               INSERT INTO session_message VALUES('msg_fixture','ses_fixture','user',0,1000,2000,'{"text":"Copied into session_v2","time":{"created":1000}}');
-               INSERT INTO session VALUES('ses_legacyonly','/synthetic/legacy','1.19.5',1000,2000);
+            r#"INSERT INTO session VALUES('ses_legacyonly','/synthetic/legacy','1.19.5',1000,2000);
                INSERT INTO message VALUES('msg_legacyonly','ses_legacyonly',1000,2000,'{"role":"user","time":{"created":1000}}');
                INSERT INTO part VALUES('prt_legacyonly','msg_legacyonly','ses_legacyonly',1000,2000,'{"type":"text","text":"Legacy only"}');"#,
         );
+        let legacy_refs = discover(dir.path()).unwrap();
+        let legacy_read = load(dir.path(), &by_id(&legacy_refs, "ses_fixture")).unwrap();
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        migrate_fixture(dir.path());
         let before = std::fs::read(dir.path().join(DB)).unwrap();
         let refs = discover(dir.path()).unwrap();
         let ids: Vec<_> = refs
@@ -1413,19 +1491,143 @@ mod tests {
             .map(|r| r.path.file_name().unwrap().to_str().unwrap().to_owned())
             .collect();
         assert_eq!(ids, ["ses_fixture", "ses_fixture2x", "ses_legacyonly"]);
+        for id in ["ses_fixture", "ses_legacyonly"] {
+            assert_eq!(
+                format!("{:?}", by_id(&refs, id)),
+                format!("{:?}", by_id(&legacy_refs, id)),
+                "{id}"
+            );
+        }
         let copied = load(dir.path(), &refs[0]).unwrap();
-        assert_eq!(copied.events.len(), 1);
-        assert_eq!(
-            copied.events[0].content.as_deref(),
-            Some("Copied into session_v2")
-        );
-        assert_eq!(copied.agent_version.as_deref(), Some("1.19.0"));
+        assert_eq!(copied.session_hash, legacy_read.session_hash);
+        assert_eq!(copied.conversation_id, legacy_read.conversation_id);
+        assert_eq!(copied.agent_version, legacy_read.agent_version);
+        assert_same_events(&copied, &legacy_read);
+        assert_eq!(copied.events[0].content.as_deref(), Some("Synthetic test"));
         assert_eq!(load(dir.path(), &refs[1]).unwrap().events.len(), 8);
         let legacy = load(dir.path(), &refs[2]).unwrap();
         assert_eq!(legacy.events[0].content.as_deref(), Some("Legacy only"));
         assert_eq!(legacy.agent_version.as_deref(), Some("1.19.5"));
-        assert_eq!(refs[2].cwd.as_deref(), Some("/synthetic/legacy"));
         assert_eq!(before, std::fs::read(dir.path().join(DB)).unwrap());
+    }
+
+    /// Any message the migration could not have written, or any migrated
+    /// row changed after it, means the session was continued under 2.x;
+    /// it is then described and read from `session_v2`.
+    #[test]
+    fn a_copy_continued_under_2x_is_read_from_session_v2() {
+        for continued in [
+            CONTINUE,
+            // A migrated row changed after the migration.
+            "UPDATE session_message SET time_updated=2500 WHERE id='msg_fixture'",
+            // A new message sharing a legacy id's 16-character prefix and
+            // time, but of a kind the migration does not mint such ids for.
+            r#"INSERT INTO session_message VALUES('msg_fixtureQqQqQqQqQqQqQq','ses_fixture','user',3,1000,2000,'{"text":"Continued under 2.x","time":{"created":1000}}')"#,
+            // A synthetic row whose time matches no legacy message.
+            r#"INSERT INTO session_message VALUES('msg_fixtureQqQqQqQqQqQqQq','ses_fixture','synthetic',3,1500,1500,'{"text":"Continued under 2.x","time":{"created":1500}}')"#,
+        ] {
+            let dir = fixture();
+            add_v2(dir.path(), KNOWN_MIGRATIONS);
+            migrate_fixture(dir.path());
+            change(dir.path(), continued);
+            let refs = discover(dir.path()).unwrap();
+            assert_eq!(refs.len(), 2, "{continued}");
+            let reference = by_id(&refs, "ses_fixture");
+            let transcript = load(dir.path(), &reference).unwrap();
+            assert_eq!(
+                transcript.events[0].content.as_deref(),
+                Some("Copied into session_v2"),
+                "{continued}"
+            );
+            if continued == CONTINUE {
+                assert_eq!(
+                    transcript.events.last().unwrap().content.as_deref(),
+                    Some("Continued under 2.x")
+                );
+                // Described from session_v2 too: its newest message.
+                assert_eq!(
+                    reference.group_modified_at.unwrap().timestamp_millis(),
+                    3000
+                );
+            }
+            if continued.starts_with("UPDATE") {
+                assert_eq!(
+                    reference.group_modified_at.unwrap().timestamp_millis(),
+                    2500
+                );
+            }
+        }
+    }
+
+    /// OpenCode message ids are 30 characters, so the migration's synthetic
+    /// ids share a legacy id's first 16 and differ in the last 14.
+    #[test]
+    fn synthetic_rows_match_full_length_legacy_ids_by_prefix() {
+        let legacy = "msg_0123456789ABcdefghijklmnop";
+        let synthetic = "msg_0123456789ABQqQqQqQqQqQqQq";
+        let unrelated = "msg_0123456789AXQqQqQqQqQqQqQq";
+        assert_eq!(legacy.len(), 30);
+        for (id, time, continued) in [
+            (synthetic, 1000, false),
+            (synthetic, 1001, true),
+            (unrelated, 1000, true),
+        ] {
+            let dir = fixture();
+            change(
+                dir.path(),
+                &format!(
+                    "UPDATE message SET id='{legacy}'; UPDATE part SET message_id='{legacy}';"
+                ),
+            );
+            let legacy_ref = discover(dir.path()).unwrap().remove(0);
+            add_v2(dir.path(), KNOWN_MIGRATIONS);
+            change(
+                dir.path(),
+                &format!(
+                    r#"INSERT INTO session_v2(id,project_id,slug,directory,version,time_created,time_updated)
+                         VALUES('ses_fixture','global','s','/synthetic/project','1.19.0',1000,2000);
+                       INSERT INTO session_message VALUES('{legacy}','ses_fixture','user',0,1000,2000,'{{"text":"Copied into session_v2","time":{{"created":1000}}}}');
+                       INSERT INTO session_message VALUES('{id}','ses_fixture','synthetic',1,{time},2000,'{{"text":"Copied synthetic","time":{{"created":{time}}}}}');"#
+                ),
+            );
+            let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+            let transcript = load(dir.path(), &reference).unwrap();
+            let from_v2 = transcript.events[0].content.as_deref() == Some("Copied into session_v2");
+            assert_eq!(from_v2, continued, "{id} {time}");
+            if !continued {
+                assert_eq!(format!("{reference:?}"), format!("{legacy_ref:?}"));
+            }
+        }
+    }
+
+    /// A legacy session from a release the 1.x reader refuses is refused
+    /// as before while its copy is untouched, and read as the 2.x session
+    /// it became once continued.
+    #[test]
+    fn an_unreadable_legacy_version_reads_only_once_continued_under_2x() {
+        let dir = fixture();
+        change(dir.path(), "UPDATE session SET version='1.17.0'");
+        add_v2(dir.path(), KNOWN_MIGRATIONS);
+        migrate_fixture(dir.path());
+        let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+        assert!(
+            load(dir.path(), &reference)
+                .unwrap_err()
+                .downcast_ref::<super::super::opencode::UnsupportedExportVersion>()
+                .is_some()
+        );
+        change(dir.path(), CONTINUE);
+        let reference = by_id(&discover(dir.path()).unwrap(), "ses_fixture");
+        let transcript = load(dir.path(), &reference).unwrap();
+        assert_eq!(transcript.agent_version.as_deref(), Some("1.17.0"));
+        assert_eq!(
+            transcript.events.last().unwrap().content.as_deref(),
+            Some("Continued under 2.x")
+        );
+        assert_eq!(
+            reference.group_modified_at.unwrap().timestamp_millis(),
+            3000
+        );
     }
 
     /// A session_v2 copy is read whatever its version column says: a copy
