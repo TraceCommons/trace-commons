@@ -398,8 +398,10 @@ carries the full statement and working rules; the essentials are repeated here.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-sources`, `-contributor-insights`, `-contributor-platform`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`, `-attestation`, the unpublished `-client-server-tests`, and
-  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`)). The shipped
+  `-build-info`, `-attestation`, the unpublished `-client-server-tests`,
+  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`), and the 11
+  `ironwire_*` crates (copyright NEAR AI, imported from nearai/ironwire; see
+  `docs/ironwire/README.md`)). The shipped
   clients can be embedded in proprietary agent harnesses and must stay
   permissive.
 
