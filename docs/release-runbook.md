@@ -36,8 +36,8 @@ is bumped by hand (see "Publishing, and the manual tap bump").
   crate in the release-prep commit.
 - The Tauri app is not built for release by any workflow.
 - The CLI is unaffected: `release-contributor.yml` still builds and
-  publishes it for macOS, Linux and Windows on `contributor-v*` tags, and
-  still bumps winget; the Homebrew formula is bumped by hand.
+  publishes it for macOS, Linux and Windows on `contributor-v*` tags. The
+  Homebrew formula and the winget manifest are updated by hand.
   `scripts/install.ps1`
   resolves `contributor-v*` releases, never `app-v*` ones.
 
@@ -142,16 +142,22 @@ after both tag runs have succeeded:
 4. Open a pull request for each and squash-merge it. Homebrew serves the
    previous version until you do.
 
-### Re-running a release tag
+## winget (by hand)
 
-A deleted-and-re-cut tag re-runs the winget step against a branch that
-already exists (`TraceCommons.Contributor-$V`). That used to fail with
-`! [rejected] (fetch first)` after every artifact had published, so the step
-force-pushes. That is safe only because the step clones the winget fork with
-`--depth 1 --single-branch`, which fetches the default branch and nothing
-else, and rebuilds the branch from it plus a hash computed from the published
-asset: no previous attempt's bytes can reach the push. If the fork already
-carries that exact content, the step exits 0 without pushing.
+No workflow submits to winget: `WINGET_PKGS_TOKEN` stopped authenticating
+(contributor-v1.0.2), and the step only ever pushed a branch to a fork,
+because no token can open a pull request on `microsoft/winget-pkgs`. After
+`release-contributor` succeeds:
+
+1. Run `scripts/winget/generate-manifests.sh <version>`. It downloads the
+   published `trace-commons-contributor-x86_64-pc-windows-msvc.zip` and
+   hashes the bytes it got, then writes the three manifests under
+   `manifests/t/TraceCommons/Contributor/<version>/`.
+2. Copy that directory into your fork of `microsoft/winget-pkgs` at the same
+   path, validate it on Windows (`winget validate --manifest <path>`), and
+   open a pull request against `microsoft/winget-pkgs`.
+
+### The publish job's guard
 
 In `release-apps.yml`, the `publish` job carries `if: always() && ...` so
 a failed or skipped platform does not withhold a verified macOS DMG (on a

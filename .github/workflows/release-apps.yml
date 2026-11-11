@@ -63,10 +63,9 @@ jobs:
   # this is the same idea with this workflow's own credential list.
   #
   # The list is enumerated from what release-apps.yml actually reads, NOT
-  # copied from release-contributor.yml: this workflow never touches
-  # WINGET_PKGS_TOKEN, and its update manifests take their signing key from
-  # Secret Manager rather than from
-  # vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX. Requiring either here would
+  # copied from release-contributor.yml: its update manifests take their
+  # signing key from Secret Manager rather than from
+  # vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX. Requiring that here would
   # fail releases over configuration nothing in this file consumes.
   #
   # `environment: release` is load-bearing and not just symmetry with the
