@@ -54,10 +54,11 @@ The macOS app and CLI are distributed via a Homebrew tap:
 `brew tap TraceCommons/tap`.
 
 - `Casks/trace-commons.rb` installs the notarized `Near.ai.app` from the
-  DMG published as `Near.ai-<version>.dmg` on releases of
-  `TraceCommons/trace-commons` tagged `app-v<version>`. Releases before the
-  rename published `TraceCommons-<version>.dmg` holding `TraceCommons.app`;
-  the cask's `url` and `app` stanzas name the new files.
+  DMG published as `Gateway-<version>.dmg` (volume `Gateway`) on releases
+  of `TraceCommons/trace-commons` tagged `app-v<version>`. Releases up to
+  1.0.2 published `Near.ai-<version>.dmg`, and earlier ones
+  `TraceCommons-<version>.dmg` holding `TraceCommons.app`; the cask's `url`
+  and `app` stanzas name the current files.
 - `Formula/trace-commons-contributor.rb` installs the signed CLI from the
   zips published as `trace-commons-contributor-<target>.zip` on releases
   tagged `contributor-v<version>`, for both `aarch64-apple-darwin` and
@@ -71,7 +72,7 @@ The macOS app and CLI are distributed via a Homebrew tap:
 `aarch64-apple-darwin` and `x86_64-apple-darwin`, `lipo`s them into one
 dylib, and passes `swift build --arch arm64 --arch x86_64` so the app
 executable is universal too; it verifies both with `lipo -archs` and fails
-loudly if either is thin. `Near.ai-<version>.dmg` therefore runs on both
+loudly if either is thin. `Gateway-<version>.dmg` therefore runs on both
 Apple silicon and Intel Macs, and the cask carries no `depends_on arch:`.
 
 The CLI (`Formula/trace-commons-contributor.rb`) ships separate
@@ -127,7 +128,7 @@ publish jobs failed after their assets were out, and that skipped the update
 feed behind them. The tap is bumped by hand now, with your own `gh` login,
 after both tag runs have succeeded:
 
-1. Download the release assets: `Near.ai-<version>.dmg` from
+1. Download the release assets: `Gateway-<version>.dmg` from
    `app-v<version>`, and `trace-commons-contributor-aarch64-apple-darwin.zip`
    and `trace-commons-contributor-x86_64-apple-darwin.zip` from
    `contributor-v<version>`, each with its `.sha256`.
@@ -135,7 +136,10 @@ after both tag runs have succeeded:
    published `.sha256`. Use the hash of the bytes you downloaded, never one
    copied from a log or an earlier branch.
 3. In a clone of the tap, on a branch per file:
-   - `Casks/trace-commons.rb`: set `version` and the DMG's `sha256`.
+   - `Casks/trace-commons.rb`: set `version` and the DMG's `sha256`. The
+     first bump of a release named `Gateway-<version>.dmg` must also change
+     the `url` from `Near.ai-#{version}.dmg` to `Gateway-#{version}.dmg`;
+     the `app` stanza stays `Near.ai.app`.
    - `Formula/trace-commons-contributor.rb`: set `version`, the `on_arm`
      `sha256` to the `aarch64-apple-darwin` zip's hash, and the `on_intel`
      `sha256` to the `x86_64-apple-darwin` zip's hash. Getting these

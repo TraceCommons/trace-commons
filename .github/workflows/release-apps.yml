@@ -282,7 +282,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="Near.ai-${SHORT_VERSION}.dmg"
+          OUT="Gateway-${SHORT_VERSION}.dmg"
           cp macos/.build/Near.ai.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
@@ -1442,10 +1442,10 @@ jobs:
           ARGS=()
 
           if [ "$MACOS_RESULT" = success ]; then
-            F="dist/macos-dmg/Near.ai-$V.dmg"
+            F="dist/macos-dmg/Gateway-$V.dmg"
             SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
             SIZE="$(wc -c < "$F" | tr -d ' ')"
-            ARGS+=(--platform "macos-universal=$BASE/Near.ai-$V.dmg=$SHA=$SIZE")
+            ARGS+=(--platform "macos-universal=$BASE/Gateway-$V.dmg=$SHA=$SIZE")
           fi
 
           # Never true on a tag push now that `windows` is dispatch-only,
@@ -1544,8 +1544,8 @@ jobs:
           ./scripts/updates/generate-appcast.sh \
             --short-version "$V" \
             --build-version "$BUILD_VERSION" \
-            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/Near.ai-$V.dmg" \
-            --dmg-path "dist/macos-dmg/Near.ai-$V.dmg" \
+            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/Gateway-$V.dmg" \
+            --dmg-path "dist/macos-dmg/Gateway-$V.dmg" \
             --sign-update "$SIGN_UPDATE" \
             --ed-key-file "$RUNNER_TEMP/sparkle-ed-key" \
             --out dist/updates/appcast.xml
