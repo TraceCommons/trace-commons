@@ -45,7 +45,7 @@ public struct LegacyMigrationWire: Decodable, Equatable, Sendable {
             noticeJSON = nil
             return
         }
-        let data = try JSONEncoder().encode(notice)
+        let data = try JSONEncoder.sortedKeys.encode(notice)
         noticeJSON = String(decoding: data, as: UTF8.self)
     }
 }
