@@ -183,10 +183,15 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     }
 }
 
-/// Native/export format refusal, shared by all native health surfaces.
-pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode session version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str =
-    "Supported: OpenCode 1.19.0 databases and sessions from 1.18.29 or 1.19.0.";
+/// Refusal for traces saved by an OpenCode version the reader does not
+/// accept, shared by all native health surfaces. The versions match the
+/// readers' `READABLE_RANGES` in `trace-commons-contributor-sources`.
+/// Approved by the owner 2026-11-10; "this app" per the 2026-11-02 rule that
+/// the commons' name never appears in user-visible copy.
+pub const OPENCODE_VERSION_TITLE: &str =
+    "Some OpenCode traces are from a version this app can't read yet.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This app reads traces saved by OpenCode 1.14.28 to \
+     1.14.29, 1.18.0 to 1.18.35 and 1.19.0 to 1.19.5. Traces from other versions are left out.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -388,13 +393,33 @@ mod tests {
         assert_ne!(row["watching"], row["off"]);
     }
 
+    /// The banner's version list is the readers' ranges, in order, each
+    /// written "1.m.first to 1.m.last".
+    fn assert_opencode_detail_names_every_readable_version() {
+        let ranges: Vec<String> = crate::source::opencode::READABLE_RANGES
+            .iter()
+            .map(|(m, first, last)| format!("1.{m}.{first} to 1.{m}.{last}"))
+            .collect();
+        let (last, rest) = ranges.split_last().unwrap();
+        let expected = format!("OpenCode {} and {last}.", rest.join(", "));
+        assert!(
+            OPENCODE_VERSION_DETAIL.contains(&expected),
+            "{OPENCODE_VERSION_DETAIL} lacks {expected}"
+        );
+    }
+
     #[test]
     fn export_refusal_payload_preserves_supported_version_and_scope() {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert_opencode_detail_names_every_readable_version();
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
     }
 
     #[test]
@@ -450,8 +475,13 @@ mod tests {
         }
         assert!(source_check_line(SourceTool::OpenCode, "unset").contains("only managed launches"));
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert_opencode_detail_names_every_readable_version();
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
         assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));
     }
 
