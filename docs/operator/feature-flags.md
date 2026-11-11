@@ -113,9 +113,13 @@ Signing therefore, not the bucket ACL, decides what can turn a flag on. The
 buckets are shared with release artifacts: `tracecommons-flatpak` is written by
 the release workflow's `GCP_FLATPAK_PUBLISHER_SA` (`release-apps.yml`), and
 `tc-staging-updates-20261022` by `TC_STAGING_GCP_PUBLISHER_SA`
-(`staging-macos.yml`), plus whoever holds storage admin on those projects. Any
-of them can delete or replace a manifest object, which returns clients to their
-cache and then their defaults; none of them can enable a flag.
+(`staging-macos.yml`, bucket from `macos/channels/staging.env`), plus whoever
+holds storage admin on those projects. Any of them can delete or replace a
+manifest object, which returns clients to their cache and then their defaults;
+none of them can enable a flag. They can, however, hold back a disable: leaving
+an earlier signed manifest in place, or restoring it, keeps clients that have
+not yet seen the newer revision on its values until its `expires_at`. Keep
+validity short for flags whose disable is urgent.
 
 ### The signing key (owner, once per environment)
 
