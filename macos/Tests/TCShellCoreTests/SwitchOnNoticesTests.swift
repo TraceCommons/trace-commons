@@ -68,6 +68,39 @@ final class SwitchOnNoticesTests: XCTestCase {
             try JSONDecoder().decode(GateHeld.self, from: Data(#"{"held_sessions":-1}"#.utf8)))
     }
 
+    /// The same object decodes to equal values every time. Each wire keeps
+    /// the object re-encoded, and a dictionary's key order is not stable from
+    /// one decode to the next, so without sorted keys two reads of an
+    /// unchanged status could compare unequal and republish it.
+    func testAReEncodedObjectComparesEqualAcrossDecodes() throws {
+        let held = Data("""
+        {"held_sessions":0,"reasons":[],"projects":[],"a":1,"b":2,"c":3,"d":4}
+        """.utf8)
+        let rewording = Data(rewordingElement.utf8)
+        let void = Data("""
+        {"id":7,"project_id":"3f1c","project_label":"api","voided_at":"t","reason":"r","a":1,"b":2}
+        """.utf8)
+        let migration = Data("""
+        {"offered":true,"notice":{"title":"t","body":"b","action":"a","later":"l","x":1,"y":2}}
+        """.utf8)
+        func same<T: Decodable & Equatable>(_ type: T.Type, _ data: Data) throws {
+            let first = try JSONDecoder().decode(T.self, from: data)
+            for _ in 0..<200 {
+                XCTAssertEqual(try JSONDecoder().decode(T.self, from: data), first, "\(T.self)")
+            }
+        }
+        try same(GateHeld.self, held)
+        try same(ArmingRewordingWire.self, rewording)
+        try same(GrantVoidWire.self, void)
+        try same(LegacyMigrationWire.self, migration)
+        // What the daemon sends when nothing is held is the same value as
+        // the default for a daemon that sends nothing.
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                GateHeld.self, from: Data(#"{"held_sessions":0,"reasons":[],"projects":[]}"#.utf8)),
+            GateHeld.none)
+    }
+
     private let heldNotice = """
     {"title":"t","body":"b","reasons":["r"],"release":"r2","ask_first":"a",
      "projects":[{"project_id":"3f1c","line":"api: 3 sessions waiting",
