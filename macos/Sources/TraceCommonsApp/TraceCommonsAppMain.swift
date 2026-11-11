@@ -280,6 +280,9 @@ struct MonitorCommands: Commands {
     /// entire main menu whenever a `Commands` value's observed object
     /// changes, and the model changes on every daemon status update.
     @ObservedObject var privateInference: PrivateInferenceMenuItem
+    /// The command-line tool's item, observed here so a change of status
+    /// rebuilds the menu item; it publishes only on a change.
+    @ObservedObject var cliTool: CliToolController = .shared
     let navigation: MainWindowNavigation
     /// The person's tab order, so Cmd-N follows the strip as dragged.
     @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
@@ -330,7 +333,7 @@ struct MonitorCommands: Commands {
         // Install, update or remove the command-line tool (owner,
         // 2026-10-29), like VS Code's "Install 'code' command in PATH".
         CommandGroup(after: .appSettings) {
-            CliToolMenuItem()
+            CliToolMenuItem(controller: cliTool)
         }
     }
 
