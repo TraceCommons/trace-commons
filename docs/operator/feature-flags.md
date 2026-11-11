@@ -130,6 +130,23 @@ an earlier signed manifest in place, or restoring it, keeps clients that have
 not yet seen the newer revision on its values until its `expires_at`. Keep
 validity short for flags whose disable is urgent.
 
+### Current keys
+
+Created 2026-11-10 in `tracecommons-pilot-2026`, `us-central1`, key ring
+`tc-feature-flags`, algorithm `ec-sign-ed25519`, software protection.
+`roles/cloudkms.signerVerifier` on each key is held by `zaki@iqlusion.io`
+only; no project-level KMS role is granted, and `roles/editor` carries no
+signing permission. KMS data-access audit logging is on for the project.
+
+| Environment | Key (version 1) | Key id | Public key (raw, hex) |
+|---|---|---|---|
+| production | `feature-manifest-production` | `6c75f4c8298f1563` | `49ce745bfec653ca8187c1c0bb68d18c7afc9dfc6998bc7bc9424bd4081845a5` |
+| staging | `feature-manifest-staging` | `026b03ad08ebdbb8` | `044cb512150ded39f6b345ade36aa8038f5eb4ae382fbb08d7ba05cce53babcb` |
+| testing | `feature-manifest-testing` | `3678f0265d88264f` | `328a5ecf5805942071d6cfdf822acb98d8d33dc4ff44f2640b1c2ad3475e5a53` |
+
+Each is pinned in its environment's `profiles/<env>.json`. The public keys are
+not secret; export a PEM again at any time with the command below.
+
 ### The signing key (owner, once per environment)
 
 Use one Cloud KMS key per environment, algorithm `ec-sign-ed25519`, created and
