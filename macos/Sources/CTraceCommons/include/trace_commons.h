@@ -2495,7 +2495,9 @@ uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void
  * leftover error is not mistaken for this one.
  */
 /* Attached handles also disable cloned reader sinks and drain active callbacks;
- * calling from an attached callback is refused with the same context label. */
+ * calling from an attached callback is refused with the same context label.
+ * A refused attached unsubscribe still stops delivery to ctx, but ctx must stay
+ * valid until a retry from a plain thread succeeds. */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.

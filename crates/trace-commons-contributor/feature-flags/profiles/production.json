@@ -3,5 +3,6 @@
   "registry_version": 1,
   "environment": "production",
   "capabilities": [],
-  "remote_enable": []
+  "remote_enable": [],
+  "signing_keys": []
 }

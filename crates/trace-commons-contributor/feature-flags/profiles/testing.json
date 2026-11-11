@@ -3,5 +3,6 @@
   "registry_version": 1,
   "environment": "testing",
   "capabilities": [],
-  "remote_enable": []
+  "remote_enable": [],
+  "signing_keys": []
 }

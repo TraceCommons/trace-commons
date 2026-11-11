@@ -10071,7 +10071,8 @@ feature snapshot: environment, profile digest, daemon-instance UUID, increasing
 snapshot generation, sampled time, source, manifest revision/expiry/freshness,
 and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
 It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
-returns `{"requested":true}` and schedules a coalesced anonymous refresh; it
+returns `{"requested":true}` and schedules a coalesced anonymous refresh (at most
+one fetch start per 30 seconds; a sooner request is deferred, not dropped); it
 cannot accept a URL or flag values. Developer dry runs allow the snapshot read
 but refuse refresh. Neither method grants any operation authorization.
 

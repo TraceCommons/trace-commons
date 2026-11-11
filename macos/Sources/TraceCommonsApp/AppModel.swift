@@ -1731,7 +1731,6 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        if case .refused(let line) = BuildChannelGate.current { startup = .refused(line); return }
         start(plistChannel: BuildChannelGate.plistChannel)
     }
 
@@ -1740,13 +1739,13 @@ final class AppModel: ObservableObject {
     /// dylib, or names no channel, refuses here with the core's sentence and
     /// resolves no directory and starts no daemon (staging design, 4.3).
     /// `start(configDirectory:)` below is a test seam that skips this check.
-    func start(plistChannel: String?) {
+    func start(plistChannel: String?, featureProfileAgrees: Bool = BuildChannelGate.featureProfileAgrees) {
         guard case .starting = startup else { return }
         let channel: BuildChannel
-        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        switch BuildChannelGate.verdict(plistChannel: plistChannel, featureProfileAgrees: featureProfileAgrees) {
         case .agreed(let agreed):
             channel = agreed
-        case .refused(let sentence):
+        case .refused(_, let sentence):
             startup = .refused(sentence)
             return
         }

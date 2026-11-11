@@ -84,8 +84,10 @@ for forward compatibility. Unsupported schema, wrong environment, malformed or
 duplicate fields, invalid times, and invalid known flag values reject the whole
 manifest. Require expiry after issue time and limit validity to seven days.
 
-Trust v1 publication through HTTPS and restricted existing deployment credentials.
-Independent application signatures/key rotation are outside v1. A remote flag is
+Manifests are Ed25519-signed by a per-environment Cloud KMS key whose public key
+each build profile pins; the update buckets are shared with release artifacts,
+so their write credentials alone must not be able to enable a flag (review of
+PR #2003). A profile may pin several keys for rotation. A remote flag is
 never an authorization boundary. Reject lower revisions than the highest accepted
 revision; an identical revision must have identical content. Rollback publishes
 old values under a new revision. Local cache tampering is outside this threat model.
