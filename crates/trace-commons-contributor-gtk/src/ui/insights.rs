@@ -2372,6 +2372,69 @@ mod tests {
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_insights_tabs_have_visible_labels_and_switch_pages() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let window = adw::ApplicationWindow::builder()
+            .default_width(980)
+            .default_height(720)
+            .build();
+        let store = std::env::temp_dir().join(format!("tc-insights-nav-{}", uuid::Uuid::new_v4()));
+        let view = InsightsView::with_store(&window, Some(store));
+        window.set_content(Some(&view.root));
+        window.present();
+        let settle = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while std::time::Instant::now() < end {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        settle();
+        let row = view.root.first_child().unwrap();
+        let scroller = row
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        let viewport = scroller.child().unwrap();
+        let switcher = viewport
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::StackSwitcher>()
+            .unwrap();
+        let stack = switcher.stack().unwrap();
+        let mut button = switcher.first_child();
+        for tab in analytics::Tab::ALL {
+            let widget = button.take().expect("one control per destination");
+            let control = widget.clone().downcast::<gtk::ToggleButton>().unwrap();
+            let label = control.child().unwrap().downcast::<gtk::Label>().unwrap();
+            assert_eq!(label.text(), copy(tab.title_key()));
+            assert!(label.is_mapped() && label.width() > 0 && label.height() > 0);
+            assert!(control.grab_focus());
+            control.emit_clicked();
+            settle();
+            assert_eq!(stack.visible_child_name().as_deref(), Some(tab.name()));
+            let bounds = label.compute_bounds(&scroller).unwrap();
+            assert!(
+                bounds.x() >= 0.0 && bounds.y() >= 0.0,
+                "label clipped at start"
+            );
+            assert!(
+                bounds.x() + bounds.width() <= scroller.width() as f32,
+                "label clipped at end"
+            );
+            button = widget.next_sibling();
+        }
+        assert!(button.is_none());
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn local_first_window_lists_mission_drafts_only_while_missions_are_shown() {
         assert_eq!(
             std::env::consts::OS,

@@ -33,3 +33,11 @@ Reproduce component capture from the GTK crate with Python GI, GTK4/libadwaita G
 ```sh
 INSIGHTS_TEXT_SCALE=1.5 GTK_A11Y=none xvfb-run -a -s '-screen 0 1100x1000x24' dbus-run-session -- python3 scripts/insights-component-shot.py src/ui/brand_tokens.rs /tmp/dark-440-large.png dark 440
 ```
+
+## PR 2083 CI follow-up
+
+Hosted Linux compiled and passed unit tests but failed the existing OCR gate: the frame was nonblank and contained Overview content, but OCR omitted Overview/Breakdown/Sessions tab labels. No screenshot artifact was retained by that run. A full production stylesheet plus mounted GTK hierarchy reproduced all four labels on Linux; an actual InsightsView probe on macOS also reported all four labels mapped at nonzero size. The cause remains unresolved; no speculative product fix or weakened OCR gate was applied.
+
+Added an actual rooted InsightsView regression checking labels, visible allocation, focus and tab switching, and wired it plus the two existing style/layout regressions into the Weston runner using its nonzero-test-count helper. Local GTK library validation: 597 passed, seven display tests ignored; formatting and bash syntax passed. New Linux display cases are compiled but await CI execution.
+
+Other hosted failures are untouched by this UI diff: rustix 1.1.4 advisory RUSTSEC-2026-0486 across lockfiles; root hickory-proto 0.25.2 advisories RUSTSEC-2026-0487/0489/0490/0491; two contributor fake-Codex process-survival assertions after their 30-second sleep lifetime in a 61-second suite. No review comments were present when checked.
