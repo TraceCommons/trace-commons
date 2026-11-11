@@ -125,6 +125,7 @@ upload_principal_ownership_pg|S|upload_principal_ownership_pg||admission_test_up
 credit_hold_ownership|S|lib|credit_hold_ownership::tests|admission_test_credit_hold_ownership|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_credit_hold_ownership||
 activity_missions_pg|S|activity_missions_pg||admission_test_activity_missions|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_activity_missions||
 model_training_consent_pg|S|model_training_consent_pg||admission_test_model_training_consent|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_model_training_consent||
+org_pg|S|org_pg||admission_test_orgs|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_orgs||
 r1_pipeline_measurement|S|r1_pipeline_measurement|--nocapture||TRACE_COMMONS_R1_MEASUREMENT_PG_TEST_URL=@postgres|test result: ok\.|^skipping:
 legacy_invite_counts|S|legacy_invite_counts|--nocapture||TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL=@postgres|test result: ok\.|^skipping:
 pipeline_upgrade|S|lib|pipeline_upgrade --ignored|pipeline_test_upgrade|TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL=@pipeline_test_upgrade||

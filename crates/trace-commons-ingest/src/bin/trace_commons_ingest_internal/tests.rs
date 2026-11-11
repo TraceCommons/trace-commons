@@ -92221,8 +92221,12 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
         .map(|p| (p.to_string(), account))
         .collect();
 
-    let (settled, excluded, reasons) =
-        apply_credit_settlement_account_cap(events.clone(), cap, &linked);
+    let (settled, excluded, reasons) = apply_credit_settlement_account_cap(
+        events.clone(),
+        cap,
+        &linked,
+        &OrgSettlementTarget::NotOrg,
+    );
     assert!(
         settled.is_empty(),
         "the account is over cap, so none of its principals may settle"
@@ -92235,8 +92239,12 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
 
     // Without account linkage there is nothing to fold up, so the legacy
     // per-principal behaviour is preserved: each is under cap and settles.
-    let (settled_unlinked, excluded_unlinked, _) =
-        apply_credit_settlement_account_cap(events.clone(), cap, &HashMap::new());
+    let (settled_unlinked, excluded_unlinked, _) = apply_credit_settlement_account_cap(
+        events.clone(),
+        cap,
+        &HashMap::new(),
+        &OrgSettlementTarget::NotOrg,
+    );
     assert_eq!(
         settled_unlinked.len(),
         3,
@@ -92245,10 +92253,60 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
     assert_eq!(excluded_unlinked, 0);
 
     // A single principal over the cap is still blocked, linked or not.
-    let (over, over_excluded, _) =
-        apply_credit_settlement_account_cap(vec![event("solo", 1.5)], cap, &HashMap::new());
+    let (over, over_excluded, _) = apply_credit_settlement_account_cap(
+        vec![event("solo", 1.5)],
+        cap,
+        &HashMap::new(),
+        &OrgSettlementTarget::NotOrg,
+    );
     assert!(over.is_empty());
     assert_eq!(over_excluded, 1);
+
+    // In an org tenant every principal settles to the holder, linked or not,
+    // so the org's cap bounds the whole org, not each member.
+    let holder = OrgSettlementTarget::Holder {
+        account_id: Uuid::new_v4(),
+        cap_micros: 1_000_000,
+    };
+    let (org_settled, org_excluded, _) = apply_credit_settlement_account_cap(
+        events.clone(),
+        Some(1_000_000),
+        &HashMap::new(),
+        &holder,
+    );
+    assert!(
+        org_settled.is_empty(),
+        "three unlinked members together exceed the org cap"
+    );
+    assert_eq!(org_excluded, 3);
+    let (org_under, org_under_excluded, _) =
+        apply_credit_settlement_account_cap(events, Some(2_000_000), &HashMap::new(), &holder);
+    assert_eq!(org_under.len(), 3);
+    assert_eq!(org_under_excluded, 0);
+}
+
+#[tokio::test]
+async fn credit_settlement_refuses_an_org_tenant_without_an_org_record() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let org_tenant = format!("org-{}", "ab".repeat(32));
+    // No database: the org record cannot be read, so settlement refuses.
+    let err = credit_settlement_org_target(&state, &org_tenant)
+        .await
+        .expect_err("an org tenant with no record never settles");
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert_eq!(err.1.0.error, "org_record_missing");
+    // Any tenant that claims the org namespace is held to the same rule.
+    let err = credit_settlement_org_target(&state, "ORG-unshaped")
+        .await
+        .expect_err("org-looking tenant refused");
+    assert_eq!(err.1.0.error, "org_record_missing");
+    assert_eq!(
+        credit_settlement_org_target(&state, "tenant-a")
+            .await
+            .unwrap(),
+        OrgSettlementTarget::NotOrg
+    );
 }
 
 /// The dedup index must be held as a trait object so Phase 2 can substitute a

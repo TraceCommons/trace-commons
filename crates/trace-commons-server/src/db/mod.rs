@@ -18,9 +18,14 @@ pub mod first_run_stats;
 pub mod postgres;
 pub mod postgres_inference_connection;
 mod postgres_legacy_payout_carry;
+mod postgres_org;
 mod postgres_payout;
 mod postgres_referral;
 mod postgres_terms_acceptance;
+pub use postgres_org::{
+    CreatedOrg, NewOrg, OrgPolicyUpdateOutcome, OrgSeatAdmission, OrgSeatAdmitOutcome,
+    OrgSeatRemoveOutcome,
+};
 pub mod witness_blocked;
 #[doc(hidden)]
 pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
@@ -261,6 +266,117 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _accepted_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError> {
         Err(DatabaseError::Pool("terms_acceptance_unavailable".into()))
+    }
+
+    /// The org record of an `org-` tenant (V159), or `None`. Never creates a
+    /// tenant. Callers treat `None` for an org-namespace tenant as a refusal.
+    async fn get_org(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<crate::org::OrgRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn get_org_seat(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    /// The seat a registered device key belongs to.
+    async fn get_org_seat_for_device(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    /// The seat whose account owns `principal_ref` (a device principal or an
+    /// upload principal bound to one).
+    async fn get_org_seat_for_principal(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn list_org_seats(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<crate::org::OrgSeatListing>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn create_org(&self, _new: NewOrg) -> Result<CreatedOrg, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn admit_org_seat(
+        &self,
+        _admission: OrgSeatAdmission,
+    ) -> Result<OrgSeatAdmitOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn record_org_membership_proof(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _proved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn register_org_seat_device(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _device_key_id: &str,
+        _expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn update_org_policy(
+        &self,
+        _tenant_id: &str,
+        _expected_version: i64,
+        _policy: &trace_commons_protocol::org_policy::OrgPolicy,
+        _actor_ref: &str,
+    ) -> Result<OrgPolicyUpdateOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn remove_org_seat(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _actor_ref: &str,
+    ) -> Result<OrgSeatRemoveOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn append_org_audit_row(
+        &self,
+        _tenant_id: &str,
+        _action: &str,
+        _actor_ref: &str,
+        _outcome: &str,
+        _safe_metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
+    }
+
+    async fn list_org_audit(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<trace_commons_protocol::org_policy::OrgAuditEntry>, DatabaseError> {
+        Err(DatabaseError::Pool("org_store_unavailable".into()))
     }
 
     async fn select_inference_connection(

@@ -256,6 +256,10 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_inference_connection_requests",
     "trace_account_inference_connection_events",
     "account_terms_acceptances",
+    "trace_orgs",
+    "trace_org_enrolment_authorities",
+    "trace_org_seats",
+    "trace_org_seat_devices",
     "trace_account_principals",
     "trace_device_upload_principals",
     "trace_login_links",
@@ -2137,6 +2141,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_terms_acceptances",
         include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
     ),
+    // V159: organizations. One tenant per org with a seat per member and
+    // server and a holder account for settled credit, under forced RLS.
+    (
+        159,
+        "orgs",
+        include_str!("../../../../migrations/V159__orgs.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2393,6 +2404,117 @@ impl Database for PgBackend {
             accepted_at,
         )
         .await
+    }
+
+    async fn get_org(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::org::OrgRecord>, DatabaseError> {
+        PgBackend::get_org(self, tenant_id).await
+    }
+
+    async fn get_org_seat(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        PgBackend::get_org_seat(self, tenant_id, account_id).await
+    }
+
+    async fn get_org_seat_for_device(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        PgBackend::get_org_seat_for_device(self, tenant_id, device_key_id).await
+    }
+
+    async fn get_org_seat_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<Option<crate::org::OrgSeatRecord>, DatabaseError> {
+        PgBackend::get_org_seat_for_principal(self, tenant_id, principal_ref).await
+    }
+
+    async fn list_org_seats(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::org::OrgSeatListing>, DatabaseError> {
+        PgBackend::list_org_seats(self, tenant_id).await
+    }
+
+    async fn create_org(
+        &self,
+        new: crate::db::NewOrg,
+    ) -> Result<crate::db::CreatedOrg, DatabaseError> {
+        PgBackend::create_org(self, new).await
+    }
+
+    async fn admit_org_seat(
+        &self,
+        admission: crate::db::OrgSeatAdmission,
+    ) -> Result<crate::db::OrgSeatAdmitOutcome, DatabaseError> {
+        PgBackend::admit_org_seat(self, admission).await
+    }
+
+    async fn record_org_membership_proof(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        proved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::record_org_membership_proof(self, tenant_id, account_id, proved_at).await
+    }
+
+    async fn register_org_seat_device(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        device_key_id: &str,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::register_org_seat_device(self, tenant_id, account_id, device_key_id, expires_at)
+            .await
+    }
+
+    async fn update_org_policy(
+        &self,
+        tenant_id: &str,
+        expected_version: i64,
+        policy: &trace_commons_protocol::org_policy::OrgPolicy,
+        actor_ref: &str,
+    ) -> Result<crate::db::OrgPolicyUpdateOutcome, DatabaseError> {
+        PgBackend::update_org_policy(self, tenant_id, expected_version, policy, actor_ref).await
+    }
+
+    async fn remove_org_seat(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        actor_ref: &str,
+    ) -> Result<crate::db::OrgSeatRemoveOutcome, DatabaseError> {
+        PgBackend::remove_org_seat(self, tenant_id, account_id, actor_ref).await
+    }
+
+    async fn append_org_audit_row(
+        &self,
+        tenant_id: &str,
+        action: &str,
+        actor_ref: &str,
+        outcome: &str,
+        safe_metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        PgBackend::append_org_audit_row(self, tenant_id, action, actor_ref, outcome, safe_metadata)
+            .await
+    }
+
+    async fn list_org_audit(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_protocol::org_policy::OrgAuditEntry>, DatabaseError> {
+        PgBackend::list_org_audit(self, tenant_id, limit).await
     }
 
     async fn select_inference_connection(
@@ -8684,6 +8806,7 @@ mod tests {
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
+            include_str!("../../../../migrations/V159__orgs.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -8737,6 +8860,7 @@ mod tests {
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
+            include_str!("../../../../migrations/V159__orgs.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -9741,6 +9865,98 @@ mod v158_tests {
         assert!(
             !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
             "V158 must not grant anything TO PUBLIC"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v159_tests {
+    /// V159: the org tables are under forced RLS on the central tenant
+    /// predicate, the runtime has no DELETE and updates only lifecycle
+    /// columns, the seat shape checks hold, and nothing the PostgreSQL 15
+    /// pilot lacks is used.
+    #[test]
+    fn v159_creates_org_tables_under_forced_rls() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__orgs.sql", 159);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            4,
+            "V159 must be named four times: by the MIGRATIONS table, by the two \
+             RLS coverage lists, and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 159 && *name == "orgs"),
+            "V159 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V159__orgs.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for table in [
+            "trace_orgs",
+            "trace_org_enrolment_authorities",
+            "trace_org_seats",
+            "trace_org_seat_devices",
+        ] {
+            for required in [
+                format!("CREATE TABLE IF NOT EXISTS {table} ("),
+                format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;"),
+                format!("CREATE POLICY trace_corpus_tenant_isolation ON {table}"),
+            ] {
+                assert!(code.contains(&required), "V159 is missing `{required}`");
+            }
+            assert!(
+                super::TRACE_COMMONS_RLS_TABLES.contains(&table),
+                "{table} must be listed in TRACE_COMMONS_RLS_TABLES"
+            );
+        }
+        for required in [
+            "CHECK (tenant_id ~ '^org-[0-9a-f]{64}$')",
+            "CHECK ((kind = 'member') = (org_role IS NOT NULL))",
+            "OR (kind = 'holder' AND consent_basis IS NULL)",
+            "CHECK ((kind = 'holder') = (identity_index IS NULL))",
+            "ON trace_org_seats (tenant_id) WHERE kind = 'holder';",
+            "UNIQUE (tenant_id, identity_index)",
+            "near_ai_org_index     TEXT UNIQUE",
+            "USING (tenant_id = trace_current_tenant_id())",
+        ] {
+            assert!(code.contains(required), "V159 is missing `{required}`");
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "BYPASSRLS",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "WITH INHERIT",
+            "WITH SET",
+            "CREATE ROLE",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V159 must not contain `{forbidden}`"
+            );
+        }
+        // Every UPDATE grant is column-scoped.
+        for line in upper.lines().filter(|line| line.contains("GRANT UPDATE")) {
+            assert!(
+                line.contains("GRANT UPDATE ("),
+                "V159 grants a whole-row UPDATE: `{line}`"
+            );
+        }
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V159 must not grant anything TO PUBLIC"
         );
     }
 }
