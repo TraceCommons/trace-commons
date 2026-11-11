@@ -346,7 +346,7 @@ fn read_session(conn: &mut Connection, root: &Path, id: &str) -> Result<SessionT
         [id],
         |r| r.get(0),
     ))?;
-    if !["1.18.29", "1.19.0"].contains(&version.as_str()) {
+    if !super::opencode::is_readable(&version) {
         return Err(super::opencode::UnsupportedExportVersion.into());
     }
     let mut messages = Vec::new();
@@ -586,6 +586,58 @@ mod tests {
         let transcript = load(dir.path(), &reference).unwrap();
         assert_eq!(transcript.agent_version.as_deref(), Some("1.18.29"));
         assert_eq!(transcript.conversation_id.as_deref(), Some("ses_fixture"));
+    }
+    /// Patch releases whose storage code is unchanged from 1.19.0 read
+    /// exactly like it; the next unchecked release still refuses.
+    #[test]
+    fn every_readable_release_reads_like_1_19_0_and_later_ones_refuse() {
+        let dir = fixture();
+        let reference = discover(dir.path()).unwrap().remove(0);
+        let baseline = load(dir.path(), &reference).unwrap();
+        for version in [
+            "1.14.28", "1.14.29", "1.18.0", "1.18.25", "1.18.27", "1.18.34", "1.18.35", "1.19.1",
+            "1.19.2", "1.19.3", "1.19.4", "1.19.5",
+        ] {
+            assert!(super::super::opencode::is_readable(version), "{version}");
+            change(
+                dir.path(),
+                &format!("UPDATE session SET version='{version}'"),
+            );
+            let reference = discover(dir.path()).unwrap().remove(0);
+            let transcript = load(dir.path(), &reference).unwrap();
+            assert_eq!(transcript.agent_version.as_deref(), Some(version));
+            assert_eq!(transcript.conversation_id, baseline.conversation_id);
+            assert_eq!(transcript.events.len(), baseline.events.len());
+        }
+        for version in [
+            "1.14.27",
+            "1.14.30",
+            "1.15.0",
+            "1.17.9",
+            "1.18.36",
+            "1.19.6",
+            "1.19.99",
+            "1.20.0",
+            "2.0.0",
+            "2.1.4",
+            "1.18.x",
+            "01.18.5",
+            "1.18.5-beta",
+            "",
+        ] {
+            change(
+                dir.path(),
+                &format!("UPDATE session SET version='{version}'"),
+            );
+            let reference = discover(dir.path()).unwrap().remove(0);
+            assert!(
+                load(dir.path(), &reference)
+                    .unwrap_err()
+                    .downcast_ref::<super::super::opencode::UnsupportedExportVersion>()
+                    .is_some(),
+                "{version}"
+            );
+        }
     }
     #[test]
     fn record_budget_and_ambiguous_identity_fail_closed() {
