@@ -79,6 +79,15 @@ use trace_commons_protocol::witness_pacing::{
     WITNESS_BACKGROUND_WORKLOAD, WITNESS_SATURATED_ERROR, WITNESS_SATURATED_RETRY_AFTER_SECS,
     WITNESS_WORKLOAD_HEADER,
 };
+use trace_commons_protocol::witness_refusal::{
+    WITNESS_ARTIFACT_BINDING_FAILED, WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
+    WITNESS_INFERENCE_ATTESTATION_MISSING, WITNESS_INFERENCE_ATTESTATION_UNAVAILABLE,
+    WITNESS_INFERENCE_BODY_NOT_IN_SESSION, WITNESS_INFERENCE_BODY_TOO_LARGE,
+    WITNESS_INFERENCE_CALL_ABSENT, WITNESS_INFERENCE_CALL_UNATTESTABLE,
+    WITNESS_INFERENCE_RECEIPT_UNVERIFIED, WITNESS_MEASUREMENT_UNAVAILABLE,
+    WITNESS_REDACTION_FAILED, WITNESS_REQUEST_TIMED_OUT, WITNESS_REQUEST_TOO_LARGE,
+    WITNESS_SIGNING_UNAVAILABLE,
+};
 
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
 use crate::redaction_witness::certificate::WitnessCertificate;
@@ -386,7 +395,7 @@ async fn run_bounded(
         // slot permanently.
         Err(_elapsed) => {
             load.counters.timed_out();
-            Refusal::new(StatusCode::GATEWAY_TIMEOUT, "witness_request_timed_out").into_response()
+            Refusal::new(StatusCode::GATEWAY_TIMEOUT, WITNESS_REQUEST_TIMED_OUT).into_response()
         }
     }
 }
@@ -676,50 +685,46 @@ impl IntoResponse for Refusal {
 fn refusal_for(error: WitnessError) -> Refusal {
     match error {
         WitnessError::RedactionFailed => {
-            Refusal::new(StatusCode::SERVICE_UNAVAILABLE, "witness_redaction_failed")
+            Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_REDACTION_FAILED)
         }
         WitnessError::ArtifactBindingFailed => Refusal::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "witness_artifact_binding_failed",
+            WITNESS_ARTIFACT_BINDING_FAILED,
         ),
         WitnessError::MeasurementUnavailable => Refusal::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "witness_measurement_unavailable",
+            WITNESS_MEASUREMENT_UNAVAILABLE,
         ),
-        WitnessError::SigningUnavailable => Refusal::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "witness_signing_unavailable",
-        ),
+        WitnessError::SigningUnavailable => {
+            Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_SIGNING_UNAVAILABLE)
+        }
         // The attested-inference refusals are 403, not 503. Every one of them
         // is this deployment declining this submission under a policy the
         // operator set, which is a permanent answer for this input: a 503
         // would tell a contributor to retry something that will be refused
         // identically forever, and a 400 would tell them their request was
         // malformed when it was well-formed and unattested.
-        WitnessError::InferenceAttestationMissing => Refusal::new(
-            StatusCode::FORBIDDEN,
-            "witness_inference_attestation_missing",
-        ),
+        WitnessError::InferenceAttestationMissing => {
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_ATTESTATION_MISSING)
+        }
         WitnessError::InferenceAttestationUnavailable => Refusal::new(
             StatusCode::FORBIDDEN,
-            "witness_inference_attestation_unavailable",
+            WITNESS_INFERENCE_ATTESTATION_UNAVAILABLE,
         ),
         WitnessError::InferenceCallAbsent => {
-            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_absent")
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_CALL_ABSENT)
         }
         WitnessError::InferenceCallUnattestable => {
-            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_unattestable")
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_CALL_UNATTESTABLE)
         }
-        WitnessError::InferenceBodyNotInSession => Refusal::new(
-            StatusCode::FORBIDDEN,
-            "witness_inference_body_not_in_session",
-        ),
-        WitnessError::InferenceReceiptUnverified => Refusal::new(
-            StatusCode::FORBIDDEN,
-            "witness_inference_receipt_unverified",
-        ),
+        WitnessError::InferenceBodyNotInSession => {
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_BODY_NOT_IN_SESSION)
+        }
+        WitnessError::InferenceReceiptUnverified => {
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_RECEIPT_UNVERIFIED)
+        }
         WitnessError::InferenceReceiptTooLarge => {
-            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_body_too_large")
+            Refusal::new(StatusCode::FORBIDDEN, WITNESS_INFERENCE_BODY_TOO_LARGE)
         }
     }
 }
@@ -734,7 +739,7 @@ async fn witness_handler(
     // maximum and not what the sender chose to send.
     let body = axum::body::to_bytes(request.into_body(), service.max_request_bytes())
         .await
-        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, WITNESS_REQUEST_TOO_LARGE))?;
 
     let parsed: WitnessRequestBody = serde_json::from_slice(&body)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
@@ -760,7 +765,7 @@ async fn witness_handler(
                 .map_err(|ContributionPathUnavailable| {
                     Refusal::new(
                         StatusCode::SERVICE_UNAVAILABLE,
-                        "witness_contribution_path_unavailable",
+                        WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
                     )
                 })?
                 .map_err(refusal_for)?;
@@ -836,7 +841,7 @@ async fn job_result(response: Response, max_bytes: usize) -> JobResult {
         Err(_) => JobResult {
             status: 503,
             headers: vec![("content-type".to_string(), b"application/json".to_vec())],
-            body: br#"{"error":"witness_redaction_failed"}"#.to_vec(),
+            body: format!(r#"{{"error":"{WITNESS_REDACTION_FAILED}"}}"#).into_bytes(),
         },
     }
 }
@@ -879,7 +884,7 @@ async fn submit_job(State(state): State<JobState>, request: Request) -> Result<R
     }
     let body = axum::body::to_bytes(request.into_body(), state.service.max_request_bytes())
         .await
-        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, WITNESS_REQUEST_TOO_LARGE))?;
     {
         let parsed: WitnessRequestBody = serde_json::from_slice(&body)
             .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
@@ -1008,7 +1013,7 @@ async fn token_bundle_handler(
 ) -> Result<Response, Refusal> {
     let body = axum::body::to_bytes(request.into_body(), service.max_request_bytes())
         .await
-        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, WITNESS_REQUEST_TOO_LARGE))?;
     let body: TokenBundleBody = serde_json::from_slice(&body)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
     let RequestShape::Contribution(request) = shape_of(body.contribution)? else {
@@ -1047,7 +1052,7 @@ async fn admission_witness_handler(
 ) -> Result<Response, Refusal> {
     let body = axum::body::to_bytes(request.into_body(), service.max_request_bytes())
         .await
-        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, WITNESS_REQUEST_TOO_LARGE))?;
     let parsed: WitnessRequestBody = serde_json::from_slice(&body)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
     let RequestShape::Contribution(request) = shape_of(parsed)? else {

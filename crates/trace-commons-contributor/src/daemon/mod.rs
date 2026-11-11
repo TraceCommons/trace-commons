@@ -4056,6 +4056,9 @@ mod tests {
         /// `Some(retry_after)` makes `/v1/witness` answer the pacing
         /// contract's `503 witness_saturated`; `None` certifies.
         witness_saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+        /// Set, `/v1/witness` answers `503 witness_signing_unavailable`: a
+        /// witness that is up but cannot do its job right now.
+        witness_unavailable: Arc<std::sync::atomic::AtomicBool>,
         /// The workload header of every `/v1/witness` request, in order.
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// Non-zero makes the claim issuer answer with that status.
@@ -4181,12 +4184,14 @@ mod tests {
             ))
             .await;
             let witness_saturated = Arc::new(std::sync::Mutex::new(None::<&'static str>));
+            let witness_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let witness_calls = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
             let quote_guards = Arc::new(std::sync::Mutex::new(Vec::new()));
             let witness_delay_ms = Arc::new(AtomicU64::new(0));
             let witness_live = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
             let witness_routes = Self::witness_routes(
                 witness_saturated.clone(),
+                witness_unavailable.clone(),
                 witness_calls.clone(),
                 witness_delay_ms.clone(),
                 witness_live.clone(),
@@ -4318,6 +4323,7 @@ mod tests {
                 uploads,
                 ingest_reply,
                 witness_saturated,
+                witness_unavailable,
                 witness_calls,
                 issuer_status,
                 ingest_hang,
@@ -4332,6 +4338,7 @@ mod tests {
         /// and certifies what it was sent.
         fn witness_routes(
             saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+            unavailable: Arc<std::sync::atomic::AtomicBool>,
             calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
             delay_ms: Arc<AtomicU64>,
             live: Arc<(AtomicUsize, AtomicUsize)>,
@@ -4385,6 +4392,7 @@ mod tests {
                     post(
                         move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
                             let saturated = *saturated.lock().unwrap();
+                            let unavailable = unavailable.load(Ordering::SeqCst);
                             calls.lock().unwrap().push(
                                 headers
                                     .get(
@@ -4404,6 +4412,15 @@ mod tests {
                                         StatusCode::SERVICE_UNAVAILABLE,
                                         [(axum::http::header::RETRY_AFTER, retry_after)],
                                         Json(serde_json::json!({"error": "witness_saturated"})),
+                                    )
+                                        .into_response();
+                                }
+                                if unavailable {
+                                    return (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        Json(serde_json::json!({
+                                            "error": trace_commons_protocol::witness_refusal::WITNESS_SIGNING_UNAVAILABLE
+                                        })),
                                     )
                                         .into_response();
                                 }
@@ -6746,6 +6763,57 @@ mod tests {
         assert_eq!(tried.len(), 1, "the pass stopped at the first: {entries:?}");
         assert!(tried[0].retry_after.is_some());
         assert_eq!(tried[0].transient_upload_failures, 1);
+    }
+
+    /// A witness that is up but cannot do its job right now (`503
+    /// witness_signing_unavailable`) judged nothing. Before the witness's
+    /// refusals were read by status and label it was a malformed answer and
+    /// the session was refused for good. Now it keeps its approval, is tried
+    /// again on the transient-upload backoff, and goes out once the witness
+    /// recovers.
+    #[tokio::test]
+    async fn a_witness_that_cannot_serve_is_retried_and_the_session_goes_out_later() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.witness_unavailable.store(true, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+        assert_eq!(entry.reason_label.as_deref(), Some("witness_unreachable"));
+        assert_eq!(entry.transient_upload_failures, 1);
+        let due = entry.retry_after.expect("a retry time");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.witness_unavailable.store(false, Ordering::SeqCst);
+        h.pass(due).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Uploaded, "{entry:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// An approved session an older build refused `witness_response_malformed`
+    /// (a witness that was only down) is approved again by a newer build's
+    /// load-time pass, keeping the approval it was refused under, and goes
+    /// out through the witness on the next pass.
+    #[tokio::test]
+    async fn a_malformed_witness_refusal_from_an_older_build_goes_out_after_the_upgrade() {
+        let h = TransientRetryHarness::with_witness().await;
+        let id = h.entry().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            q.set_state(
+                id,
+                queue::QueueState::Refused,
+                Some("witness_response_malformed".to_string()),
+            );
+            assert!(q.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")));
+            assert!(!q.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")));
+        }
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+        h.pass(TransientRetryHarness::now()).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Uploaded, "{entry:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
     }
 
     /// Once the transient-upload budget is spent, a witness that never
