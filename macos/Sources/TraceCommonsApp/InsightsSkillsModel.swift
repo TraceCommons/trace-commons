@@ -8,6 +8,19 @@ import TCShellCore
 final class InsightsSkillsModel {
     typealias Reader = @Sendable (Bool) async throws -> DaemonData.SkillsSnapshot
     typealias Writer = @Sendable (String, Bool) async throws -> DaemonData.SkillsSnapshot
+    typealias DefinitionReader = @Sendable (String) async throws -> DaemonData.SkillDefinition
+    typealias EvidenceReader = @Sendable (String) async throws -> DaemonData.SkillEvidence
+    private let definitionReader: DefinitionReader?
+    private let evidenceReader: EvidenceReader?
+    private(set) var definition: DaemonData.SkillDefinition?
+    private(set) var evidence: DaemonData.SkillEvidence?
+    private(set) var definitionFailure = false
+    private(set) var evidenceFailure = false
+    private(set) var detailEpoch = UUID()
+    private var definitionGeneration = UUID()
+    private var evidenceGeneration = UUID()
+    private var selectedDefinition: String?
+    private var selectedEvidence: String?
     private let reader: Reader?
     private let writer: Writer?
     private let fallbackCopy: [String: String]
@@ -17,12 +30,41 @@ final class InsightsSkillsModel {
     private(set) var failureKey: String?
     var canFollow: Bool { writer != nil && !busy }
 
-    init(reader: Reader? = nil, writer: Writer? = nil, copy: [String: String] = [:],
+    init(reader: Reader? = nil, writer: Writer? = nil, definitionReader: DefinitionReader? = nil, evidenceReader: EvidenceReader? = nil, copy: [String: String] = [:],
          idlePollInterval: Duration = .seconds(5 * 60)) {
+        self.definitionReader = definitionReader; self.evidenceReader = evidenceReader
         self.reader = reader; self.writer = writer; self.fallbackCopy = copy
         self.idlePollInterval = idlePollInterval
     }
 
+    func invalidateDetails() {
+        definitionGeneration = UUID(); evidenceGeneration = UUID()
+        selectedDefinition = nil; selectedEvidence = nil
+        definition = nil; evidence = nil
+        definitionFailure = false; evidenceFailure = true
+        detailEpoch = UUID()
+    }
+
+    func loadDefinition(_ id: String) async {
+        let generation = UUID(); definitionGeneration = generation
+        selectedDefinition = id; definition = nil; definitionFailure = false
+        guard let definitionReader else { definitionFailure = true; return }
+        do {
+            let result = try await definitionReader(id)
+            guard !Task.isCancelled, selectedDefinition == id, definitionGeneration == generation else { return }
+            definition = result; definitionFailure = result.status != "available"
+        } catch { if !Task.isCancelled, selectedDefinition == id, definitionGeneration == generation { definitionFailure = true } }
+    }
+    func loadEvidence(_ reference: String) async {
+        let generation = UUID(); evidenceGeneration = generation
+        selectedEvidence = reference; evidence = nil; evidenceFailure = false
+        guard let evidenceReader else { evidenceFailure = true; return }
+        do {
+            let result = try await evidenceReader(reference)
+            guard !Task.isCancelled, selectedEvidence == reference, evidenceGeneration == generation else { return }
+            evidence = result; evidenceFailure = !result.enabled || result.readable != true || result.session == nil
+        } catch { if !Task.isCancelled, selectedEvidence == reference, evidenceGeneration == generation { evidenceFailure = true } }
+    }
     func text(_ key: String, values: [String: String] = [:]) -> String {
         var result = shown?.copy[key] ?? fallbackCopy[key] ?? ""
         for (key, value) in values { result = result.replacingOccurrences(of: "{\(key)}", with: value) }
@@ -35,13 +77,65 @@ final class InsightsSkillsModel {
         return date?.formatted(date: .abbreviated, time: .shortened) ?? value
     }
 
-    func inventorySkills(in snapshot: DaemonData.SkillsSnapshot, matching query: String) -> [DaemonData.InstalledSkill] {
+    func inventorySkills(in snapshot: DaemonData.SkillsSnapshot, matching query: String,
+                         agent: String = "", availability: String = "", sort: String = "name",
+                         days: Int = 30) -> [DaemonData.InstalledSkill] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return snapshot.inventory.skills }
         return snapshot.inventory.skills.filter { skill in
-            [skill.name, skill.description, agentLabel(skill.agent), scopeLabel(skill.scope), skill.location]
-                .contains { $0.localizedStandardContains(query) }
+            (query.isEmpty || [skill.name, skill.description].contains { $0.localizedStandardContains(query) })
+                && (agent.isEmpty || skill.agent == agent)
+                && (availability.isEmpty || (snapshot.inventory.details[skill.id]?.availability ?? "unknown") == availability)
+        }.sorted { lhs, rhs in
+            let left = usage(for: lhs, in: snapshot), right = usage(for: rhs, in: snapshot)
+            if sort == "sessions" {
+                let a = left?.windows.first { $0.days == days }?.sessions ?? 0
+                let b = right?.windows.first { $0.days == days }?.sessions ?? 0
+                if a != b { return a > b }
+            }
+            if sort == "recent" {
+                let a = usageRows(for: lhs, in: snapshot).compactMap(\.lastSeen).max() ?? ""
+                let b = usageRows(for: rhs, in: snapshot).compactMap(\.lastSeen).max() ?? ""
+                if a != b { return a > b }
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
+    }
+
+    /// Shared roots can be consumed by several agents. Keep their observations
+    /// separate: capped all-time references cannot deduplicate window totals.
+    func usageRows(for skill: DaemonData.InstalledSkill, in snapshot: DaemonData.SkillsSnapshot) -> [DaemonData.SkillsUsageRow] {
+        guard !hasUsageCollision(skill, in: snapshot) else { return [] }
+        if skill.agent == "shared" {
+            let supported = Set(snapshot.usage.coverage.filter {
+                ["codex", "claude_code", "opencode"].contains($0.agent) && $0.status != "unsupported"
+            }.map(\.agent))
+            return snapshot.usage.skills.filter { $0.name == skill.name && supported.contains($0.agent) }
+                .sorted { $0.agent < $1.agent }
+        }
+        return snapshot.usage.skills.filter { $0.agent == skill.agent && $0.name == skill.name }
+    }
+
+    private func hasUsageCollision(_ skill: DaemonData.InstalledSkill, in snapshot: DaemonData.SkillsSnapshot) -> Bool {
+        snapshot.inventory.skills.filter {
+            $0.name == skill.name && (skill.agent == "shared" || $0.agent == "shared" || $0.agent == skill.agent)
+        }.count != 1
+    }
+
+    /// Only expose a single-row total when its meaning is unambiguous.
+    func usage(for skill: DaemonData.InstalledSkill, in snapshot: DaemonData.SkillsSnapshot) -> DaemonData.SkillsUsageRow? {
+        let rows = usageRows(for: skill, in: snapshot)
+        return rows.count == 1 ? rows.first : nil
+    }
+
+    func usageState(for skill: DaemonData.InstalledSkill, in snapshot: DaemonData.SkillsSnapshot) -> String {
+        guard snapshot.usage.enabled else { return "skills_usage_unavailable" }
+        let coverage = snapshot.usage.coverage.filter {
+            skill.agent == "shared" ? ["codex", "claude_code", "opencode"].contains($0.agent) : $0.agent == skill.agent
+        }
+        guard coverage.contains(where: { $0.status != "unsupported" }) else { return "skills_usage_unavailable" }
+        if hasUsageCollision(skill, in: snapshot) { return "skills_usage_unattributed" }
+        if snapshot.usage.partial || snapshot.usage.lastAnalysisAt == nil { return "skills_usage_pending" }
+        return "skills_no_usage"
     }
 
     func catalogSkills(in snapshot: DaemonData.SkillsSnapshot, matching query: String) -> [DaemonData.CatalogSkill] {
@@ -87,6 +181,7 @@ final class InsightsSkillsModel {
         do {
             let snapshot = try await reader(refresh)
             guard !Task.isCancelled else { return }
+            invalidateDetails()
             if snapshot.readable {
                 shown = snapshot
                 failureKey = snapshot.error == nil ? nil : "skills_refresh_failed"
@@ -106,6 +201,7 @@ final class InsightsSkillsModel {
         do {
             let snapshot = try await writer(publisherID, followed)
             guard !Task.isCancelled else { return }
+            invalidateDetails()
             guard snapshot.readable else { failureKey = "skills_follow_failed"; return }
             shown = snapshot
             failureKey = snapshot.error == nil ? nil : "skills_follow_failed"

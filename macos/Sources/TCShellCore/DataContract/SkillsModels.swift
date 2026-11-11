@@ -66,25 +66,33 @@ extension DaemonData {
     public struct SkillsInventory: Codable, Equatable, Sendable {
         public let skills: [InstalledSkill]
         public let partial: Bool
+        public let scannedAt: String?
         public let coverage: [SkillsInventoryCoverage]
+        public let details: [String: SkillInstallationDetails]
 
-        public init(skills: [InstalledSkill] = [], partial: Bool = true, coverage: [SkillsInventoryCoverage] = []) {
+        public init(skills: [InstalledSkill] = [], partial: Bool = true, coverage: [SkillsInventoryCoverage] = [], details: [String: SkillInstallationDetails] = [:], scannedAt: String? = nil) {
             self.skills = skills
             self.partial = partial
+            self.scannedAt = scannedAt
             self.coverage = coverage
+            self.details = details
         }
 
         enum CodingKeys: String, CodingKey {
+            case scannedAt = "scanned_at"
             case skills
             case partial
             case coverage
+            case details
         }
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            scannedAt = try values.decodeIfPresent(String.self, forKey: .scannedAt)
             skills = try values.decodeIfPresent([InstalledSkill].self, forKey: .skills) ?? []
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? true
             coverage = try values.decodeIfPresent([SkillsInventoryCoverage].self, forKey: .coverage) ?? []
+            details = try values.decodeIfPresent([String: SkillInstallationDetails].self, forKey: .details) ?? [:]
         }
     }
 
@@ -344,13 +352,21 @@ extension DaemonData {
     }
 
     public struct SkillsUsage: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let lastAnalysisAt: String?
+        public let earliestEvidence: String?
+        public let sessionsPartial: Int
         public let sessionsObserved: Int
         public let sessionsUnknown: Int
         public let partial: Bool
         public let skills: [SkillsUsageRow]
         public let coverage: [SkillsUsageCoverage]
 
-        public init(sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = []) {
+        public init(enabled: Bool = false, lastAnalysisAt: String? = nil, earliestEvidence: String? = nil, sessionsPartial: Int = 0, sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = []) {
+            self.enabled = enabled
+            self.lastAnalysisAt = lastAnalysisAt
+            self.earliestEvidence = earliestEvidence
+            self.sessionsPartial = sessionsPartial
             self.sessionsObserved = sessionsObserved
             self.sessionsUnknown = sessionsUnknown
             self.partial = partial
@@ -359,6 +375,10 @@ extension DaemonData {
         }
 
         enum CodingKeys: String, CodingKey {
+            case enabled
+            case lastAnalysisAt = "last_analysis_at"
+            case earliestEvidence = "earliest_evidence"
+            case sessionsPartial = "sessions_partial"
             case sessionsObserved = "sessions_observed"
             case sessionsUnknown = "sessions_unknown"
             case partial
@@ -368,6 +388,10 @@ extension DaemonData {
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+            lastAnalysisAt = try values.decodeIfPresent(String.self, forKey: .lastAnalysisAt)
+            earliestEvidence = try values.decodeIfPresent(String.self, forKey: .earliestEvidence)
+            sessionsPartial = try values.decodeIfPresent(Int.self, forKey: .sessionsPartial) ?? 0
             sessionsObserved = try values.decodeIfPresent(Int.self, forKey: .sessionsObserved) ?? 0
             sessionsUnknown = try values.decodeIfPresent(Int.self, forKey: .sessionsUnknown) ?? 0
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? true
@@ -392,6 +416,9 @@ extension DaemonData {
     }
 
     public struct SkillsUsageRow: Codable, Equatable, Sendable {
+        public let windows: [SkillsUsageWindow]
+        public let daily: [SkillsUsageDay]
+        public let undatedEvents: Int
         public let name: String
         public let agent: String
         public let invocations: Int
@@ -400,7 +427,10 @@ extension DaemonData {
         public let lastSeen: String?
         public let sessionRefs: [String]
 
-        public init(name: String, agent: String, invocations: Int, loads: Int, sessions: Int, lastSeen: String? = nil, sessionRefs: [String] = []) {
+        public init(name: String, agent: String, invocations: Int, loads: Int, sessions: Int, lastSeen: String? = nil, sessionRefs: [String] = [], windows: [SkillsUsageWindow] = [], daily: [SkillsUsageDay] = [], undatedEvents: Int = 0) {
+            self.windows = windows
+            self.daily = daily
+            self.undatedEvents = undatedEvents
             self.name = name
             self.agent = agent
             self.invocations = invocations
@@ -411,6 +441,8 @@ extension DaemonData {
         }
 
         enum CodingKeys: String, CodingKey {
+            case windows, daily
+            case undatedEvents = "undated_events"
             case name
             case agent
             case invocations
@@ -422,6 +454,9 @@ extension DaemonData {
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            windows = try values.decodeIfPresent([SkillsUsageWindow].self, forKey: .windows) ?? []
+            daily = try values.decodeIfPresent([SkillsUsageDay].self, forKey: .daily) ?? []
+            undatedEvents = try values.decodeIfPresent(Int.self, forKey: .undatedEvents) ?? 0
             name = try values.decode(String.self, forKey: .name)
             agent = try values.decode(String.self, forKey: .agent)
             invocations = try values.decode(Int.self, forKey: .invocations)
@@ -432,4 +467,52 @@ extension DaemonData {
         }
     }
 
+}
+
+extension DaemonData {
+    public struct SkillInstallationDetails: Codable, Equatable, Sendable {
+        public let aliases: [String]
+        public let availability: String
+        public let definitionStatus: String
+        enum CodingKeys: String, CodingKey {
+            case aliases, availability
+            case definitionStatus = "definition_status"
+        }
+    }
+    public struct SkillsUsageWindow: Codable, Equatable, Sendable {
+        public let days: Int
+        public let invocations: Int
+        public let loads: Int
+        public let sessions: Int
+        public init(days: Int, invocations: Int, loads: Int, sessions: Int) {
+            self.days = days; self.invocations = invocations; self.loads = loads; self.sessions = sessions
+        }
+    }
+    public struct SkillsUsageDay: Codable, Equatable, Sendable {
+        public let day: String
+        public let invocations: Int
+        public let loads: Int
+        public let sessions: Int
+    }
+}
+
+
+extension DaemonData {
+    public struct SkillDefinition: Decodable, Sendable {
+        public let skillID: String
+        public let status: String
+        public let definition: String?
+        enum CodingKeys: String, CodingKey { case skillID = "skill_id", status, definition }
+    }
+    public struct SkillEvidence: Decodable, Sendable {
+        public let enabled: Bool
+        public let readable: Bool?
+        public let session: Session?
+        public struct Session: Decodable, Sendable {
+            public let source: String?
+            public let date: String?
+            public let turns: UInt64?
+            public let tokens: UInt64?
+        }
+    }
 }

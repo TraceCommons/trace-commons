@@ -37,6 +37,7 @@ struct InsightsView: View {
     /// The get-started card's one action: Traces, on its folder list.
     /// `nil` draws no link.
     private let openTraces: (() -> Void)?
+    private let openSkillsSettings: (() -> Void)?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -51,6 +52,7 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
+                    openSkillsSettings: (() -> Void)? = nil,
                     skills: InsightsSkillsModel? = nil,
                     isSkillsEnabled: Bool = false) {
         let router = InsightsServiceRouter(selection: storeSelection)
@@ -95,12 +97,15 @@ struct InsightsView: View {
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
                   inspector: inspector,
                   home: home,
-                  payoutStreams: payoutStreams, openTraces: openTraces,
+                  payoutStreams: payoutStreams, openTraces: openTraces, openSkillsSettings: openSkillsSettings,
                   skills: skills ?? InsightsSkillsModel(
                     reader: daemon.map { client in { @Sendable refresh in try await client.insightsSkills(refresh: refresh) } },
                     writer: daemon.map { client in { @Sendable publisher, followed in
                         try await client.setSkillsFollow(publisherID: publisher, followed: followed)
-                    } }, copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled)
+                    } },
+                    definitionReader: daemon.map { client in { @Sendable id in try await client.skillDefinition(skillID: id) } },
+                    evidenceReader: daemon.map { client in { @Sendable reference in try await client.skillEvidence(sessionRef: reference) } },
+                    copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -119,11 +124,13 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
+                    openSkillsSettings: (() -> Void)? = nil,
                     skills: InsightsSkillsModel? = nil,
                     isSkillsEnabled: Bool = false) {
         self.isSkillsEnabled = isSkillsEnabled
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
+        self.openSkillsSettings = openSkillsSettings
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -287,7 +294,7 @@ struct InsightsView: View {
             case .benchmarks:
                 InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
             case .skills:
-                InsightsSkillsTab(model: skillsModel)
+                InsightsSkillsTab(model: skillsModel, reviewSettings: openSkillsSettings)
             }
         }
         .onAppear { model.open() }

@@ -254,3 +254,15 @@ the daemon through existing IPC/FFI. Hosted ingest runtime integration and
 Windows/Linux UI integrations are follow-up work; these flags cannot disable an
 independently deployed server feature. Local tests do not prove live publication,
 production deployment, or physical-device/cross-platform UI validation.
+
+### Local skill index extension
+
+The local skill Index extension reuses `insights_skills`; it does not introduce a
+second rollout switch. Keep the existing registry default and example manifest
+values false. A reviewer should exercise both a permitted environment enable and
+a live disable before rollout. Do not publish a manifest as part of a code PR.
+
+Validation must cover disabled navigation/polling, inventory with local analysis
+off, extraction only with analysis enabled, Never-folder exclusions, and a disable
+while background work is pending. Counts describe observed usage over retained
+local history, not total lifetime use. Unknown/partial coverage is not zero usage.

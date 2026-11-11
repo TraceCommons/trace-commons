@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 pub use document::parse_skill_document;
-pub use inventory::{scan_inventory, scan_inventory_with_policy, scan_inventory_with_roots};
+pub use inventory::{
+    configured_global_roots, scan_inventory, scan_inventory_with_policy, scan_inventory_with_roots,
+};
 pub use provenance::{normalize_repository, normalize_skill_path};
 
 /// One document is read once and hashed without newline or whitespace changes.
@@ -109,6 +111,9 @@ pub struct ScanCoverage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Inventory {
+    /// Local display metadata. Raw canonical paths are never serialized.
+    #[serde(default)]
+    pub details: std::collections::BTreeMap<String, SkillInstallationDetails>,
     pub skills: Vec<InstalledSkill>,
     pub partial: bool,
     #[serde(default)]
@@ -174,4 +179,34 @@ pub(crate) struct Root {
     agent: String,
     scope: String,
     location: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillAvailability {
+    Available,
+    Disabled,
+    Cached,
+    Missing,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillDefinitionStatus {
+    #[default]
+    Valid,
+    Invalid,
+    Unreadable,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInstallationDetails {
+    pub aliases: Vec<String>,
+    pub availability: SkillAvailability,
+    pub definition_status: SkillDefinitionStatus,
+    /// Ephemeral path for local authorization and attribution. Never persisted.
+    #[serde(skip)]
+    pub canonical_path: PathBuf,
 }

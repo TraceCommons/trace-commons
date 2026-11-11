@@ -4,6 +4,127 @@ import TCShellCore
 
 @MainActor
 final class InsightsSkillsTests: XCTestCase {
+    func testInventorySearchFiltersAndUsageSort() {
+        let model = InsightsSkillsModel()
+        let alpha = DaemonData.InstalledSkill(id: "a", name: "Alpha", description: "Reviews code", agent: "codex", scope: "global", location: "hidden", sha256: "a")
+        let beta = DaemonData.InstalledSkill(id: "b", name: "Beta", description: "Builds", agent: "claude_code", scope: "global", location: "hidden", sha256: "b")
+        let snapshot = DaemonData.SkillsSnapshot(inventory: .init(skills: [beta, alpha]), usage: .init(skills: [
+            .init(name: "Beta", agent: "claude_code", invocations: 10, loads: 0, sessions: 3,
+                  windows: [.init(days: 30, invocations: 10, loads: 0, sessions: 3)])
+        ]))
+        XCTAssertEqual(model.inventorySkills(in: snapshot, matching: "").map(\.id), ["a", "b"])
+        XCTAssertEqual(model.inventorySkills(in: snapshot, matching: "reviews").map(\.id), ["a"])
+        XCTAssertTrue(model.inventorySkills(in: snapshot, matching: "hidden").isEmpty)
+        XCTAssertEqual(model.inventorySkills(in: snapshot, matching: "", agent: "codex").map(\.id), ["a"])
+        XCTAssertEqual(model.inventorySkills(in: snapshot, matching: "", sort: "sessions").map(\.id), ["b", "a"])
+        XCTAssertEqual(model.inventorySkills(in: snapshot, matching: "", sort: "sessions", days: 7).map(\.id), ["a", "b"])
+    }
+
+    func testAmbiguousInstallationsDoNotReceiveNameOnlyCounts() {
+        let model = InsightsSkillsModel()
+        let first = DaemonData.InstalledSkill(id: "a", name: "Review", description: "", agent: "codex", scope: "global", location: "a", sha256: "a")
+        let second = DaemonData.InstalledSkill(id: "b", name: "Review", description: "", agent: "codex", scope: "project", location: "b", sha256: "b")
+        let usage = DaemonData.SkillsUsage(enabled: true, lastAnalysisAt: "2026-11-11T00:00:00Z", partial: false,
+            skills: [.init(name: "Review", agent: "codex", invocations: 0, loads: 2, sessions: 1)],
+            coverage: [.init(agent: "codex", status: "loads_only")])
+        let snapshot = DaemonData.SkillsSnapshot(inventory: .init(skills: [first, second]), usage: usage)
+        XCTAssertNil(model.usage(for: first, in: snapshot))
+        XCTAssertEqual(model.usageState(for: first, in: snapshot), "skills_usage_unattributed")
+        XCTAssertEqual(model.usageState(for: first, in: .init(inventory: .init(skills: [first]))), "skills_usage_unavailable")
+    }
+
+    func testSharedSkillKeepsConsumerUsageSeparateAndWithholdsCollisions() {
+        let model = InsightsSkillsModel()
+        let shared = DaemonData.InstalledSkill(id: "shared", name: "Review", description: "", agent: "shared", scope: "global", location: "shared", sha256: "a")
+        let competing = DaemonData.InstalledSkill(id: "private", name: "Review", description: "", agent: "codex", scope: "global", location: "private", sha256: "b")
+        let usage = DaemonData.SkillsUsage(enabled: true, lastAnalysisAt: "2026-11-11T00:00:00Z", partial: false,
+            skills: [
+                .init(name: "Review", agent: "codex", invocations: 0, loads: 2, sessions: 1, sessionRefs: ["same"], windows: [.init(days: 30, invocations: 0, loads: 2, sessions: 1)]),
+                .init(name: "Review", agent: "claude_code", invocations: 1, loads: 0, sessions: 1, sessionRefs: ["same"], windows: [.init(days: 30, invocations: 1, loads: 0, sessions: 1)])
+            ], coverage: [.init(agent: "codex", status: "loads_only"), .init(agent: "claude_code", status: "explicit_invocations")])
+        let snapshot = DaemonData.SkillsSnapshot(inventory: .init(skills: [shared]), usage: usage)
+        let rows = model.usageRows(for: shared, in: snapshot)
+        XCTAssertEqual(rows.map(\.agent), ["claude_code", "codex"])
+        XCTAssertEqual(rows.map(\.sessions), [1, 1])
+        XCTAssertNil(model.usage(for: shared, in: snapshot), "Never sum potentially overlapping trace totals")
+        XCTAssertNotEqual(model.usageState(for: shared, in: snapshot), "skills_usage_unavailable")
+        let collision = DaemonData.SkillsSnapshot(inventory: .init(skills: [shared, competing]), usage: usage)
+        XCTAssertTrue(model.usageRows(for: shared, in: collision).isEmpty)
+        XCTAssertTrue(model.usageRows(for: competing, in: collision).isEmpty)
+        XCTAssertEqual(model.usageState(for: shared, in: collision), "skills_usage_unattributed")
+    }
+
+    func testDefinitionAndEvidenceReadersUseDaemonResults() async {
+        let model = InsightsSkillsModel(definitionReader: { id in
+            XCTAssertEqual(id, "local-id")
+            return try JSONDecoder().decode(DaemonData.SkillDefinition.self,
+                from: Data(##"{"skill_id":"local-id","status":"available","definition":"# Local definition"}"##.utf8))
+        }, evidenceReader: { reference in
+            XCTAssertEqual(reference, "t1.42")
+            return try JSONDecoder().decode(DaemonData.SkillEvidence.self,
+                from: Data(#"{"enabled":true,"readable":true,"session":{"source":"codex","date":"2026-11-11","turns":null,"tokens":42}}"#.utf8))
+        })
+        await model.loadDefinition("local-id")
+        XCTAssertEqual(model.definition?.definition, "# Local definition")
+        XCTAssertFalse(model.definitionFailure)
+        await model.loadEvidence("t1.42")
+        XCTAssertEqual(model.evidence?.session?.tokens, 42)
+        XCTAssertFalse(model.evidenceFailure)
+    }
+
+    func testUnavailableDefinitionAndRevokedEvidenceStayUnavailable() async {
+        let model = InsightsSkillsModel(definitionReader: { id in
+            try JSONDecoder().decode(DaemonData.SkillDefinition.self,
+                from: Data(#"{"skill_id":"local-id","status":"unavailable"}"#.utf8))
+        }, evidenceReader: { _ in
+            try JSONDecoder().decode(DaemonData.SkillEvidence.self, from: Data(#"{"enabled":false}"#.utf8))
+        })
+        await model.loadDefinition("local-id")
+        XCTAssertTrue(model.definitionFailure)
+        XCTAssertNil(model.definition?.definition)
+        await model.loadEvidence("t1.42")
+        XCTAssertTrue(model.evidenceFailure)
+    }
+
+    private actor DelayedDefinition {
+        var waiting: CheckedContinuation<Void, Never>?
+        var reads = 0
+        func read(_ id: String) async throws -> DaemonData.SkillDefinition {
+            reads += 1
+            let first = reads == 1
+            if first { await withCheckedContinuation { waiting = $0 } }
+            let body = first ? "old" : "new"
+            return try JSONDecoder().decode(DaemonData.SkillDefinition.self,
+                from: JSONSerialization.data(withJSONObject: ["skill_id": id, "status": "available", "definition": body]))
+        }
+        func hasWaiter() -> Bool { waiting != nil }
+        func release() { waiting?.resume(); waiting = nil }
+    }
+
+    func testLateSameIdentityDefinitionCannotRestoreClearedSelection() async {
+        let replies = DelayedDefinition()
+        let model = InsightsSkillsModel(definitionReader: { try await replies.read($0) })
+        let old = Task { await model.loadDefinition("same-id") }
+        while !(await replies.hasWaiter()) { await Task.yield() }
+        model.invalidateDetails()
+        await model.loadDefinition("same-id")
+        XCTAssertEqual(model.definition?.definition, "new")
+        await replies.release()
+        await old.value
+        XCTAssertEqual(model.definition?.definition, "new")
+    }
+
+    func testInvalidationDiscardsInFlightDefinitionWithoutReplacement() async {
+        let replies = DelayedDefinition()
+        let model = InsightsSkillsModel(definitionReader: { try await replies.read($0) })
+        let old = Task { await model.loadDefinition("same-id") }
+        while !(await replies.hasWaiter()) { await Task.yield() }
+        model.invalidateDetails()
+        await replies.release()
+        await old.value
+        XCTAssertNil(model.definition)
+    }
+
     private actor Replies {
         var reads = 0
         func next() throws -> DaemonData.SkillsSnapshot {

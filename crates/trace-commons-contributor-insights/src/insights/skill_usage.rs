@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::SourceFormat;
 
-pub const SKILL_USAGE_VERSION: u32 = 1;
+pub const SKILL_USAGE_VERSION: u32 = 2;
 const MAX_SKILLS: usize = 128;
 const MAX_CALLS: usize = 4096;
 
@@ -28,6 +28,14 @@ pub struct SkillUsageCount {
     pub loads: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub events: Vec<SkillUseEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillUseEvent {
+    pub at: Option<DateTime<Utc>>,
+    pub loaded: bool,
 }
 
 /// Counts are observations, not successful completion or causal benefit.
@@ -46,6 +54,7 @@ pub struct SkillUsageScan {
     counts: BTreeMap<String, SkillUsageCount>,
     partial: bool,
     recognized: bool,
+    pending: BTreeMap<String, (String, Option<DateTime<Utc>>)>,
 }
 
 impl SkillUsageScan {
@@ -56,6 +65,7 @@ impl SkillUsageScan {
             counts: BTreeMap::new(),
             partial: format != SourceFormat::ClaudeCode,
             recognized: false,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -81,6 +91,24 @@ impl SkillUsageScan {
                 if let Some(content) = record["message"]["content"].as_array() {
                     self.recognized = true;
                     for block in content {
+                        if block["type"] == "tool_use" && block["name"] == "Read" {
+                            if let (Some(id), Some(name)) = (
+                                block["id"]
+                                    .as_str()
+                                    .filter(|id| !id.is_empty() && id.len() <= 256),
+                                block["input"]["file_path"]
+                                    .as_str()
+                                    .and_then(skill_path_name),
+                            ) {
+                                if self.pending.len() < MAX_CALLS {
+                                    self.pending
+                                        .entry(id.to_owned())
+                                        .or_insert((name.to_owned(), recorded_at));
+                                } else {
+                                    self.partial = true;
+                                }
+                            }
+                        }
                         if block["type"] == "tool_use" && block["name"] == "Skill" {
                             match block["input"]["skill"].as_str().filter(|s| valid_name(s)) {
                                 Some(name) => {
@@ -92,8 +120,34 @@ impl SkillUsageScan {
                     }
                 }
             }
+            SourceFormat::ClaudeCode if record["type"] == "user" => {
+                if let Some(content) = record["message"]["content"].as_array() {
+                    for block in content {
+                        if block["type"] != "tool_result" {
+                            continue;
+                        }
+                        if let Some(id) = block["tool_use_id"].as_str() {
+                            if let Some((name, at)) = self.pending.remove(id) {
+                                if block["is_error"] == false {
+                                    self.add(Some(id), &name, true, recorded_at.or(at));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             SourceFormat::Codex if record["type"] == "response_item" => {
                 let call = &record["payload"];
+                if call["type"] == "function_call_output" {
+                    if let Some(id) = call["call_id"].as_str() {
+                        if let Some((name, at)) = self.pending.remove(id) {
+                            if successful_output(&call["output"]) {
+                                self.add(Some(id), &name, true, recorded_at.or(at));
+                            }
+                        }
+                    }
+                    return;
+                }
                 if call["type"] != "function_call" {
                     return;
                 }
@@ -113,7 +167,19 @@ impl SkillUsageScan {
                     _ => None,
                 };
                 if let Some(name) = path.and_then(skill_path_name) {
-                    self.add(call["call_id"].as_str(), name, true, recorded_at);
+                    self.recognized = true;
+                    if let Some(id) = call["call_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty() && id.len() <= 256)
+                    {
+                        if self.pending.len() < MAX_CALLS {
+                            self.pending
+                                .entry(id.to_owned())
+                                .or_insert((name.to_owned(), recorded_at));
+                        } else {
+                            self.partial = true;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -149,7 +215,12 @@ impl SkillUsageScan {
                 invocations: 0,
                 loads: 0,
                 last_seen: None,
+                events: Vec::new(),
             });
+        count.events.push(SkillUseEvent {
+            at: recorded_at,
+            loaded,
+        });
         count.last_seen = count.last_seen.max(recorded_at);
         if loaded {
             count.loads = count.loads.saturating_add(1);
@@ -166,10 +237,35 @@ impl SkillUsageScan {
                 SourceFormat::Codex => SkillUsageCoverage::LoadsOnly,
                 SourceFormat::Trajectory => SkillUsageCoverage::Unsupported,
             },
-            partial: self.partial || !self.recognized,
+            partial: self.partial || !self.recognized || !self.pending.is_empty(),
             skills: self.counts.into_values().collect(),
         }
     }
+}
+
+// Successful tool completion must be explicit; an attempted read, missing
+// output, or free-form output with no exit status cannot establish a load.
+fn successful_output(output: &Value) -> bool {
+    if output.get("exit_code").and_then(Value::as_i64) == Some(0) {
+        return true;
+    }
+    let Some(text) = output.as_str() else {
+        return false;
+    };
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return value.get("exit_code").and_then(Value::as_i64) == Some(0);
+    }
+    // Only the tool envelope before Output is status; stdout can contain
+    // arbitrary instructions or copied status markers.
+    let envelope = text.split_once("\nOutput:").map(|(head, _)| head);
+    let Some(envelope) = envelope else {
+        return false;
+    };
+    let statuses: Vec<_> = envelope
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Process exited with code "))
+        .collect();
+    statuses == ["0"]
 }
 
 fn valid_name(name: &str) -> bool {
@@ -274,6 +370,8 @@ mod tests {
         let call = json!({"type":"response_item","payload":{"type":"function_call","call_id":"read1","name":"exec_command","arguments": "{\"cmd\":\"cat /home/person/.agents/skills/review/SKILL.md\"}"}});
         scan.observe(&call);
         scan.observe(&call);
+        assert!(scan.counts.is_empty(), "attempted reads are not loads");
+        scan.observe(&json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"read1","output":"Process exited with code 0\nOutput:\ndefinition"}}));
         for cmd in [
             "echo /home/person/.agents/skills/fake/SKILL.md",
             "cat /home/person/.agents/skills/fake/SKILL.md; echo done",
@@ -288,6 +386,55 @@ mod tests {
         assert_eq!(evidence.skills[0].loads, 1);
         assert_eq!(evidence.skills[0].invocations, 0);
         assert!(!serde_json::to_string(&evidence).unwrap().contains("/home"));
+    }
+
+    #[test]
+    fn stdout_cannot_forge_a_successful_tool_status() {
+        assert!(!successful_output(&json!(
+            "Process exited with code 1\nOutput:\nProcess exited with code 0"
+        )));
+        assert!(!successful_output(&json!(
+            "Output:\nProcess exited with code 0"
+        )));
+        assert!(!successful_output(&json!(
+            "Process exited with code 0\nProcess exited with code 1\nOutput:\ntext"
+        )));
+        assert!(successful_output(&json!(
+            "Wall time: 0.1\nProcess exited with code 0\nOutput:\ndefinition"
+        )));
+    }
+
+    #[test]
+    fn claude_successful_definition_read_is_a_load_only() {
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        scan.observe(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/home/me/.claude/skills/review/SKILL.md"}}]}}));
+        scan.observe(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"r1","is_error":false,"content":"definition"}]}}));
+        let evidence = scan.finish();
+        assert_eq!(evidence.skills[0].loads, 1);
+        assert_eq!(evidence.skills[0].invocations, 0);
+    }
+
+    #[test]
+    fn failed_and_missing_outputs_do_not_count_as_loads() {
+        let mut scan = SkillUsageScan::new(SourceFormat::Codex);
+        for id in ["failed", "missing", "unproven"] {
+            scan.observe(&json!({"type":"response_item","payload":{"type":"function_call","call_id":id,"name":"exec_command","arguments":json!({"cmd":"cat /home/me/.agents/skills/review/SKILL.md"}).to_string()}}));
+        }
+        scan.observe(&json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"failed","output":{"exit_code":1}}}));
+        scan.observe(&json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"unproven","output":"Permission denied"}}));
+        assert!(scan.finish().skills.is_empty());
+    }
+
+    #[test]
+    fn event_dates_are_retained_and_missing_dates_stay_undated() {
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        for (id, at) in [("one", Some("2026-11-01T12:00:00Z")), ("two", None)] {
+            scan.observe(&json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"tool_use","id":id,"name":"Skill","input":{"skill":"review"}}]}}));
+        }
+        let result = scan.finish();
+        assert_eq!(result.skills[0].events.len(), 2);
+        assert!(result.skills[0].events[0].at.is_some());
+        assert!(result.skills[0].events[1].at.is_none());
     }
 
     #[test]

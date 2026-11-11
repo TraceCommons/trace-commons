@@ -1513,6 +1513,10 @@ struct TestSeams {
 }
 
 impl CounterPass {
+    pub(crate) fn clear_generation(&self) -> u64 {
+        self.cleared.load(Ordering::SeqCst)
+    }
+
     /// The pass for a daemon over `store`, with the key custody owner
     /// decision D16 (open) names.
     pub fn for_store(store: &ConfigStore) -> Self {
@@ -2727,6 +2731,24 @@ impl CounterPass {
             Ok(found) => found,
             Err(reason) => return unreadable_value(reason),
         };
+        #[derive(Default, Serialize)]
+        struct Period {
+            invocations: u64,
+            loads: u64,
+            sessions: usize,
+        }
+        #[derive(Serialize)]
+        struct Window {
+            days: i64,
+            #[serde(flatten)]
+            counts: Period,
+        }
+        #[derive(Serialize)]
+        struct Day {
+            day: String,
+            #[serde(flatten)]
+            counts: Period,
+        }
         #[derive(Serialize)]
         struct Aggregate {
             name: String,
@@ -2736,14 +2758,32 @@ impl CounterPass {
             sessions: usize,
             last_seen: Option<DateTime<Utc>>,
             session_refs: Vec<String>,
+            windows: Vec<Window>,
+            daily: Vec<Day>,
+            undated_events: usize,
         }
+        let now = Utc::now();
+        let mut earliest_evidence: Option<DateTime<Utc>> = None;
+        let mut sessions_partial = 0usize;
         let mut aggregates: BTreeMap<(String, &'static str), Aggregate> = BTreeMap::new();
         let mut observed = 0usize;
         let mut unknown = 0usize;
         let mut partial = false;
+        let mut child_sessions_unavailable = 0usize;
         if let (Some(key), Some(store)) = (&key, &store) {
             let never = never_digests(key, never_project_keys);
             let tag = store_tag_of(key, store);
+            child_sessions_unavailable = store
+                .spawned
+                .values()
+                .filter(|child| {
+                    store
+                        .rows
+                        .get(&child.parent)
+                        .is_some_and(|parent| is_listed(parent, &never))
+                })
+                .count();
+            partial |= child_sessions_unavailable > 0;
             for row in store.rows.values().filter(|row| is_listed(row, &never)) {
                 let Some(evidence) = row
                     .skill_usage
@@ -2755,6 +2795,7 @@ impl CounterPass {
                 };
                 observed += 1;
                 partial |= evidence.partial;
+                sessions_partial += usize::from(evidence.partial);
                 let agent = match row.body {
                     RowBody::Claude { .. }
                     | RowBody::Unknown {
@@ -2779,6 +2820,15 @@ impl CounterPass {
                         sessions: 0,
                         last_seen: None,
                         session_refs: Vec::new(),
+                        windows: [7, 30, 90]
+                            .into_iter()
+                            .map(|days| Window {
+                                days,
+                                counts: Period::default(),
+                            })
+                            .collect(),
+                        daily: Vec::new(),
+                        undated_events: 0,
                     });
                     entry.invocations = entry
                         .invocations
@@ -2786,6 +2836,54 @@ impl CounterPass {
                     entry.loads = entry.loads.saturating_add(u64::from(count.loads));
                     entry.sessions += 1;
                     entry.last_seen = entry.last_seen.max(count.last_seen);
+                    let mut session_days = BTreeSet::new();
+                    let mut session_windows = BTreeSet::new();
+                    for event in &count.events {
+                        let Some(at) = event.at else {
+                            entry.undated_events += 1;
+                            continue;
+                        };
+                        earliest_evidence = Some(earliest_evidence.map_or(at, |old| old.min(at)));
+                        if at > now {
+                            continue;
+                        }
+                        for window in &mut entry.windows {
+                            if at >= now - chrono::Duration::days(window.days) {
+                                window.counts.loads += u64::from(event.loaded);
+                                window.counts.invocations += u64::from(!event.loaded);
+                                session_windows.insert(window.days);
+                            }
+                        }
+                        if at < now - chrono::Duration::days(90) {
+                            continue;
+                        }
+                        let day = at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d")
+                            .to_string();
+                        let index = entry
+                            .daily
+                            .iter()
+                            .position(|item| item.day == day)
+                            .unwrap_or_else(|| {
+                                entry.daily.push(Day {
+                                    day: day.clone(),
+                                    counts: Period::default(),
+                                });
+                                entry.daily.len() - 1
+                            });
+                        entry.daily[index].counts.loads += u64::from(event.loaded);
+                        entry.daily[index].counts.invocations += u64::from(!event.loaded);
+                        session_days.insert(day);
+                    }
+                    for window in &mut entry.windows {
+                        window.counts.sessions +=
+                            usize::from(session_windows.contains(&window.days));
+                    }
+                    for day in &mut entry.daily {
+                        day.counts.sessions += usize::from(session_days.contains(&day.day));
+                    }
+                    entry.daily.sort_by(|a, b| a.day.cmp(&b.day));
                     if entry.session_refs.len() < 20 {
                         entry.session_refs.push(row.listed_reference(tag));
                     }
@@ -2797,6 +2895,11 @@ impl CounterPass {
             "feed": FEED_COUNTER_PASS,
             "readable": true,
             "usage": {
+                "enabled": true,
+                "last_analysis_at": self.updated_at(),
+                "earliest_evidence": earliest_evidence,
+                "sessions_partial": sessions_partial,
+                "child_sessions_unavailable": child_sessions_unavailable,
                 "sessions_observed": observed,
                 "sessions_unknown": unknown,
                 "partial": partial || unknown > 0 || observed == 0,
@@ -2807,6 +2910,7 @@ impl CounterPass {
                 "codex": "loads_only",
                 "opencode": "unsupported",
                 "matching": "name_only",
+                "child_sessions": "unsupported",
             },
         })
     }
@@ -5185,9 +5289,14 @@ pub(crate) fn skills_usage(shared: &DaemonShared) -> serde_json::Value {
     let value = shared.insights_counter.skill_usage_value(enabled, &never);
     // A live disable while the aggregation ran hides even cached evidence.
     if !shared
-        .feature_flags
-        .snapshot()
-        .is_enabled("insights_skills")
+        .settings
+        .lock()
+        .map(|s| s.insights_counter_pass)
+        .unwrap_or(false)
+        || !shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills")
     {
         serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS})
     } else {
@@ -5585,6 +5694,40 @@ mod tests {
     }
 
     #[test]
+    fn skill_windows_exclude_undated_and_old_events_and_count_sessions_once() {
+        let f = Fixture::new();
+        let mut bytes = claude_bytes();
+        let time = Utc::now();
+        for (id, at) in [
+            ("recent", Some(time - Duration::days(1))),
+            ("recent2", Some(time - Duration::days(2))),
+            ("older", Some(time - Duration::days(20))),
+            ("old", Some(time - Duration::days(100))),
+            ("undated", None),
+        ] {
+            let line = serde_json::json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"tool_use","id":id,"name":"Skill","input":{"skill":"review"}}]}});
+            bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
+        }
+        let path = f.write("windows.jsonl", &bytes);
+        let candidate = candidate(SOURCE_CLAUDE_CODE, &path);
+        f.run_skills(std::slice::from_ref(&candidate));
+        let value = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        let row = &value["usage"]["skills"][0];
+        assert_eq!(row["invocations"], 5);
+        assert_eq!(row["undated_events"], 1);
+        assert_eq!(row["windows"][0]["invocations"], 2);
+        assert_eq!(row["windows"][0]["sessions"], 1);
+        assert_eq!(row["windows"][1]["invocations"], 3);
+        assert_eq!(row["windows"][2]["invocations"], 3);
+        assert_eq!(row["daily"].as_array().unwrap().len(), 3);
+        assert_eq!(f.run_skills(&[candidate]).read, 0);
+        assert_eq!(
+            f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"]["skills"][0]["invocations"],
+            5
+        );
+    }
+
+    #[test]
     fn skill_usage_excludes_automated_rows() {
         let f = Fixture::new();
         let path = f.write("skills.jsonl", &claude_bytes());
@@ -5593,7 +5736,7 @@ mod tests {
         let row = store.rows.values_mut().next().unwrap();
         row.automation = Automation::Automated;
         row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
-            schema_version: 1,
+            schema_version: SKILL_USAGE_VERSION,
             coverage: crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations,
             partial: false,
             skills: vec![crate::insights::skill_usage::SkillUsageCount {
@@ -5601,6 +5744,7 @@ mod tests {
                 invocations: 1,
                 loads: 0,
                 last_seen: None,
+                events: Vec::new(),
             }],
         });
         f.pass.save(store).unwrap();

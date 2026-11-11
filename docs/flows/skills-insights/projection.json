@@ -1,0 +1,28 @@
+{
+  "states": 1338,
+  "steps": 18795,
+  "views": {
+    "FLOW": {
+      "labels": 7,
+      "arrows": 24,
+      "internalSteps": 13216,
+      "projectedSteps": 5579
+    },
+    "USAGE": {
+      "labels": 8,
+      "arrows": 38,
+      "internalSteps": 12225,
+      "projectedSteps": 6570
+    },
+    "DETAIL": {
+      "labels": 6,
+      "arrows": 21,
+      "internalSteps": 14251,
+      "projectedSteps": 4544
+    }
+  },
+  "analysisOffInventoryWitness": [
+    "YouPressRefresh",
+    "TheScanFindsSkills"
+  ]
+}

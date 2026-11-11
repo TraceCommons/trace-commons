@@ -67,7 +67,7 @@ fn scans_only_known_directories_and_reports_invalid_documents() {
         b"not a skill",
     );
     let inventory = scan_inventory_with_roots(home.path(), &[project.path().into()], &[]);
-    assert_eq!(inventory.skills.len(), 3);
+    assert_eq!(inventory.skills.len(), 4);
     assert!(inventory.partial);
     assert!(
         inventory
@@ -250,7 +250,15 @@ fn oversized_file_marks_coverage_partial() {
     );
     let inventory = scan_inventory_with_roots(home.path(), &[], &[]);
     assert!(inventory.partial);
-    assert!(inventory.skills.is_empty());
+    assert_eq!(inventory.skills.len(), 1);
+    let skill = &inventory.skills[0];
+    assert_eq!(skill.name, "huge");
+    assert!(skill.description.is_empty());
+    assert!(skill.sha256.is_empty());
+    assert!(skill.source.is_none());
+    let details = &inventory.details[&skill.id];
+    assert_eq!(details.definition_status, SkillDefinitionStatus::Unreadable);
+    assert_eq!(details.availability, SkillAvailability::Unknown);
     assert!(
         inventory
             .coverage
@@ -648,5 +656,147 @@ fn never_policy_blocks_verified_plugin_manifest_content() {
     let inventory = scan_inventory_with_policy(home.path(), &[], &[], &[denied.path().into()]);
     assert_eq!(inventory.skills.len(), 1);
     assert!(inventory.skills[0].source.is_none());
+    assert!(inventory.partial);
+}
+
+#[test]
+fn malformed_inventory_entry_is_retained_with_invalid_status() {
+    let home = tempfile::tempdir().unwrap();
+    put(
+        home.path(),
+        ".codex/skills/broken/SKILL.md",
+        b"not frontmatter",
+    );
+    let inventory = scan_inventory_with_roots(home.path(), &[], &[]);
+    assert_eq!(inventory.skills.len(), 1);
+    let skill = &inventory.skills[0];
+    assert_eq!(
+        inventory.details[&skill.id].definition_status,
+        SkillDefinitionStatus::Invalid
+    );
+    assert_eq!(
+        inventory.details[&skill.id].availability,
+        SkillAvailability::Unknown
+    );
+    let json = serde_json::to_string(&inventory).unwrap();
+    assert!(!json.contains(home.path().to_str().unwrap()));
+}
+
+#[cfg(unix)]
+#[test]
+fn same_agent_aliases_deduplicate_and_keep_alias_locations() {
+    use std::os::unix::fs::symlink;
+    let home = tempfile::tempdir().unwrap();
+    put(
+        home.path(),
+        ".codex/skills/real/SKILL.md",
+        doc("same").as_bytes(),
+    );
+    symlink(
+        home.path().join(".codex/skills/real"),
+        home.path().join(".codex/skills/alias"),
+    )
+    .unwrap();
+    let inventory = scan_inventory_with_roots(home.path(), &[], &[]);
+    assert_eq!(inventory.skills.len(), 1);
+    assert_eq!(inventory.details[&inventory.skills[0].id].aliases.len(), 2);
+}
+
+#[test]
+fn claude_registry_selects_active_plugin_version_and_disabled_state() {
+    let home = tempfile::tempdir().unwrap();
+    for (name, version) in [("enabled", "1"), ("enabled", "2"), ("disabled", "1")] {
+        put(
+            home.path(),
+            &format!(".claude/plugins/cache/vendor/{name}/{version}/skills/example/SKILL.md"),
+            doc(name).as_bytes(),
+        );
+    }
+    put(
+        home.path(),
+        ".claude/settings.json",
+        br#"{"enabledPlugins":{"enabled@vendor":true,"disabled@vendor":false}}"#,
+    );
+    let registry = serde_json::json!({"version":2,"plugins":{
+        "enabled@vendor":[{"scope":"user","installPath":home.path().join(".claude/plugins/cache/vendor/enabled/2")}],
+        "disabled@vendor":[{"scope":"user","installPath":home.path().join(".claude/plugins/cache/vendor/disabled/1")}]
+    }});
+    put(
+        home.path(),
+        ".claude/plugins/installed_plugins.json",
+        &serde_json::to_vec(&registry).unwrap(),
+    );
+    let inventory = scan_inventory_with_roots(home.path(), &[], &[]);
+    assert_eq!(inventory.skills.len(), 3);
+    let states: Vec<_> = inventory
+        .skills
+        .iter()
+        .map(|skill| inventory.details[&skill.id].availability)
+        .collect();
+    assert!(states.contains(&SkillAvailability::Available));
+    assert!(states.contains(&SkillAvailability::Disabled));
+    assert!(states.contains(&SkillAvailability::Cached));
+}
+
+#[test]
+fn configured_agent_root_replaces_global_default_but_keeps_indexed_projects() {
+    let home = tempfile::tempdir().unwrap();
+    let alternate = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    put(
+        home.path(),
+        ".codex/skills/stale/SKILL.md",
+        doc("stale-default").as_bytes(),
+    );
+    put(
+        alternate.path(),
+        "skills/current/SKILL.md",
+        doc("configured").as_bytes(),
+    );
+    put(
+        project.path(),
+        ".codex/skills/project/SKILL.md",
+        doc("project").as_bytes(),
+    );
+    let inventory = scan_inventory_with_roots(
+        home.path(),
+        &[project.path().into()],
+        &[("codex".into(), alternate.path().join("skills"))],
+    );
+    let names: Vec<_> = inventory
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"configured"));
+    assert!(names.contains(&"project"));
+    assert!(!names.contains(&"stale-default"));
+}
+
+#[cfg(unix)]
+#[test]
+fn never_alias_under_symlinked_root_is_not_lost_during_listing() {
+    use std::os::unix::fs::symlink;
+    let home = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    put(
+        target.path(),
+        "skills/private/SKILL.md",
+        doc("private").as_bytes(),
+    );
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+    symlink(
+        target.path().join("skills"),
+        home.path().join(".codex/skills"),
+    )
+    .unwrap();
+    let inventory = scan_inventory_with_policy(
+        home.path(),
+        &[],
+        &[],
+        &[home.path().join(".codex/skills/private")],
+    );
+    assert!(inventory.skills.is_empty());
     assert!(inventory.partial);
 }

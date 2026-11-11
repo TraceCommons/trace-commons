@@ -264,6 +264,8 @@ public protocol DaemonDataClient: Sendable {
     func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted
 
     /// Local Skills inventory, usage and cached publisher catalog.
+    func skillDefinition(skillID: String) async throws -> DaemonData.SkillDefinition
+    func skillEvidence(sessionRef: String) async throws -> DaemonData.SkillEvidence
     func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot
     /// Persist a publisher follow and return the confirmed snapshot.
     func setSkillsFollow(publisherID: String, followed: Bool) async throws -> DaemonData.SkillsSnapshot
@@ -341,6 +343,13 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    public func skillDefinition(skillID: String) async throws -> DaemonData.SkillDefinition {
+        throw DaemonDataError.notAvailableYet(method: "insights_skills")
+    }
+    public func skillEvidence(sessionRef: String) async throws -> DaemonData.SkillEvidence {
+        throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
+    }
+
     public func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot {
         throw DaemonDataError.notAvailableYet(method: "insights_skills")
     }

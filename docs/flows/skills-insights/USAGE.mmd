@@ -1,0 +1,57 @@
+stateDiagram-v2
+  direction TB
+  state "Usage unavailable — analysis off" as s0
+  state "Skills disabled" as s1
+  state "Usage pending" as s2
+  state "Folder excluded" as s3
+  state "Analyzing local history" as s4
+  state "Analysis complete" as s5
+  state "Partial history" as s6
+  state "Usage unavailable — unsupported" as s7
+  [*] --> s0
+  s0 --> s1 : the skills flag turns off
+  s0 --> s2 : you enable local analysis
+  s1 --> s0 : the skills flag turns on
+  s0 --> s3 : you enable local analysis
+  s2 --> s1 : the skills flag turns off
+  s2 --> s3 : you exclude the folder
+  s2 --> s0 : you disable local analysis
+  s2 --> s4 : the analysis starts
+  s1 --> s2 : the skills flag turns on
+  s3 --> s1 : the skills flag turns off
+  s3 --> s2 : you permit the folder
+  s3 --> s0 : you disable local analysis
+  s4 --> s1 : the skills flag turns off
+  s4 --> s3 : you exclude the folder
+  s4 --> s0 : you disable local analysis
+  s4 --> s5 : the analysis completes
+  s4 --> s6 : the analysis is partial
+  s4 --> s7 : the format is unsupported
+  s1 --> s3 : the skills flag turns on
+  s1 --> s4 : the skills flag turns on
+  s3 --> s4 : you permit the folder
+  s0 --> s4 : you enable local analysis
+  s4 --> s2 : the old analysis returns
+  s5 --> s1 : the skills flag turns off
+  s5 --> s3 : you exclude the folder
+  s5 --> s0 : you disable local analysis
+  s5 --> s2 : you clear local analysis
+  s5 --> s4 : the analysis starts
+  s6 --> s1 : the skills flag turns off
+  s6 --> s3 : you exclude the folder
+  s6 --> s0 : you disable local analysis
+  s6 --> s2 : you clear local analysis
+  s6 --> s4 : the analysis starts
+  s7 --> s1 : the skills flag turns off
+  s7 --> s3 : you exclude the folder
+  s7 --> s0 : you disable local analysis
+  s7 --> s2 : you clear local analysis
+  s7 --> s4 : the analysis starts
+  class s0 teal
+  class s1 tan
+  class s2 teal
+  class s3 tan
+  class s4 yellow
+  class s5 teal
+  class s6 teal
+  class s7 teal
