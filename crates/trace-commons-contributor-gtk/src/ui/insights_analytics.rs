@@ -479,6 +479,14 @@ enum Slot {
     Sessions,
 }
 
+fn week_params(week: Option<chrono::NaiveDate>, tz: i32) -> serde_json::Value {
+    serde_json::json!({"iso_week": week.map(|week| week.format("%G-W%V").to_string()), "tz": tz})
+}
+
+fn accept_live_result(active: bool, shown: Tab, current: u64, received: u64) -> bool {
+    active && shown == Tab::Overview && current == received
+}
+
 /// The shell's current UTC offset, which buckets the week's days.
 fn local_offset() -> i32 {
     chrono::Local::now().offset().local_minus_utc()
@@ -613,6 +621,10 @@ pub(super) struct AnalyticsTabs {
     shown: Cell<Tab>,
     generations: [Cell<u64>; 5],
     store_dir: Option<PathBuf>,
+    app: RefCell<std::rc::Weak<super::super::App>>,
+    active: Cell<bool>,
+    live_busy: Cell<bool>,
+    live_again: Cell<bool>,
 }
 
 fn scrolled(body: &gtk::Box) -> gtk::ScrolledWindow {
@@ -655,7 +667,113 @@ impl AnalyticsTabs {
             shown: Cell::new(Tab::Overview),
             generations: Default::default(),
             store_dir,
+            app: RefCell::new(std::rc::Weak::new()),
+            active: Cell::new(true),
+            live_busy: Cell::new(false),
+            live_again: Cell::new(false),
         })
+    }
+
+    pub(super) fn bind_app(&self, app: &Rc<super::super::App>) {
+        *self.app.borrow_mut() = Rc::downgrade(app);
+        self.suspend();
+    }
+
+    pub(super) fn suspend(&self) {
+        self.active.set(false);
+        self.invalidate();
+    }
+
+    pub(super) fn invalidate(&self) {
+        self.live_again.set(false);
+        for generation in &self.generations {
+            generation.set(generation.get().wrapping_add(1));
+        }
+    }
+
+    pub(super) fn resume(self: &Rc<Self>) {
+        self.active.set(true);
+        self.load(self.shown.get());
+    }
+
+    fn load_saved_overview(self: &Rc<Self>) {
+        let operation = Op::WeekOverview {
+            week_start: self.overview_week.get(),
+            tz: local_offset(),
+        };
+        self.read(
+            Slot::Overview,
+            &self.overview_body,
+            operation,
+            |tabs, response| {
+                let Response::WeekOverview { overview } = response else {
+                    return false;
+                };
+                tabs.present_overview(&overview);
+                true
+            },
+        );
+    }
+
+    fn load_live_overview(self: &Rc<Self>, app: &Rc<super::super::App>) {
+        self.bump(Slot::Overview);
+        let generation = self.generation(Slot::Overview).get();
+        clear(&self.overview_body);
+        let spinner = gtk::Spinner::new();
+        spinner.start();
+        self.overview_body.append(&spinner);
+        if self.live_busy.replace(true) {
+            // Keep only the newest selection while the existing worker call runs.
+            self.live_again.set(true);
+            return;
+        }
+        let requested_week = self.overview_week.get();
+        let params = week_params(requested_week, local_offset());
+        let weak = Rc::downgrade(self);
+        app.call("insights_week", params, move |_, result| {
+            let Some(tabs) = weak.upgrade() else { return };
+            tabs.live_busy.set(false);
+            if tabs.live_again.replace(false)
+                && tabs.active.get()
+                && tabs.shown.get() == Tab::Overview
+            {
+                tabs.load(Tab::Overview);
+                return;
+            }
+            if !accept_live_result(
+                tabs.active.get(),
+                tabs.shown.get(),
+                tabs.generation(Slot::Overview).get(),
+                generation,
+            ) {
+                return;
+            }
+            if let Some((response, overview)) = result.ok().and_then(|response| {
+                super::live::live_overview(&response)
+                    .filter(|overview| {
+                        requested_week.is_none_or(|week| overview.week_start == week)
+                    })
+                    .map(|overview| (response, overview))
+            }) {
+                clear(&tabs.overview_body);
+                tabs.present_overview_heading(&overview);
+                // Live totals are not evidence links into the saved-snapshot feed.
+                let totals = card_box();
+                totals.append(&styled(&text("analytics_card_sessions"), "heading"));
+                totals.append(&styled(
+                    &figure(Some(u64::from(overview.sessions))),
+                    "title-3",
+                ));
+                for source in &overview.sources {
+                    totals.append(&small(&source_line(source.source)));
+                    totals.append(&styled(&figure(source.tokens), "title-3"));
+                }
+                tabs.overview_body.append(&totals);
+                super::live::append_work_cards(&tabs.overview_body, &response);
+            } else {
+                tabs.load_saved_overview();
+            }
+        });
     }
 
     fn generation(&self, slot: Slot) -> &Cell<u64> {
@@ -672,6 +790,7 @@ impl AnalyticsTabs {
         let Some(tab) = Tab::from_name(name) else {
             return;
         };
+        self.bump(Slot::Overview);
         self.shown.set(tab);
         self.load(tab);
     }
@@ -696,28 +815,21 @@ impl AnalyticsTabs {
     }
 
     fn load(self: &Rc<Self>, tab: Tab) {
+        if !self.active.get() {
+            return;
+        }
         let tz = local_offset();
         match tab {
             Tab::Overview => {
                 // A drill-down still in flight belongs to the old cards.
                 self.open_inputs.set(None);
                 self.bump(Slot::Inputs);
-                let operation = Op::WeekOverview {
-                    week_start: self.overview_week.get(),
-                    tz,
-                };
-                self.read(
-                    Slot::Overview,
-                    &self.overview_body,
-                    operation,
-                    |tabs, response| {
-                        let Response::WeekOverview { overview } = response else {
-                            return false;
-                        };
-                        tabs.present_overview(&overview);
-                        true
-                    },
-                );
+                let app = self.app.borrow().upgrade();
+                if let Some(app) = app {
+                    self.load_live_overview(&app);
+                } else {
+                    self.load_saved_overview();
+                }
             }
             Tab::Patterns => {
                 self.open_pattern.set(None);
@@ -807,7 +919,7 @@ impl AnalyticsTabs {
             let (Some(tabs), Some(body)) = (weak.upgrade(), body.upgrade()) else {
                 return;
             };
-            if tabs.generation(slot).get() != generation {
+            if !tabs.active.get() || tabs.generation(slot).get() != generation {
                 return;
             }
             clear(&body);
@@ -849,7 +961,7 @@ impl AnalyticsTabs {
         picker
     }
 
-    fn present_overview(self: &Rc<Self>, overview: &WeekOverview) {
+    fn present_overview_heading(self: &Rc<Self>, overview: &WeekOverview) {
         let body = &self.overview_body;
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         heading.append(&styled(&text("analytics_this_week"), "title-2"));
@@ -879,7 +991,11 @@ impl AnalyticsTabs {
         for line in feed_lines(overview.feed) {
             body.append(&small(&line));
         }
+    }
 
+    fn present_overview(self: &Rc<Self>, overview: &WeekOverview) {
+        self.present_overview_heading(overview);
+        let body = &self.overview_body;
         let cards = summary_grid();
         // Tokens: one line per harness, side by side; never summed.
         let tokens = card_box();
@@ -1437,6 +1553,45 @@ mod tests {
     }
     fn words(key: &str) -> String {
         ui_copy()[key].clone()
+    }
+
+    #[test]
+    fn live_week_request_uses_iso_year_and_optional_current_week() {
+        let week = chrono::NaiveDate::from_ymd_opt(2024, 12, 30).unwrap();
+        assert_eq!(
+            week_params(Some(week), -28800),
+            serde_json::json!({"iso_week":"2025-W01", "tz":-28800})
+        );
+        assert!(week_params(None, 0)["iso_week"].is_null());
+    }
+
+    #[test]
+    fn hidden_other_tab_and_stale_live_results_are_rejected() {
+        assert!(accept_live_result(true, Tab::Overview, 4, 4));
+        assert!(!accept_live_result(false, Tab::Overview, 4, 4));
+        assert!(!accept_live_result(true, Tab::Patterns, 4, 4));
+        assert!(!accept_live_result(true, Tab::Overview, 5, 4));
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn canceled_close_invalidates_results_without_disabling_analytics() {
+        assert_eq!(std::env::consts::OS, "linux");
+        adw::init().expect("GTK display unavailable");
+        let tabs = AnalyticsTabs::new(None);
+        let pending = tabs.generation(Slot::Overview).get();
+        tabs.live_again.set(true);
+        tabs.invalidate();
+        assert!(tabs.active.get());
+        assert!(!tabs.live_again.get());
+        assert!(!accept_live_result(
+            tabs.active.get(),
+            Tab::Overview,
+            tabs.generation(Slot::Overview).get(),
+            pending
+        ));
+        tabs.suspend();
+        assert!(!tabs.active.get());
     }
 
     #[test]

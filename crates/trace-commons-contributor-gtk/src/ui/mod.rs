@@ -520,6 +520,7 @@ impl App {
             quit_confirmed: Cell::new(false),
         });
 
+        insights.bind_app(&app);
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
