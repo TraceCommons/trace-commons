@@ -990,9 +990,46 @@ fn macos_app_bundle_builds_and_lipos_both_architectures() {
 
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
-        workflow.contains("Near.ai-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),
+        workflow.contains("Gateway-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),
         "the DMG is universal now, so its filename must not carry an \
          architecture suffix"
+    );
+}
+
+/// The release DMG is named Gateway, file and volume (owner, 2026-11-11);
+/// the app inside keeps its bundle name. The appcast, `latest.json` and
+/// the release asset must all name the same file, or an update points at a
+/// download that does not exist.
+#[test]
+fn the_release_dmg_is_named_gateway() {
+    let workflow = executable_text(&read(".github/workflows/release-apps.yml"));
+    assert!(
+        !workflow.contains("Near.ai-"),
+        "release-apps.yml still names a Near.ai- DMG somewhere"
+    );
+    for needed in [
+        "OUT=\"Gateway-${SHORT_VERSION}.dmg\"",
+        "F=\"dist/macos-dmg/Gateway-$V.dmg\"",
+        "$BASE/Gateway-$V.dmg=",
+        "app-v$V/Gateway-$V.dmg\"",
+        "--dmg-path \"dist/macos-dmg/Gateway-$V.dmg\"",
+    ] {
+        assert!(
+            workflow.contains(needed),
+            "release-apps.yml must contain `{needed}`"
+        );
+    }
+    let production = read("macos/channels/production.env");
+    assert!(
+        production
+            .lines()
+            .any(|line| line == "TC_DMG_VOLUME_NAME=Gateway"),
+        "the production DMG's volume is named Gateway"
+    );
+    let dmg = read("macos/scripts/make-release-dmg.sh");
+    assert!(
+        dmg.contains("-volname \"$TC_DMG_VOLUME_NAME\""),
+        "make-release-dmg.sh must name the volume from TC_DMG_VOLUME_NAME"
     );
 }
 
