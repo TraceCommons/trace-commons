@@ -349,12 +349,17 @@ fn release_tags_are_checked_against_the_versions_the_binaries_report() {
         contributor.contains("PACKAGE_VERSION") && contributor.contains("TAG_VERSION"),
         "the contributor release must refuse a tag/package version mismatch"
     );
-    for required in ["WINGET_PKGS_TOKEN", "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX"] {
-        assert!(
-            contributor.contains("missing configuration") && contributor.contains(required),
-            "the contributor release must fail before building when {required} is absent"
-        );
-    }
+    assert!(
+        contributor.contains("missing configuration")
+            && contributor.contains("TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX"),
+        "the contributor release must fail before building when \
+         TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX is absent"
+    );
+    assert!(
+        !executable_text(&contributor).contains("WINGET_PKGS_TOKEN"),
+        "the contributor release must not require WINGET_PKGS_TOKEN; winget \
+         is submitted by hand"
+    );
     assert!(
         contributor.contains("needs: release-config"),
         "the signed contributor build must wait for release configuration preflight"
@@ -1128,15 +1133,15 @@ fn executable_text(workflow: &str) -> String {
         .join("\n")
 }
 
-/// No release workflow touches the Homebrew tap. The cask and formula bumps
-/// spent HOMEBREW_TAP_TOKEN, a cross-repository token that stopped
-/// authenticating and failed the 1.0.0 and 1.0.1 publish jobs after their
-/// assets were out, which also skipped the update feed behind them. The tap
-/// is now bumped by hand with the releaser's own login
-/// (docs/release-runbook.md), so no workflow may read that secret or push to
-/// the tap again.
+/// No workflow publishes to a package manager. The Homebrew cask and formula
+/// bumps spent HOMEBREW_TAP_TOKEN and the winget bump spent WINGET_PKGS_TOKEN,
+/// cross-repository tokens that stopped authenticating and failed release
+/// runs after their assets were out (the tap step also skipped the update
+/// feed behind it). Both are now done by hand with the releaser's own login
+/// (docs/release-runbook.md), so no workflow may read those secrets or push
+/// to the tap or a winget-pkgs fork again.
 #[test]
-fn no_workflow_bumps_the_homebrew_tap() {
+fn no_workflow_publishes_to_a_package_manager() {
     let dir = repo_root().join(".github/workflows");
     let mut checked = 0;
     for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
@@ -1156,6 +1161,14 @@ fn no_workflow_bumps_the_homebrew_tap() {
         assert!(
             !exec.contains("TraceCommons/homebrew-tap"),
             "{name} reaches TraceCommons/homebrew-tap; tap bumps are made by hand"
+        );
+        assert!(
+            !exec.contains("WINGET_PKGS_TOKEN"),
+            "{name} reads WINGET_PKGS_TOKEN; winget is submitted by hand"
+        );
+        assert!(
+            !exec.contains("winget-pkgs"),
+            "{name} reaches a winget-pkgs repository; winget is submitted by hand"
         );
         checked += 1;
     }
@@ -1187,112 +1200,6 @@ fn release_workflows_never_merge_or_bypass_checks() {
     }
 }
 
-/// A deleted-and-re-cut tag re-runs the winget step against a branch that
-/// already exists. `git push -u origin "$BRANCH"` was rejected with
-/// "! [rejected] (fetch first)" on the contributor-v0.4.7 re-run, failing the
-/// whole job after every artifact had already published.
-#[test]
-fn bump_branch_pushes_survive_a_re_run() {
-    let workflow = read(".github/workflows/release-contributor.yml");
-    let pushes: Vec<&str> = workflow
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("git push"))
-        .collect();
-    assert!(
-        !pushes.is_empty(),
-        "release-contributor.yml must still push the winget branch"
-    );
-    for line in pushes {
-        assert!(
-            line.contains("--force"),
-            "`{line}` is rejected on a re-run against an existing bump \
-             branch, which fails the release after its assets have already \
-             published"
-        );
-    }
-}
-
-/// The dangerous half of making the push forceful: a force-push carrying the
-/// *previous* run's checksum would publish a manifest whose hash does not
-/// match the installer, which reads to users as tampering.
-///
-/// What makes that structurally impossible is that the bump branch is never
-/// fetched. The step clones `--single-branch` (the winget fork's default
-/// branch only) and rebuilds the branch from that plus a hash computed from
-/// the published asset, so there is nothing of a previous attempt left to
-/// carry forward.
-#[test]
-fn force_pushed_bump_branches_cannot_carry_a_stale_checksum() {
-    let file = ".github/workflows/release-contributor.yml";
-    let step = "name: Generate and submit";
-    let workflow = read(file);
-    let start = workflow
-        .find(step)
-        .unwrap_or_else(|| panic!("{file} must still contain `{step}`"));
-    let body = &workflow[start..];
-    let body = &body[..body.find("\n      - name:").unwrap_or(body.len())];
-    let body = executable_text(body);
-    assert!(
-        body.contains("--single-branch"),
-        "{file} / {step}: clone the default branch only. Fetching the bump \
-         branch is the only route by which a previous run's checksum could \
-         reach a force-push."
-    );
-    assert!(
-        !body.contains("git fetch") && !body.contains("git pull"),
-        "{file} / {step}: must not fetch the existing bump branch -- \
-         re-deriving the branch from the default branch is what guarantees \
-         the checksum came from this run"
-    );
-    // Re-running when the fork already carries this exact content must not
-    // die on `git commit` finding nothing to commit.
-    assert!(
-        body.contains("git diff --quiet") || body.contains("git diff --cached --quiet"),
-        "{file} / {step}: a re-run against an already-bumped branch must exit \
-         cleanly rather than failing on an empty commit"
-    );
-}
-
-/// The winget manifest hash is never passed in by hand: the generator
-/// downloads the published asset and hashes the bytes it got.
-#[test]
-fn winget_bump_hashes_the_published_asset() {
-    let contributor = executable_text(&read(".github/workflows/release-contributor.yml"));
-    assert!(
-        contributor.contains("./scripts/winget/generate-manifests.sh \"$V\""),
-        "the winget manifest must be regenerated from the published asset on \
-         every run rather than reusing a branch's InstallerSha256"
-    );
-}
-
-/// The winget pull request is deliberately NOT opened by the workflow: no
-/// token we can issue is permitted to call `createPullRequest` against
-/// microsoft/winget-pkgs, and attempting it failed the whole release on
-/// contributor-v0.4.7 after every artifact had published. What must survive
-/// is the pointer to the branch the job pushed, since that is the only route
-/// to the manifest reaching winget users.
-#[test]
-fn the_winget_job_points_at_its_pushed_branch() {
-    let contributor = read(".github/workflows/release-contributor.yml");
-    assert!(
-        contributor.contains("FORK_OWNER=\"$(gh api user --jq .login)\""),
-        "the winget job must derive the owner of the token-scoped fork"
-    );
-    assert!(
-        !contributor.contains("gh pr create --fill --repo microsoft/winget-pkgs"),
-        "the winget job must not try to open a pull request it has no token for"
-    );
-    assert!(
-        contributor.contains("${FORK_OWNER}:${BRANCH}"),
-        "the winget job must print a compare URL naming the fork-owned branch"
-    );
-    assert!(
-        contributor.contains("GITHUB_STEP_SUMMARY"),
-        "the winget compare URL must reach the run summary, not just the log"
-    );
-}
-
 /// With no workflow touching the tap, the runbook is the only thing that
 /// gets a release onto Homebrew. It must say which two files to bump, that
 /// every hash is checked against the published `.sha256`, and to merge.
@@ -1314,6 +1221,23 @@ fn runbook_tells_the_releaser_to_bump_the_tap_by_hand() {
         !runbook.contains("tap-bump-staleness"),
         "the runbook must not point at the removed staleness workflow"
     );
+}
+
+/// With no workflow submitting to winget, the runbook is the only route.
+/// It must name the generator, which hashes the published zip itself, and
+/// where the manifests go.
+#[test]
+fn runbook_tells_the_releaser_to_submit_winget_by_hand() {
+    let runbook = read("docs/release-runbook.md");
+    for needed in [
+        "scripts/winget/generate-manifests.sh",
+        "microsoft/winget-pkgs",
+    ] {
+        assert!(
+            runbook.contains(needed),
+            "the runbook's manual winget submission must mention `{needed}`"
+        );
+    }
 }
 
 #[test]
