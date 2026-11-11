@@ -26,6 +26,18 @@ final class MainMenuRebuildTests: XCTestCase {
         XCTAssertTrue(body.contains("@ObservedObject var privateInference: PrivateInferenceMenuItem"))
     }
 
+    /// The command-line tool's item is rebuilt when its status changes: the
+    /// menu commands observe its controller themselves. A View observing it
+    /// inside a CommandGroup is not known to rebuild the menu's item.
+    func testTheMenuCommandsObserveTheCliToolController() throws {
+        let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
+        let commands = try XCTUnwrap(main.range(of: "struct MonitorCommands: Commands {"))
+        let end = try XCTUnwrap(main.range(of: "\n}\n", range: commands.upperBound..<main.endIndex))
+        let body = main[commands.lowerBound..<end.lowerBound]
+        XCTAssertTrue(body.contains("@ObservedObject var cliTool: CliToolController"))
+        XCTAssertTrue(body.contains("CliToolMenuItem(controller: cliTool)"))
+    }
+
     /// A model change that leaves the switch as it was publishes nothing to
     /// the menu.
     func testAnUnrelatedModelChangeDoesNotRepublishTheItem() async throws {
