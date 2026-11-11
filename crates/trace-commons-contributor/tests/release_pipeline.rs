@@ -349,11 +349,7 @@ fn release_tags_are_checked_against_the_versions_the_binaries_report() {
         contributor.contains("PACKAGE_VERSION") && contributor.contains("TAG_VERSION"),
         "the contributor release must refuse a tag/package version mismatch"
     );
-    for required in [
-        "HOMEBREW_TAP_TOKEN",
-        "WINGET_PKGS_TOKEN",
-        "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX",
-    ] {
+    for required in ["WINGET_PKGS_TOKEN", "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX"] {
         assert!(
             contributor.contains("missing configuration") && contributor.contains(required),
             "the contributor release must fail before building when {required} is absent"
@@ -366,10 +362,9 @@ fn release_tags_are_checked_against_the_versions_the_binaries_report() {
 }
 
 /// release-apps.yml gained the same pre-flight release-contributor.yml has
-/// had since it was written, but with its OWN credential list. Before it, a
-/// missing HOMEBREW_TAP_TOKEN first surfaced at the cask bump inside
-/// `publish` -- after a notarized DMG, a signed MSIX and two GCS buckets had
-/// already moved.
+/// had since it was written, but with its OWN credential list, so a missing
+/// credential fails the run before a notarized DMG, a signed MSIX and two GCS
+/// buckets have already moved.
 ///
 /// The list is not release-contributor's: this workflow never reads
 /// WINGET_PKGS_TOKEN, and its update manifests fetch their signing key from
@@ -401,7 +396,6 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
         "SPARKLE_PUBLIC_ED_KEY",
         "GCP_WIF_PROVIDER",
         "GCP_FLATPAK_PUBLISHER_SA",
-        "HOMEBREW_TAP_TOKEN",
     ] {
         // Twice at minimum: once in the pre-flight's env block, once where it
         // is spent. A name that appears only at the point of use is a
@@ -1134,200 +1128,137 @@ fn executable_text(workflow: &str) -> String {
         .join("\n")
 }
 
-/// The tap bump must stay a pull request -- it is the audit trail, and the
-/// place the tap's own checks run -- and it must merge itself. Eleven bump
-/// pull requests accumulated unmerged back to 0.4.1 while the tap served
-/// cask 0.4.0 and formula 0.3.0, because merging was a human step the
-/// runbook never told anyone to take.
+/// No release workflow touches the Homebrew tap. The cask and formula bumps
+/// spent HOMEBREW_TAP_TOKEN, a cross-repository token that stopped
+/// authenticating and failed the 1.0.0 and 1.0.1 publish jobs after their
+/// assets were out, which also skipped the update feed behind them. The tap
+/// is now bumped by hand with the releaser's own login
+/// (docs/release-runbook.md), so no workflow may read that secret or push to
+/// the tap again.
 #[test]
-fn tap_bumps_go_through_a_pull_request() {
-    for file in [
-        ".github/workflows/release-apps.yml",
-        ".github/workflows/release-contributor.yml",
-    ] {
-        let workflow = read(file);
+fn no_workflow_bumps_the_homebrew_tap() {
+    let dir = repo_root().join(".github/workflows");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
+        let path = entry.expect("workflow entry").path();
+        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if ext != "yml" && ext != "yaml" {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let exec = executable_text(&std::fs::read_to_string(&path).expect("read workflow"));
         assert!(
-            workflow.contains("homebrew-tap"),
-            "{file} must bump the tap"
+            !exec.contains("HOMEBREW_TAP_TOKEN"),
+            "{name} reads HOMEBREW_TAP_TOKEN; tap bumps are made by hand"
         );
-        // Still a pull request, not a direct push to the tap's default
-        // branch: the pull request is where the tap's own checks run.
         assert!(
-            workflow.contains("gh pr create"),
-            "{file} must open a pull request against the tap, not push to it"
+            !exec.contains("TraceCommons/homebrew-tap"),
+            "{name} reaches TraceCommons/homebrew-tap; tap bumps are made by hand"
         );
+        checked += 1;
     }
+    assert!(checked > 0, "no workflows found under {}", dir.display());
+    assert!(
+        !dir.join("tap-bump-staleness.yml").exists(),
+        "the tap-bump staleness check watched for bump pull requests no \
+         workflow opens any more"
+    );
 }
 
-/// The bump pull request is merged by the workflow, not by a human. The
-/// merge must use the non-bypassing form -- `--auto` waits for the tap's
-/// required checks and branch protection -- and must never pass `--admin`,
-/// which exists precisely to bypass them.
+/// No release workflow merges a pull request or passes `--admin`, which
+/// exists to bypass branch protection and required checks.
 #[test]
-fn tap_bumps_never_merge_themselves_ungated() {
-    // Automating this merge is wanted, but TraceCommons/homebrew-tap has
-    // `allow_auto_merge = false`, no branch protection on its default
-    // branch, and no CI workflows at all. `gh pr merge --auto` would fail
-    // outright there, and any fallback to a plain `--squash`/`--merge`
-    // would be an immediate ungated merge into what `brew upgrade` serves
-    // -- the direct push this step exists to avoid, wearing a pull request
-    // as a disguise. The merge may be automated once the tap has an audit
-    // check to gate on; until then this pins that it is not.
+fn release_workflows_never_merge_or_bypass_checks() {
     for file in [
         ".github/workflows/release-apps.yml",
         ".github/workflows/release-contributor.yml",
     ] {
-        let workflow = read(file);
-        let exec = executable_text(&workflow);
+        let exec = executable_text(&read(file));
         assert!(
             !exec.contains("gh pr merge"),
-            "{file} must not merge the bump pull request: the tap has no \
-             required check for an auto-merge to wait on, so any merge here \
-             is ungated"
+            "{file} must not merge a pull request"
         );
         assert!(
             !exec.contains("--admin"),
             "{file} must never pass --admin to gh"
         );
-        // The pointer is the whole mitigation while the merge is manual:
-        // eleven bumps went unmerged back to 0.4.1 because nothing surfaced
-        // them. It must reach the run summary, not just the log.
-        assert!(
-            workflow.contains("GITHUB_STEP_SUMMARY"),
-            "{file} must surface the open bump on the run summary so it is \
-             not forgotten the way 0.4.1 through 0.4.6 were"
-        );
     }
 }
 
-/// A deleted-and-re-cut tag re-runs these steps against branches that
-/// already exist. `git push -u origin "$BRANCH"` was rejected with
-/// "! [rejected] (fetch first)" on the app-v0.4.7 re-run, failing the whole
-/// publish job after every artifact had already published.
+/// A deleted-and-re-cut tag re-runs the winget step against a branch that
+/// already exists. `git push -u origin "$BRANCH"` was rejected with
+/// "! [rejected] (fetch first)" on the contributor-v0.4.7 re-run, failing the
+/// whole job after every artifact had already published.
 #[test]
 fn bump_branch_pushes_survive_a_re_run() {
-    for file in [
-        ".github/workflows/release-apps.yml",
-        ".github/workflows/release-contributor.yml",
-    ] {
-        let workflow = read(file);
-        let pushes: Vec<&str> = workflow
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("git push"))
-            .collect();
+    let workflow = read(".github/workflows/release-contributor.yml");
+    let pushes: Vec<&str> = workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("git push"))
+        .collect();
+    assert!(
+        !pushes.is_empty(),
+        "release-contributor.yml must still push the winget branch"
+    );
+    for line in pushes {
         assert!(
-            !pushes.is_empty(),
-            "{file} must still push a bump branch somewhere"
-        );
-        for line in pushes {
-            assert!(
-                line.contains("--force"),
-                "{file}: `{line}` is rejected on a re-run against an existing \
-                 bump branch, which fails the release after its assets have \
-                 already published"
-            );
-        }
-        // Opening the pull request must tolerate one already existing for
-        // that head: `gh pr create` exits non-zero on a duplicate head.
-        assert!(
-            workflow.contains(
-                "gh pr list --repo TraceCommons/homebrew-tap --head \"$BRANCH\" \
-                 --state open --json url"
-            ) || workflow.contains("--head \"$BRANCH\" --state open --json url"),
-            "{file} must reuse an already-open bump pull request instead of \
-             erroring on a duplicate head"
+            line.contains("--force"),
+            "`{line}` is rejected on a re-run against an existing bump \
+             branch, which fails the release after its assets have already \
+             published"
         );
     }
 }
 
 /// The dangerous half of making the push forceful: a force-push carrying the
-/// *previous* run's checksum would publish a cask whose sha256 does not match
-/// the DMG, which reads to users as tampering. Verified by hand on
-/// app-v0.4.7 -- the re-run's DMG hashed to d60ce434... while the branch left
-/// behind by the first run still said 5234e018...
+/// *previous* run's checksum would publish a manifest whose hash does not
+/// match the installer, which reads to users as tampering.
 ///
 /// What makes that structurally impossible is that the bump branch is never
-/// fetched. Each step clones `--single-branch` (the tap's, or the winget
-/// fork's, default branch only) and rebuilds the branch from that plus a hash
-/// computed from this run's own artifact, so there is nothing of a previous
-/// attempt left to carry forward.
+/// fetched. The step clones `--single-branch` (the winget fork's default
+/// branch only) and rebuilds the branch from that plus a hash computed from
+/// the published asset, so there is nothing of a previous attempt left to
+/// carry forward.
 #[test]
 fn force_pushed_bump_branches_cannot_carry_a_stale_checksum() {
-    for (file, step) in [
-        (
-            ".github/workflows/release-apps.yml",
-            "name: Open a cask bump",
-        ),
-        (
-            ".github/workflows/release-contributor.yml",
-            "name: Open a formula bump",
-        ),
-        (
-            ".github/workflows/release-contributor.yml",
-            "name: Generate and submit",
-        ),
-    ] {
-        let workflow = read(file);
-        let start = workflow
-            .find(step)
-            .unwrap_or_else(|| panic!("{file} must still contain `{step}`"));
-        let body = &workflow[start..];
-        let body = &body[..body.find("\n      - name:").unwrap_or(body.len())];
-        let body = executable_text(body);
-        assert!(
-            body.contains("--single-branch"),
-            "{file} / {step}: clone the default branch only. Fetching the \
-             bump branch is the only route by which a previous run's \
-             checksum could reach a force-push."
-        );
-        assert!(
-            !body.contains("git fetch") && !body.contains("git pull"),
-            "{file} / {step}: must not fetch the existing bump branch -- \
-             re-deriving the branch from the default branch is what \
-             guarantees the checksum came from this run"
-        );
-        // Re-running when the tap already carries this exact content must
-        // not die on `git commit` finding nothing to commit.
-        assert!(
-            body.contains("git diff --quiet") || body.contains("git diff --cached --quiet"),
-            "{file} / {step}: a re-run against an already-bumped tap must \
-             exit cleanly rather than failing on an empty commit"
-        );
-    }
+    let file = ".github/workflows/release-contributor.yml";
+    let step = "name: Generate and submit";
+    let workflow = read(file);
+    let start = workflow
+        .find(step)
+        .unwrap_or_else(|| panic!("{file} must still contain `{step}`"));
+    let body = &workflow[start..];
+    let body = &body[..body.find("\n      - name:").unwrap_or(body.len())];
+    let body = executable_text(body);
+    assert!(
+        body.contains("--single-branch"),
+        "{file} / {step}: clone the default branch only. Fetching the bump \
+         branch is the only route by which a previous run's checksum could \
+         reach a force-push."
+    );
+    assert!(
+        !body.contains("git fetch") && !body.contains("git pull"),
+        "{file} / {step}: must not fetch the existing bump branch -- \
+         re-deriving the branch from the default branch is what guarantees \
+         the checksum came from this run"
+    );
+    // Re-running when the fork already carries this exact content must not
+    // die on `git commit` finding nothing to commit.
+    assert!(
+        body.contains("git diff --quiet") || body.contains("git diff --cached --quiet"),
+        "{file} / {step}: a re-run against an already-bumped branch must exit \
+         cleanly rather than failing on an empty commit"
+    );
 }
 
-/// Every hash written into the tap must be re-derived from an artifact this
-/// run produced, and proved to have landed in the file before anything is
-/// pushed. These assertions are what stop a future edit from "helpfully"
-/// reading a hash out of the existing bump branch.
+/// The winget manifest hash is never passed in by hand: the generator
+/// downloads the published asset and hashes the bytes it got.
 #[test]
-fn tap_bumps_prove_they_wrote_this_runs_checksum() {
-    let apps = executable_text(&read(".github/workflows/release-apps.yml"));
-    assert!(
-        apps.contains("SHA=\"$(awk '{print $1}' dist/macos-dmg/Near.ai-\"$V\".dmg.sha256)\""),
-        "the cask bump must read the checksum from this run's own DMG artifact"
-    );
-    assert!(
-        apps.contains("grep -qF \"$SHA\" Casks/trace-commons.rb"),
-        "the cask bump must assert the computed checksum actually landed in \
-         the cask before pushing, not merely that a substitution ran"
-    );
-    assert!(
-        apps.contains("grep -qF '/Near.ai-#{version}.dmg\"' Casks/trace-commons.rb")
-            && apps.contains("grep -qxF '  app \"Near.ai.app\"' Casks/trace-commons.rb"),
-        "the cask bump must refuse to push a cask whose url or app stanza \
-         still names the pre-rename TraceCommons files"
-    );
-
+fn winget_bump_hashes_the_published_asset() {
     let contributor = executable_text(&read(".github/workflows/release-contributor.yml"));
-    assert!(
-        contributor.contains("ARM=\"$(awk '{print $1}' dist/aarch64-apple-darwin/")
-            && contributor.contains("X86=\"$(awk '{print $1}' dist/x86_64-apple-darwin/"),
-        "the formula bump must read both checksums from this run's own artifacts"
-    );
-    // The winget manifest hash is never passed in by hand: the generator
-    // downloads the published asset and hashes the bytes it got.
     assert!(
         contributor.contains("./scripts/winget/generate-manifests.sh \"$V\""),
         "the winget manifest must be regenerated from the published asset on \
@@ -1335,35 +1266,19 @@ fn tap_bumps_prove_they_wrote_this_runs_checksum() {
     );
 }
 
-/// `gh pr create --repo` selects the base repository but cannot infer a head
-/// branch from a different workflow checkout. Both real 0.2.x tag runs pushed
-/// their tap branches and then failed here with "use the --head flag". Pin the
-/// explicit branch so a package-manager follow-up cannot fail the release job
-/// after its assets have already been published.
+/// The winget pull request is deliberately NOT opened by the workflow: no
+/// token we can issue is permitted to call `createPullRequest` against
+/// microsoft/winget-pkgs, and attempting it failed the whole release on
+/// contributor-v0.4.7 after every artifact had published. What must survive
+/// is the pointer to the branch the job pushed, since that is the only route
+/// to the manifest reaching winget users.
 #[test]
-fn cross_repository_pull_requests_name_their_head_branches() {
-    let apps = read(".github/workflows/release-apps.yml");
-    assert!(
-        apps.contains("gh pr create --fill --repo TraceCommons/homebrew-tap --head \"$BRANCH\""),
-        "the app cask PR must explicitly name its pushed head branch"
-    );
-
+fn the_winget_job_points_at_its_pushed_branch() {
     let contributor = read(".github/workflows/release-contributor.yml");
-    assert!(
-        contributor
-            .contains("gh pr create --fill --repo TraceCommons/homebrew-tap --head \"$BRANCH\""),
-        "the contributor formula PR must explicitly name its pushed head branch"
-    );
     assert!(
         contributor.contains("FORK_OWNER=\"$(gh api user --jq .login)\""),
         "the winget job must derive the owner of the token-scoped fork"
     );
-    // The winget pull request is deliberately NOT opened by the workflow:
-    // no token we can issue is permitted to call `createPullRequest`
-    // against microsoft/winget-pkgs, and attempting it failed the whole
-    // release on contributor-v0.4.7 after every artifact had published.
-    // What must survive is the pointer to the branch the job pushed, since
-    // that is now the only route to the manifest reaching winget users.
     assert!(
         !contributor.contains("gh pr create --fill --repo microsoft/winget-pkgs"),
         "the winget job must not try to open a pull request it has no token for"
@@ -1378,71 +1293,26 @@ fn cross_repository_pull_requests_name_their_head_branches() {
     );
 }
 
-/// The staleness backstop must exist, must be scheduled, and must stay out
-/// of anything that gates a release or a code pull request -- a previous
-/// release's unmerged bump failing *this* release's publish job is the
-/// failure shape the rest of this work removed.
+/// With no workflow touching the tap, the runbook is the only thing that
+/// gets a release onto Homebrew. It must say which two files to bump, that
+/// every hash is checked against the published `.sha256`, and to merge.
 #[test]
-fn a_scheduled_job_watches_for_unmerged_tap_bumps() {
-    let staleness = read(".github/workflows/tap-bump-staleness.yml");
-    assert!(
-        staleness.contains("schedule:") && staleness.contains("cron:"),
-        "the staleness check must run on a schedule, not only on demand"
-    );
-    let triggers = staleness
-        .split("\njobs:")
-        .next()
-        .expect("the staleness workflow must have a jobs: block");
-    assert!(
-        !triggers.contains("\n  pull_request:") && !triggers.contains("\n  push:"),
-        "the staleness check must not run on pushes or pull requests: it \
-         would be constant noise for a condition that changes once per \
-         release, and a fork pull request cannot see HOMEBREW_TAP_TOKEN"
-    );
-    assert!(
-        staleness.contains("TraceCommons/homebrew-tap"),
-        "the staleness check must actually query the tap"
-    );
-    assert!(
-        staleness.contains("24 hours ago"),
-        "a bump opened by a release still in flight is not stale; the check \
-         needs an age floor"
-    );
-
-    for file in [
-        ".github/workflows/release-apps.yml",
-        ".github/workflows/release-contributor.yml",
-        ".github/workflows/ci.yml",
-        ".github/workflows/clients.yml",
+fn runbook_tells_the_releaser_to_bump_the_tap_by_hand() {
+    let runbook = read("docs/release-runbook.md");
+    for needed in [
+        "Casks/trace-commons.rb",
+        "Formula/trace-commons-contributor.rb",
+        ".sha256",
+        "merge",
     ] {
-        // Checked against executable lines only: a comment pointing at the
-        // backstop is useful documentation and cannot create a dependency.
-        // What must not exist is a `needs:`, a `uses:`, or a call.
         assert!(
-            !executable_text(&read(file)).contains("tap-bump-staleness"),
-            "{file} must not depend on the staleness check -- it must never \
-             be able to fail a release or a code pull request over a \
-             previous release's leftovers"
+            runbook.contains(needed),
+            "the runbook's manual tap bump must mention `{needed}`"
         );
     }
-}
-
-/// The runbook is the other half of the fix. It previously stopped at
-/// "opens a pull request" and never told anyone to merge it, which is the
-/// root cause of the nine stale pull requests.
-#[test]
-fn runbook_tells_the_releaser_to_merge_the_tap_bump() {
-    // Task 12 previously stopped at "opens a pull request" and never told
-    // anyone to merge it. That omission is why cask 0.4.1 through 0.4.6 sat
-    // unmerged while Homebrew served 0.4.0.
-    let runbook = read("docs/release-runbook.md");
     assert!(
-        runbook.contains("merge"),
-        "the runbook must tell the releaser to merge the bump pull request"
-    );
-    assert!(
-        runbook.contains("tap-bump-staleness"),
-        "the runbook must name the backstop that catches a bump nobody merged"
+        !runbook.contains("tap-bump-staleness"),
+        "the runbook must not point at the removed staleness workflow"
     );
 }
 
@@ -1532,34 +1402,6 @@ fn no_workflow_references_the_retired_macos_13_runner() {
     assert!(
         contributor.contains("x86_64-apple-darwin"),
         "the Intel macOS CLI target must still be built somewhere"
-    );
-}
-
-/// The formula-bump awk substitutes the two `sha256 "..."` lines by
-/// position, which silently swaps hashes onto the wrong architecture if the
-/// formula's blocks were ever reordered, and silently does nothing at all
-/// if the formula used the single-line `sha256 arm: "...", x86_64: "..."`
-/// form (the regex would never match, yet `git commit -am` still succeeds
-/// because the version sed alone changed a line). Both failure shapes must
-/// be caught: an explicit ordering assertion, and a post-substitution check
-/// that both computed hashes actually landed in the file.
-#[test]
-fn formula_bump_verifies_its_own_substitution() {
-    let workflow = read(".github/workflows/release-contributor.yml");
-    let bump_start = workflow
-        .find("name: Open a formula bump")
-        .expect("formula bump step must exist");
-    let bump_step = &workflow[bump_start..];
-    assert!(
-        bump_step.contains("a < i") || bump_step.contains("a<i"),
-        "the bump step must assert on_arm precedes on_intel before relying \
-         on positional hash substitution"
-    );
-    assert!(
-        bump_step.contains("grep -qF \"$ARM\"") && bump_step.contains("grep -qF \"$X86\""),
-        "the bump step must assert both computed hashes actually landed in \
-         the formula after substitution, or a non-matching regex form \
-         silently bumps the version while keeping the old checksums"
     );
 }
 
