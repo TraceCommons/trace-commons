@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.4" date="2026-11-11">
+      <description>
+        <p>Brings saved Claude Code, Codex and OpenCode accounts back on macOS, in Settings, Saved accounts: add, launch with, rename, reconnect, verify and remove them.</p>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-11-11">
       <description>
         <p>Lets traces waiting on this computer upload again: a trace no longer shows as unable to be sent because no model call went through Private AI, an upload over the daily allowance waits and retries when it resets, and a privacy check that fails because the service is briefly down is tried again.</p>
