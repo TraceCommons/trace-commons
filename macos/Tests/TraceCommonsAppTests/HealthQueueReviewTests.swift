@@ -9,7 +9,7 @@ final class HealthQueueReviewTests: XCTestCase {
         let health = HealthCopy.core(label: "opencode-export-version-unsupported", maxQueueEntries: nil)
         XCTAssertEqual(health.title, shared.opencodeVersionTitle)
         XCTAssertEqual(health.detail, shared.opencodeVersionDetail)
-        XCTAssertTrue(health.detail.contains("OpenCode 1.18.29 and 1.19.0"))
+        XCTAssertTrue(health.detail.contains("OpenCode 1.18.29 and 1.19.0 to 1.19.5"))
         XCTAssertFalse(health.title.lowercased().contains("session"))
         XCTAssertFalse(health.detail.contains("database"))
         XCTAssertFalse(health.reviewsQueue)

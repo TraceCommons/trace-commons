@@ -185,12 +185,13 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
 
 /// Refusal for traces saved by an OpenCode version the reader does not
 /// accept, shared by all native health surfaces. The versions match the
-/// readers in `trace-commons-contributor-sources` (`opencode`, `opencode_db`).
-/// Approved by the owner 2026-11-10.
+/// readers' `READABLE_VERSIONS` in `trace-commons-contributor-sources`.
+/// Approved by the owner 2026-11-10; "this app" per the 2026-11-02 rule that
+/// the commons' name never appears in user-visible copy.
 pub const OPENCODE_VERSION_TITLE: &str =
-    "Some OpenCode traces are from a version Trace Commons can't read yet.";
-pub const OPENCODE_VERSION_DETAIL: &str = "Trace Commons reads traces saved by OpenCode 1.18.29 \
-     and 1.19.0. Traces from other versions are left out.";
+    "Some OpenCode traces are from a version this app can't read yet.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This app reads traces saved by OpenCode 1.18.29 and \
+     1.19.0 to 1.19.5. Traces from other versions are left out.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -392,12 +393,43 @@ mod tests {
         assert_ne!(row["watching"], row["off"]);
     }
 
+    /// The banner's version list is the readers' list: 1.18.29, then the
+    /// contiguous 1.19 releases written as a range.
+    fn assert_opencode_detail_names_every_readable_version() {
+        let versions = crate::source::opencode::READABLE_VERSIONS;
+        let minors: Vec<&str> = versions
+            .iter()
+            .copied()
+            .filter(|v| v.starts_with("1.19."))
+            .collect();
+        let others: Vec<&str> = versions
+            .iter()
+            .copied()
+            .filter(|v| !v.starts_with("1.19."))
+            .collect();
+        assert_eq!(others, ["1.18.29"]);
+        let patches: Vec<u32> = minors.iter().map(|v| v[5..].parse().unwrap()).collect();
+        assert!(
+            patches.windows(2).all(|w| w[1] == w[0] + 1),
+            "1.19 releases must be contiguous to be written as a range"
+        );
+        let expected = format!(
+            "OpenCode 1.18.29 and {} to {}.",
+            minors[0],
+            minors[minors.len() - 1]
+        );
+        assert!(
+            OPENCODE_VERSION_DETAIL.contains(&expected),
+            "{OPENCODE_VERSION_DETAIL} lacks {expected}"
+        );
+    }
+
     #[test]
     fn export_refusal_payload_preserves_supported_version_and_scope() {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("OpenCode 1.18.29 and 1.19.0"));
+        assert_opencode_detail_names_every_readable_version();
         // One refusal, one cause: the saving version. Not the database
         // format, and "trace", never "session".
         for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
@@ -459,7 +491,7 @@ mod tests {
         }
         assert!(source_check_line(SourceTool::OpenCode, "unset").contains("only managed launches"));
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("OpenCode 1.18.29 and 1.19.0"));
+        assert_opencode_detail_names_every_readable_version();
         // One refusal, one cause: the saving version. Not the database
         // format, and "trace", never "session".
         for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {

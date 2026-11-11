@@ -1,7 +1,8 @@
 //! OpenCode local session and JSON export reader.
 //!
-//! Native SQLite sessions are read through `opencode_db`; exports support 1.18.29
-//! and 1.19.0, plus the structurally validated v2 session-transfer envelope.
+//! Native SQLite sessions are read through `opencode_db`; both readers accept
+//! the versions in [`READABLE_VERSIONS`], and exports also take the
+//! structurally validated v2 session-transfer envelope.
 //! Neither source implies provider evidence or upload consent.
 //! A declared directory contains `.json` exports directly (not recursively).
 
@@ -23,6 +24,23 @@ use std::{
 mod v2;
 
 pub const QUALIFIED_VERSION: &str = "1.18.29";
+/// Every OpenCode version whose saved sessions both readers (exports and the
+/// native database) accept. Anything else is refused as
+/// [`UnsupportedExportVersion`]. 1.19.1 to 1.19.5 change no storage, schema,
+/// migration or export code against 1.19.0 (anomalyco/opencode, compare
+/// v1.19.0...v1.19.5: the storage-adjacent changes are app and TUI screens,
+/// one package version, and two deleted re-export modules). Add a release
+/// only after the same check.
+/// The user-facing list is `source_copy::OPENCODE_VERSION_DETAIL`.
+pub const READABLE_VERSIONS: &[&str] = &[
+    QUALIFIED_VERSION,
+    "1.19.0",
+    "1.19.1",
+    "1.19.2",
+    "1.19.3",
+    "1.19.4",
+    "1.19.5",
+];
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
 /// Also caps the flat count `source::discovery::describe_opencode` gives for
@@ -362,7 +380,7 @@ fn parse_export_with_record_budget(
         return v2::parse(&doc, bytes, record_budget);
     }
     let session_id = id(info, "id")?;
-    if ![QUALIFIED_VERSION, "1.19.0"].contains(&field(info, "version")?) {
+    if !READABLE_VERSIONS.contains(&field(info, "version")?) {
         return Err(UnsupportedExportVersion.into());
     }
     let cwd = field(info, "directory")?.to_owned();
@@ -650,6 +668,18 @@ mod tests {
             "opencode_malformed_json"
         );
         assert!(mutated(|v| v["info"]["version"] = "99.0".into()).is_err());
+        for version in ["1.19.1", "1.19.2", "1.19.3", "1.19.4", "1.19.5"] {
+            assert!(
+                mutated(|v| v["info"]["version"] = version.into()).is_ok(),
+                "{version}"
+            );
+        }
+        for version in ["1.19.99", "1.20.0", "2.0.0", "2.1.4"] {
+            assert!(
+                mutated(|v| v["info"]["version"] = version.into()).is_err(),
+                "{version}"
+            );
+        }
         assert!(mutated(|v| v["info"]["directory"] = 42.into()).is_err());
         assert!(mutated(|v| v["messages"][0]["parts"][0]["text"] = false.into()).is_err());
         assert!(
