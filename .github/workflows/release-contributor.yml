@@ -37,18 +37,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # Keep a missing cross-repository token from surfacing only after four
+      # Keep missing release configuration from surfacing only after four
       # signed binaries and a GitHub Release have already been published.
       # Dispatches are build-only, so they do not need publishing credentials.
       - name: Confirm tag-release credentials are configured
         if: github.event_name == 'push'
         env:
-          WINGET_PKGS_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
           UPDATE_PUBLIC_KEY: ${{ vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX }}
         run: |
           set -euo pipefail
           missing=()
-          [ -n "$WINGET_PKGS_TOKEN" ] || missing+=(WINGET_PKGS_TOKEN)
           [ -n "$UPDATE_PUBLIC_KEY" ] || missing+=(TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX)
           if [ ${#missing[@]} -ne 0 ]; then
             printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
@@ -512,83 +510,3 @@ jobs:
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
             dist/*/*
-
-  winget-bump:
-    name: bump the winget manifest
-    needs: [publish]
-    # Matches the publish job's own gate: a dispatch can satisfy
-    # startsWith(github.ref, 'refs/tags/') alone, so the push event is
-    # required too. The generator downloads the published release asset to
-    # compute its hash, so it cannot run before publish has created the
-    # release.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # Pushes a branch to the fork and stops there. It deliberately does
-      # NOT open the pull request: winget-pkgs is a third-party repository
-      # with its own review, and the token available here cannot create pull
-      # requests against it -- `createPullRequest` returns "Resource not
-      # accessible by personal access token", which failed the whole release
-      # on contributor-v0.4.7 after every artifact had already published.
-      #
-      # The manifest work is the part worth automating; opening the PR is one
-      # click. The step prints the compare URL and writes it to the job
-      # summary so the last manual step is in front of whoever cut the
-      # release rather than buried in a log.
-      #
-      # No artifact download and no hash argument here: generate-manifests.sh
-      # fetches the published asset itself and computes InstallerSha256 from
-      # the bytes it got. A hash passed in by hand is exactly the value that
-      # gets copied from the wrong release.
-      - name: Generate and submit
-        env:
-          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
-        run: |
-          set -euo pipefail
-          V="${GITHUB_REF_NAME#contributor-v}"
-          ./scripts/winget/generate-manifests.sh "$V"
-          FORK_OWNER="$(gh api user --jq .login)"
-          # --single-branch: the fork's default branch only. The manifest
-          # branch is never fetched, so a re-run rebuilds it from the fork's
-          # default branch plus the manifests generate-manifests.sh just
-          # wrote from the published asset's own bytes. Nothing a previous
-          # attempt pushed can survive into this branch.
-          git clone --depth 1 --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/${FORK_OWNER}/winget-pkgs.git" winget-pkgs
-          # The generator already wrote the partitioned path winget-pkgs
-          # expects, so copy the tree across rather than individual files.
-          cp -R "manifests/t" "winget-pkgs/manifests/"
-          cd winget-pkgs
-          BRANCH="TraceCommons.Contributor-$V"
-          git switch -c "$BRANCH"
-          git config user.name "trace-commons-release"
-          git config user.email "ops@tracecommons.ai"
-          git add "manifests/t/TraceCommons/Contributor/$V"
-          if git diff --cached --quiet; then
-            echo "the fork already carries the manifests for $V; nothing to push."
-          else
-            git commit -m "New version: TraceCommons.Contributor version $V"
-            # --force, not a plain push. `TraceCommons.Contributor-$V`
-            # already exists whenever a tag is deleted and re-cut, and a
-            # plain push is rejected with "! [rejected] (fetch first)",
-            # failing this job after the release has published. The clone
-            # above is what makes forcing safe: the InstallerSha256 in these
-            # manifests was computed by the generator from the asset it
-            # downloaded during THIS run, so the branch being replaced
-            # cannot contribute a stale hash.
-            git push --force -u origin "$BRANCH"
-          fi
-          URL="https://github.com/microsoft/winget-pkgs/compare/master...${FORK_OWNER}:${BRANCH}?expand=1"
-          echo "Manifest branch pushed. Open the pull request here:"
-          echo "  $URL"
-          {
-            echo "### winget manifest ready for review"
-            echo
-            echo "Branch \`$BRANCH\` is pushed to \`${FORK_OWNER}/winget-pkgs\`."
-            echo "It does not reach winget users until a pull request is opened and merged:"
-            echo
-            echo "[Open the pull request]($URL)"
-          } >> "$GITHUB_STEP_SUMMARY"
