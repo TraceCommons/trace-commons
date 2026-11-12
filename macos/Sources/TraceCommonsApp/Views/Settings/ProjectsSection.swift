@@ -100,16 +100,15 @@ struct ProjectsSection: View {
     }
 
     /// What choosing a mode in Settings does, as the Traces tree decides
-    /// it: arming always asks; Never asks when sessions are waiting, with
+    /// it: Never asks when sessions are waiting, with
     /// their count, and is not made without the core's words for it; every
     /// other change is a direct call.
     enum Change: Equatable {
-        case noop, apply, arm, ignore, unavailable
+        case noop, apply, ignore, unavailable
     }
 
     static func change(_ project: ProjectRow, to wanted: ProjectMode) -> Change {
         guard wanted != project.mode else { return .noop }
-        if wanted == .autoUpload { return .arm }
         if wanted == .ignore, (project.pendingCount ?? 0) > 0 {
             return ignoreCopy(project) == nil ? .unavailable : .ignore
         }
@@ -176,7 +175,6 @@ struct ProjectsManagerSheet: View {
     @State private var filter: ProjectMode?
     @State private var expanded: Set<String> = []
     @State private var selection: Set<String> = []
-    @State private var armingCandidate: ProjectRow?
     /// A Never with sessions waiting, asked first in the core's words
     /// (#1146 `ProjectModeField`: "Ignore {project}?").
     @State private var ignoreCandidate: ProjectRow?
@@ -244,29 +242,6 @@ struct ProjectsManagerSheet: View {
             bulkModes = await model.planProjectModes([], mode: .ask)?.bulkModes
         }
         // Raised over the sheet: the layer the sheet sits in is a host.
-        .glassModal(isPresented: Binding(
-            // Not presented without the core's words: arming is never
-            // confirmed against a sentence this shell wrote.
-            get: { armingCandidate.flatMap(armingCopy) != nil },
-            // Any dismissal clears the candidate.
-            set: { if !$0 { armingCandidate = nil } }
-        )) {
-            if let project = armingCandidate, let copy = armingCopy(project) {
-                // Not `.destructive`: arming destroys nothing and is
-                // reversible from this same picker. Ron's #1146 heading,
-                // line and buttons; the body is the arming disclosure.
-                GlassConfirmation(
-                    title: copy.settingsQuestion, subtitle: copy.settingsDescription.isEmpty ? nil : copy.settingsDescription, message: copy.body,
-                    actions: [
-                        .cancel(copy.settingsDecline) { armingCandidate = nil },
-                        GlassModalAction(copy.settingsConfirm, isDefault: true) {
-                            model.setProjectMode(project, mode: .autoUpload)
-                            armingCandidate = nil
-                        },
-                    ],
-                    onCancel: { armingCandidate = nil })
-            }
-        }
         .glassModal(isPresented: Binding(
             get: { ignoreCandidate.flatMap(ProjectsSection.ignoreCopy) != nil },
             set: { if !$0 { ignoreCandidate = nil } }
@@ -517,11 +492,9 @@ struct ProjectsManagerSheet: View {
                         get: { project.mode },
                         set: { wanted in
                             guard let wanted else { return }
-                            // Arming is a grant, so it is never silent;
-                            // a Never that clears waiting sessions asks.
+                            // A Never that clears waiting sessions asks.
                             switch ProjectsSection.change(project, to: wanted) {
                             case .noop, .unavailable: return
-                            case .arm: armingCandidate = project
                             case .ignore: ignoreCandidate = project
                             case .apply: model.setProjectMode(project, mode: wanted)
                             }
@@ -538,15 +511,6 @@ struct ProjectsManagerSheet: View {
             }
         }
         .padding(.leading, member ? 22 : 0)
-    }
-
-    /// The arming confirmation's words, from the core. No count is in hand
-    /// here, so the offer's evidence line is not rendered.
-    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
-        ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
-            project: project.displayLabel,
-            count: 0
-        ))
     }
 }
 
