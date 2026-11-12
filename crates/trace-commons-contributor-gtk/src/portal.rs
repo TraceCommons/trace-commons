@@ -83,8 +83,8 @@ pub fn spawn_request() -> async_channel::Receiver<BackendState> {
             let outcome = request_background();
             if outcome.is_err() {
                 // Fixed label only. No portal, no `Background`
-                // implementation, and a contributor declining the dialog
-                // all reach here, and none of them should look like a
+                // implementation, or an unreadable response reaches here.
+                // None of them should look like a
                 // crash -- never the D-Bus error text, which can carry
                 // more detail than a journal line should.
                 eprintln!("trace-commons-shell: background portal unavailable");
@@ -103,9 +103,9 @@ pub fn spawn_request() -> async_channel::Receiver<BackendState> {
 /// [`BackendState`]. `Ok` means some backend fielded the call; an error
 /// with a D-Bus name from the "no such thing to answer this" family means
 /// no backend implements `Background`; anything else is inconclusive.
-fn classify(outcome: anyhow::Result<()>) -> BackendState {
+fn classify(outcome: anyhow::Result<BackgroundResponse>) -> BackendState {
     match outcome {
-        Ok(()) => BackendState::Present,
+        Ok(_) => BackendState::Present,
         Err(error) => match error.downcast_ref::<zbus::Error>() {
             Some(zbus::Error::MethodError(name, _, _)) => {
                 if is_absent_backend_error(name.as_str()) {
@@ -135,7 +135,7 @@ fn is_absent_backend_error(name: &str) -> bool {
     )
 }
 
-fn request_background() -> anyhow::Result<()> {
+fn request_background() -> anyhow::Result<BackgroundResponse> {
     let connection = zbus::blocking::Connection::session()?;
     let proxy = zbus::blocking::Proxy::new(
         &connection,
@@ -153,13 +153,8 @@ fn request_background() -> anyhow::Result<()> {
     let request_path: zbus::zvariant::OwnedObjectPath =
         proxy.call("RequestBackground", &("", options))?;
 
-    // The call above only opens the request; the portal answers
-    // asynchronously with a `Response` signal on the returned object. This
-    // waits for it so the round trip is genuinely exercised end to end
-    // rather than declared successful the moment the dialog opens -- but
-    // the result of that wait changes nothing else here: the portal is the
-    // permanent record of whether the contributor allowed it, and this
-    // application has nothing further to persist about that decision.
+    // A returned handle is not a permission result. Decode the eventual
+    // response, including cancellation and denial, before classifying it.
     let request_proxy = zbus::blocking::Proxy::new(
         &connection,
         "org.freedesktop.portal.Desktop",
@@ -167,8 +162,39 @@ fn request_background() -> anyhow::Result<()> {
         "org.freedesktop.portal.Request",
     )?;
     let mut responses = request_proxy.receive_signal("Response")?;
-    responses.next();
-    Ok(())
+    decode_response(responses.next())
+}
+
+/// Permission outcome, distinct from the presence-only backend probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundResponse {
+    Granted,
+    Denied,
+    Cancelled,
+    Other,
+}
+
+fn decode_response(message: Option<zbus::Message>) -> anyhow::Result<BackgroundResponse> {
+    let message = message.ok_or_else(|| anyhow::anyhow!("background-response-missing"))?;
+    let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) =
+        message.body().deserialize()?;
+    // Request.Response defines 1 as cancellation and 2 as any other end.
+    // Only code 0 carries the Background portal's permission result.
+    match code {
+        0 => {
+            let allowed = results
+                .get("background")
+                .ok_or_else(|| anyhow::anyhow!("background-result-missing"))?;
+            if bool::try_from(allowed)? {
+                Ok(BackgroundResponse::Granted)
+            } else {
+                Ok(BackgroundResponse::Denied)
+            }
+        }
+        1 => Ok(BackgroundResponse::Cancelled),
+        2 => Ok(BackgroundResponse::Other),
+        _ => Err(anyhow::anyhow!("background-response-invalid")),
+    }
 }
 
 #[cfg(test)]
@@ -224,7 +250,10 @@ mod tests {
 
     #[test]
     fn a_successful_call_is_present() {
-        assert_eq!(classify(Ok(())), BackendState::Present);
+        assert_eq!(
+            classify(Ok(BackgroundResponse::Granted)),
+            BackendState::Present
+        );
     }
 
     #[test]
@@ -234,6 +263,56 @@ mod tests {
         // read as either answer.
         assert_eq!(
             classify(Err(anyhow::anyhow!("no session bus"))),
+            BackendState::Unknown
+        );
+    }
+
+    fn response(code: u32, background: Option<bool>) -> zbus::Message {
+        let mut results: HashMap<&str, Value> = HashMap::new();
+        if let Some(allowed) = background {
+            results.insert("background", Value::from(allowed));
+        }
+        zbus::Message::signal(
+            "/org/freedesktop/portal/desktop/request/test/token",
+            "org.freedesktop.portal.Request",
+            "Response",
+        )
+        .unwrap()
+        .build(&(code, results))
+        .unwrap()
+    }
+
+    #[test]
+    fn portal_permission_outcomes_remain_distinct_from_backend_presence() {
+        for (code, allowed, expected) in [
+            (0, Some(true), BackgroundResponse::Granted),
+            (0, Some(false), BackgroundResponse::Denied),
+            (1, None, BackgroundResponse::Cancelled),
+            (2, None, BackgroundResponse::Other),
+        ] {
+            let outcome = decode_response(Some(response(code, allowed)));
+            assert_eq!(*outcome.as_ref().unwrap(), expected);
+            assert_eq!(classify(outcome), BackendState::Present);
+        }
+    }
+
+    #[test]
+    fn lost_or_invalid_response_does_not_establish_backend_presence() {
+        for message in [None, Some(response(0, None)), Some(response(3, None))] {
+            let outcome = decode_response(message);
+            assert!(outcome.is_err());
+            assert_eq!(classify(outcome), BackendState::Unknown);
+        }
+        let malformed = zbus::Message::signal(
+            "/org/freedesktop/portal/desktop/request/test/token",
+            "org.freedesktop.portal.Request",
+            "Response",
+        )
+        .unwrap()
+        .build(&("wrong type",))
+        .unwrap();
+        assert_eq!(
+            classify(decode_response(Some(malformed))),
             BackendState::Unknown
         );
     }
