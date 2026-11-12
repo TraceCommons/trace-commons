@@ -1014,17 +1014,12 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
+    // Settings > Projects and first-run Tools no longer confirm Automatic:
+    // #2093 turns it on at once everywhere. The offer's words still show
+    // on the Traces card above and in the Monitor's popover.
     (
-        "arming confirmation",
-        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
-        "TCCoreCopy.armingOfferCopyJSON",
-        "TCBridge/TCCoreCopy.swift",
-        "tc_arming_offer_copy_json",
-    ),
-    (
-        // A repo's rule under Customize on Tools, where Rules now lives.
-        "first-run arming confirmation",
-        "TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
+        "arming offer popover",
+        "TraceCommonsApp/Views/Monitor/MonitorNotices.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
