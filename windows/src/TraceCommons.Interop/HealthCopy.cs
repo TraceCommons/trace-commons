@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
@@ -85,6 +86,14 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 return new HealthCopy(title, detail, null);
         }
 
+        // An upload outage is retried on its own (#1358, #2095). Its words are
+        // the core's (`health_copy::health_copy_for_label`), the same ones
+        // macOS and Tauri draw, rather than a fourth transcription here.
+        if (label is "claim-mint-failed" or "ingest-unreachable" && FromCore(label) is HealthCopy outage)
+        {
+            return outage;
+        }
+
         return label switch
         {
             "not-logged-in" => new HealthCopy(
@@ -107,11 +116,6 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 "Your traces are waiting rather than going out unscanned. Retrying "
                 + "automatically.",
                 null),
-            "claim-mint-failed" or "ingest-unreachable" => new HealthCopy(
-                "Can't reach the upload server.",
-                "Your traces are saved and uploads will retry automatically. You don't need "
-                + "to do anything.",
-                null),
             "queue-full" => new HealthCopy(
                 "Near.ai has stopped queuing new traces",
                 "-- 500 are already waiting. Review or clear some to start again.",
@@ -128,6 +132,40 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "nothing has gone out.",
                 null),
         };
+    }
+
+    /// <summary>
+    /// The core's banner for a label the daemon reported
+    /// (<c>tc_health_copy_json</c>), or null when the library could not be
+    /// read; the caller then falls through to the on-hold banner.
+    /// </summary>
+    private static HealthCopy? FromCore(string label)
+    {
+        try
+        {
+            string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_health_copy_json(1, label, 0));
+            if (json is null)
+            {
+                return null;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
+            if (root.TryGetProperty("title", out JsonElement title) && title.ValueKind == JsonValueKind.String &&
+                root.TryGetProperty("detail", out JsonElement detail) && detail.ValueKind == JsonValueKind.String)
+            {
+                string? action = root.TryGetProperty("action", out JsonElement a) && a.ValueKind == JsonValueKind.String
+                    ? a.GetString()
+                    : null;
+                return new HealthCopy(title.GetString()!, detail.GetString()!, action);
+            }
+
+            return null;
+        }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

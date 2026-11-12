@@ -337,6 +337,21 @@ internal static class NativeMethods
     internal static extern IntPtr tc_account_change_copy_json();
 
     /// <summary>
+    /// The health banner's words for <paramref name="label"/>
+    /// (<c>health_copy::health_copy_for_label</c>), as an owned JSON object
+    /// with <c>title</c>, <c>detail</c>, <c>action</c>, <c>action_kind</c>
+    /// and <c>severity</c>. <paramref name="reachable"/> is the caller's own
+    /// liveness fact; 0 asks for the core-down banner. Free it the way
+    /// <see cref="TakeOwnedString"/> does. NULL for nothing to show and on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_health_copy_json(
+        int reachable,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label,
+        long maxQueueEntries);
+
+    /// <summary>
     /// The project-ignore confirmation's words for one project and its
     /// waiting count (<c>project_copy::ignore_project_copy</c>), as an owned
     /// JSON object with <c>title</c>, <c>body</c>, <c>button</c> and
