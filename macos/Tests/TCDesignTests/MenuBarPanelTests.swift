@@ -104,13 +104,14 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertEqual(steps[0].shared, GlassMenuBarStrip.reach, "traces are not measured against calls")
     }
 
-    /// The badge shows two digits at most: 99+ past 99.
+    /// Traces waiting show a dot, whatever the count; none at zero.
     @MainActor
-    func test_theBadgeStopsAtNinetyNine() {
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(1), "1")
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(99), "99")
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(100), "99+")
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(1_200), "99+")
+    func test_anyWaitingCountShowsTheDot() {
+        for count in [1, 99, 100, 1_200] {
+            XCTAssertEqual(GlassMenuBarStrip.shownBadge(count, condition: .live), count)
+        }
+        XCTAssertNil(GlassMenuBarStrip.shownBadge(0, condition: .live))
+        XCTAssertNil(GlassMenuBarStrip.shownBadge(nil, condition: .live))
     }
 
     /// A core that is down or unread draws no bars, no Private AI, no badge
