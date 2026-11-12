@@ -327,38 +327,27 @@ The menu lists what is waiting, per project, with sizes. Those lines are
 **not** approve buttons — see below. It shows unattended uploads when any
 armed project exists, a week summary, pause, open window, settings, quit.
 
-Quit is explicit about consequences, because users must not have to guess
-whether closing the window stops contributing. **The correct wording depends
-on the platform's process model, and getting it wrong is a lie about whether
-the machine is still watching:**
+Quit asks first only when it would stop something live (owner decision
+2026-11-12, replacing a prompt shown on every quit that described what the
+watcher did afterwards). Every other quit, including closing the window on
+Linux, or on Windows without a tray, proceeds at once. Stopping the watcher is
+not by itself a reason to ask.
 
-- Where the application HOSTS the daemon in-process (macOS, Windows), quitting
-  the app stops the watcher, because the app *is* it. Say that:
+The two live things are a compute worker this app runs (the compute
+snapshot's `worker_stopped` is false) and Private AI answering model calls
+through a watcher this app hosts (`private_inference_copy::quit_needs_notice`).
+When either is true the prompt says why in one short sentence and nothing
+more:
 
-  > Quitting stops Trace Commons watching for finished sessions. Nothing is
-  > queued or sent until you open it again. Anything already waiting stays
-  > waiting.
-  > [ Cancel ]  [ Quit ]
+> Quit Trace Commons?
+> Quitting stops compute on this computer.
+> [ Cancel ]  [ Quit ]
 
-- Where a separate daemon runs under a service manager (Linux with the systemd
-  unit), quitting the window leaves it running. Say that instead:
-
-  > The background watcher keeps running after you quit. Unless it's paused,
-  > it keeps sending sessions you've already approved, and any session from a
-  > project set to contribute automatically, including ones that finish after
-  > you quit. Everything else waits for you.
-  > [ Cancel ]  [ Quit ]
-
-  There is deliberately no "Quit and stop watching" action here. A shell
-  attached to the watcher through `AttachedDaemon` cannot send `shutdown`
-  (it is refused before it reaches the wire), so the button would do nothing.
-
-An earlier draft of this spec gave only the second wording, which is false on
-the platform the first application was built for. The second wording itself
-used to end "Nothing will be sent while nobody's approving", which is false
-for anything already approved and for any project set to contribute
-automatically. A shell that cannot reach a watcher at all says only that it
-cannot tell whether one is running. The sentences live in
+with "Quitting stops Private AI on this computer." or "Quitting stops compute
+and Private AI on this computer." for the other two cases. A prompt that
+cannot be read while something is live refuses the quit; it never becomes a
+silent quit. There is no "Quit and stop watching" action. The sentences and
+the choice of sentence live in
 `crates/trace-commons-contributor/src/quit_copy.rs`.
 
 Pause offers `For 1 hour` / `Until tomorrow morning` / `Until I turn it back

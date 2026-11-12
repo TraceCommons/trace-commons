@@ -6083,35 +6083,18 @@ fn the_external_url_allowlist_crosses_the_abi() {
 }
 
 #[test]
-fn the_quit_prompt_is_chosen_from_the_handle() {
-    isolated_stale_pointer_probe("the_quit_prompt_is_chosen_from_the_handle", || {
-        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
-        use trace_commons_contributor_ffi::tc_quit_prompt_json;
+fn the_quit_prompt_names_what_quitting_stops() {
+    use trace_commons_contributor::quit_copy::quit_prompt;
+    use trace_commons_contributor_ffi::tc_quit_reason_prompt_json;
+    // Nothing live: no prompt, and no error recorded for it.
+    assert!(tc_quit_reason_prompt_json(0, 0).is_null());
+    for (compute, private_ai) in [(1, 0), (0, 1), (1, 1), (7, -1)] {
         assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
-            serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
+            json_owned(tc_quit_reason_prompt_json(compute, private_ai)),
+            serde_json::to_value(quit_prompt(compute != 0, private_ai != 0)).unwrap(),
+            "({compute}, {private_ai})"
         );
-        let dir = tempfile::tempdir().unwrap();
-        let h = start(dir.path());
-        let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
-        assert_eq!(
-            hosting,
-            serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
-        );
-        assert_eq!(hosting["role"], "hosting");
-        unsafe { tc_daemon_stop(h) };
-        assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-            "unavailable"
-        );
-        unsafe { tc_handle_free(h) };
-        // A freed handle is refused, not dereferenced, and has no watcher.
-        assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-            "unavailable"
-        );
-        assert_last_error_contains("invalid-handle-pointer");
-    });
+    }
 }
 
 #[test]

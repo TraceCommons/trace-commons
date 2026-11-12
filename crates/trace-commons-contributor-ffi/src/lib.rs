@@ -6558,44 +6558,30 @@ pub unsafe extern "C" fn tc_automatic_contribution_copy_json(
     })
 }
 
-/// The quit prompt that is true for the process holding `handle`
-/// (`quit_copy::quit_prompt`), as a JSON object
-/// `{role, title, body, confirm, cancel}`.
+/// The quit prompt for what quitting would stop (`quit_copy::quit_prompt`),
+/// as a JSON object `{title, body, confirm, cancel}`.
 ///
-/// The role is read off the handle, not asked of the shell: a handle that
-/// runs the daemon in this process is `hosting` (quitting stops the
-/// watcher), one attached to a daemon another process runs is `attached`
-/// (the watcher keeps running, and keeps sending), and a NULL handle, one
-/// that is not live (recorded as `invalid-handle-pointer` via
-/// `tc_last_error`), or one whose daemon has stopped is `unavailable`.
+/// `stops_compute` and `stops_private_ai` are boolean (0/nonzero): a compute
+/// worker is still running, and `tc_private_inference_quit_needs_notice`
+/// answered 1. A shell quits without asking when both are false and does
+/// not call this; called that way it returns NULL. Otherwise NULL only on a
+/// caught panic, which a shell treats as a refused quit, never as "no
+/// prompt".
 ///
-/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
-/// on a caught panic.
-///
-/// # Safety
-/// `handle`, if non-null, must be a `tc_handle*` from `tc_daemon_start*` or
-/// `tc_daemon_attach` that has not been passed to `tc_handle_free`.
+/// Returns an owned JSON string; free it with [`tc_string_free`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tc_quit_prompt_json(handle: *const tc_handle) -> *mut c_char {
+pub extern "C" fn tc_quit_reason_prompt_json(
+    stops_compute: i32,
+    stops_private_ai: i32,
+) -> *mut c_char {
     guarded_string_no_err(|| {
-        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
-        // A pointer that is not a live handle records
-        // `invalid-handle-pointer` and is answered as no watcher, which is
-        // then the true prompt: nothing this process holds is watching.
-        let role = if handle.is_null() || !handle_pointer_is_live(handle) {
-            QuitRole::Unavailable
-        } else {
-            let handle = unsafe { &*handle };
-            match attached_of(handle) {
-                Some(attached) if !attached.is_closed() => QuitRole::Attached,
-                Some(_) => QuitRole::Unavailable,
-                None if shared_of(handle).is_some() => QuitRole::Hosting,
-                None => QuitRole::Unavailable,
-            }
-        };
-        Ok(to_owned_cstring(&serde_json::to_string(&quit_prompt(
-            role,
-        ))?))
+        match trace_commons_contributor::quit_copy::quit_prompt(
+            stops_compute != 0,
+            stops_private_ai != 0,
+        ) {
+            Some(prompt) => Ok(to_owned_cstring(&serde_json::to_string(&prompt)?)),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
 }
 

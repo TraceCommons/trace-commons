@@ -1244,16 +1244,12 @@ internal static class NativeMethods
     internal static extern IntPtr tc_decisions_owed_text(long decisionsOwed);
 
     /// <summary>
-    /// The quit prompt true for the process holding <paramref name="handle"/>
-    /// (<c>quit_copy::quit_prompt</c>), as an owned JSON object
-    /// <c>{role, title, body, confirm, cancel}</c>. The role is read off the
-    /// handle: <c>hosting</c> for a daemon run in this process,
-    /// <c>attached</c> for one another process runs, <c>unavailable</c> for
-    /// NULL, a handle that is not live, or a stopped daemon. NULL only on a
-    /// caught panic.
+    /// The quit prompt naming what quitting stops (quit_copy::quit_prompt):
+    /// {title, body, confirm, cancel}. NULL when both flags are 0 (no
+    /// prompt; callers do not ask then) or on a caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr tc_quit_prompt_json(IntPtr handle);
+    internal static extern IntPtr tc_quit_reason_prompt_json(int stopsCompute, int stopsPrivateAI);
 
     /// <summary>
     /// The sentence for a <c>TC_WITNESS_STATE_*</c> value, as an owned char*.
