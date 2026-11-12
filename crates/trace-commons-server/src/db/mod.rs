@@ -20,6 +20,7 @@ pub mod postgres_inference_connection;
 mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
+mod postgres_terms_acceptance;
 pub mod witness_blocked;
 #[doc(hidden)]
 pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
@@ -243,6 +244,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _batch: &trace_commons_protocol::usage_analytics::UsageEventBatch,
     ) -> Result<u64, DatabaseError> {
         Err(DatabaseError::Pool("usage_events_unavailable".into()))
+    }
+
+    /// Record that an account accepted a version of the Terms of Service in
+    /// its org. Append-only; a repeat of (tenant, account, version, hash)
+    /// returns the original row's `recorded_at`.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_terms_acceptance(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _auth_method: &str,
+        _client_kind: &str,
+        _terms_version: &str,
+        _content_sha256: &str,
+        _accepted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError> {
+        Err(DatabaseError::Pool("terms_acceptance_unavailable".into()))
     }
 
     async fn select_inference_connection(
@@ -530,6 +548,17 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _account: &crate::account_trust::TrustAccount,
         _limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Re-derives this account's carried age (V157) from its live,
+    /// non-pooled, device-proven tenant links, writing only what changed.
+    /// Returns how many carries the account holds afterwards.
+    async fn refresh_account_trust_carried_age(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<u32, DatabaseError> {
         Err(DatabaseError::Pool(
             "account_trust_worker_unavailable".into(),
         ))
@@ -1484,6 +1513,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Trusted strong-authenticator insertion. Request enrollment must use
+    /// `enroll_near_identity`, passing strength from the authenticated session.
     /// Insert a registered NEAR access key for `account_id`. `public_key` is the
     /// globally-UNIQUE NEAR access key (`ed25519:...`) used by the unauthenticated
     /// login resolver to map key -> tenant; `near_account_id` is the human-readable
@@ -1499,6 +1530,29 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "insert_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Atomically admit and insert a verified wallet identity. A weak session
+    /// may insert only when this account has no active strong authenticator at
+    /// the serialized admission point. `strong_session` MUST come from the
+    /// authenticated context, never a request field. False means refusal (an
+    /// existing authenticator or an account that is no longer open).
+    ///
+    /// Implementations must serialize the count and insert with all additions
+    /// or revivals of strong authenticators, including NEAR AI anchors and
+    /// account merges. Never fall back to a separate count followed by insert.
+    async fn enroll_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+        _near_account_id: &str,
+        _label: Option<&str>,
+        _strong_session: bool,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "atomic near identity enrollment not implemented".to_string(),
         ))
     }
 

@@ -11,11 +11,10 @@
 //! `IngestPipelineRuntimeAssembler` (P5) -- never a direct call into
 //! `PipelineService`.
 //!
-//! Nested inside `tests` (via the same pattern as `admission_pg_tests` and
-//! `nearai_ceremony_pg_tests`) rather than declared as a sibling module of
-//! `trace-commons-ingest.rs`: `test_state_with_options`, `sample_envelope`,
-//! `make_metadata_only_low_risk`, `auth_headers`, and `cleanup_pg_trace_tenant`
-//! are private to `tests` and visible only to its descendants.
+//! Nested inside `tests` (via the same pattern as `admission_pg_tests`)
+//! rather than declared as a sibling module of `trace-commons-ingest.rs`:
+//! it uses fixtures such as `sample_envelope` and `cleanup_pg_trace_tenant`,
+//! which are private to `tests` and visible only to its descendants.
 
 use super::*;
 
@@ -13798,7 +13797,7 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
             };
             let root = tempfile::tempdir().unwrap();
             let mut state =
-                (*crate::ingest::app::tests::test_state(root.path().to_path_buf())).clone();
+                (*crate::ingest::app::test_support::test_state(root.path().to_path_buf())).clone();
             state.db_mirror = Some(runtime.clone() as Arc<dyn Database>);
             state.db_tenant_policy_reads = global;
             state.tenant_rollout_gates = gates.clone();

@@ -810,6 +810,7 @@ impl QueueEntry {
                 crate::submit::REASON_TRANSIENT_REDACTION
                     | crate::submit::REASON_WITNESS_SATURATED
                     | crate::submit::REASON_RATE_LIMITED
+                    | REASON_ACCOUNT_LIMIT_REACHED
                     | crate::submit::REASON_INGEST_UNREACHABLE
                     | super::health::LABEL_CLAIM_MINT_FAILED
             )
@@ -821,6 +822,15 @@ impl QueueEntry {
                 trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
                     == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
             })
+    }
+
+    /// Whether this entry is approved and waiting, at `now`, for an account
+    /// allowance ingest said was spent. While any entry is, the upload pass
+    /// sends nothing (`daemon::account_allowance_held`).
+    pub(crate) fn waiting_on_account_allowance(&self, now: DateTime<Utc>) -> bool {
+        self.state == QueueState::Approved
+            && self.reason_label.as_deref() == Some(REASON_ACCOUNT_LIMIT_REACHED)
+            && self.retry_after.is_some_and(|due| due > now)
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -915,6 +925,13 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// this exact string. Changing it in one place and not the other would
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
+
+/// Ingest refused the upload because the account's allowance for the period
+/// is spent (`AdmissionRefusal::AccountLimitReached`, in the server's own
+/// spelling). Not a verdict on the session: the entry keeps its approval and
+/// waits, `Approved` under this label, until `retry_after`.
+pub const REASON_ACCOUNT_LIMIT_REACHED: &str =
+    trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
 
 /// The reason label `keep` records: the contributor chose "Keep on this Mac"
 /// for this session (K5, open decision #4 in #1118).
@@ -1011,6 +1028,9 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 /// opt-in under the new scopes is exactly what arming means.
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
+    // A bound admission contribution needs the person's certified preview;
+    // a standing opt-in must not restart an unpreviewed witness job.
+    super::preview::REASON_WITNESS_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
     // Re-approving it unattended would restart the retry budget the cap
     // just spent, and the classifier would get the session every hour again.
@@ -1042,11 +1062,18 @@ const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavai
 /// rather than the trace's. A redaction that panicked is a defect in the
 /// build; `witness_attestation_unavailable` was also what earlier builds
 /// recorded when the witness merely ran past its deadline, a terminal
-/// refusal for a session nothing had judged.
+/// refusal for a session nothing had judged. `witness_response_malformed`
+/// was what earlier builds recorded for every witness refusal they did not
+/// spell, a witness that was down among them; only an approved one is
+/// offered again, and it goes back to approved.
 pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
     crate::envelope::REASON_REDACTION_PANICKED,
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+    REASON_WITNESS_RESPONSE_MALFORMED,
 ];
+
+/// `witness_response_malformed`, as `witness::WitnessTrustError` spells it.
+const REASON_WITNESS_RESPONSE_MALFORMED: &str = "witness_response_malformed";
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
@@ -1855,11 +1882,13 @@ impl Queue {
     /// as a fresh offer dated `now`, like [`Self::release_witness_risk_holds`].
     /// The caller decides that the device has a witness.
     ///
-    /// Released only when the scrub record is readable (`QueueEntry::scrub`
-    /// is `Scrubbed`) and the witness rule gives no reason at all
-    /// (`second_look_reasons` under `RedactionWitness::Present`): nothing
-    /// unsure, nothing trimmed. No record, or any other reason, stays held,
-    /// and so does an entry with no message from the person.
+    /// A bound scrub record is released when the witness rule gives no
+    /// reason at all (`second_look_reasons` under `RedactionWitness::Present`):
+    /// nothing unsure, nothing trimmed. A revocation can have cleared the
+    /// pin while retaining that historical record. Its zero-match counts can identify
+    /// an obsolete hold, but never certify new bytes: clear them and require
+    /// a fresh witness run. No record, or any other reason, stays held, and
+    /// so does an entry with no message from the person.
     ///
     /// A local preview pin is cleared with its counts, so the entry goes
     /// through the witness again (an upload refuses a local pin on a witness
@@ -1873,13 +1902,21 @@ impl Queue {
                 && e.reason_label.as_deref()
                     == Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED);
             let scrub = e.scrub();
-            let only_nothing_matched = matches!(scrub, Scrub::Scrubbed(_))
-                && second_look::second_look_reasons(
-                    scrub,
-                    e.subagents_dropped,
-                    RedactionWitness::Present,
-                )
-                .is_empty();
+            let historical_zero_match = e.previewed_envelope_digest.is_none()
+                && e.scrub.as_ref().is_some_and(|record| {
+                    record.counts.content_marks == 0
+                        && record.counts.unsure_spans == 0
+                        && !record.counts.unsure_unreadable
+                        && e.subagents_dropped == 0
+                });
+            let only_nothing_matched = historical_zero_match
+                || (matches!(scrub, Scrub::Scrubbed(_))
+                    && second_look::second_look_reasons(
+                        scrub,
+                        e.subagents_dropped,
+                        RedactionWitness::Present,
+                    )
+                    .is_empty());
             if !held || !only_nothing_matched || e.has_no_user_messages() {
                 continue;
             }
@@ -2270,7 +2307,10 @@ impl Queue {
     /// no recorded build stays refused too, except
     /// `witness_attestation_unavailable`: no build recorded one before this
     /// rule, and those builds also gave that label to a witness that only
-    /// ran out of time, so an unrecorded one is from an older build.
+    /// ran out of time, so an unrecorded one is from an older build. The same
+    /// holds for `witness_response_malformed`, which earlier builds gave to a
+    /// witness that was down; it is offered again only when it was approved,
+    /// since nothing but an approval sends a session to the witness.
     pub fn reoffer_panicked_refusals(&mut self, current_version: &str) -> bool {
         let mut changed = false;
         for e in self.entries.iter_mut() {
@@ -2280,25 +2320,101 @@ impl Queue {
             if e.state != QueueState::Refused || !REOFFERED_ON_A_NEWER_BUILD.contains(&reason) {
                 continue;
             }
+            // `approved_scopes`, not `approved_at`: a standing opt-in's
+            // approval leaves `approved_at` unset, and every revocation
+            // clears both together.
+            let malformed = reason == REASON_WITNESS_RESPONSE_MALFORMED;
+            if malformed && e.approved_scopes.is_none() {
+                continue;
+            }
             let newer = match e.refused_on_version.as_deref() {
                 Some(refused_on) => {
                     crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
                 }
-                None => reason == REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+                None => matches!(
+                    reason,
+                    REASON_WITNESS_ATTESTATION_UNAVAILABLE | REASON_WITNESS_RESPONSE_MALFORMED
+                ),
             };
             if !newer {
                 continue;
             }
-            e.state = if e.approved_at.is_some() {
+            e.state = if malformed || e.approved_at.is_some() {
                 QueueState::Approved
             } else {
                 QueueState::Pending
             };
             e.reason_label = None;
             e.refused_on_version = None;
+            if malformed {
+                // A whole retry budget, as a fresh approval gets: a run
+                // started before the refusal must not count against it.
+                e.retry_after = None;
+                e.transient_upload_failures = 0;
+                e.transient_upload_run_started_at = None;
+            }
             changed = true;
         }
         changed
+    }
+
+    /// Send again, once its account allowance allows, every approved
+    /// session an older build ended `Failed` with `account_limit_reached`,
+    /// returning how many moved.
+    ///
+    /// A spent allowance says nothing about the session: ingest refuses
+    /// every send until the period resets. Builds before this rule recorded
+    /// it as a final failure, so those sessions were never sent. Each goes
+    /// back to `Approved` under the same label, due `now`, with every term
+    /// of its approval as it was, so nobody is asked again and the usual
+    /// send-time checks still apply. The upload pass then holds the queue
+    /// again if the allowance is still spent.
+    ///
+    /// Only `Failed` entries with exactly this label that still carry an
+    /// approval (`approved_scopes`) move: a dismissed, kept or withdrawn
+    /// entry is in another state, and nothing is approved on anyone's
+    /// behalf here. One whose file already has a live entry stays, as in
+    /// [`Self::reoffer_refused_for_reason`]: the session grew and is offered
+    /// as it is now. Idempotent: a moved entry is no longer `Failed`.
+    ///
+    /// A `Failed` entry pins nothing, so the sweep has already removed any
+    /// certified bytes it was pinned to. An unattended approval's pin is the
+    /// witness's own certificate, not bytes a person was shown, so it is
+    /// dropped and the session is witnessed again, as a fresh unattended
+    /// approval is. A person's pin is kept: the upload then finds its bytes
+    /// gone and puts the session back in front of them, since they approved
+    /// those bytes and no others.
+    pub fn retry_account_limit_failures(&mut self, now: DateTime<Utc>) -> usize {
+        let limit = REASON_ACCOUNT_LIMIT_REACHED;
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
+        let mut moved = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Failed
+                && e.reason_label.as_deref() == Some(limit)
+                && e.approved_scopes.is_some()
+                && !live_paths.contains(&e.path)
+            {
+                e.state = QueueState::Approved;
+                e.retry_after = Some(now);
+                if e.approved_unattended {
+                    e.previewed_envelope_digest = None;
+                    e.attested_inference = None;
+                    e.would_send_bytes = None;
+                }
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// Revoke an unattended approval and pin the certified review the
@@ -3427,6 +3543,127 @@ mod tests {
         }
     }
 
+    /// Older builds ended an approved session `Failed` when the account's
+    /// allowance was spent. Such an entry goes back to approved and waiting,
+    /// due now, with its approval as it was; once only, since it is then no
+    /// longer `Failed`. A dismissed or kept entry, one whose approval was
+    /// revoked, one with another failure, and one whose file already has a
+    /// live entry all stay where they are.
+    #[test]
+    fn an_account_limit_failure_from_an_older_build_waits_to_be_sent_again() {
+        let limit =
+            trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
+        let now = at("2026-11-11T00:00:00Z");
+        let mut failed = entry("failed", "2026-11-01T00:00:00Z");
+        failed.path = PathBuf::from("/s/failed.jsonl");
+        let mut by_hand = entry("by-hand", "2026-11-01T00:00:00Z");
+        by_hand.path = PathBuf::from("/s/by-hand.jsonl");
+        let mut dismissed = entry("dismissed", "2026-11-01T00:00:00Z");
+        dismissed.path = PathBuf::from("/s/dismissed.jsonl");
+        let mut kept = entry("kept", "2026-11-01T00:00:00Z");
+        kept.path = PathBuf::from("/s/kept.jsonl");
+        let mut revoked = entry("revoked", "2026-11-01T00:00:00Z");
+        revoked.path = PathBuf::from("/s/revoked.jsonl");
+        let mut other = entry("other", "2026-11-01T00:00:00Z");
+        other.path = PathBuf::from("/s/other.jsonl");
+        let mut stale = entry("stale", "2026-11-01T00:00:00Z");
+        stale.path = PathBuf::from("/s/grew.jsonl");
+        let mut live = entry("live", "2026-11-02T00:00:00Z");
+        live.path = PathBuf::from("/s/grew.jsonl");
+        let mut q = Queue::new();
+        for e in [
+            &failed, &by_hand, &dismissed, &kept, &revoked, &other, &stale, &live,
+        ] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        let scopes = vec!["debugging_evaluation".to_string()];
+        for e in [&failed, &dismissed, &kept, &other, &stale] {
+            assert!(q.approve_unattended(e.entry_id, &scopes, Some("inputs")));
+        }
+        let approved_at = at("2026-11-02T00:00:00Z");
+        assert!(q.approve(
+            by_hand.entry_id,
+            &scopes,
+            None,
+            None,
+            None,
+            Some(approved_at)
+        ));
+        for e in [&failed, &by_hand, &stale] {
+            q.record_attempt(e.entry_id, None);
+            q.set_state(e.entry_id, QueueState::Failed, Some(limit.into()));
+        }
+        q.set_state(
+            dismissed.entry_id,
+            QueueState::Refused,
+            Some(REASON_DISMISSED.into()),
+        );
+        q.set_state(kept.entry_id, QueueState::Refused, Some(REASON_KEPT.into()));
+        // Failed with the label, but nothing says it was approved.
+        q.set_state(revoked.entry_id, QueueState::Failed, Some(limit.into()));
+        q.set_state(
+            other.entry_id,
+            QueueState::Failed,
+            Some("admission_refused".into()),
+        );
+        for e in [&failed, &by_hand] {
+            q.entry_mut_for_test(e.entry_id)
+                .unwrap()
+                .previewed_envelope_digest = Some("sha256:pinned".into());
+        }
+        let before = q.clone();
+
+        assert_eq!(q.retry_account_limit_failures(now), 2);
+        // The unattended pin goes, so the witness certifies it again; the
+        // person's stays, so they are asked rather than sent other bytes.
+        assert_eq!(
+            q.get(failed.entry_id).unwrap().previewed_envelope_digest,
+            None
+        );
+        assert_eq!(
+            q.get(by_hand.entry_id)
+                .unwrap()
+                .previewed_envelope_digest
+                .as_deref(),
+            Some("sha256:pinned")
+        );
+        for id in [failed.entry_id, by_hand.entry_id] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Approved, "{e:?}");
+            assert_eq!(e.reason_label.as_deref(), Some(limit));
+            assert_eq!(e.retry_after, Some(now));
+            assert!(e.ready_for_upload(now));
+            assert_eq!(e.approved_scopes, was.approved_scopes);
+            assert_eq!(e.approved_inputs, was.approved_inputs);
+            assert_eq!(e.approved_at, was.approved_at);
+            assert_eq!(e.approved_unattended, was.approved_unattended);
+        }
+        assert!(q.get(failed.entry_id).unwrap().approved_unattended);
+        assert_eq!(
+            q.get(by_hand.entry_id).unwrap().approved_at,
+            Some(approved_at)
+        );
+        for id in [
+            dismissed.entry_id,
+            kept.entry_id,
+            revoked.entry_id,
+            other.entry_id,
+            stale.entry_id,
+            live.entry_id,
+        ] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(
+                (e.state, e.reason_label.as_deref()),
+                (was.state, was.reason_label.as_deref()),
+                "{e:?}"
+            );
+        }
+
+        assert_eq!(q.retry_account_limit_failures(now), 0, "once only");
+    }
+
     /// A trace refused because its redaction panicked is offered again once
     /// a newer build runs: approved again if it was approved, pending if it
     /// was not. The same build, an older one, or any other refusal leaves
@@ -3587,6 +3824,134 @@ mod tests {
         assert_eq!(untouched.reason_label.as_deref(), Some("redaction-failed"));
         // Nothing left to move.
         assert!(!q.reoffer_panicked_refusals("0.24.2"));
+    }
+
+    /// Builds before the witness's refusals were read by status and label
+    /// refused an approved session `witness_response_malformed` for a witness
+    /// that was only down (the 2026-11-05 outage), and recorded no build. Such a
+    /// refusal goes back to approved and waiting, once, so the witness path
+    /// retries it with its usual backoff. An unapproved one, one recorded on
+    /// this build, a dismissal, a keep and any other refusal stay where they
+    /// are.
+    #[test]
+    fn an_approved_malformed_witness_refusal_from_an_older_build_is_approved_again() {
+        let malformed = REASON_WITNESS_RESPONSE_MALFORMED;
+        let approved_at = Some(at("2026-11-05T00:00:00Z"));
+        let approved = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            transient_upload_failures: 3,
+            transient_upload_run_started_at: approved_at,
+            ..entry("approved", "2026-11-05T00:00:00Z")
+        };
+        // A standing opt-in's approval: scopes stamped, no `approved_at`.
+        let unattended = QueueEntry {
+            approved_scopes: Some(Vec::new()),
+            approved_unattended: true,
+            ..entry("unattended", "2026-11-05T00:00:00Z")
+        };
+        let unapproved = entry("unapproved", "2026-11-05T00:00:00Z");
+        let current = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("current", "2026-11-05T00:00:00Z")
+        };
+        let dismissed = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("dismissed", "2026-11-05T00:00:00Z")
+        };
+        let kept = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("kept", "2026-11-05T00:00:00Z")
+        };
+        let other = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("other", "2026-11-05T00:00:00Z")
+        };
+        let failed = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("failed", "2026-11-05T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        for e in [
+            &approved,
+            &unattended,
+            &unapproved,
+            &current,
+            &dismissed,
+            &kept,
+            &other,
+            &failed,
+        ] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        for (id, state, label) in [
+            (approved.entry_id, QueueState::Refused, malformed),
+            (unattended.entry_id, QueueState::Refused, malformed),
+            (unapproved.entry_id, QueueState::Refused, malformed),
+            (current.entry_id, QueueState::Refused, malformed),
+            (dismissed.entry_id, QueueState::Refused, REASON_DISMISSED),
+            (kept.entry_id, QueueState::Refused, REASON_KEPT),
+            (
+                other.entry_id,
+                QueueState::Refused,
+                "witness_quote_unverified",
+            ),
+            (failed.entry_id, QueueState::Failed, malformed),
+        ] {
+            q.set_state(id, state, Some(label.to_string()));
+        }
+        // A malformed refusal made on this build records the build.
+        q.note_refusal_version(current.entry_id, "0.30.0");
+        assert_eq!(
+            q.get(current.entry_id)
+                .unwrap()
+                .refused_on_version
+                .as_deref(),
+            Some("0.30.0")
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.30.0"));
+        let back = q.get(approved.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(back.approved_at, approved_at, "the approval is kept");
+        assert_eq!(back.transient_upload_failures, 0, "a whole retry budget");
+        assert_eq!(back.transient_upload_run_started_at, None);
+        let back = q.get(unattended.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert!(back.approved_unattended, "still the opt-in's approval");
+        for (id, state, label) in [
+            (unapproved.entry_id, QueueState::Refused, malformed),
+            (current.entry_id, QueueState::Refused, malformed),
+            (dismissed.entry_id, QueueState::Refused, REASON_DISMISSED),
+            (kept.entry_id, QueueState::Refused, REASON_KEPT),
+            (
+                other.entry_id,
+                QueueState::Refused,
+                "witness_quote_unverified",
+            ),
+            (failed.entry_id, QueueState::Failed, malformed),
+        ] {
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, state, "{label}");
+            assert_eq!(e.reason_label.as_deref(), Some(label));
+        }
+        // Once: nothing left to move on the same build, even after the
+        // moved entry is refused malformed again on it.
+        assert!(!q.reoffer_panicked_refusals("0.30.0"));
+        q.set_state(
+            approved.entry_id,
+            QueueState::Refused,
+            Some(malformed.to_string()),
+        );
+        q.note_refusal_version(approved.entry_id, "0.30.0");
+        assert!(!q.reoffer_panicked_refusals("0.30.0"));
+        assert_eq!(q.get(approved.entry_id).unwrap().state, QueueState::Refused);
     }
 
     /// `entry`, plus the observation it is supposed to be made of.
@@ -5007,6 +5372,62 @@ mod tests {
         q.set_state(id, QueueState::Approved, None);
         q.cancel(id).unwrap();
         assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+    }
+
+    #[test]
+    fn a_revoked_zero_match_hold_can_return_to_the_witness_without_a_stale_pin() {
+        use crate::daemon::second_look::{REASON_SECOND_LOOK_REVIEW_REQUIRED, Scrub, ScrubCounts};
+        for (content, unsure, unreadable, dropped, repinned, expected) in [
+            (0, 0, false, 0, false, 1),
+            (1, 0, false, 0, false, 0),
+            (0, 1, false, 0, false, 0),
+            (0, 0, true, 0, false, 0),
+            (0, 0, false, 1, false, 0),
+            (0, 0, false, 0, true, 0),
+        ] {
+            let mut q = Queue::new();
+            let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+            e.shape = Some(SessionShape {
+                user_turns: 1,
+                ..Default::default()
+            });
+            e.subagents_dropped = dropped;
+            let id = e.entry_id;
+            q.upsert(e, 500).unwrap();
+            assert!(q.record_previewed_envelope(id, "sha256:old", None, None));
+            assert!(q.record_scrub(
+                id,
+                "sha256:old",
+                ScrubCounts {
+                    marks: content,
+                    content_marks: content,
+                    unsure_spans: unsure,
+                    unsure_unreadable: unreadable,
+                }
+            ));
+            assert!(q.approve(id, &[], None, None, None, None));
+            assert!(q.revoke_approval_at(id, REASON_SECOND_LOOK_REVIEW_REQUIRED, Utc::now()));
+            if repinned {
+                assert!(q.record_previewed_envelope(id, "sha256:different", None, None));
+            }
+            assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
+            assert!(q.get(id).unwrap().scrub.is_some());
+            assert_eq!(q.release_nothing_matched_holds(Utc::now()), expected);
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Pending);
+            assert_eq!(e.approved_inputs, None);
+            if expected == 1 {
+                assert_eq!(e.reason_label, None);
+                assert_eq!(e.previewed_envelope_digest, None);
+                assert_eq!(e.scrub, None, "historical counts cannot certify new bytes");
+                assert!(!e.approved_unattended);
+            } else {
+                assert_eq!(
+                    e.reason_label.as_deref(),
+                    Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
+                );
+            }
+        }
     }
 
     #[test]

@@ -1662,6 +1662,7 @@ impl ConfigStore {
             LEGACY_INVITE_REFUSAL_FILE,
             RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
+            crate::daemon::terms_state::TERMS_STATE_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1692,6 +1693,7 @@ impl ConfigStore {
             LEGACY_INVITE_REFUSAL_FILE,
             RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
+            crate::daemon::terms_state::TERMS_STATE_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))

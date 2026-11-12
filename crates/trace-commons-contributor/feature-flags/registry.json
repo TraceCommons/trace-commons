@@ -5,6 +5,7 @@
     "claude_desktop_private_ai": {
       "description": "Claude Desktop Code setup and dedicated Private AI routing",
       "owner": "private-ai",
+      "class": "product",
       "default": false,
       "required_capabilities": [
         "claude_desktop_private_ai_v1"

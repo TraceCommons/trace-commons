@@ -1,0 +1,50 @@
+{
+  "sourceImplementationCommit": "a59c1ebd73cbffdee402d110dddbbd35af752d19",
+  "baseCommit": "f13a91d388340356d4c744e78596db853e8d45ff",
+  "productionAccess": false,
+  "deployed": false,
+  "merged": false,
+  "dependenciesChanged": false,
+  "migrationsAdded": false,
+  "rust": {
+    "ingest": {
+      "passed": 1950,
+      "ignored": 50
+    },
+    "server": {
+      "passed": 2819,
+      "ignored": 13,
+      "executables": 60
+    },
+    "freshPostgreSql": "16.15; fresh synthetic database per server executable; CI fixture variables; loopback only",
+    "doctests": "2 passed",
+    "licenseBoundary": "4 passed within server it executable",
+    "checkBins": "passed",
+    "clippyAllTargets": "passed with repository allow-list",
+    "format": "passed",
+    "flags": {
+      "RUSTFLAGS": "-D warnings",
+      "CARGO_INCREMENTAL": "0"
+    }
+  },
+  "models": {
+    "models": 5,
+    "namedWitnessesAndControls": 29,
+    "boundedChecks": 7,
+    "maxTransitions": 8,
+    "result": "no counterexample within bound for repaired full steps",
+    "unboundedProof": false,
+    "executableEquivalenceProof": false
+  },
+  "evidenceClassifierTests": 8,
+  "review": {
+    "source": "no remaining blockers after derived-export metadata-authority correction",
+    "modelsAndRegressions": "no remaining blockers; current full steps exclude historical mutant controls"
+  },
+  "materialLimits": [
+    "Existing ignored suites remain explicitly reported.",
+    "No production legacy-row count or role configuration was queried.",
+    "Readiness remains opt-in; controlled private-role/community-drain policies are exact supported exceptions.",
+    "Authorization-decision checks do not guarantee recall or last-network-byte timing."
+  ]
+}

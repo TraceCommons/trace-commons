@@ -45,21 +45,19 @@ final class FirstRunCreditNoteTests: XCTestCase {
                 + "                            .foregroundStyle(GlassTokens.Color.statusAskText.color)"))
     }
 
-    func testTracesNotesNoCreditOnlyWhileTrainCodingModelsIsOff() throws {
+    func testTheHeadlineFollowsTrainCodingModels() throws {
         let copy = try words()
-        XCTAssertEqual(copy.traces.noCredit, "Allow Train coding models to earn it.")
-        XCTAssertEqual(copy.traces.backToUses, "Go back to Uses")
         var state = FirstRunState(step: .traces, scopes: ["debugging_evaluation", "benchmark_only"])
         XCTAssertTrue(TracesScreenLayout.showsNoCredit(state, uses: copy.uses))
         state.scopes.insert("model_training")
         XCTAssertFalse(TracesScreenLayout.showsNoCredit(state, uses: copy.uses))
 
         let source = try Self.source("TracesScreen.swift")
-        XCTAssertTrue(source.contains("if TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses) {"))
-        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
-        XCTAssertFalse(source.contains("exclamationmark"), "a note, not a warning")
-        // The headline says what the traces could earn while the note shows
-        // (Zaki's review of #1690), and is unchanged once credit is on.
+        // Traces has no note or link back to Uses, which comes after it (Ron,
+        // 2026-11-05). The headline says what the traces could earn while
+        // credit is off (Zaki's review of #1690), and is unchanged once on.
+        XCTAssertFalse(source.contains("copy.traces.noCredit"))
+        XCTAssertFalse(source.contains("copy.traces.backToUses"))
         XCTAssertTrue(source.contains("let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
         XCTAssertTrue(source.contains("earnsCredit: earnsCredit) {"))
         // The final-credit line shows only while credit is on (owner,
@@ -80,16 +78,5 @@ final class FirstRunCreditNoteTests: XCTestCase {
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: true),
             "We have detected some traces that can earn you credit.")
-    }
-
-    func testTheLinkReturnsToUsesWithEveryChoiceKept() {
-        var state = FirstRunState(step: .traces, scopes: ["debugging_evaluation", "ranking_training"])
-        state = UsesScreenLayout.choosingSharing(state, .automatic)
-        state.privateAI = true
-        let back = TracesScreenLayout.backToUses(state)
-        XCTAssertEqual(back.step, .uses)
-        var same = back
-        same.step = .traces
-        XCTAssertEqual(same, state, "nothing but the step changes")
     }
 }

@@ -3,7 +3,10 @@ description: >-
   Deletes large preinstalled toolchains this workflow never uses (.NET, the
   Android SDK, Haskell and the CodeQL bundle), so a job that restores a big
   cargo cache and then compiles several feature sets does not run out of
-  disk. Run it before the cache restore. A no-op off Linux.
+  disk. Call it twice: `phase: start` early, which starts the deletions in
+  the background and returns at once, and `phase: wait` just before the
+  step that needs the space, which returns once enough disk is free. A
+  no-op off Linux.
 #
 # Why this exists. On 2026-11-01 the `staging channel tests` job failed on
 # a PR with "No space left on device" while compiling the contributor's lib
@@ -18,17 +21,84 @@ description: >-
 # never touches. Docker images are left alone, because the pipeline
 # qualification job pulls a digest-pinned PostgreSQL container.
 #
-# The deletions run in parallel, and the step prints the free space before
-# and after, so a job log shows what was reclaimed.
+# Why two phases. Run in one step, the deletions blocked the job for 85 s
+# (run 42696037795, `cargo test (default features)`: 86G free before, 108G
+# after) before the toolchain, cache restore and apt steps that do not need
+# the space. Now they run in the background while those steps do, and the
+# wait phase holds the compile until either the deletions have finished or
+# `min-free-gb` is already free -- on that run's runner, 86G was free before
+# anything was deleted, so the gate would not have waited at all. The
+# deletions keep running in the background if the gate opens first.
+#
+# Each phase prints the free space, and the wait phase prints how long it
+# waited and the deletions' own log, so a job log shows what was reclaimed
+# and whether the gate cost anything.
+inputs:
+  phase:
+    description: '`start` (launch the deletions) or `wait` (block until enough disk is free).'
+    default: start
+  min-free-gb:
+    description: >-
+      The wait phase returns as soon as this many GB are free on /, without
+      waiting for the deletions to finish. A conservative margin, not a
+      measurement: each job's trim step prints how large `target` actually
+      grew ("before trim").
+    default: '40'
 runs:
   using: composite
   steps:
-    - if: runner.os == 'Linux'
+    - if: runner.os == 'Linux' && inputs.phase == 'start'
       shell: bash
       run: |
-        df -h / | tail -1 | awk '{print "free before: " $4}'
-        for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
-          [ -d "$d" ] && sudo rm -rf "$d" &
+        set -euo pipefail
+        state="$RUNNER_TEMP/free-runner-disk"
+        mkdir -p "$state"
+        rm -f "$state/done"
+        df -h / | tail -1 | awk '{print "free at start: " $4}'
+        # Detached, with every stream on a file: a background process that
+        # held the step's output open would keep the step from finishing.
+        (
+          start=$SECONDS
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+            [ -d "$d" ] && sudo rm -rf "$d" &
+          done
+          wait
+          echo "deletions finished in $((SECONDS - start))s"
+          df -h / | tail -1 | awk '{print "free after the deletions: " $4}'
+          touch "$state/done"
+        ) >"$state/log" 2>&1 </dev/null &
+        echo $! >"$state/pid"
+        echo "deletions started in the background (pid $!)"
+    - if: runner.os == 'Linux' && inputs.phase == 'wait'
+      shell: bash
+      env:
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
+      run: |
+        set -euo pipefail
+        state="$RUNNER_TEMP/free-runner-disk"
+        if [ ! -f "$state/pid" ]; then
+          echo "::error::free-runner-disk phase 'wait' ran without phase 'start' before it"
+          exit 1
+        fi
+        pid=$(cat "$state/pid")
+        free_gb() { df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
+        waited=0
+        while [ ! -f "$state/done" ]; do
+          if [ "$(free_gb)" -ge "$MIN_FREE_GB" ]; then
+            echo "$(free_gb)G free, at least ${MIN_FREE_GB}G: not waiting for the deletions to finish"
+            break
+          fi
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::warning::the deletions stopped without finishing; continuing with $(free_gb)G free"
+            break
+          fi
+          if [ "$waited" -ge 600 ]; then
+            echo "::warning::the deletions have not finished after 600s; continuing with $(free_gb)G free"
+            break
+          fi
+          sleep 2
+          waited=$((waited + 2))
         done
-        wait
-        df -h / | tail -1 | awk '{print "free after: " $4}'
+        echo "waited ${waited}s; free now: $(free_gb)G"
+        echo "deletion log so far:"
+        cat "$state/log" || true

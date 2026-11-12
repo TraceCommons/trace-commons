@@ -1,7 +1,29 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use super::test_support::*;
 use super::*;
+
+#[path = "tests/export_expiry_tests.rs"]
+mod export_expiry_tests;
+
+#[path = "tests/scheduler_config_tests.rs"]
+mod scheduler_config_tests;
+
+#[path = "tests/operational_metrics_body_tests.rs"]
+mod operational_metrics_body_tests;
+
+#[path = "tests/drill_evidence_tests.rs"]
+mod drill_evidence_tests;
+
+#[path = "tests/bootstrap_atomicity_tests.rs"]
+mod bootstrap_atomicity_tests;
+
+#[path = "tests/legacy_data_authorization_tests.rs"]
+mod legacy_data_authorization_tests;
+
+#[path = "tests/scope_escalation_tests.rs"]
+mod scope_escalation_tests;
 
 #[path = "tests/multitenant_settlement_tests.rs"]
 mod multitenant_settlement_tests;
@@ -36,6 +58,8 @@ mod referral_tests;
 mod removed_account_routes_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/terms_acceptance_tests.rs"]
+mod terms_acceptance_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
@@ -727,12 +751,6 @@ async fn source_offer_is_served_without_credentials() {
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
 }
 
-/// `pub(super)`: the unit tests of `pipeline_activation`, a sibling of this
-/// module, build their state from it.
-pub(super) fn test_state(root: PathBuf) -> Arc<AppState> {
-    test_state_with_options(root, None, None, false, false, false, false)
-}
-
 /// `postgres_backend_for_ingest_test`, for a test that must not pass by
 /// skipping (poldsam P-11): with no database URL set it skips, as every
 /// database test does, and once one is set a database that cannot be
@@ -748,48 +766,6 @@ async fn required_postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
          migrations failed: this test must not skip"
     );
     backend
-}
-
-async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    let config = DatabaseConfig {
-        url: SecretString::from(url),
-        pool_size: 4,
-        ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url:
-            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
-        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
-        pii_backstop_driver_url:
-            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
-        invite_registry_url: None,
-    };
-    let backend = match PgBackend::new(&config).await {
-        Ok(backend) => Arc::new(backend),
-        Err(error) => {
-            eprintln!("skipping: database unavailable ({error})");
-            return None;
-        }
-    };
-    if let Err(error) = backend.run_migrations().await {
-        eprintln!("skipping: migrations failed ({error})");
-        return None;
-    }
-    // Reset the process-global account-surface rate limiter at the START of every
-    // DB-backed test. The account/session/rotation tests all drive handlers
-    // that share the `ACCOUNT_RATE_LIMITER` singleton (keyed by IP / global /
-    // per-credential buckets); without this, a test inherits hit counts from
-    // whatever ran before it and flakes with spurious rate-limit denials under
-    // default parallelism. The
-    // reset is harmless for tests that don't touch the limiter (it clears empty
-    // maps) and runs before any test logic, so no test can accumulate state across
-    // this boundary. This makes each DB-backed account test independent of
-    // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
-    // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
-    // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
-    reset_account_rate_limiter_for_db_test().await;
-    Some(backend)
 }
 
 /// The routing store a booted ingest builds over the connection its
@@ -6039,53 +6015,6 @@ fn append_ranking_backfill_fixture_for_submissions(
     }
 }
 
-pub(crate) fn test_state_with_options(
-    root: PathBuf,
-    db_mirror: Option<Arc<dyn Database>>,
-    artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
-    db_contributor_reads: bool,
-    db_reviewer_reads: bool,
-    db_replay_export_reads: bool,
-    db_audit_reads: bool,
-) -> Arc<AppState> {
-    test_state_with_options_and_policies(
-        root,
-        db_mirror,
-        artifact_store,
-        db_contributor_reads,
-        db_reviewer_reads,
-        db_replay_export_reads,
-        db_audit_reads,
-        BTreeMap::new(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn test_state_with_options_and_policies(
-    root: PathBuf,
-    db_mirror: Option<Arc<dyn Database>>,
-    artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
-    db_contributor_reads: bool,
-    db_reviewer_reads: bool,
-    db_replay_export_reads: bool,
-    db_audit_reads: bool,
-    tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
-) -> Arc<AppState> {
-    test_state_with_options_policies_and_export_guardrails(
-        root,
-        db_mirror,
-        artifact_store,
-        db_contributor_reads,
-        db_reviewer_reads,
-        db_replay_export_reads,
-        false,
-        db_audit_reads,
-        tenant_policies,
-        false,
-        false,
-    )
-}
-
 fn test_state_with_required_tenant_policies(
     root: PathBuf,
     tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
@@ -6297,16 +6226,6 @@ fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -
     state
 }
 
-fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAuth>) {
-    for auth in tokens.values() {
-        let key =
-            submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
-        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
-        let key = large_body_principal_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
-        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
-    }
-}
-
 fn mutate_test_signed_token_verifier(
     state: &mut Arc<AppState>,
     mutate: impl FnOnce(&mut TraceCommonsSignedTokenVerifier),
@@ -6487,38 +6406,6 @@ fn managed_eddsa_signed_claim(sub: &str) -> serde_json::Value {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn test_state_with_options_policies_and_export_guardrails(
-    root: PathBuf,
-    db_mirror: Option<Arc<dyn Database>>,
-    artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
-    db_contributor_reads: bool,
-    db_reviewer_reads: bool,
-    db_replay_export_reads: bool,
-    db_replay_export_require_object_refs: bool,
-    db_audit_reads: bool,
-    tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
-    require_tenant_submission_policy: bool,
-    require_export_guardrails: bool,
-) -> Arc<AppState> {
-    test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
-        root,
-        db_mirror,
-        artifact_store.map(ConfiguredTraceArtifactStore::legacy),
-        db_contributor_reads,
-        db_reviewer_reads,
-        db_replay_export_reads,
-        db_replay_export_require_object_refs,
-        db_audit_reads,
-        false,
-        tenant_policies,
-        require_tenant_submission_policy,
-        require_export_guardrails,
-        false,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn test_state_with_configured_artifact_store_policies_and_export_guardrails(
     root: PathBuf,
     db_mirror: Option<Arc<dyn Database>>,
@@ -6549,315 +6436,6 @@ fn test_state_with_configured_artifact_store_policies_and_export_guardrails(
         false,
         false,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
-    root: PathBuf,
-    db_mirror: Option<Arc<dyn Database>>,
-    artifact_store: Option<ConfiguredTraceArtifactStore>,
-    db_contributor_reads: bool,
-    db_reviewer_reads: bool,
-    db_replay_export_reads: bool,
-    db_replay_export_require_object_refs: bool,
-    db_audit_reads: bool,
-    db_tenant_policy_reads: bool,
-    tenant_policies: BTreeMap<String, TenantSubmissionPolicy>,
-    require_tenant_submission_policy: bool,
-    require_export_guardrails: bool,
-    require_db_mirror_writes: bool,
-    require_derived_export_object_refs: bool,
-) -> Arc<AppState> {
-    let mut tokens = BTreeMap::new();
-    insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
-    insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
-    insert_token(&mut tokens, "tenant-a", "token-a-3", TokenRole::Contributor);
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "review-token-a",
-        TokenRole::Reviewer,
-    );
-    insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
-    // A second admin tenant, used only by the settlement in-process-lock
-    // test. That test must HOLD the settlement lock while calling the
-    // handler, and the lock is process-global and keyed by tenant -- so
-    // holding tenant-a's lock fails every other settlement test that runs in
-    // parallel with it. Giving it its own tenant keeps the contention real
-    // and local.
-    insert_token(
-        &mut tokens,
-        "tenant-lock",
-        "admin-token-lock",
-        TokenRole::Admin,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "export-worker-token-a",
-        TokenRole::ExportWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "retention-worker-token-a",
-        TokenRole::RetentionWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "vector-worker-token-a",
-        TokenRole::VectorWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "benchmark-worker-token-a",
-        TokenRole::BenchmarkWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "utility-worker-token-a",
-        TokenRole::UtilityWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "process-eval-worker-token-a",
-        TokenRole::ProcessEvalWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "revocation-worker-token-a",
-        TokenRole::RevocationWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "competition-read-worker-token-a",
-        TokenRole::CompetitionReadWorker,
-    );
-    insert_token(
-        &mut tokens,
-        "tenant-a",
-        "account-trust-worker-token-a",
-        TokenRole::AccountTrustWorker,
-    );
-    insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
-    insert_token(
-        &mut tokens,
-        "tenant-b",
-        "review-token-b",
-        TokenRole::Reviewer,
-    );
-    insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
-    configure_unbounded_submit_limits_for_test(&tokens);
-    Arc::new(AppState {
-        inference_connection_catalog: Arc::new(Vec::new()),
-        activity_missions_policy: None,
-        credit_estimate_table: Arc::new(
-            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
-        ),
-        credit_settlement_table: None,
-        payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
-        payout_store: None,
-        payout_control_token_hash: None,
-        referral_store: None,
-        referral_config: Default::default(),
-        referral_network_mark_key: None,
-        first_run_estimate: Default::default(),
-        witness_accepted_list_path: None,
-        first_run_copy: Default::default(),
-        first_run_stats: None,
-        witness_blocked: None,
-        root,
-        near_provisioning_enabled: false,
-        near_account_identity: None,
-        near_ai_signup_policy_template: None,
-        near_provisioning_public_origin: None,
-        near_provisioning_admission_ready: false,
-        near_attestation_client: None,
-        near_attestation_key_report_client: None,
-        near_attestation_verification_clock: None,
-        near_ai_introspection_base_url: None,
-        driver_liveness: Arc::new(
-            trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
-        ),
-        tokens: Arc::new(tokens),
-        signed_token_verifier: None,
-        managed_eddsa_keyset_refresh: None,
-        require_eddsa_signed_tokens: false,
-        require_managed_eddsa_signed_tokens: false,
-        require_tenant_access_grants: false,
-        tenant_policies: Arc::new(tenant_policies),
-        require_tenant_submission_policy,
-        db_mirror,
-        pipeline_service: None,
-        pipeline_product: None,
-        pipeline_store: None,
-        pipeline_activation: None,
-        pipeline_qualification: None,
-        pipeline_package_trust: None,
-        pipeline_check_trust: None,
-        pipeline_code_revision_hash: None,
-        pipeline_main_gate: TEST_MAIN_GATE,
-        pipeline_infrastructure_override: None,
-        // The test assemblers build their services with this flag set
-        // (`unqualified_routing_allowed`); a test of production routing
-        // builds its state and its service with it off.
-        pipeline_unqualified_routing: true,
-        pipeline_runtime_selection: PipelineRuntimeSelection::None,
-        pipeline_runtime_required: false,
-        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
-        pipeline_index_rebuilds: Arc::default(),
-        pipeline_default_routing: None,
-        pipeline_worker_pass_stats: Arc::default(),
-        pipeline_worker_concurrency: pipeline_runtime::PIPELINE_WORKER_DEFAULT_CONCURRENCY,
-        pipeline_worker_wake: Arc::default(),
-        db_contributor_reads,
-        db_reviewer_reads,
-        db_reviewer_require_object_refs: false,
-        db_replay_export_reads,
-        db_replay_export_require_object_refs,
-        db_audit_reads,
-        db_tenant_policy_reads,
-        require_db_mirror_writes,
-        require_postgres_trace_rls_ready: false,
-        postgres_runtime_role_sha256: None,
-        require_derived_export_object_refs,
-        object_primary_submit_review: false,
-        object_primary_replay_export: false,
-        object_primary_derived_exports: false,
-        require_db_reconciliation_clean: false,
-        require_export_guardrails,
-        privacy_filter_backend: PrivacyFilterBackendTag::None,
-        require_privacy_filter: false,
-        community_leaderboard_enabled: false,
-        community_snapshot_interval: None,
-        community_analytics_publication_basis:
-            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
-        accept_medium_risk_submissions: false,
-        allow_legacy_segment_resume: false,
-        community_tenant_ids: Arc::new(Vec::new()),
-        tenant_rollout_gates: TraceTenantRolloutGates::default(),
-        max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
-        submit_principal_limits: SubmitPrincipalLimits::default(),
-        large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
-        // The whole budget: fixture principals are shared across parallel
-        // tests, and the focused share tests set their own.
-        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
-        upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
-        submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
-        analytics_min_cell_count: 0,
-        analytics_broad_release_noise: None,
-        analytics_broad_release_privacy_accounting: None,
-        credit_settlement_max_micros_per_account: None,
-        credit_settlement_allowed_policy_versions: Arc::new(BTreeSet::new()),
-        credit_settlement_require_issuer_approval: false,
-        credit_settlement_issuer_approval_max_age: None,
-        credit_settlement_require_central_issuer_profile: false,
-        credit_settlement_central_issuer_principal_refs: Arc::new(BTreeSet::new()),
-        credit_settlement_require_rollout_smoke_ready: false,
-        credit_settlement_near_contract_id: None,
-        credit_settlement_require_near_contract: false,
-        submission_quota: TraceSubmissionQuotaConfig::default(),
-        legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
-        artifact_store,
-        require_object_store_versioning: false,
-        near_credit_submitter: None,
-        near_credit_submitter_timeout_ms: None,
-        near_credit_submitter_auth_configured: false,
-        near_credit_confirmer: None,
-        near_credit_confirmer_timeout_ms: None,
-        near_credit_confirmer_auth_configured: false,
-        near_credit_require_adapter_auth: false,
-        near_settlement_mode: NearSettlementMode::Http,
-        near_credit_outbox_scheduler: None,
-        benchmark_registry_submitter: None,
-        benchmark_registry_submitter_timeout_ms: None,
-        benchmark_registry_submitter_auth_configured: false,
-        benchmark_registry_confirmer: None,
-        benchmark_registry_confirmer_timeout_ms: None,
-        benchmark_registry_confirmer_auth_configured: false,
-        benchmark_registry_require_adapter_auth: false,
-        benchmark_evaluator: None,
-        benchmark_evaluator_timeout_ms: None,
-        process_evaluator: None,
-        process_evaluator_timeout_ms: None,
-        remote_object_deleter: None,
-        remote_object_deleter_timeout_ms: None,
-        require_external_remote_object_deleter: false,
-        worker_cache_invalidator: None,
-        worker_cache_invalidator_timeout_ms: None,
-        require_external_worker_cache_invalidator: false,
-        vector_embedder: None,
-        vector_embedder_timeout_ms: None,
-        require_external_vector_embedder: false,
-        vector_searcher: None,
-        vector_searcher_timeout_ms: None,
-        require_external_vector_searcher: false,
-        export_job_scheduler: None,
-        retention_maintenance_scheduler: None,
-        vector_index_scheduler: None,
-        perplexity_score_driver: None,
-        pii_backstop_driver: None,
-        witness_bypass: None,
-        witness_capture_pin: None,
-        admission: None,
-        account_admission: None,
-        client_upload_trust_database: None,
-        account_trust_shadow_policy: None,
-        near_ai_starter_mode: starter_advance::StarterMode::Disabled,
-        account_trust_applied_policy: None,
-        account_trust_scheduler: None,
-        benchmark_registry_scheduler: None,
-        benchmark_pipeline_scheduler: None,
-        credit_cycle_scheduler: None,
-        credit_settlement_scheduler: None,
-        process_evaluation_scheduler: None,
-        revocation_propagation_scheduler: None,
-        community_snapshot_invalidation_scheduler: None,
-        ranking_calibration_max_age: None,
-        ranking_require_calibration_dataset_registry: false,
-        ranking_require_active_calibration_dataset: false,
-        ranking_require_server_feature_provenance: false,
-        ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
-        ranking_max_average_absolute_error_micros:
-            TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
-        ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
-        ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
-        ranking_min_pairwise_label_count: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
-        ranking_min_pairwise_accuracy_micros: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
-        ranking_max_labeler_issue_rate_micros: None,
-        ranking_min_labeler_reliability_label_count: None,
-        gate_service: Arc::new(InMemoryGateService::new(
-            "in_memory_default",
-            "sha256:in_memory_default",
-        )),
-        revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
-        novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
-        novelty_utility_require_production_gate: false,
-        novelty_utility_settle_from: None,
-        scoring_driver_credit_issuer_principal_ref: None,
-        account_ceremony_store: Arc::new(CeremonyStore::new()),
-        account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
-        account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
-        account_near_config: None,
-        attestation_signing: None,
-        legacy_invite_link: None,
-        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-        dedup_vector_index: None,
-        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-        dedup_vector_index_id_map: Arc::new(
-            std::sync::Mutex::new(std::collections::HashMap::new()),
-        ),
-        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-        dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        near_access_key_checker_override: None,
-    })
 }
 
 fn test_artifact_store(root: &Path) -> Arc<LocalEncryptedTraceArtifactStore> {
@@ -6894,16 +6472,6 @@ fn count_files_under_dir(root: &Path) -> usize {
         .sum()
 }
 
-fn auth_headers(token: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    let value = format!("Bearer {token}");
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&value).expect("valid auth header"),
-    );
-    headers
-}
-
 const SUBMIT_RATE_LIMIT_TOKEN_A: &str = "submit-rate-limit-token-a";
 const SUBMIT_RATE_LIMIT_TOKEN_B: &str = "submit-rate-limit-token-b";
 
@@ -6924,16 +6492,6 @@ fn submit_rate_limit_test_state(root: PathBuf) -> Arc<AppState> {
     let mut state = test_state(root);
     Arc::make_mut(&mut state).tokens = Arc::new(tokens);
     state
-}
-
-fn submit_rate_limit_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-async fn reset_account_rate_limiter_for_db_test() {
-    let _lock = submit_rate_limit_test_lock().lock().await;
-    reset_account_rate_limiter_for_test();
 }
 
 fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
@@ -7880,45 +7438,6 @@ async fn sample_envelope() -> TraceContributionEnvelope {
     sample_envelope_with_user_input("Please inspect the workspace").await
 }
 
-async fn sample_envelope_with_user_input(content: &str) -> TraceContributionEnvelope {
-    let trace = TraceFile {
-        model_name: "test-model".to_string(),
-        memory_snapshot: Vec::new(),
-        http_exchanges: Vec::new(),
-        steps: vec![TraceStep {
-            request_hint: None,
-            response: TraceResponse::UserInput {
-                content: content.to_string(),
-            },
-            expected_tool_results: Vec::new(),
-            timestamp: None,
-        }],
-    };
-    let raw = trace_commons_protocol::trace_contribution::RawTraceContribution::from_recorded_trace(
-        &trace,
-        RecordedTraceContributionOptions {
-            include_message_text: true,
-            pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
-            tenant_scope_ref: Some("tenant_sha256:client".to_string()),
-            ..Default::default()
-        },
-    );
-    DeterministicTraceRedactor::default()
-        .redact_trace(raw)
-        .await
-        .expect("redaction should succeed")
-}
-
-fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
-    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-    envelope.consent.message_text_included = false;
-    envelope.consent.tool_payloads_included = false;
-    for event in &mut envelope.events {
-        event.redacted_content = None;
-        event.structured_payload = serde_json::Value::Null;
-    }
-}
-
 /// Give a metadata-only envelope a distinguishing feature that is NOT message
 /// text, so two otherwise-identical Low-risk fixtures stay distinct without
 /// either of them acquiring content that would classify them Medium.
@@ -7998,17 +7517,6 @@ async fn submit_accepts_reduced_training_dynamics() {
             StatusCode::BAD_REQUEST,
             "reduced signals were rejected by envelope validation"
         );
-    }
-}
-
-fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
-    for event in &mut envelope.events {
-        if event.event_type
-            == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
-        {
-            event.redacted_content = Some(content.to_string());
-            return;
-        }
     }
 }
 
@@ -14456,40 +13964,6 @@ const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
 /// (its default).
 const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
-/// `main`'s default index-insert threshold
-/// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`), as the assembly tests
-/// hand it to the runtime.
-const TEST_EMBED_INSERT_NOVELTY_MICROS: u64 = 50_000;
-
-/// `main`'s gate configuration the assembly tests hand the runtime: `main`'s
-/// defaults, the floors `CompatibilityAssembler` builds with, and no
-/// `NoveltyUtility` delta.
-const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(2_000_000),
-        tail_fraction_floor_micros: Some(0),
-        novelty_floor_micros: Some(500_000),
-        embed_insert_novelty_micros: TEST_EMBED_INSERT_NOVELTY_MICROS,
-        top_k: 5,
-        chunk_target_tokens: 2048,
-        chunk_max_tokens: 3072,
-        chunk_cap: 16,
-        chunk_min_tokens: 64,
-        novelty_utility_microcredits: 0,
-        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
-    };
-
-/// The `main` gate configuration `config` holds, for a test assembler that
-/// builds `config` itself.
-fn main_gate_of(
-    config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
-) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    // The configuration's own inverse, every field included: a hand-copied
-    // field list here dropped the credit rule once, and the production
-    // corpus harness then refused a graded package (stage 2, 2026-11-03).
-    config.main_gate()
-}
-
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
 /// injected adapter pays (`http`), and no adapter credential is required.
 const TEST_NEAR_PAYOUT_CONTROLS: PipelineNearPayoutControls = PipelineNearPayoutControls {
@@ -16129,7 +15603,13 @@ async fn tenant_policy_blocks_privileged_revocation_but_not_owner_revocation() {
     let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
         .expect("submission record reads")
         .expect("submission record exists");
-    record.auth_principal_ref = legacy_principal_ref();
+    record.auth_principal_ref = state
+        .tokens
+        .get("token-a")
+        .expect("owner credential")
+        .legacy_principal_ref
+        .clone()
+        .expect("same-credential historical alias");
     write_submission_record(temp.path(), &record)
         .expect("legacy-principal submission record writes");
 
@@ -31370,7 +30850,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
 }
 
 #[tokio::test]
-async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
+async fn maintenance_legal_hold_preserves_expired_payload_without_exporting_it() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
@@ -31409,6 +30889,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         witness_accepted_list_path: None,
+        witness_accepted_list_directory: None,
+        witness_configuration_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         witness_blocked: None,
@@ -31658,8 +31140,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         }),
     )
     .await
-    .expect("legal-hold trace remains exportable while held");
-    assert_eq!(export.item_count, 1);
+    .expect("legal hold preserves the payload without extending export eligibility");
+    assert_eq!(export.item_count, 0);
 }
 
 #[tokio::test]
@@ -32089,6 +31571,59 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
             .unwrap();
     }
 
+    // Two submissions that earn nothing, so the evaluate summary names why:
+    // one accepted with credit whose gate decision came from a pipeline
+    // bundle the legacy allowlist does not name, and one accepted by status
+    // alone (no credit row) under a policy that does not read that source.
+    let pipeline_evaluator = format!("pipeline:sha256:{}", "b".repeat(64));
+    for (gate_version, credited) in [(pipeline_evaluator.as_str(), true), ("gate-v1", false)] {
+        let at = Utc::now() - chrono::Duration::days(10);
+        let submission = Uuid::new_v4();
+        let trace = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+                    schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+                    redaction_pipeline_version,redaction_hash,received_at)
+                 VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5,$6)",
+                &[&tenant, &submission, &trace, &owner, &"a".repeat(64), &at],
+            )
+            .await
+            .unwrap();
+        if credited {
+            admin
+                .execute(
+                    "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                        credit_account_ref,event_type,points_delta,reason,actor_principal_ref,
+                        actor_role,settlement_state,occurred_at)
+                     VALUES($1,$2,$3,$4,'fixture','accepted','0','fixture',$5,'system','pending',$6)",
+                    &[&tenant, &Uuid::new_v4(), &submission, &trace, &owner, &at],
+                )
+                .await
+                .unwrap();
+        }
+        admin
+            .execute(
+                "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                    gate_policy_version,gate_version_hash,perplexity_micros,tail_fraction_micros,
+                    perplexity_passed,novelty_score_micros,nearest_neighbor_hash,novelty_passed,
+                    embedding_evidence_hash,attestation_chain_hash,decided_at,dedup_cluster_id,
+                    dedup_signal_version)
+                 VALUES($1,$2,$3,$4,$5,1,1,TRUE,1,$5,TRUE,$5,$5,$6,$7,'events.v2+simhash.v2')",
+                &[
+                    &tenant,
+                    &Uuid::new_v4(),
+                    &submission,
+                    &gate_version,
+                    &"a".repeat(64),
+                    &at,
+                    &Uuid::new_v4(),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
     // A policy version unique to this run, so the drill checks only its rows.
     let version = format!("e2e-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let policy = serde_json::json!({
@@ -32181,6 +31716,31 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
     assert_eq!(status, StatusCode::OK, "{evaluated}");
     assert_eq!(evaluated["mode"], "shadow");
     assert!(evaluated["tier_distribution"]["1"].as_u64().unwrap_or(0) >= 1);
+    // The run scans every tenant's accounts, so other tests' rows may add to
+    // these totals: assert a floor, not an exact value.
+    let rejections = &evaluated["rejections"];
+    assert!(
+        rejections["evaluator_not_allowlisted"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "{evaluated}"
+    );
+    assert!(
+        rejections["no_qualifying_acceptance"].as_u64().unwrap_or(0) >= 1,
+        "{evaluated}"
+    );
+    for label in [
+        "dedup_version_not_allowlisted",
+        "not_first_in_cluster",
+        "gate_failed",
+        "quality_below_min",
+        "approver_unknown",
+        "gate_facts_dedup_unstamped",
+    ] {
+        assert!(rejections[label].is_u64(), "{label}: {evaluated}");
+    }
+    assert!(!evaluated.to_string().contains(&pipeline_evaluator));
     for body in [&recorded, &evaluated] {
         let text = body.to_string();
         assert!(!text.contains(&tenant) && !text.contains(&account.to_string()));
@@ -72038,32 +71598,6 @@ fn target_abac_rejects_policy_write_exceeding_tenant_policy() {
 // Gate-evaluation worker route (POST /v1/workers/gate/evaluate)
 // -----------------------------------------------------------------------
 
-/// Build a service-owned-remote artifact store whose backing provider is a
-/// fresh on-disk directory + a local-master KEK. This is the only
-/// configured artifact store shape that produces v2 (KEK-wrapped) artifacts
-/// the gate worker is allowed to read; the file-system provider keeps the
-/// fixture self-contained without standing up a real remote.
-fn fixture_gate_worker_artifact_store(
-    artifact_root: &Path,
-) -> (ConfiguredTraceArtifactStore, String) {
-    let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
-    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
-    let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
-    let kek_crypto = SecretsCrypto::new(SecretString::from(key)).expect("fixture kek crypto");
-    let kek = LocalMasterKeyWrapper::new(kek_crypto, "trace-commons-gate-worker-test-v1");
-    let provider_config = TraceArtifactProviderConfig::service_owned_remote(object_store.clone())
-        .expect("provider config");
-    let provider = FileRemoteTraceArtifactProvider::new(artifact_root.to_path_buf());
-    let store = Arc::new(ServiceOwnedTraceArtifactStore::new(
-        provider_config,
-        crypto,
-        kek,
-        provider,
-    ));
-    let configured = ConfiguredTraceArtifactStore::new(object_store.clone(), store);
-    (configured, object_store)
-}
-
 /// Seed: insert a submission row, write a v2 KEK-wrapped envelope into the
 /// configured artifact store, then register an active object ref pointing
 /// at it. Returns the submission_id for downstream worker calls.
@@ -81651,8 +81185,8 @@ fn submission_record_with_principal(auth_principal_ref: &str) -> TraceCommonsSub
 }
 
 /// (a) An account set of {principal_a} sees ONLY principal_a's record — not
-/// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
-/// the legacy reviewer/contributor surface honours. Pure set membership.
+/// principal_b's, and crucially NOT unknown `legacy_principal_ref()` ownership.
+/// Pure set membership, without the reviewer surface's privileged access.
 #[test]
 fn visible_for_account_is_set_membership_only_no_legacy_wildcard() {
     let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
@@ -82079,52 +81613,6 @@ async fn serve_ingest_for_test(
         let _ = axum::serve(listener, app(state)).await;
     });
     (addr, server)
-}
-
-/// Send an upload's headers, declaring a body that is never sent. A handler
-/// that polls the body waits on it; one that answers first does so without it.
-async fn send_upload_headers_without_body(
-    addr: std::net::SocketAddr,
-    method: &str,
-    path: &str,
-    bearer: Option<&str>,
-) -> tokio::net::TcpStream {
-    use tokio::io::AsyncWriteExt;
-
-    let mut stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .expect("connects to the test server");
-    let authorization = bearer
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
-    stream
-        .write_all(
-            format!(
-                "{method} {path} HTTP/1.1\r\nHost: ingest.test\r\n{authorization}\
-                 Content-Type: application/json\r\nContent-Length: 1024\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await
-        .expect("request headers write");
-    stream
-}
-
-/// The status line of the response, or `None` if the server has not answered
-/// within `wait`.
-async fn response_status_within(
-    stream: &mut tokio::net::TcpStream,
-    wait: StdDuration,
-) -> Option<String> {
-    use tokio::io::AsyncReadExt;
-
-    let mut buffer = vec![0u8; 64];
-    let read = tokio::time::timeout(wait, stream.read(&mut buffer))
-        .await
-        .ok()?
-        .expect("response reads");
-    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
-    text.lines().next().map(str::to_owned)
 }
 
 /// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
@@ -84256,9 +83744,6 @@ async fn session_kind_and_credential(
 // replaced by the `#[cfg(test)]` `near_access_key_checker_override` seam so no
 // live NEAR node is required.
 // ============================================================================
-
-/// The NEP-413 recipient the test NEAR config binds challenges to.
-const NEAR_TEST_RECIPIENT: &str = "app.tracecommons.test";
 
 /// Stub `NearAccessKeyChecker` that returns a fixed verdict (or an error) for the
 /// binding check, so the enroll-finish handler is exercisable without a live RPC.
@@ -97652,27 +97137,15 @@ mod witness_bypass {
 // ---------------------------------------------------------------------
 
 mod witness_receipt {
+    use super::witness_receipt_fixture::*;
+    pub(super) use super::witness_receipt_fixture::{certificate_for_policy, signing_address};
     use super::*;
     use axum::body::Body;
-    use k256::ecdsa::SigningKey;
-    use sha3::Keccak256;
     use tower::ServiceExt;
     use trace_commons_server::redaction_witness::config::witness_bypass_config_from_values;
     use trace_commons_server::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
 
-    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
     const ALIAS: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
-
-    fn signing_key() -> SigningKey {
-        let bytes = Keccak256::digest(b"witness-receipt-test-witness");
-        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
-    }
-
-    pub(super) fn signing_address() -> String {
-        let point = signing_key().verifying_key().to_encoded_point(false);
-        let digest = Keccak256::digest(&point.as_bytes()[1..]);
-        format!("0x{}", hex::encode(&digest[12..]))
-    }
 
     /// A certificate over `body`, encoded exactly as the witness service's
     /// route serves it, plus its signature.
@@ -97681,20 +97154,6 @@ mod witness_receipt {
     /// key, so nothing here can pass by a fixture agreeing with a bug.
     fn certificate_over(body: &[u8], verdict: &str) -> (String, String) {
         certificate_for_policy(body, verdict, ALIAS)
-    }
-    pub(super) fn certificate_for_policy(
-        body: &[u8],
-        verdict: &str,
-        policy: &str,
-    ) -> (String, String) {
-        let json = serde_json::json!({
-            "redacted_sha256": hex::encode(sha2::Sha256::digest(body)),
-            "residual_risk_verdict": verdict,
-            "redaction_policy_version": policy,
-            "witness_measurement": MEASUREMENT,
-            "timestamp": chrono::Utc::now().timestamp(),
-        });
-        sign_certificate_json(json)
     }
 
     fn certificate_v2_over(body: &[u8]) -> (String, String) {
@@ -97721,36 +97180,6 @@ mod witness_receipt {
             ).unwrap(),
         });
         sign_certificate_json(json)
-    }
-
-    fn sign_certificate_json(json: serde_json::Value) -> (String, String) {
-        let encoded = serde_json::to_string(&json).expect("the certificate serialises");
-
-        // Sign the same way the enclave does: the decoder rebuilds the
-        // certificate and the signature must recover over ITS signing bytes,
-        // so this goes through the decoder rather than reconstructing them.
-        let mut headers = HeaderMap::new();
-        headers.insert(CERTIFICATE_HEADER, encoded.parse().expect("a header value"));
-        headers.insert(SIGNATURE_HEADER, "0x00".parse().expect("a header value"));
-        let (certificate, _) =
-            trace_commons_server::redaction_witness::request::witness_headers(&headers)
-                .expect("the fixture certificate decodes")
-                .expect("both headers are present");
-
-        let message = certificate.signing_bytes();
-        let mut hasher = Keccak256::new();
-        hasher.update(b"\x19Ethereum Signed Message:\n");
-        hasher.update(message.len().to_string().as_bytes());
-        hasher.update(&message);
-        let (signature, recovery) = signing_key()
-            .sign_prehash_recoverable(&hasher.finalize())
-            .expect("prehash signs");
-        let signature_hex = format!(
-            "0x{}{:02x}",
-            hex::encode(signature.to_bytes()),
-            recovery.to_byte() + 27
-        );
-        (encoded, signature_hex)
     }
 
     /// A state with the bypass pinned AND the backstop driver enabled, which
@@ -99868,20 +99297,6 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
 
-/// The migrated PostgreSQL the two ignored ceremony suites below share.
-#[path = "migrated_pg_fixture.rs"]
-mod migrated_pg_fixture;
-
-/// The NEAR AI enrollment ceremony, both halves, over a real PostgreSQL.
-///
-/// **The module name is load-bearing.** The `postgres-suites` job selects this
-/// suite with `cargo test -p trace-commons-server --lib
-/// nearai_ceremony_pg_tests -- --ignored`, a substring match on the test path. A rename that does not
-/// change the workflow leaves these tests reporting `ignored` forever, which
-/// is the failure mode that step exists to prevent.
-#[path = "nearai_ceremony_pg_tests.rs"]
-mod nearai_ceremony_pg_tests;
-
 /// F10, changing an account's NEAR AI login, against PostgreSQL. Selected in
 /// CI by `near_ai_rebind_pg_tests -- --ignored`, like the two suites above.
 #[path = "near_ai_rebind_pg_tests.rs"]
@@ -99894,7 +99309,7 @@ mod wallet_v2_pg_tests;
 /// Spec section 3D acceptance: a receipt through the real HTTP router, auth,
 /// and worker, surviving a crash and restart. Nested here (not declared
 /// directly in `trace-commons-ingest.rs`) for the same reason as
-/// `admission_pg_tests` and `nearai_ceremony_pg_tests` above: it reuses this
+/// `admission_pg_tests` above: it reuses this
 /// module's private test-state and fixture helpers, which are visible only
 /// to `tests`'s descendants.
 #[path = "pipeline_http_pg_tests.rs"]
@@ -100209,8 +99624,6 @@ async fn a_staging_build_never_offers_wallet_provisioning() {
         assert_eq!(body["ready"], false);
     }
 }
-
-include!("token_bundle_journey_test.rs");
 
 fn withdrawal_credit_event(
     submission_id: Uuid,
@@ -103267,13 +102680,17 @@ mod witness_accepted_list_tests {
     };
 
     async fn get_list(state: Arc<AppState>) -> axum::response::Response {
+        get_list_at(state, "/v1/public/witness-accepted-list").await
+    }
+
+    async fn get_list_at(state: Arc<AppState>, uri: &str) -> axum::response::Response {
         app(state)
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
                     // The literal, so the route inventory's `^/v1/public/`
                     // rule is the one that classifies it.
-                    .uri("/v1/public/witness-accepted-list")
+                    .uri(uri)
                     .body(Body::empty())
                     .expect("request builds"),
             )
@@ -103283,6 +102700,10 @@ mod witness_accepted_list_tests {
 
     /// A list signed with a throwaway key made here; never a real key.
     fn signed_list(version: u64) -> Vec<u8> {
+        signed_list_for(version, "https://witness.example")
+    }
+
+    fn signed_list_for(version: u64, witness_url: &str) -> Vec<u8> {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
@@ -103290,7 +102711,7 @@ mod witness_accepted_list_tests {
             schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
             version,
             issued_at: chrono::Utc::now(),
-            witness_url: "https://witness.example".into(),
+            witness_url: witness_url.into(),
             entries: vec![AcceptedEntry {
                 measurements: format!("mrtd={}", "aa".repeat(48)),
                 signing_address: format!("0x{}", "11".repeat(20)),
@@ -103404,6 +102825,476 @@ mod witness_accepted_list_tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), second.as_slice());
+    }
+
+    const LEGACY_FILE: &str =
+        "0e7c422b71d746acc93644f48a5c0f036c04dc0463f24b6e91130a69b5e593e9.json";
+    const NEW_FILE: &str = "dee9e24acd9bc27323748bf363040752a27c9d82cf7b0b0b5f23744dd60d0a30.json";
+    const LEGACY_QUERY: &str =
+        "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness.example";
+    const NEW_QUERY: &str =
+        "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness-new.example";
+
+    fn state_serving_directory(
+        path: Option<std::path::PathBuf>,
+        directory: &std::path::Path,
+    ) -> Arc<AppState> {
+        let mut state = state_serving(path);
+        Arc::make_mut(&mut state).witness_accepted_list_directory =
+            Some(Arc::new(directory.to_path_buf()));
+        state
+    }
+
+    #[tokio::test]
+    async fn explicit_urls_select_independent_signed_files_and_unqualified_stays_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_list(1);
+        let old_dedicated = signed_list(2);
+        let new = signed_list_for(1, "https://witness-new.example");
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        std::fs::write(dir.path().join(LEGACY_FILE), &old_dedicated).unwrap();
+        std::fs::write(dir.path().join(NEW_FILE), &new).unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        for (uri, expected) in [
+            ("/v1/public/witness-accepted-list", &legacy),
+            (LEGACY_QUERY, &old_dedicated),
+            (NEW_QUERY, &new),
+            (
+                "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness-new.example%2F%2F",
+                &new,
+            ),
+        ] {
+            let response = get_list_at(Arc::clone(&state), uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body.as_ref(), expected.as_slice());
+        }
+        // A directory alone must not change the legacy route's 404 behavior.
+        let response = get_list(state_serving_directory(None, dir.path())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn legacy_fallback_requires_the_requested_witness_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_list(1);
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        // Exercise both absence of the directory setting and absence of a
+        // dedicated file in a configured directory.
+        for state in [
+            state_serving(Some(legacy_path.clone())),
+            state_serving_directory(Some(legacy_path), dir.path()),
+        ] {
+            let response = get_list_at(Arc::clone(&state), LEGACY_QUERY).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                legacy.as_slice()
+            );
+            let response = get_list_at(state, NEW_QUERY).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                label_of(response).await,
+                witness_accepted_list::LABEL_NOT_PUBLISHED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_witness_or_malformed_dedicated_files_never_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(
+            &legacy_path,
+            signed_list_for(1, "https://witness-new.example"),
+        )
+        .unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        for document in [signed_list(1), b"malformed".to_vec()] {
+            std::fs::write(dir.path().join(NEW_FILE), document).unwrap();
+            let response = get_list_at(Arc::clone(&state), NEW_QUERY).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                label_of(response).await,
+                witness_accepted_list::LABEL_UNAVAILABLE
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_selected_file_never_falls_back_to_a_matching_legacy_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(&legacy_path, signed_list(1)).unwrap();
+        // A directory at the selected file path cannot be read as JSON on
+        // any supported platform, without relying on user-specific mode bits.
+        std::fs::create_dir(dir.path().join(LEGACY_FILE)).unwrap();
+        let response = get_list_at(
+            state_serving_directory(Some(legacy_path), dir.path()),
+            LEGACY_QUERY,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            label_of(response).await,
+            witness_accepted_list::LABEL_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_oversize_queries_are_fixed_bad_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(&legacy_path, signed_list(1)).unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        let mut queries = vec![
+            "witness_url=".to_string(),
+            "&".into(),
+            "witness_url=..%2F..%2Flegacy.json".into(),
+            "witness_url=http%3A%2F%2Fwitness.example".into(),
+            "witness_url=https%3A%2F%2Fu%3Ap%40witness.example".into(),
+            "witness_url=https%3A%2F%2F%40witness.example".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%23fragment".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%3Fx%3Dy".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%5Cother".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%0A".into(),
+            "witness_url=https%3A%2F%2F".into(),
+            "witness_url=https%3A%2F%2F%2Fwitness.example".into(),
+            "witness_url=%GG".into(),
+            "witness_url=%FF".into(),
+            "witness_url=%".into(),
+            "witness_url=https%3A%2F%2Fwitness.example&witness_url=https%3A%2F%2Fwitness-new.example".into(),
+            "unexpected=value".into(),
+        ];
+        queries.push(format!(
+            "witness_url=https%3A%2F%2Fwitness.example%2F{}",
+            "x".repeat(2048)
+        ));
+        queries.push(format!("witness_url={}", "%61".repeat(2049)));
+        queries.push(format!("witness_url={}", "%61".repeat(4096)));
+        for query in queries {
+            let uri = format!("/v1/public/witness-accepted-list?{query}");
+            let response = get_list_at(Arc::clone(&state), &uri).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                label_of(response).await,
+                "witness_accepted_list_query_invalid"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn both_legacy_and_dedicated_reads_keep_the_document_size_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let mut bytes = signed_list(1);
+        // Trailing whitespace leaves valid JSON, so the byte bound itself
+        // must refuse this otherwise well-formed signed document.
+        bytes.resize(
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_MAX_BYTES,
+            b' ',
+        );
+        let state = state_serving_directory(Some(legacy_path.clone()), dir.path());
+        for (extra, expected) in [
+            (false, StatusCode::OK),
+            (true, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            if extra {
+                bytes.push(b' ');
+            }
+            std::fs::write(&legacy_path, &bytes).unwrap();
+            std::fs::write(dir.path().join(LEGACY_FILE), &bytes).unwrap();
+            for uri in ["/v1/public/witness-accepted-list", LEGACY_QUERY] {
+                let response = get_list_at(Arc::clone(&state), uri).await;
+                assert_eq!(response.status(), expected);
+                if expected == StatusCode::OK {
+                    assert_eq!(
+                        to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .unwrap()
+                            .as_ref(),
+                        bytes.as_slice()
+                    );
+                } else {
+                    assert_eq!(
+                        label_of(response).await,
+                        witness_accepted_list::LABEL_UNAVAILABLE
+                    );
+                }
+            }
+        }
+    }
+}
+
+mod witness_configuration_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+    use tower::ServiceExt;
+    use trace_commons_protocol::witness_accepted_list::{
+        AcceptedEntry, AcceptedList, ListSignature, WITNESS_ACCEPTED_LIST_SCHEMA,
+        assemble_signed_list, key_id_for,
+    };
+    use trace_commons_protocol::witness_configuration::{
+        WITNESS_CONFIGURATION_MAX_BYTES, WITNESS_CONFIGURATION_SCHEMA, WitnessConfiguration,
+        WitnessEndpoint,
+    };
+
+    async fn get_at(state: Arc<AppState>, uri: &str) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_configuration(state: Arc<AppState>) -> axum::response::Response {
+        get_at(state, "/v1/public/witness-configuration").await
+    }
+
+    fn entry() -> AcceptedEntry {
+        let now = chrono::Utc::now();
+        AcceptedEntry {
+            measurements: format!("mrtd={}", "aa".repeat(48)),
+            signing_address: format!("0x{}", "11".repeat(20)),
+            not_before: now,
+            not_after: now + chrono::Duration::days(30),
+            commit: None,
+        }
+    }
+
+    // All keys and URLs are synthetic; no operational key enters this fixture.
+    fn sign_payload(payload: String) -> Vec<u8> {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let signature = ListSignature {
+            key_id: key_id_for(&public),
+            signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+        };
+        assemble_signed_list(payload, vec![signature])
+    }
+
+    fn signed_configuration(version: u64) -> Vec<u8> {
+        sign_payload(
+            WitnessConfiguration {
+                schema: WITNESS_CONFIGURATION_SCHEMA.into(),
+                version,
+                issued_at: chrono::Utc::now(),
+                enrollment_urls: vec![
+                    "https://witness.example".into(),
+                    "https://new-witness.example".into(),
+                ],
+                endpoints: vec![WitnessEndpoint {
+                    url: "https://new-witness.example".into(),
+                    entries: vec![entry()],
+                }],
+            }
+            .canonical_payload()
+            .unwrap(),
+        )
+    }
+
+    fn signed_v1_list() -> Vec<u8> {
+        sign_payload(
+            AcceptedList {
+                schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+                version: 1,
+                issued_at: chrono::Utc::now(),
+                witness_url: "https://witness.example".into(),
+                entries: vec![entry()],
+            }
+            .canonical_payload()
+            .unwrap(),
+        )
+    }
+
+    fn state_serving(path: Option<PathBuf>) -> Arc<AppState> {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).witness_configuration_path = path.map(Arc::new);
+        state
+    }
+
+    async fn assert_error(response: axum::response::Response, status: StatusCode, label: &str) {
+        assert_eq!(response.status(), status);
+        let body = to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], label);
+        assert!(!body.windows(7).any(|bytes| bytes == b"payload"));
+    }
+
+    #[test]
+    fn the_route_literal_is_the_protocol_path() {
+        assert_eq!(
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_PATH,
+            "/v1/public/witness-configuration"
+        );
+    }
+
+    #[test]
+    fn absent_or_blank_configuration_path_is_unconfigured() {
+        for value in [None, Some(""), Some(" \t\n")] {
+            assert!(witness_configuration::path_from_value(value).is_none());
+        }
+        assert_eq!(
+            witness_configuration::path_from_value(Some(" /srv/configuration.json "))
+                .as_deref()
+                .map(PathBuf::as_path),
+            Some(Path::new("/srv/configuration.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_configuration_setting_returns_fixed_public_404() {
+        assert_error(
+            get_configuration(state_serving(None)).await,
+            StatusCode::NOT_FOUND,
+            witness_configuration::LABEL_NOT_PUBLISHED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn configured_missing_unreadable_unsigned_corrupt_or_oversized_files_return_fixed_503() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        let state = state_serving(Some(path.clone()));
+        assert_error(
+            get_configuration(Arc::clone(&state)).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            witness_configuration::LABEL_UNAVAILABLE,
+        )
+        .await;
+        assert_error(
+            get_configuration(state_serving(Some(dir.path().to_path_buf()))).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            witness_configuration::LABEL_UNAVAILABLE,
+        )
+        .await;
+
+        let mut unsigned: serde_json::Value =
+            serde_json::from_slice(&signed_configuration(1)).unwrap();
+        unsigned["signatures"] = serde_json::json!([]);
+        let bare = unsigned["payload"].as_str().unwrap().as_bytes().to_vec();
+        let mut oversized = signed_configuration(2);
+        oversized.resize(WITNESS_CONFIGURATION_MAX_BYTES + 1, b' ');
+        for body in [
+            b"not JSON".to_vec(),
+            serde_json::to_vec(&unsigned).unwrap(),
+            bare,
+            signed_v1_list(),
+            oversized,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_error(
+                get_configuration(Arc::clone(&state)).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                witness_configuration::LABEL_UNAVAILABLE,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_is_byte_exact_and_updates_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        // Whitespace in the envelope demonstrates the route never reserializes.
+        let value: serde_json::Value = serde_json::from_slice(&signed_configuration(1)).unwrap();
+        let mut first = serde_json::to_vec_pretty(&value).unwrap();
+        first.extend_from_slice(b"\n\n");
+        std::fs::write(&path, &first).unwrap();
+        let state = state_serving(Some(path.clone()));
+        let response = get_configuration(Arc::clone(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for (header, expected) in [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ] {
+            assert_eq!(response.headers().get(header).unwrap(), expected);
+        }
+        assert_eq!(
+            to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                .await
+                .unwrap()
+                .as_ref(),
+            first.as_slice()
+        );
+
+        let second = signed_configuration(2);
+        let replacement = dir.path().join("replacement.json");
+        std::fs::write(&replacement, &second).unwrap();
+        std::fs::rename(replacement, path).unwrap();
+        let response = get_configuration(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                .await
+                .unwrap()
+                .as_ref(),
+            second.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_is_public_even_when_ingest_controls_are_required_and_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        std::fs::write(&path, signed_configuration(1)).unwrap();
+        let mut state = state_serving(Some(path));
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.require_tenant_access_grants = true;
+        state_mut.require_eddsa_signed_tokens = true;
+        state_mut.require_db_mirror_writes = true;
+        state_mut.require_postgres_trace_rls_ready = true;
+        state_mut.require_privacy_filter = true;
+        // No bearer, cookie or tenant context is supplied.
+        assert_eq!(get_configuration(state).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn configuration_and_legacy_v1_routes_publish_independent_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let configuration_path = dir.path().join("configuration.json");
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_v1_list();
+        let configuration = signed_configuration(1);
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        std::fs::write(&configuration_path, &configuration).unwrap();
+        let mut state = state_serving(Some(configuration_path));
+        Arc::make_mut(&mut state).witness_accepted_list_path = Some(Arc::new(legacy_path));
+        for (uri, expected) in [
+            ("/v1/public/witness-configuration", &configuration),
+            ("/v1/public/witness-accepted-list", &legacy),
+            (
+                "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness.example",
+                &legacy,
+            ),
+        ] {
+            let response = get_at(Arc::clone(&state), uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected.as_slice()
+            );
+        }
     }
 }
 

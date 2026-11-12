@@ -42,6 +42,7 @@
 //! in this module may say "verifiable against source".
 
 pub mod accepted_list;
+pub mod configuration;
 pub mod inference_record;
 pub mod status;
 #[cfg(test)]
@@ -190,8 +191,9 @@ pub enum WitnessTrustError {
         control: &'static str,
         reported: Option<String>,
     },
-    /// The contribution is larger than this client will send. Refused
-    /// locally, before anything is offered.
+    /// The contribution is larger than this client will send, refused
+    /// locally before anything is offered, or larger than the witness
+    /// accepts (`413 witness_request_too_large`).
     #[error("the contribution is larger than the witness path will carry")]
     WitnessPayloadTooLarge,
     /// The certificate's digest does not cover the bytes the witness
@@ -202,12 +204,16 @@ pub enum WitnessTrustError {
     /// The certificate's signature does not recover to the pinned address.
     #[error("the witness certificate did not verify")]
     WitnessCertificateUnverified,
-    /// A witness response could not be read as a certificate and an envelope.
+    /// A witness response could not be read as a certificate and an envelope,
+    /// or the witness refused with a client error this build does not
+    /// recognise. A witness that cannot serve is [`Self::WitnessUnreachable`].
     #[error("the witness response was malformed")]
     WitnessResponseMalformed,
     /// The witness declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
-    /// what that deployment accepts.
+    /// what that deployment accepts. Also the witness's own attested-inference
+    /// refusals (`403 witness_inference_*`): a receipt missing, unverified or
+    /// too large for its policy is the same decision.
     ///
     /// A decision, not a fault. It is the refusal a rollout produces most
     /// often -- a signer not yet trusted, a model not yet accepted -- and
@@ -247,8 +253,13 @@ pub enum WitnessTrustError {
     /// is any witness call that was waited on and never answered.
     #[error("the witness did not answer in time")]
     WitnessTimeout,
-    /// The witness could not be connected to at all: DNS, refused or reset
-    /// connection, or a TLS handshake that failed. Nothing was sent.
+    /// The witness could not be connected to at all (DNS, refused or reset
+    /// connection, or a TLS handshake that failed), or it, or the gateway in
+    /// front of it, answered that it cannot serve right now: any `5xx`
+    /// other than saturation and timeout, such as `503
+    /// witness_signing_unavailable`, or a gateway `404` with no instance
+    /// behind it. Nothing was certified, and the same request may succeed
+    /// later.
     #[error("the witness could not be reached")]
     WitnessUnreachable,
 }
@@ -399,15 +410,31 @@ pub async fn witness_session(
     crate::envelope::raw_contribution_size_ok(&raw, transport.envelope_limit_bytes())
         .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
 
+    let verified = probe_witness(transport, url, trust, now_unix).await?;
+
+    transport::witness_contribution(transport, &verified, raw, attested, granted).await
+}
+
+/// Read only: a fresh nonce, DCAP verification, and endpoint-scoped paired pins.
+/// No raw bytes can be sent by this helper.
+pub(crate) async fn probe_witness(
+    transport: &dyn transport::WitnessTransport,
+    url: &str,
+    trust: &WitnessTrust,
+    now_unix: u64,
+) -> Result<verify::VerifiedWitness, WitnessTrustError> {
+    if !trust.is_pinned() {
+        return Err(WitnessTrustError::WitnessMeasurementUnpinned {
+            control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+            reported: None,
+        });
+    }
     let nonce = transport::WitnessNonce::fresh()?;
     let evidence = transport.attestation(&nonce).await?;
     let quote = hex::decode(evidence.quote_hex.trim())
         .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
     let collateral = transport.collateral(&quote).await?;
-
-    let verified = verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)?;
-
-    transport::witness_contribution(transport, &verified, raw, attested, granted).await
+    verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)
 }
 
 /// Inputs for an explicitly approved token-bundle witness request.

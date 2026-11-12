@@ -312,17 +312,6 @@ pub const STATE_START_FAILED: &str = "Couldn't start. Turn it off and on to retr
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P198).
 pub const STATE_CRASHED: &str = "May have stopped. Turn it off and on.";
 
-/// Said at the moment of quitting, on the two platforms where the app is the
-/// daemon.
-///
-/// Task 3's plan carries this as a requirement: the existing quit
-/// confirmation explains that quitting stops the watcher, and with the
-/// listener inside the same process it now stops that too. A shell appends
-/// this to its own confirmation only when the switch is on -- a contributor
-/// who never turned it on should not be warned about losing it.
-pub const QUIT_ALSO_STOPS: &str = "Quitting also ends any model calls still handled by this app. Tools pointed \
-     here cannot get answers until this app is open and answering.";
-
 /// The reported local port, without claiming readiness, assembled rather than exported as a
 /// template with a hole in it.
 ///
@@ -599,7 +588,6 @@ pub struct PrivateInferenceCopy {
     pub state_port_in_use: &'static str,
     pub state_start_failed: &'static str,
     pub state_crashed: &'static str,
-    pub quit_also_stops: &'static str,
     pub write_unconfirmed: &'static str,
     pub settings_moved: &'static str,
     pub tray_turn_off: &'static str,
@@ -2604,7 +2592,6 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         state_port_in_use: STATE_PORT_IN_USE,
         state_start_failed: STATE_START_FAILED,
         state_crashed: STATE_CRASHED,
-        quit_also_stops: QUIT_ALSO_STOPS,
         write_unconfirmed: WRITE_UNCONFIRMED,
         settings_moved: SETTINGS_MOVED,
         tray_turn_off: TRAY_TURN_OFF,
@@ -5216,10 +5203,12 @@ mod tests {
             serde_json::to_value(private_inference_copy()).expect("the payload serialises");
         let fields = payload.as_object().expect("a JSON object");
         // 187 plus `sign_in_tooltip` and `harnesses_precedence_tooltip`
-        // (Settings copy pass 2, P3 and P177, 2026-11-04).
+        // (Settings copy pass 2, P3 and P177, 2026-11-04), less
+        // `quit_also_stops` (the quit prompt is one core sentence since
+        // 2026-11-12, `quit_copy`).
         assert_eq!(
             fields.len(),
-            189,
+            188,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

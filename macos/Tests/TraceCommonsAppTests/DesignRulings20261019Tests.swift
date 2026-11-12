@@ -91,14 +91,17 @@ final class DesignRulings20261019Tests: XCTestCase {
         XCTAssertLessThan(keyed.lowerBound, plates.lowerBound)
     }
 
-    /// The promo cards' large graphics are drawn at half strength, so they
-    /// sit behind the words.
+    /// The promo cards' large graphics sit behind the words: the pixel cells
+    /// carry their own transparency (Ron, 2026-11-05), so the card draws them
+    /// whole.
     func test_thePromoGraphicsAreFaded() throws {
         let source = try String(
             contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
                 .appendingPathComponent("TCDesign/Components/HeroCard.swift"),
             encoding: .utf8)
-        XCTAssertTrue(source.contains("static var graphicOpacity: Double { 0.5 }"))
+        XCTAssertTrue(source.contains("static var graphicOpacity: Double { 1 }"))
+        XCTAssertTrue(source.contains("static var brightCells: Double { 0.46 }"))
+        XCTAssertTrue(source.contains("static var dimCells: Double { 0.32 }"))
         XCTAssertTrue(source.contains(".opacity(Self.graphicOpacity)"))
     }
 

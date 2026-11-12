@@ -1,0 +1,138 @@
+[
+  {
+    "label": "identity_ready",
+    "title": "Server identity baseline",
+    "body": "Two account identities and two device keys enter as finite existing or unregistered records. Device grants and account-session authority are separate.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_challenge",
+    "title": "Stored sign-in challenge",
+    "body": "Native starts store a verifier challenge without account authority. Wallet and NEAR AI starts persist ceremony bindings. Local cancellation abandons the wait without deleting the server record. Expiry and process restart have different effects.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_browser",
+    "title": "Browser confirmation and native callback",
+    "body": "A browser login link stores its account and tenant. Confirmation consumes a live link and creates a browser session. A live native request also receives a one-time code; a missing native request leaves the browser login successful.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_verifying",
+    "title": "Single-use take and saved bindings",
+    "body": "The server takes the code or ceremony before checking saved verifier, request identity and device bindings. Failed evidence or unavailable external verification can leave a consumed handle without a session.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_result",
+    "title": "Committed session and response",
+    "body": "An issued session is durable before its response arrives. A lost response does not roll back the session. Provisioning key conflicts and revocation are separate from response delivery.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_authority",
+    "title": "Authenticated request and token rotation",
+    "body": "Credential transport, tenant, stored account, presented token and token generation are separate. Validation saves the request authority, canonical token and rotation eligibility from its SELECT; a later clock boundary does not change that plan. A planned rotation can lose a race with another rotation or revocation. Native sessions remain weak account authority. Native bearer transport requires a native-kind row; cookie transport can also validate a native-kind row, while retaining cookie transport and weak authority. A wrong-kind native bearer may update last-seen or rotate the row during database validation before the resolver refuses authority and withholds the rotated token. Mixed credentials and device bearers are refused before database validation.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_revocation",
+    "title": "Session and device revocation",
+    "body": "Current-session logout, account-wide session revocation and device revocation change different records. Device revocation also ends grants and attributed sessions, plus other live unattributed native sessions, while sparing the caller when unattributed.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "identity_headless",
+    "title": "Headless device codes and renewal",
+    "body": "A native account session can mint a code by signing with an independently supplied linked minter key, including when the session has no device attribution. A key that joined by code cannot mint another code. Successful redemption atomically links a device and issues its session. Only a code-linked device may renew with its key; a renewal nonce remains separate from a session token.",
+    "controls": [
+      "YouStartASignInCeremony",
+      "YouCancelTheLocalCeremony",
+      "YouMintABrowserLoginLink",
+      "YouConfirmTheBrowserLogin",
+      "YouSignOutTheCurrentSession",
+      "YouSignOutEverywhere",
+      "YouRevokeAnAccountDevice",
+      "YouReadAnAccountSurface",
+      "YouMintAHeadlessDeviceCode"
+    ],
+    "kind": "server"
+  }
+]

@@ -411,10 +411,90 @@ impl State {
         }
     }
 
+    /// Collapse only current Claude readings with a confirmed account and
+    /// organization. All fingerprints and profile bindings stay in memory;
+    /// unknown identities and conflicting evidence keep separate rows.
+    fn display_entries(&self, provider: Provider, now: DateTime<Utc>) -> Vec<&Entry> {
+        let mut entries: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| entry.login.provider == provider)
+            .collect();
+        if provider == Provider::Claude {
+            let mut groups: BTreeMap<(&str, &str), Vec<&Entry>> = BTreeMap::new();
+            for entry in &entries {
+                let Some(reading) = entry.reading.as_ref().filter(|reading| {
+                    entry
+                        .measured_at
+                        .is_some_and(|at| now < at + Duration::seconds(CACHE_SECONDS))
+                        && reading.windows.iter().any(|window| {
+                            window.used_permille.is_some()
+                                && window.resets_at.is_none_or(|reset| reset > now)
+                        })
+                }) else {
+                    continue;
+                };
+                if let (Some(account), Some(organization)) = (
+                    reading
+                        .identity
+                        .account
+                        .as_deref()
+                        .filter(|id| !id.is_empty()),
+                    reading
+                        .identity
+                        .organization
+                        .as_deref()
+                        .filter(|id| !id.is_empty()),
+                ) {
+                    groups
+                        .entry((account, organization))
+                        .or_default()
+                        .push(entry);
+                }
+            }
+            let mut hidden = BTreeSet::new();
+            for group in groups.values() {
+                // A partially identified profile must not bridge two profiles
+                // whose additional account evidence contradicts each other.
+                if group.iter().any(|a| {
+                    group.iter().any(|b| {
+                        a.reading
+                            .as_ref()
+                            .unwrap()
+                            .identity
+                            .conflicts_with(&b.reading.as_ref().unwrap().identity)
+                    })
+                }) {
+                    continue;
+                }
+                let representative = group
+                    .iter()
+                    .copied()
+                    .max_by_key(|entry| {
+                        (
+                            entry.measured_at,
+                            entry.login.default_login,
+                            std::cmp::Reverse(entry.login.id.as_str()),
+                        )
+                    })
+                    .unwrap();
+                for entry in group {
+                    if entry.login.id != representative.login.id {
+                        hidden.insert(entry.login.id.as_str());
+                    }
+                }
+            }
+            entries.retain(|entry| !hidden.contains(entry.login.id.as_str()));
+        }
+        entries.sort_by(|a, b| {
+            (!a.login.default_login, &a.login.id).cmp(&(!b.login.default_login, &b.login.id))
+        });
+        entries
+    }
+
     fn value(&self, now: DateTime<Utc>) -> Value {
         let providers: Vec<_> = [Provider::Codex, Provider::Claude].into_iter().map(|provider| {
-            let mut entries: Vec<_> = self.entries.values().filter(|entry| entry.login.provider == provider).collect();
-            entries.sort_by(|a,b| (!a.login.default_login, &a.login.id).cmp(&(!b.login.default_login, &b.login.id)));
+            let entries = self.display_entries(provider, now);
             let logins: Vec<_> = entries.into_iter().map(|entry| {
                 let fresh_enough = entry.measured_at.is_some_and(|at| now < at + Duration::seconds(CACHE_SECONDS));
                 let reading = entry.reading.as_ref().filter(|_| fresh_enough);
@@ -932,6 +1012,186 @@ mod tests {
             }],
         }
     }
+    fn observed_claude_logins(specs: &[(&str, &str, Option<&str>, i64)]) -> State {
+        let mut state = State::default();
+        state.synchronize(
+            [false, true],
+            specs
+                .iter()
+                .map(|(id, _, _, _)| {
+                    let mut spec = login(id);
+                    spec.provider = Provider::Claude;
+                    spec
+                })
+                .collect(),
+        );
+        for (id, account, organization, age) in specs {
+            let at = now() - Duration::seconds(*age);
+            let claim = state
+                .claims(at, true, Some(Provider::Claude), Some(id))
+                .remove(0);
+            let mut answer = reading(account, now() + Duration::days(1));
+            answer.identity.organization = organization.map(str::to_owned);
+            state.complete(&claim, Ok(answer), at);
+        }
+        state
+    }
+
+    #[test]
+    fn duplicate_claude_account_and_organization_has_one_quota_row() {
+        let state = observed_claude_logins(&[
+            ("default", "account-a", Some("org-a"), 0),
+            ("personal", "account-a", Some("org-a"), 0),
+        ]);
+        let value = state.value(now());
+        let logins = value["providers"][1]["logins"].as_array().unwrap();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0]["id"], "default");
+        assert_eq!(
+            state.entries.len(),
+            2,
+            "display dedupe must preserve refresh bindings"
+        );
+        assert!(!value.to_string().contains("account-a"));
+        assert!(!value.to_string().contains("org-a"));
+    }
+
+    #[test]
+    fn duplicate_claude_quota_uses_the_freshest_login_and_its_refresh_target() {
+        let mut state = observed_claude_logins(&[
+            ("default", "account-a", Some("org-a"), 120),
+            ("personal", "account-a", Some("org-a"), 0),
+        ]);
+        state
+            .entries
+            .get_mut("personal")
+            .unwrap()
+            .reading
+            .as_mut()
+            .unwrap()
+            .windows[0]
+            .used_permille = Some(730);
+        let value = state.value(now());
+        let logins = value["providers"][1]["logins"].as_array().unwrap();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0]["id"], "personal");
+        assert_eq!(logins[0]["windows"][0]["used_permille"], 730);
+    }
+
+    #[test]
+    fn conflicting_claude_evidence_cannot_be_bridged_by_a_partial_identity() {
+        let mut state = observed_claude_logins(&[
+            ("default", "account-a", Some("org-a"), 0),
+            ("personal", "account-a", Some("org-a"), 0),
+            ("work", "account-a", Some("org-a"), 0),
+        ]);
+        for (id, email) in [("personal", "email-a"), ("work", "email-b")] {
+            state
+                .entries
+                .get_mut(id)
+                .unwrap()
+                .reading
+                .as_mut()
+                .unwrap()
+                .identity
+                .email = Some(email.into());
+        }
+        assert_eq!(
+            state.value(now())["providers"][1]["logins"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn invalidated_claude_profiles_reappear_instead_of_staying_hidden() {
+        for auth_change in [true, false] {
+            let mut state = observed_claude_logins(&[
+                ("default", "account-a", Some("org-a"), 0),
+                ("personal", "account-a", Some("org-a"), 0),
+            ]);
+            assert_eq!(
+                state.value(now())["providers"][1]["logins"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            if auth_change {
+                let at = now() + Duration::seconds(61);
+                let claim = state
+                    .claims(at, true, Some(Provider::Claude), Some("personal"))
+                    .remove(0);
+                state.complete(
+                    &claim,
+                    Err(ProbeFailure {
+                        reason: "auth_changed",
+                        identity: None,
+                    }),
+                    at,
+                );
+            } else {
+                let mut specs: Vec<_> = state
+                    .entries
+                    .values()
+                    .map(|entry| entry.login.clone())
+                    .collect();
+                specs
+                    .iter_mut()
+                    .find(|login| login.id == "personal")
+                    .unwrap()
+                    .native_revision = Some("changed".into());
+                state.synchronize([false, true], specs);
+            }
+            assert_eq!(
+                state.value(now())["providers"][1]["logins"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_or_unconfirmed_claude_accounts_keep_their_own_rows() {
+        for specs in [
+            vec![
+                ("default", "account-a", Some("org-a"), 0),
+                ("personal", "account-b", Some("org-a"), 0),
+            ],
+            vec![
+                ("default", "account-a", Some("org-a"), 0),
+                ("personal", "account-a", Some("org-b"), 0),
+            ],
+            vec![
+                ("default", "account-a", None, 0),
+                ("personal", "account-a", None, 0),
+            ],
+            vec![
+                ("default", "account-a", Some("org-a"), CACHE_SECONDS),
+                ("personal", "account-a", Some("org-a"), 0),
+            ],
+        ] {
+            let value = observed_claude_logins(&specs).value(now());
+            assert_eq!(value["providers"][1]["logins"].as_array().unwrap().len(), 2);
+        }
+        let mut state = observed_claude_logins(&[
+            ("default", "account-a", Some("org-a"), 0),
+            ("personal", "account-a", Some("org-a"), 0),
+        ]);
+        state.entries.get_mut("personal").unwrap().reading = None;
+        assert_eq!(
+            state.value(now())["providers"][1]["logins"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn a_reading_names_its_source_and_no_reading_names_none() {
         let (mut state, claim) = prepared();

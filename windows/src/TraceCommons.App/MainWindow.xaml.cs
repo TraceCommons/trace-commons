@@ -189,6 +189,14 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        // Nothing live to stop: let this close go through as it is, rather
+        // than cancelling it and closing again from inside this handler.
+        if (outcome == CloseRequestOutcome.AskToQuit && !ViewModel.PrivateInferenceQuitStops)
+        {
+            _quitConfirmed = true;
+            return;
+        }
+
         // Cancel synchronously before awaiting any confirmation.
         args.Cancel = true;
         if (outcome == CloseRequestOutcome.HideToTray)
@@ -208,34 +216,35 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // What quitting costs, said before it happens, in the core's words
-        // (quit_copy.rs, via tc_quit_prompt_json). Picking the wrong sentence
-        // "is a lie about whether the machine is still watching", so the core
-        // chooses it from the handle: this app HOSTS the daemon in-process,
-        // so while it runs the prompt says quitting stops the watcher, and
-        // with none started it says only what is true without one. This
-        // window used to hand-type the hosting sentence for both cases.
-        //
-        // Null only if the core could not produce a prompt at all. That is
-        // refused like any other failure to confirm below: a quit that was
-        // never confirmed is not read as a yes.
-        if (_host.QuitPrompt() is not { } prompt)
+        // Ask only when quitting would stop something live, in one sentence
+        // from the core (quit_copy.rs, via tc_quit_reason_prompt_json).
+        // Anything else quits at once (owner, 2026-11-12). A prompt that
+        // cannot be read while something is live refuses the quit: a quit
+        // that was never confirmed is not read as a yes.
+        QuitDecision decision = QuitPrompt.Decide(
+            stopsCompute: false,
+            stopsPrivateAI: ViewModel.PrivateInferenceQuitStops,
+            out QuitPrompt? prompt);
+        if (decision == QuitDecision.QuitNow)
+        {
+            // Reached from the tray, outside any Closing handler; the
+            // window's own close never gets here with nothing live.
+            _quitConfirmed = true;
+            Close();
+            return;
+        }
+
+        if (prompt is null)
         {
             return;
         }
 
+        BringForward();
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = Content.XamlRoot,
             Title = prompt.Title,
-            // The extra sentence is the Rust's too, and it is added only
-            // while the switch is on: with the listener inside this process,
-            // quitting stops answering model calls as well as stopping the
-            // watcher, and the quit body does not cover that. A contributor
-            // who never turned it on is not warned about losing it.
-            Content = ViewModel.PrivateInferenceQuitDetail is { } stopsRouting
-                ? prompt.Body + "\n\n" + stopsRouting
-                : prompt.Body,
+            Content = prompt.Body,
             PrimaryButtonText = prompt.Confirm,
             CloseButtonText = prompt.Cancel,
             DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
@@ -659,11 +668,8 @@ public sealed partial class MainWindow : Window
 
     private void OnTrayQuitRequested()
     {
-        _host.Dispatcher.TryEnqueue(async () =>
-        {
-            BringForward();
-            await ConfirmQuitAsync();
-        });
+        // ConfirmQuitAsync brings the window forward only when it asks.
+        _host.Dispatcher.TryEnqueue(async () => await ConfirmQuitAsync());
     }
 
     /// <summary>

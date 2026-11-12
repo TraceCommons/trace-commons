@@ -1,0 +1,28 @@
+[package]
+name = "ironwire_ledger"
+description = "IronWire's local trace ledger"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["NEAR AI <support@near.ai>"]
+repository.workspace = true
+publish = false
+
+[dependencies]
+ironwire_core.workspace = true
+ironclaw_common.workspace = true
+
+chrono.workspace = true
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

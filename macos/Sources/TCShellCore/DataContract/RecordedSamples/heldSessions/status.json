@@ -11,6 +11,8 @@
     "debugging_evaluation"
   ],
   "consent_hold": null,
+  "terms_hold": false,
+  "terms_version_owed": null,
   "paused": false,
   "queue_depth": 4,
   "queue_capacity_used": 4,

@@ -170,7 +170,7 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             ))
         );
         let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
-        let row = entry_value(&entry, s.admission_evidence());
+        let row = entry_value(&entry, s.eligibility_applies());
         assert_eq!(
             row["attested_inference"],
             serde_json::json!({"state": "uncertified", "reason": "no_attested_call"})
@@ -225,11 +225,11 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
     server.abort();
 }
 
-/// With a witness configured, an entry nobody has had reviewed cannot be
-/// previewed or approved locally. Both answers name that, rather than the
-/// generic `preview-failed` a person could do nothing with.
+/// Ordinary history without a preview is approved for the asynchronous
+/// witness check. Opening a preview still requires the explicit review flow;
+/// Submit itself neither builds a local artifact nor calls the witness.
 #[tokio::test]
-async fn an_unreviewed_entry_under_a_witness_is_reported_as_needing_review() {
+async fn an_unreviewed_entry_keeps_preview_explicit_and_queues_witness_on_submit() {
     let body = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"synthetic onboarding task\"},\"cwd\":\"/synthetic/project\",\"timestamp\":\"2026-08-08T10:00:00Z\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n";
     let (s, id, dir) = shared_with_session(body);
     let project = dir.path().join("project");
@@ -256,7 +256,7 @@ async fn an_unreviewed_entry_under_a_witness_is_reported_as_needing_review() {
     cfg.device_key_id = device.device_key_id.clone();
     cfg.user_subject = device.device_key_id.clone();
     cfg.consent_scopes = vec!["debugging_evaluation".into()];
-    // Nothing listens here: the refusal comes before any network call.
+    // Nothing listens here: preview and approval make no network call.
     cfg.witness = Some(crate::config::WitnessSettings {
         url: "https://witness.invalid".into(),
         signing_address: "0x1111111111111111111111111111111111111111".into(),
@@ -270,13 +270,24 @@ async fn an_unreviewed_entry_under_a_witness_is_reported_as_needing_review() {
     assert_eq!(error.message, super::super::super::preview::REASON_WITNESS_REVIEW_REQUIRED);
 
     let approved = handle_approve(&s, &req("approve", serde_json::json!({"entry_id": id}))).await;
-    let result = approved.result.expect("approve answers with what it skipped");
-    assert_eq!(result["approved"], 0);
-    assert_eq!(
-        result["skipped"],
-        serde_json::json!([{
-            "entry_id": id.to_string(),
-            "reason_label": super::super::super::preview::REASON_WITNESS_REVIEW_REQUIRED,
-        }])
+    let result = approved.result.expect("approve queues the witness check");
+    assert_eq!(result["approved"], 1);
+    assert_eq!(result["skipped"], serde_json::json!([]));
+    assert_eq!(result["witness_review"], true);
+    let queue = s.queue.lock().unwrap();
+    let entry = queue.get(id).unwrap();
+    assert_eq!(entry.state, QueueState::Approved);
+    assert!(entry.previewed_envelope_digest.is_none());
+    assert!(super::super::super::witness_worker::needs_witness_job(&cfg, entry));
+    assert!(
+        entry.approved_at.is_some(),
+        "the person still has an undo window"
+    );
+    assert_eq!(entry.approved_scopes.as_ref(), Some(&cfg.consent_scopes));
+    assert!(
+        super::super::super::approved_envelope::load_witnessed(&s.store, id)
+            .unwrap()
+            .is_none(),
+        "certified bytes can only arrive from the later worker"
     );
 }

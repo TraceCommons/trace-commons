@@ -148,7 +148,7 @@ final class FirstRunPlanTests: XCTestCase {
         var state = try joined(answered())
         state = FirstRunNavigation.back(state)
         state = FirstRunNavigation.back(state)
-        XCTAssertEqual(state.step, .traces)
+        XCTAssertEqual(state.step, .uses, "back past Terms")
         XCTAssertEqual(state.invite, "INVITE-1")
         state = FirstRunNavigation.next(FirstRunNavigation.next(state))
         XCTAssertEqual(state.step, .join)

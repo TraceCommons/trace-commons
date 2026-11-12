@@ -3,7 +3,7 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Where Customize on Tools reads the repos and their past sessions (Ron's
+/// Where Customize on Uses reads the repos and their past sessions (Ron's
 /// #1030 Rules screen, folded into Tools on 2026-10-21). Nil is a refusal or
 /// no daemon, never an empty answer.
 @MainActor
@@ -14,7 +14,7 @@ protocol FirstRunRulesSource: AnyObject {
 
 extension AppModel: FirstRunRulesSource {}
 
-/// The per-repo rules' decisions, which Customize on Tools draws, apart from
+/// The per-repo rules' decisions, which Customize on Uses draws, apart from
 /// the view so they can be tested
 /// (#1030 `ftux-model.ts`: `groupState`, `toggleGroup`, `applyRule`,
 /// `pastSessionSummary`).
@@ -80,16 +80,13 @@ enum RulesScreenLayout {
     enum PickOutcome: Equatable {
         /// Written, or cleared because it is the daemon's own mode.
         case applied
-        /// Automatic: nothing is written until the core's arming
-        /// confirmation is accepted (`confirmArming`).
-        case needsConfirmation
         /// Not for this folder; nothing is written.
         case refused
     }
 
     /// The modes a folder's picker offers: every mode the daemon would set
     /// for it. Automatic is offered before sign-in, as on Uses (Ron,
-    /// 2026-10-22): it is confirmed when picked and armed at Start, once the
+    /// 2026-10-22): it is recorded when picked and armed at Start, once the
     /// enrollment it needs is held (`FirstRunPlan`), and until then the row
     /// says it turns on once the person signs in (`armsAfterSignIn`).
     static func offeredModes(_ project: ProjectRow, state: FirstRunState) -> [ProjectMode] {
@@ -101,8 +98,9 @@ enum RulesScreenLayout {
     /// even when the daemon already reads Ask: an Ask the person picked
     /// stays an exception to "Automatic, including existing history" chosen
     /// later on Uses (owner decision 2026-10-29, #1747), and `FirstRunPlan`
-    /// sends it after the grant. Automatic is a grant, so it is never
-    /// silent: it waits for the arming confirmation.
+    /// sends it after the grant. Automatic is written at once, with no
+    /// confirmation box (owner, 2026-11-11); without an enrollment it is
+    /// recorded, not sent: Start arms it after sign-in.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
         if wanted == project.mode, wanted != .ask {
@@ -111,19 +109,12 @@ enum RulesScreenLayout {
             return .applied
         }
         guard project.offerableModes.contains(wanted) else { return .refused }
-        if wanted == .autoUpload { return .needsConfirmation }
+        if wanted == .autoUpload {
+            state.rules[id] = .autoUpload
+            return .applied
+        }
         setRule(&state, projectID: id, mode: wanted)
         return .applied
-    }
-
-    /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a folder the daemon will not arm, whatever the view
-    /// asked. Without an enrollment it is recorded, not sent: Start arms it
-    /// after sign-in.
-    static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
-        guard project.offerableModes.contains(.autoUpload) else { return false }
-        state.rules[project.projectId] = .autoUpload
-        return true
     }
 
     /// A folder set to Automatic in this first run that cannot be armed yet,
@@ -133,9 +124,9 @@ enum RulesScreenLayout {
         state.rules[project.projectId] == .autoUpload && !FirstRunNavigation.canChooseAutomatic(state)
     }
 
-    /// Set a folder's rule other than Automatic, which only
-    /// `confirmArming` writes. Never clears the folder's selection: a Never
-    /// folder contributes nothing, its past sessions included.
+    /// Set a folder's rule other than Automatic, which only `pick` writes.
+    /// Never clears the folder's selection: a Never folder contributes
+    /// nothing, its past sessions included.
     static func setRule(_ state: inout FirstRunState, projectID: String, mode: ProjectMode) {
         guard mode != .autoUpload else { return }
         state.rules[projectID] = mode

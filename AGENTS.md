@@ -1,17 +1,12 @@
-# AGENTS.md — trace-commons-server
+# AGENTS.md — trace-commons
 
-Guidance for coding agents working in this repository. `CLAUDE.md` holds the
-full repo guidance (build commands, CI gates, conventions, known gotchas); read
-it too. This file leads with licensing because it is the one rule here whose
-violation a compiler will never report.
+Rules every coding agent working in this repository needs, whatever tool it
+runs in. This file stands on its own for licensing, which comes first because
+it is the one rule here whose violation a compiler will never report.
 
-Native SwiftUI (`macos/`) is the main client on macOS (#1173 D1): no new
-Tauri work on macOS, and the Tauri app is retired there once the native
-screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
-(#1173 D13, a default for now). `CLAUDE.md` lists the other shells.
-Native macOS is also the lead client and the parity target: GTK, Windows and
-Tauri match its terminology, states, flows and affordances, and Tauri drift
-is low priority.
+`CLAUDE.md` holds the full repo guidance: build and test commands, the CI
+jobs, conventions, and known gotchas. Read it too. Where a topic appears in
+both files, the full text is in one and the other points to it.
 
 ## Licensing: the split is load-bearing
 
@@ -26,8 +21,10 @@ Copyright (C) 2026 K&Z Partners LLC.
 - `crates/trace-commons-gate-api`
 - `crates/trace-commons-gate-enclave`
 - `crates/trace-commons-ingest`
+- `crates/trace-commons-ingest-contributor-tests` (unpublished; tests of
+  the ingest service against the contributor's client code)
 
-Every `.rs` file in these four crates begins with:
+Every `.rs` file in these crates begins with:
 
 ```rust
 // Copyright (C) 2026 K&Z Partners LLC
@@ -54,6 +51,10 @@ attribute is legal Rust.
 - `crates/trace-commons-client-server-tests` (unpublished, tests only)
 - `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`, a separate Cargo
   workspace)
+- `crates/ironwire_*` (11 crates, the in-process inference proxy). These are
+  copyright NEAR AI, imported from nearai/ironwire under MIT OR Apache-2.0;
+  keep each crate's `LICENSE-MIT` and `LICENSE-APACHE` and their `authors`.
+  Their own working rules are in `docs/ironwire/AGENTS.md`.
 
 These stay permissive deliberately. The contributor CLI, the desktop apps, and
 the envelope protocol are meant to be embedded in proprietary agent harnesses;
@@ -141,13 +142,13 @@ cargo deny --features local-gpu-models check licenses
 cargo deny --all-features check licenses
 ```
 
-Run all four: the feature sets pull in different trees, and 54 crates resolve
-only under `--all-features` (see `CLAUDE.md`). CI covers them at once by
-running `check licenses` and `check sources` under `--all-features`, and runs
-`check advisories` under `--all-features` too, so this is a pre-flight rather
-than the only enforcement. Note this is separate from — and does not replace —
-the repo's standing rule that new dependencies need explicit human approval
-before you add them.
+Run all four: the feature sets pull in different trees, and some crates
+resolve only under `--all-features`, so that run is not redundant (`CLAUDE.md`
+names the trees). `--features` is a global flag and goes before `check`. CI
+runs `check licenses`, `check sources` and `check advisories` under
+`--all-features`, so this is a pre-flight rather than the only enforcement.
+Note this is separate from — and does not replace — the repo's standing rule
+that new dependencies need explicit human approval before you add them.
 
 ### Checklist before claiming a change is done
 
@@ -159,38 +160,43 @@ before you add them.
   touched dependencies. CI runs the same check, plus advisories and sources,
   on every push.
 
-## Executing a multi-task plan
+## Client priority
 
-When a plan's tasks are carried out one after another, write each task's
-tests but run the tests and CI checks once, after the last task. Per task,
-run at most a plain `cargo check` on the touched crates, so the next task
-builds on code that compiles. `CLAUDE.md` ("Executing a multi-task plan")
-has the details and the final run's command list.
-
-## Shared compile cache
-
-Install sccache and set `rustc-wrapper = "sccache"` under `[build]` in your
-user-level `~/.cargo/config.toml`, never the repository's, so worktrees
-share compiled third-party crates instead of each rebuilding them into its
-own `target/`. For agent and worktree builds, also set `CARGO_INCREMENTAL=0`
-(sccache never caches an incremental compile, which is how the workspace's
-own crates build by default) and use `RUSTFLAGS="-D warnings"` for every
-cargo command, clippy included (the flags are part of the cache key, and CI
-sets both for every job), in your agent's user-level environment, not the
-repository's config. Raise sccache's size limit to about 50 GiB; the 10 GiB
-default is too small for this workspace. `CLAUDE.md` ("Shared compile
-cache") has the details.
-
-## Everything else
-
-See `CLAUDE.md`: build and verification commands (note CI applies
-`RUSTFLAGS=-D warnings`, so plain `cargo check` does not catch what CI catches),
-the CI job inventory, hash-only logging, fail-closed defaults, tenant scoping,
-RLS, and the repo's known gotchas.
+Native SwiftUI (`macos/`) is the main client on macOS and the parity target
+for the other shells (#1173 D1): no new Tauri work on macOS. GTK, Windows and
+Tauri match its terminology, states, flows and affordances. `CLAUDE.md` ("What
+this repo is") has the full statement.
 
 ## Product text
 
 When adding or changing user-facing UI text, follow
-[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
-preserved context, separate titles and accessibility names, and shared-copy
-review checks.
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md).
+
+**No new notices without explicit approval.** Do not add a banner, card,
+one-time message, interruption, notification, or a daemon status channel that
+feeds one, unless the owner has explicitly approved both the notice and its
+wording. A spec or design principle calling for one is not approval: ask.
+See rule 9 of the copy guide.
+
+## Building and verifying
+
+`CLAUDE.md` has the commands and the reasons. The rules for every agent:
+
+- **CI applies `RUSTFLAGS=-D warnings`**, so plain `cargo check` does not
+  catch what CI catches. Use the `RUSTFLAGS` form before claiming green.
+- **Executing a multi-task plan.** Write each task's tests, but run the tests
+  and CI checks once, after the last task. Per task, run at most a plain
+  `cargo check` on the touched crates. See `CLAUDE.md` ("Executing a
+  multi-task plan") for the details and the final run's command list.
+- **Shared compile cache.** Set `rustc-wrapper = "sccache"` under `[build]`
+  in your user-level `~/.cargo/config.toml`, never the repository's. For
+  agent and worktree builds, also set `CARGO_INCREMENTAL=0` and
+  `RUSTFLAGS="-D warnings"` for every cargo command, clippy included, in your
+  user-level environment, and raise sccache's size limit to about 50 GiB.
+  See `CLAUDE.md` ("Shared compile cache").
+
+## Everything else
+
+See `CLAUDE.md`: the CI jobs and which are required, hash-only logging,
+fail-closed defaults, tenant scoping, RLS, the gate-contract conventions, and
+the repo's known gotchas.

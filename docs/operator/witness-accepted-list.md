@@ -29,8 +29,10 @@ What a client does with a list:
   parse) keeps what it has and logs a fixed label. It never goes unpinned and
   never trusts an unsigned list.
 - Keeps approvals and automatic grants: the list is stored apart from the
-  witness settings, so a refresh re-asks nothing. A change of witness URL
-  still re-asks, as before (Q10).
+  witness settings, so a refresh re-asks nothing. A manual change of the configured enrollment URL still re-asks, as before
+  (Q10). Operator-authenticated runtime routing is covered separately by
+  [signed endpoint configuration](witness-configuration.md), which the owner
+  approved for automatic domain updates.
 
 **Current state: on.** Clients trust one list-signing key, compiled into
 `TRUSTED_LIST_SIGNING_KEYS` in
@@ -229,6 +231,62 @@ have. There is no fallback signer.
 A device that has not taken the list yet refuses the new image with
 `witness_expected_measurement`, fetches the list (at most once per ten
 minutes), and tries again if a newer list arrived.
+
+## Multiple witness URLs during a hostname transition
+
+The signed V1 payload still names exactly one `witness_url`. The unqualified
+`GET /v1/public/witness-accepted-list` continues to serve
+`TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH` for existing clients.
+
+Clients with hostname-transition support send their configured witness URL as
+an encoded `witness_url` query parameter on that same public ingest route.
+Configure `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_DIRECTORY` with URL-specific
+signed documents. Each filename is the lowercase SHA-256 hex of the exact URL
+with trailing `/` characters removed, followed by `.json`. Do not otherwise
+normalize or reserialize the URL. For example:
+
+```python
+import hashlib
+url = "https://witness.tracecommons.ai"
+filename = hashlib.sha256(url.rstrip("/").encode("utf-8")).hexdigest() + ".json"
+```
+
+The server never fetches a URL supplied by a request. It selects a bounded
+local signed file and returns its bytes unchanged. A missing URL-specific
+file may fall back to the legacy file only if the signed payload names that
+same URL. A present unreadable, malformed or wrong-URL file fails closed.
+Clients still verify the signature and signed URL themselves. An old server
+ignores the query and continues to work for clients configured with the
+legacy URL; a client configured with another URL refuses that legacy list.
+
+**Versions are global on each device, even across URL changes.** Keep the
+legacy version fixed during the initial transition and give the target URL a
+strictly higher version than every legacy version already published. Equal
+versions for two URL variants do not support migration: a client that has
+already stored that version ignores the second one. Coordinate later
+publications and rollbacks with the same rule; rolling back the URL requires
+a newly signed, higher-version document for that URL, never an older backup.
+
+Release order:
+
+1. Deploy the URL-aware ingest route while retaining the existing legacy file.
+2. Stage and verify the target URL's signed list. Set the directory variable
+   and restart ingest once; subsequent atomic file replacements need no restart.
+3. Release query-aware clients. Verify the legacy route and both explicit URL
+   requests independently, including signatures and strict URL matching.
+4. Only after the new domain is stable and eligible clients have updated, move
+   legacy provisioning and connected-inference publishing surfaces. URL changes
+   still require contributor confirmation and invalidate old grants. Retain
+   current measurement pins during that ceremony; the prior URL's cached list
+   cannot authorize the new URL.
+5. Keep the old URL and its list available for contributors who have not moved.
+
+For the 2026-11-05 rollout, legacy V2 remains served. Custom-host V3 is signed
+and staged at
+`/etc/tracecommons/witness/accepted-lists/e2b3d84969c4681419afdd98023a53db98edc87e4509dc5f0d1bea70bfd8fd6f.json`;
+the directory is not enabled and discovery is unchanged. The custom-domain
+gateway route remains blocked as recorded in
+[the hostname runbook](witness-custom-domain.md).
 
 ## Rotating the list-signing key
 

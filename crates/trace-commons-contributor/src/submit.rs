@@ -33,15 +33,15 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL;
 use crate::witness::inference_record::{self, InferenceAttestationRecord};
 use crate::witness::status::{
     WitnessLastResult, certificate_obtained_for, n_of_m_from_certificate, record_last_result,
 };
 use crate::witness::transport::{
-    GrantedConsent, HttpWitnessTransport, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER,
-    WitnessedEnvelope, parse_witnessed_envelope,
+    GrantedConsent, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessedEnvelope,
+    parse_witnessed_envelope,
 };
-use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
 /// Select the witness profile from source bytes before receipt lookup or HTTP.
 /// The signup flag enables account-bound evidence, but existing unbound history
@@ -655,7 +655,9 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 
 /// Whether a witness failure label says its evidence could not be fetched,
 /// so nothing was judged: the witness ran past its deadline
-/// (`witness_timeout`), could not be reached (`witness_unreachable`), or did
+/// (`witness_timeout`), could not be reached or answered that it cannot
+/// serve right now (`witness_unreachable`: a `5xx` such as `503
+/// witness_signing_unavailable`, or a gateway with nothing behind it), or did
 /// not hand over its attestation (`witness_attestation_unavailable`: a
 /// non-success answer, a body with no quote, a broken connection) or Intel's
 /// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
@@ -664,7 +666,7 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 /// spent. A busy witness (`witness_saturated`) is not covered: it names its
 /// own retry delay and has its own path.
 ///
-/// Fetching is the only thing these labels say failed. Evidence that was
+/// Fetching or serving is the only thing these labels say failed. Evidence that was
 /// fetched and did not verify has labels of its own
 /// ([`witness_trust_hold`]), and every other witness label is a
 /// judgement or a local refusal that stays one. Nothing is uploaded without a
@@ -997,6 +999,12 @@ pub struct SubmitContext<'a> {
     /// (or a body `retry_after_seconds`) on the most recent submission; zero
     /// for none. Reset like `last_rate_limit_retry_after`.
     last_unavailable_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, ingest named when it refused the last
+    /// submission with `account_limit_reached` (the body's
+    /// `retry_after_seconds`, or `Retry-After`); zero for none, which is
+    /// what ingest sends when the allowance has no reset. Reset like
+    /// `last_rate_limit_retry_after`. Unclamped; the daemon caps it.
+    last_account_limit_retry_after: std::sync::atomic::AtomicU32,
     /// When the last submission started sending to ingest, or `None` if it
     /// stopped before any send (a hold, a local refusal, a classifier
     /// failure, a dry run). Reset at the start of each submission. The
@@ -1091,6 +1099,7 @@ impl<'a> SubmitContext<'a> {
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_account_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
@@ -1209,13 +1218,11 @@ impl<'a> SubmitContext<'a> {
             .witness
             .clone()
             .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?;
-        // The sign-up pins plus any signed accepted-list entry valid now.
-        let trust = crate::witness::accepted_list::trust_with_accepted(
-            &settings,
-            self.store.dir(),
-            Utc::now(),
-        )
-        .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
+        // Enrollment must already be pinned; signed runtime routing is
+        // resolved after grant, lease and receipt prerequisites below.
+        let trust = settings
+            .trust()
+            .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
         if !trust.is_pinned() {
             anyhow::bail!("witness_expected_measurement");
         }
@@ -1277,16 +1284,15 @@ impl<'a> SubmitContext<'a> {
         let raw = witness_input_for_profile(raw, &self.effective_cfg, true);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, &token);
         let granted = GrantedConsent { scopes, uses };
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
-        )?
-        .with_admission_evidence(true)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-        let payload = crate::witness::witness_token_session(
-            &transport,
+        let payload = crate::witness::configuration::witness_token_session(
+            self.cfg,
+            &settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: true,
+                background: false,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             crate::witness::TokenBundleSession {
                 url: &settings.url,
                 trust: &trust,
@@ -1384,7 +1390,18 @@ impl<'a> SubmitContext<'a> {
         {
             anyhow::bail!("witness_expected_measurement");
         }
-        if settings.admission_evidence && !include_inference_bodies {
+        // Enrollment can support admission evidence without requiring it for
+        // ordinary history. Select from the captured source before applying
+        // body-export consent: withholding a bound call must not downgrade it.
+        let admission_profile = admission_profile_for_request(
+            settings.admission_evidence,
+            transcript
+                .attested_call
+                .as_deref()
+                .map(|call| call.request_body()),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if admission_profile && !include_inference_bodies {
             anyhow::bail!("admission_receipt_unavailable");
         }
         // A verdict and a correction have nowhere to go on this profile. The
@@ -1395,7 +1412,7 @@ impl<'a> SubmitContext<'a> {
         // set from these arguments and validate against themselves, so a
         // silent drop leaves an entry that reads approved-with-correction
         // while the certified envelope carries neither.
-        if settings.admission_evidence
+        if admission_profile
             && (self.opts.verdict.is_some()
                 || correction
                     .map(str::trim)
@@ -1624,7 +1641,7 @@ impl<'a> SubmitContext<'a> {
         raw: RawTraceContribution,
         attested: Option<&crate::routing::attested::AttestedCall>,
         token: &ClaimToken,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> std::result::Result<
         (
             TraceContributionEnvelope,
@@ -1637,12 +1654,11 @@ impl<'a> SubmitContext<'a> {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
-        // The sign-up pins plus any signed accepted-list entry valid now
-        // (`witness::accepted_list`). The list only adds candidates; a
-        // malformed sign-up pin is still this refusal.
-        let trust =
-            crate::witness::accepted_list::trust_with_accepted(settings, self.store.dir(), now)
-                .map_err(|_| "witness_expected_measurement_malformed")?;
+        // Runtime endpoint pins are resolved after receipt/profile selection;
+        // malformed enrollment pins retain their distinct refusal label.
+        settings
+            .trust()
+            .map_err(|_| "witness_expected_measurement_malformed")?;
 
         #[cfg(test)]
         if let Some(label) = self
@@ -1663,17 +1679,6 @@ impl<'a> SubmitContext<'a> {
             settings.admission_evidence,
             attested.map(|call| call.request_body()),
         )?;
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
-        )
-        .map_err(|e| e.refusal_label())?
-        .with_admission_evidence(admission_profile)
-        .with_background_workload(self.background_witness)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
         // must have its receipt and cannot switch to the window on failure.
@@ -1697,11 +1702,15 @@ impl<'a> SubmitContext<'a> {
         // history or execution claims. Keep the ordinary invited profile intact.
         let raw = witness_input_for_profile(raw, &self.effective_cfg, admission_profile);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
-        let response = witness_session(
-            &transport,
-            &settings.url,
-            &trust,
-            now.timestamp().max(0) as u64,
+        let response = crate::witness::configuration::witness_session(
+            self.cfg,
+            settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: admission_profile,
+                background: self.background_witness,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             raw,
             attested,
             &GrantedConsent { scopes, uses },
@@ -2015,6 +2024,19 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// The wait, in seconds, ingest named for a spent account allowance on
+    /// the most recent submission, or `None` if it named none or did not
+    /// refuse it so. Meaningful immediately after a submission returns
+    /// `Failed` with `account_limit_reached`.
+    #[must_use]
+    pub fn last_account_limit_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_account_limit_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
     /// The wait, in seconds, ingest's rate limit asked for on the most recent
     /// submission, or `None` if it was not rate limited. Meaningful
     /// immediately after a submission returns `Failed` with
@@ -2082,6 +2104,8 @@ impl<'a> SubmitContext<'a> {
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_unavailable_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_account_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_ingest_send_at = None;
         let opts = self.opts;
@@ -2206,9 +2230,10 @@ impl<'a> SubmitContext<'a> {
                         .trust()
                         .map(|trust| !trust.is_pinned())
                         .unwrap_or(true)
-                        || crate::witness::transport::verify_certificate(
+                        || crate::witness::configuration::verify_review_certificate(
+                            settings,
+                            self.store.dir(),
                             &response,
-                            &settings.signing_address,
                         )
                         .is_err()
                         || approved.submission_id
@@ -2467,6 +2492,7 @@ impl<'a> SubmitContext<'a> {
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
         let mut unavailable_retry_after = None;
+        let mut account_limit_retry_after = None;
         self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
@@ -2478,9 +2504,14 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
             &mut unavailable_retry_after,
+            &mut account_limit_retry_after,
             envelope_limit,
         )
         .await;
+        if let Some(seconds) = account_limit_retry_after {
+            self.last_account_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
@@ -3401,6 +3432,9 @@ async fn upload_with_retry(
     // Written with the wait a `503` asked for (`Retry-After` or the body's
     // `retry_after_seconds`), clamped like the rate limit's.
     unavailable_retry_after: &mut Option<u32>,
+    // Written with the wait ingest named when it refused the upload with
+    // `account_limit_reached`, unclamped; left `None` when it named none.
+    account_limit_retry_after: &mut Option<u32>,
     // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
@@ -3501,6 +3535,9 @@ async fn upload_with_retry(
                 // constant for the variant that was recognised, never the
                 // string the server sent.
                 if let Some(refusal) = admission_refusal(&e) {
+                    if refusal == AdmissionRefusal::AccountLimitReached {
+                        *account_limit_retry_after = account_limit_retry_hint(&e, Utc::now());
+                    }
                     return Err(refusal.label().to_string());
                 }
                 // Sending too fast is not a verdict on the session. The
@@ -3555,6 +3592,24 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
         }
         _ => None,
     }
+}
+
+/// The wait ingest named on an `account_limit_reached` refusal: the body's
+/// `retry_after_seconds`, else `Retry-After`. `None` for none or zero, which
+/// is what ingest sends when the allowance has no reset. Unclamped.
+fn account_limit_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let OcError::ServerLabel {
+        body, retry_after, ..
+    } = e
+    else {
+        return None;
+    };
+    crate::retry_jitter::server_retry_after(
+        body_retry_after_seconds(body),
+        retry_after.as_deref(),
+        now,
+    )
+    .filter(|secs| *secs > 0)
 }
 
 /// The seconds to wait if this error is ingest's per-principal upload rate
@@ -3975,6 +4030,52 @@ mod tests {
         );
     }
 
+    /// The wait ingest names on `account_limit_reached` is read from the
+    /// body, else `Retry-After`, unclamped; none (an allowance with no
+    /// reset) or zero is no hint.
+    #[test]
+    fn an_account_limit_refusal_carries_its_wait() {
+        let now = Utc::now();
+        let refusal = |body: &str, header: Option<&str>| OcError::ServerLabel {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            label: "account_limit_reached".into(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        };
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":172800}"#,
+                    Some("5")
+                ),
+                now
+            ),
+            Some(172_800)
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(r#"{"error":"account_limit_reached"}"#, Some("120")),
+                now
+            ),
+            Some(120)
+        );
+        assert_eq!(
+            account_limit_retry_hint(&refusal(r#"{"error":"account_limit_reached"}"#, None), now),
+            None
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":0}"#,
+                    None
+                ),
+                now
+            ),
+            None
+        );
+    }
+
     #[test]
     fn admission_projection_omits_unsigned_history_but_preserves_submission_identity() {
         let cfg = crate::commands::unenrolled_preview_config();
@@ -4133,7 +4234,14 @@ mod tests {
             None,
         );
         artifact
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let mut changed = response;
         changed.envelope_bytes.push(b' '); // Same JSON value, different certified bytes.
@@ -4148,13 +4256,21 @@ mod tests {
         assert_ne!(changed.digest().unwrap(), artifact.digest().unwrap());
         assert!(
             changed
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
         assert!(
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     "sha256:another-contribution",
                     &fingerprint,
                     None,
@@ -4174,7 +4290,14 @@ mod tests {
         // a round trip that lost the admission headers would still satisfy
         // the digest and fail here.
         restored
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let opts = review_options();
         let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
@@ -4202,6 +4325,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_review_upload_uses_current_signed_rotation_and_honors_withdrawal() {
+        use crate::witness::{accepted_list, configuration};
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_accepted_list::{ListSignature, key_id_for};
+        use trace_commons_protocol::witness_configuration::WitnessConfiguration;
+
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let rotated_signer = cfg.witness.as_ref().unwrap().signing_address.clone();
+        let anchor = configuration::COMMONS_ENROLLMENT_URLS[0];
+        let settings = cfg.witness.as_mut().unwrap();
+        settings.url = anchor.into();
+        settings.signing_address = "0x1111111111111111111111111111111111111111".into();
+        store.save_config(&cfg).unwrap();
+        let enrollment_bytes = std::fs::read(store.dir().join("contributor.json")).unwrap();
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[79; 32]).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        accepted_list::set_test_keys(store.dir(), vec![public]);
+        let now = Utc::now();
+        let mut document: WitnessConfiguration = serde_json::from_value(serde_json::json!({
+            "schema":"trace-commons.witness-configuration.v1", "version":2,
+            "issued_at":now, "enrollment_urls":[anchor, "https://replacement.example"],
+            "endpoints":[{"url":"https://replacement.example", "entries":[{
+                "measurements":format!("mrtd={}", "aa".repeat(48)),
+                "signing_address":rotated_signer,
+                "not_before":now - chrono::Duration::minutes(1),
+                "not_after":now + chrono::Duration::hours(1)
+            }]}]
+        }))
+        .unwrap();
+        let publish = |document: &WitnessConfiguration| {
+            let payload = document.canonical_payload().unwrap();
+            let signature = ListSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+            };
+            let signed = serde_json::to_vec(
+                &serde_json::json!({"payload":payload,"signatures":[signature]}),
+            )
+            .unwrap();
+            configuration::install(store.dir(), &signed, &[public], anchor).unwrap();
+        };
+        publish(&document);
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        // Also model a concurrent queued operation that has not loaded the
+        // first operation's eventual receipt. Policy must still be rechecked.
+        let mut concurrent = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        concurrent
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        assert!(matches!(
+            context.submit_loaded(transcript.clone()).await.unwrap(),
+            SubmitOutcome::Submitted { .. }
+        ));
+        assert_eq!(
+            capture.lock().unwrap().bodies.as_slice(),
+            &[artifact.response().envelope_bytes.clone()]
+        );
+        assert_eq!(claim_requests.lock().unwrap().len(), 1);
+        document.version += 1;
+        document.endpoints.clear();
+        publish(&document);
+        assert!(
+            matches!(concurrent.submit_loaded(transcript).await.unwrap(), SubmitOutcome::Refused { reason_label, .. } if reason_label == "witness-review-stale")
+        );
+        assert_eq!(
+            capture.lock().unwrap().bodies.len(),
+            1,
+            "withdrawal must prevent a stale in-flight context from sending"
+        );
+        assert_eq!(
+            std::fs::read(store.dir().join("contributor.json")).unwrap(),
+            enrollment_bytes
+        );
+    }
+
+    #[tokio::test]
     async fn witness_review_survives_restart_and_uploads_exact_certified_bytes() {
         let capture = Arc::new(Mutex::new(CapturedUpload::default()));
         let issuer = spawn(stub_issuer()).await;
@@ -4212,7 +4422,14 @@ mod tests {
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
         let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
         artifact
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let entry_id = crate::daemon::queue::entry_id_for(&transcript.session_hash);
         crate::daemon::approved_envelope::save_witnessed(&store, entry_id, &artifact).unwrap();
@@ -4308,18 +4525,33 @@ mod tests {
         let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
         assert!(
             artifact
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_ok()
         );
         assert!(
             artifact
-                .validate(&cfg, "foreign-source", &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    "foreign-source",
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
         assert!(
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     "changed-settings",
                     None,
@@ -4331,6 +4563,7 @@ mod tests {
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     &fingerprint,
                     Some("worked"),
@@ -4342,6 +4575,7 @@ mod tests {
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     &fingerprint,
                     None,
@@ -4352,7 +4586,14 @@ mod tests {
         cfg.tenant_id.push_str("-foreign");
         assert!(
             artifact
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
     }
@@ -6780,6 +7021,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_explicit_review_needs_neither_receipt_nor_body_export() {
+        for legacy_call in [false, true] {
+            let (_dir, store, mut cfg, capture, witnessed) = r5_setup("low").await;
+            cfg.witness.as_mut().unwrap().admission_evidence = true;
+            cfg.inference_receipt_endpoint = None;
+            let options = review_options();
+            let mut context = SubmitContext::new(&store, &cfg, &options, None).unwrap();
+            context.witness_override = Some((
+                witnessed,
+                InferenceAttestationRecord::uncertified(inference_record::REASON_NO_ATTESTED_CALL),
+            ));
+            let selection = fixture_selection();
+            let (source, reference) = &selection[0];
+            let mut transcript = source.load(reference).unwrap();
+            let (call, _bodies) = receipt_fixture_call();
+            if legacy_call {
+                transcript.attested_call = Some(Arc::new(call));
+            }
+            let (response, inference) = context
+                .prepare_witnessed_review(&transcript, None, false)
+                .await
+                .expect("ordinary history must not require inference receipt or body consent");
+            crate::witness::transport::verify_certificate(
+                &response,
+                &cfg.witness.as_ref().unwrap().signing_address,
+            )
+            .unwrap();
+            assert!(
+                response.admission.is_none(),
+                "ordinary history claims no admission evidence"
+            );
+            assert_eq!(
+                inference,
+                InferenceAttestationRecord::uncertified(if legacy_call {
+                    inference_record::REASON_BODIES_WITHHELD
+                } else {
+                    inference_record::REASON_NO_ATTESTED_CALL
+                })
+            );
+            assert!(
+                capture.lock().unwrap().bodies.is_empty(),
+                "review does not upload to ingest"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn admission_review_without_body_consent_refuses_before_claim_or_witness() {
         let (_dir, store) = crate::config::tests_support::temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
@@ -6804,7 +7092,11 @@ mod tests {
         let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let selection = fixture_selection();
         let (source, reference) = &selection[0];
-        let transcript = source.load(reference).unwrap();
+        let mut transcript = source.load(reference).unwrap();
+        let (call, _bodies) = receipt_fixture_call_with_request(
+            r#"{"model":"fixture","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#,
+        );
+        transcript.attested_call = Some(Arc::new(call));
         let error = context
             .prepare_witnessed_review(&transcript, None, false)
             .await
@@ -8411,6 +8703,7 @@ mod tests {
             &mut envelope,
             &cfg,
             witnessed,
+            &mut None,
             &mut None,
             &mut None,
             MAX_ENVELOPE_BYTES,

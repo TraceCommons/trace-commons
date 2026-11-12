@@ -2188,6 +2188,19 @@ char*       tc_onboarding_copy(void);
  */
 char*       tc_first_run_copy_json(void);
 
+/* The published Terms of Service, fetched from the Trace Commons site
+ * (terms::fetch_published_blocking): {"document": <TermsDocument>,
+ * "content_sha256": "<64 lowercase hex of the exact bytes served>"}. HTTPS to
+ * the document's own host only, no redirects, no credential. Needs no daemon
+ * and no state directory. Blocks up to the fetch timeouts: call it off the UI
+ * thread. Returns an OWNED string; free with tc_string_free. On failure
+ * returns NULL and, when err is non-NULL, sets *err to an OWNED label (free
+ * with tc_string_free): terms-unavailable, terms-host-refused,
+ * terms-too-large, terms-malformed, terms-schema-unknown,
+ * terms-version-invalid, terms-empty, terms-link-refused, or panic.
+ */
+char*       tc_terms_document_json(char** err);
+
 /* The first run's Traces line under the count, worded by the core
  * (first_run_copy::traces_estimate_line). `request` is a JSON object:
  * {"traces": <found>, "earns_credit": <bool>}, each optional; older shells'
@@ -2482,7 +2495,9 @@ uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void
  * leftover error is not mistaken for this one.
  */
 /* Attached handles also disable cloned reader sinks and drain active callbacks;
- * calling from an attached callback is refused with the same context label. */
+ * calling from an attached callback is refused with the same context label.
+ * A refused attached unsubscribe still stops delivery to ctx, but ctx must stay
+ * valid until a retry from a plain thread succeeds. */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.
@@ -2809,13 +2824,13 @@ char*       tc_sent_traces_training_copy_json(void);
  */
 char*       tc_automatic_contribution_copy_json(const char* config_dir);
 
-/* The quit prompt true for the process holding handle (quit_copy::
- * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
- * the handle: hosting for a daemon run in this process, attached for one
- * another process runs, unavailable for NULL, a handle that is not live, or
- * a stopped daemon. NULL only on a caught panic.
+/* The quit prompt for what quitting would stop (quit_copy::quit_prompt):
+ * {title, body, confirm, cancel}, body one sentence. stops_compute and
+ * stops_private_ai are boolean (0/nonzero). A shell quits without asking
+ * when both are 0 and does not call this; called that way it returns NULL.
+ * Otherwise NULL only on a caught panic, which refuses the quit.
  */
-char*       tc_quit_prompt_json(const tc_handle* handle);
+char*       tc_quit_reason_prompt_json(int32_t stops_compute, int32_t stops_private_ai);
 
 /* The withdrawal confirmation for a trace whose reach this machine cannot
  * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a

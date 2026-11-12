@@ -50,7 +50,7 @@ pub struct ManagedService {
     /// Opens a session in a terminal ([`terminal::launch`]). A field so
     /// tests record the call rather than open a real terminal.
     launch_terminal: LaunchTerminal,
-    /// Opens a session as a tab of herdr's "Near.ai" workspace
+    /// Opens a session as a tab of herdr's "Near AI Gateway" workspace
     /// ([`herdr::launch`]), when "Group sessions in herdr" is on. A field
     /// for the same reason.
     launch_herdr: LaunchTerminal,
@@ -110,6 +110,9 @@ struct SessionParams {
 struct RedeemParams {
     session_id: Uuid,
     ticket: String,
+    /// A new launcher preserves the daemon's native Codex model catalogue.
+    #[serde(default)]
+    native_responses: bool,
 }
 
 impl ManagedService {
@@ -1339,9 +1342,8 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     } else {
         chat_models(shared).await
     };
-    let offered = listed.clone().map(|models| models::offered(p.tool, models));
-    let result = match (listed, offered) {
-        (Some(listed), Some(models)) if !models.is_empty() => {
+    let result = match listed {
+        Some(models) if !models.is_empty() => {
             let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
             let starred = favorite_models(shared);
             let favorites: Vec<&str> = models
@@ -1352,7 +1354,7 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
             let unavailable: Vec<&str> = starred
                 .iter()
                 .map(String::as_str)
-                .filter(|id| !listed.iter().any(|m| m.id == *id))
+                .filter(|id| !models.iter().any(|m| m.id == *id))
                 .collect();
             let background = models::background_table(p.tool, &models);
             Ok(json!({
@@ -1459,27 +1461,33 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
         return respond(request, Ok(json!(context)));
     }
     // No lock is held across the start: it waits on the network.
-    let started = match key.map(ApiKey::new) {
-        Some(Ok(key)) => ManagedRoute::start(
-            &shared.store,
-            p.session_id,
-            key,
-            context.session.tool,
-            context.session.model.as_deref(),
-        )
-        .await
-        .map_err(|error| match error {
-            // The proxy reached no model with the sign-in.
-            ManagedError::SignInRequired => ManagedError::NearAiSignInRequired,
-            other => other,
-        }),
-        _ => Err(ManagedError::NearAiSignInRequired),
+    let started = if context.session.tool == ToolId::Codex && !p.native_responses {
+        Err(ManagedError::DaemonUpdateRequired)
+    } else {
+        match key.map(ApiKey::new) {
+            Some(Ok(key)) => ManagedRoute::start(
+                &shared.store,
+                p.session_id,
+                key,
+                context.session.tool,
+                context.session.model.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                // The proxy reached no model with the sign-in.
+                ManagedError::SignInRequired => ManagedError::NearAiSignInRequired,
+                other => other,
+            }),
+            _ => Err(ManagedError::NearAiSignInRequired),
+        }
     };
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
             context.route_model = Some(route.default_model().to_owned());
             context.route_models = Some(route.models().to_vec());
+            context.route_native_responses =
+                (context.session.tool == ToolId::Codex).then_some(true);
             // The row shows the model the session starts on. Only the row
             // misses it if this cannot be saved; the launch goes ahead.
             let _ = service
@@ -1885,6 +1893,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
+        ManagedError::DaemonUpdateRequired => crate::managed::DAEMON_UPDATE_REQUIRED_LABEL,
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
         ManagedError::InvalidCliOptions => "managed-cli-options-invalid",
@@ -2701,6 +2710,53 @@ mod tests {
         assert!(!file.exists());
     }
 
+    /// An old launcher would silently replace newly available Codex models.
+    /// Refuse its unacknowledged launch before starting a route, and end the
+    /// redeemed session through the ordinary failed-start lifecycle.
+    #[tokio::test]
+    async fn codex_sign_in_redeem_requires_the_launchers_native_responses_ack() {
+        for ack in [None, Some(false)] {
+            let (home, shared) = launching(record_launch);
+            shared.settings.lock().unwrap().near_ai_inference =
+                Some(crate::daemon::settings::NearAiInferenceCredential {
+                    key: "fixture-only-not-a-real-key".into(),
+                    key_id: "fixture".into(),
+                    key_prefix: "fixture".into(),
+                    organization_id: "fixture".into(),
+                    workspace_id: "fixture".into(),
+                    minted_at: chrono::Utc::now(),
+                });
+            let prepared = locked(&shared, |service| {
+                prepare(service, ToolId::Codex, home.path())
+            });
+            let mut params =
+                json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
+            if let Some(ack) = ack {
+                params["native_responses"] = json!(ack);
+            }
+            let response = redeem_async(
+                &shared,
+                &Request {
+                    id: 1,
+                    method: "managed_launch_redeem".into(),
+                    params,
+                },
+            )
+            .await;
+            assert_eq!(
+                response.error.unwrap().code,
+                crate::managed::DAEMON_UPDATE_REQUIRED_LABEL
+            );
+            locked(&shared, |service| {
+                assert_eq!(
+                    service.sessions.describe(prepared.session_id),
+                    Some((ConnectionKind::NearAiSignIn, SessionState::Failed))
+                );
+                assert!(service.routes.is_empty());
+            });
+        }
+    }
+
     #[test]
     fn a_signed_in_redeem_asks_its_caller_to_host_the_proxy() {
         let (home, _store, mut service) = service();
@@ -2716,9 +2772,15 @@ mod tests {
         assert_eq!(context.route_port, None);
         assert_eq!(context.route_model, None);
         assert_eq!(context.route_models, None);
+        assert_eq!(context.route_native_responses, None);
         // Absent, not null, until a route is started.
         let wire = serde_json::to_value(&context).unwrap();
-        for field in ["route_port", "route_model", "route_models"] {
+        for field in [
+            "route_port",
+            "route_model",
+            "route_models",
+            "route_native_responses",
+        ] {
             assert!(wire.get(field).is_none(), "{field}");
         }
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);

@@ -59,6 +59,9 @@ TABLE_RULES = (
     ("pipeline_", ("SYS-002", "RUN-001")),
     ("phase_outcomes", ("SYS-007", "RUN-001")),
     ("trace_account", ("AUTH-004", "SYS-002")),
+    # V158: which terms version each account accepted, per org. Account data
+    # like the trace_account_* tables, though it lacks their prefix.
+    ("account_terms_acceptances", ("AUTH-004", "SYS-002")),
     ("trace_session", ("AUTH-004", "SYS-002")),
     ("trace_webauthn", ("AUTH-004", "SYS-002")),
     ("trace_login", ("AUTH-004", "SYS-002")),

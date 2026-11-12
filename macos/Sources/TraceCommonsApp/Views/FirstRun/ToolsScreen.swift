@@ -192,17 +192,7 @@ enum ToolsScreenLayout {
             state, candidates: rows(discovered, state: state), requiredScope: nil)
     }
 
-    /// Private AI only, beside Continue (tester report, owner-approved
-    /// path 2026-11-04): offered once discovery has answered, whatever is
-    /// ticked, since it answers every tool Not used. Not while a folder is
-    /// being added or a commit runs.
-    static func canChoosePrivateAIOnly(
-        discovered: [SourceCandidate]?, pending: Bool, isCommitting: Bool, scanned: Bool = true
-    ) -> Bool {
-        discovered != nil && scanned && !pending && !isCommitting
-    }
-
-    /// Customize, beside Continue, opens once a tool is watched, as Continue
+    /// Customize, beside Uses' action, opens once a tool is watched, as Continue
     /// does (Ron, 2026-10-21), and closes again at any time.
     static func customizeEnabled(state: FirstRunState, open: Bool, scanned: Bool, isCommitting: Bool) -> Bool {
         if open { return !isCommitting }
@@ -595,38 +585,25 @@ private struct ToolsBeam: View {
 
 // MARK: - The list
 
-/// The found tools, one check each, and the add row; under Customize, the
-/// repos found in each watched tool's traces with a rule and their past
-/// traces (Ron, 2026-10-21).
+/// The found tools, one check each, and the add row.
 struct ToolChecks: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
     @ObservedObject var adding: AddToolModel
-    @ObservedObject var repos: CustomizeRepos
     let rows: [SourceCandidate]
-    let showsRepos: Bool
-    let open: Bool
     let shown: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: GlassTokens.Space.s4) {
-            // One scroll view open or closed, so opening Customize grows the
-            // same card rather than fading one list into another. Closed,
-            // it is sized to its rows and does not scroll; while the repos
-            // are held as it closes, it stays bounded by the window.
-            ScrollView { list }
-                .scrollDisabled(!open)
-                .scrollIndicators(open ? .automatic : .hidden)
-                .fixedSize(horizontal: false, vertical: !open && !showsRepos)
+            list
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(GlassTokens.Color.firstRunCard.color))
             AddToolTile(copy: copy, runner: runner, adding: adding)
                 .modifier(RowRise(shown: shown, index: rows.count, reduceMotion: reduceMotion))
         }
-        .frame(width: open ? 580 : nil)
-        .fixedSize(horizontal: !open, vertical: false)
+        .fixedSize(horizontal: true, vertical: false)
         // Nothing of the card shows until the scan is over.
         .opacity(shown ? 1 : 0)
         .animation(GlassMotion.timed(reduceMotion, duration: 0.3), value: shown)
@@ -638,12 +615,6 @@ struct ToolChecks: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if index > 0 { GlassHairline() }
                     toolRow(row)
-                    if showsRepos, ToolsScreenLayout.isWatched(row, in: runner.state) {
-                        ToolRepoList(copy: copy, runner: runner, repos: repos, kind: row.source)
-                            .padding(.leading, 36)
-                            .padding(.bottom, GlassTokens.Space.s5)
-                            .transition(.opacity)
-                    }
                 }
                 .modifier(RowRise(shown: shown, index: index, reduceMotion: reduceMotion))
             }
@@ -687,15 +658,10 @@ struct ToolChecks: View {
     private func toolRow(_ row: SourceCandidate) -> some View {
         HStack(spacing: GlassTokens.Space.s6) {
             GlassToolTile(.tool(row.source.glassTool))
-            VStack(alignment: .leading, spacing: 0) {
-                Text(row.source.displayName)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                Text(copy.frame.sessionCountLine(row.sessionCount))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-            }
-            .frame(minWidth: 150, alignment: .leading)
+            Text(row.source.displayName)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+                .frame(minWidth: 150, alignment: .leading)
             Spacer(minLength: GlassTokens.Space.s6)
             Toggle(
                 ToolAnswerRowLayout.fill(copy.folders.watchQuestion, tool: row.source),
@@ -894,6 +860,34 @@ final class CustomizeRepos: ObservableObject {
     }
 }
 
+/// Customize, on Uses: the repos found in each watched tool's traces, with a
+/// rule and their past traces, scrolling in one card (Ron, 2026-10-21; moved
+/// from Tools 2026-11-05).
+struct CustomizeRepoCard: View {
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    @ObservedObject var repos: CustomizeRepos
+    let kinds: [SourceKind]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(kinds.enumerated()), id: \.element) { index, kind in
+                    if index > 0 { GlassHairline() }
+                    ToolRepoList(copy: copy, runner: runner, repos: repos, kind: kind)
+                        .padding(.vertical, GlassTokens.Space.s5)
+                }
+            }
+            .padding(.horizontal, GlassTokens.Space.s7)
+        }
+        .scrollIndicators(.automatic)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(GlassTokens.Color.firstRunCard.color))
+        .frame(width: 580)
+    }
+}
+
 /// One watched tool's repos under Customize: a rule each, and a chevron
 /// that opens its past traces.
 private struct ToolRepoList: View {
@@ -902,14 +896,17 @@ private struct ToolRepoList: View {
     @ObservedObject var repos: CustomizeRepos
     let kind: SourceKind
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var armingCandidate: ProjectRow?
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
-            Text(FirstRunCopy.fill(copy.rules.reposFound, ["tools": kind.displayName]))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .padding(.bottom, GlassTokens.Space.s2)
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassToolTile(.tool(kind.glassTool))
+                    .accessibilityHidden(true)
+                Text(FirstRunCopy.fill(copy.rules.reposFound, ["tools": kind.displayName]))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
+            .padding(.bottom, GlassTokens.Space.s2)
             // Watching only queues the picked past traces on this Mac.
             if let note = RulesScreenLayout.pastSessionsNote(runner.state, copy: copy.rules) {
                 Text(note)
@@ -949,34 +946,10 @@ private struct ToolRepoList: View {
                 }
             }
         }
-        .glassModal(isPresented: Binding(
-            get: { armingCandidate.flatMap(armingCopy) != nil },
-            set: { if !$0 { armingCandidate = nil } })
-        ) {
-            // Never presented without the core's words: arming is never
-            // confirmed against a sentence this shell wrote.
-            if let project = armingCandidate, let words = armingCopy(project) {
-                GlassConfirmation(
-                    title: words.question, message: words.body,
-                    actions: [
-                        .cancel(words.decline) { armingCandidate = nil },
-                        GlassModalAction(words.confirm, isDefault: true) {
-                            _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
-                            armingCandidate = nil
-                        },
-                    ],
-                    onCancel: { armingCandidate = nil })
-            }
-        }
     }
 
     @EnvironmentObject private var model: AppModel
     private var sourceModel: any FirstRunRulesSource { model }
-
-    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
-        ProjectArmingCopy.decode(
-            fromJSON: TCCoreCopy.armingOfferCopyJSON(project: project.displayLabel, count: 0))
-    }
 
     @ViewBuilder private func repoRow(_ project: ProjectRow) -> some View {
         #if DEBUG
@@ -1004,7 +977,6 @@ private struct ToolRepoList: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .accessibilityLabel(name)
                 .accessibilityAddTraits(isOpen ? .isSelected : [])
-                GlassToolTile(.folderInitial(name))
                 VStack(alignment: .leading, spacing: 0) {
                     Text(name)
                         .glassType(GlassTokens.TypeScale.label.weight(.semibold))
@@ -1050,7 +1022,7 @@ private struct ToolRepoList: View {
 
     /// Ask, Automatic and Never side by side, as the canvas draws them (Ron,
     /// 2026-10-22: no status dot). Automatic can be picked before sign-in:
-    /// it is confirmed now and armed at Start.
+    /// it is recorded now and armed at Start.
     @ViewBuilder private func rulePicker(_ project: ProjectRow) -> some View {
         if let words = ProjectModeWords.table {
             FirstRunSegmented(
@@ -1058,10 +1030,7 @@ private struct ToolRepoList: View {
                 selection: Binding(
                     get: { RulesScreenLayout.rule(runner.state, for: project) },
                     set: { wanted in
-                        // Arming is a grant, so it is never silent.
-                        if RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted) == .needsConfirmation {
-                            armingCandidate = project
-                        }
+                        _ = RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted)
                     }),
                 options: RulesScreenLayout.offeredModes(project, state: runner.state).compactMap { mode in
                     words.label(for: mode).map { .init(title: $0, value: mode) }
@@ -1128,21 +1097,15 @@ private struct ToolRepoList: View {
 // MARK: - The screen
 
 /// Tools: the ring narrowed to the tools found on this Mac, one check per
-/// tool, Customize for per-repo rules, and Continue, which starts the
-/// daemon watching what is ticked (`CommitPoint.leaveTools`).
+/// tool, and Continue, which starts the daemon watching what is ticked (`CommitPoint.leaveTools`).
 struct ToolsScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
     @ObservedObject var memory: FirstRunStageMemory
-    let source: any FirstRunRulesSource
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
     @StateObject private var adding = AddToolModel()
-    @StateObject private var repos = CustomizeRepos()
-    @State private var customizing = false
-    /// The repos stay in the card while it shrinks back, then leave.
-    @State private var holdingRepos = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1160,26 +1123,7 @@ struct ToolsScreen: View {
                     discovered: discovery.rows, state: runner.state, pending: adding.pending != nil,
                     isCommitting: runner.isCommitting, scanned: scanned),
                 busy: runner.isCommitting,
-                link: FirstRunFooter.Link(
-                    title: copy.frame.customSetupInstead,
-                    isEnabled: ToolsScreenLayout.customizeEnabled(
-                        state: runner.state, open: customizing, scanned: scanned, isCommitting: runner.isCommitting),
-                    isOpen: customizing,
-                    action: toggleCustomize),
-                secondary: FirstRunFooter.Secondary(
-                    title: copy.tools.privateAiOnly,
-                    isEnabled: ToolsScreenLayout.canChoosePrivateAIOnly(
-                        discovered: discovery.rows, pending: adding.pending != nil,
-                        isCommitting: runner.isCommitting, scanned: scanned),
-                    action: {
-                        runner.state = FirstRunNavigation.choosePrivateAIOnly(runner.state)
-                        Task { await runner.commit(.leaveTools) }
-                    }),
-                action: {
-                    runner.state = FirstRunNavigation.continueSharing(runner.state)
-                    Task { await runner.commit(.leaveTools) }
-                }),
-            open: customizing
+                action: { Task { await runner.commit(.leaveTools) } })
         ) {
             ToolsRing(rows: rows, state: runner.state, scanStart: memory.scanStartedAt)
         } title: {
@@ -1198,8 +1142,7 @@ struct ToolsScreen: View {
                         .transition(.opacity)
                     }
                     ToolChecks(
-                        copy: copy, runner: runner, adding: adding, repos: repos, rows: listed,
-                        showsRepos: customizing || holdingRepos, open: customizing, shown: scanned)
+                        copy: copy, runner: runner, adding: adding, rows: listed, shown: scanned)
                         .allowsHitTesting(scanned)
                 }
             case .failed:
@@ -1227,11 +1170,6 @@ struct ToolsScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshDiscovery()
         }
-        .onChange(of: ToolsScreenLayout.watchedKinds(runner.state)) { _, watched in
-            // Nothing watched closes Customize: it has nothing to show.
-            if watched.isEmpty, customizing { customizing = false }
-            if customizing { Task { await repos.load(runner: runner, source: source) } }
-        }
     }
 
     /// Discovery's rows, and what they say is not on this Mac: such a tool
@@ -1245,20 +1183,5 @@ struct ToolsScreen: View {
             memory.discovered = rows
             memory.startScan(reduceMotion: reduceMotion)
         }
-    }
-
-    private func toggleCustomize() {
-        if customizing {
-            customizing = false
-            holdingRepos = true
-            Task {
-                try? await Task.sleep(for: .milliseconds(800))
-                withAnimation(GlassMotion.spatial(reduceMotion, duration: 0.5)) { holdingRepos = false }
-            }
-            return
-        }
-        customizing = true
-        holdingRepos = false
-        Task { await repos.load(runner: runner, source: source) }
     }
 }

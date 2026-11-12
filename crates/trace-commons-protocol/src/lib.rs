@@ -31,14 +31,17 @@ mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
 pub mod submit_rate;
+pub mod terms;
 pub mod trace_contribution;
 pub mod upload_allowance;
 pub mod usage_analytics;
 pub mod witness_accepted_list;
 pub mod witness_blocked;
+pub mod witness_configuration;
 pub mod witness_jobs;
 pub mod witness_pacing;
 pub mod witness_provenance;
+pub mod witness_refusal;
 
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";

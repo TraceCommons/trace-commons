@@ -1,7 +1,7 @@
 # Trace Commons
 
 Trace Commons is an opt-in pipeline for contributing locally scrubbed IronClaw
-traces to a user-owned register of agent work. Capture and redaction both happen
+traces to a user-attributable collective of agent work. Capture and redaction both happen
 on the contributor's machine; only the scrubbed envelope reaches the server.
 There, two gates decide whether a record enters the register — a **novelty**
 gate (is this genuinely different from everything already filed?) and a
@@ -977,6 +977,11 @@ before reading bodies — and fail closed if file metadata tries to extend
 | Variable | Effect |
 |----------|--------|
 | `TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` | Comma-separated central retention policy IDs exempt from expiration/purge — honored only when the stored id matches the server-derived class. Exposed (IDs only) by `config-status`. |
+
+A legal hold preserves the stored payload and suppresses maintenance expiration
+and purge. It does not extend the stored `expires_at` deadline for export or
+benchmark eligibility: held data past that deadline remains unavailable to new
+exports even while its storage status is still Accepted.
 
 A non-dry-run purge requires an explicit RFC3339 `purge_expired_before` cutoff
 *and* a non-empty `purpose`; dry-run previews may omit purpose and never delete.

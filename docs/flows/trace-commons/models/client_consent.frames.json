@@ -1,0 +1,53 @@
+[
+  {
+    "label": "consent_choice",
+    "title": "Sharing choice",
+    "body": "The native sharing choice reads Ask each time until the saved include-existing grant is read back. Choosing Automatic opens its disclosures; the pending choice does not arm a folder. The detailed durable policy and queue records appear in the explanatory internal panel.",
+    "controls": [
+      "Automatic",
+      "Ask each time"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "consent_request",
+    "title": "Automatic disclosures",
+    "body": "The existing disclosures and witness identity are shown before confirmation. This frame groups the two disclosures and optional keep-folder-Ask question; it is an explanatory projection, not an added application screen.",
+    "controls": [
+      "Cancel"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "consent_saving",
+    "title": "Recording consent",
+    "body": "Internal stages: validate confirmed choice, scopes and shown witness; append audit; save the fresh grant with rollback on policy-save failure; return the response. The displayed sharing choice remains separate from the durable grant.",
+    "controls": [],
+    "kind": "server"
+  },
+  {
+    "label": "consent_internal",
+    "title": "Consent and queue records",
+    "body": "Internal explanatory panel: two folders and two entries have independent origins, generation-bound Ask exceptions, captured source-list identities, from-now snapshots and terms validity. Policy changes retract queued automatic approvals; manual approvals and in-flight rows have separate rules. The controls below select abstract inputs and do not propose product UI.",
+    "controls": [
+      "Select other folder",
+      "Folder Ask",
+      "Folder Never",
+      "Folder Automatic",
+      "Folder from now",
+      "Global Never",
+      "Clear global rule",
+      "Global Ask",
+      "Global Automatic",
+      "Choose scopes",
+      "Submit",
+      "Grant from now",
+      "Include existing and keep Ask",
+      "Include existing for all",
+      "Withdraw grant only",
+      "Ask each time",
+      "Start first run"
+    ],
+    "kind": "server"
+  }
+]

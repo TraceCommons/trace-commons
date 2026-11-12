@@ -1,0 +1,157 @@
+[
+  {
+    "label": "e2e_stopped",
+    "title": "Composition \u00b7 App stopped",
+    "body": "Internal abstract-composition panel, not application UI. The in-process daemon has stopped. Durable server work may continue.",
+    "controls": [
+      "Launch app"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_closed",
+    "title": "Composition \u00b7 Window closed",
+    "body": "Internal abstract-composition panel, not application UI. The app and daemon remain running. Uploads, polling and server processing may continue.",
+    "controls": [
+      "Open window",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_offline",
+    "title": "Composition \u00b7 Daemon unavailable",
+    "body": "Internal abstract-composition panel, not application UI. The shell cannot make a new daemon call. Durable receipts and server jobs remain separate.",
+    "controls": [
+      "Restart daemon",
+      "Close window",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_signed_out",
+    "title": "Composition \u00b7 Sign in",
+    "body": "Internal abstract-composition panel, not application UI. This abstraction begins after first run. Sign-in selects one of two accounts and creates usable enrollment.",
+    "controls": [
+      "Sign in",
+      "Close window",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_pending",
+    "title": "Composition \u00b7 Traces",
+    "body": "Internal abstract-composition panel, not application UI. A source revision awaits preview. Consent and account/device inputs are recorded separately.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history",
+      "Preview trace",
+      "Change consent",
+      "Link account payout"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_preview",
+    "title": "Composition \u00b7 Review trace",
+    "body": "Internal abstract-composition panel, not application UI. The stored preview pin identifies the revision, consent and account/device inputs. Approval is a separate action.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history",
+      "Approve preview",
+      "Change consent"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_approved",
+    "title": "Composition \u00b7 Approved",
+    "body": "Internal abstract-composition panel, not application UI. The daemon rechecks enrollment, source revision and approval inputs before a send.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history",
+      "Change consent"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_sending",
+    "title": "Composition \u00b7 Sending",
+    "body": "Internal abstract-composition panel, not application UI. A request may be in flight. Sending does not establish a durable server receipt or a final verdict.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_retry",
+    "title": "Composition \u00b7 Try again",
+    "body": "Internal abstract-composition panel, not application UI. The transport did not establish local receipt status. A durable receipt may already exist; replay keeps its owner and bundle.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_history",
+    "title": "Composition \u00b7 History",
+    "body": "Internal abstract-composition panel, not application UI. The daemon has a receipt. Visible history follows cached reads; server Admission, Review, Score and Settle may be ahead.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history",
+      "Withdraw",
+      "Link account payout"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_credit",
+    "title": "Composition \u00b7 Credit",
+    "body": "Internal abstract-composition panel, not application UI. The last app read includes earned credit. Pipeline NEAR issuance and account NEAR AI/referral payouts have independent state.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history",
+      "Withdraw",
+      "Link account payout"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "e2e_withdrawn",
+    "title": "Composition \u00b7 Taken back",
+    "body": "Internal abstract-composition panel, not application UI. The last app read reports withdrawal. Logical exclusion precedes index cleanup and retention-governed object purge.",
+    "controls": [
+      "Select another trace",
+      "Change account",
+      "Close window",
+      "Quit",
+      "Refresh history"
+    ],
+    "kind": "server"
+  }
+]

@@ -37,7 +37,15 @@ async fn fixture() -> (String, Calls, tokio::task::JoinHandle<()>) {
     (base, calls, task)
 }
 pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared {
-    let shared = DaemonShared::load(store).unwrap();
+    let mut shared = DaemonShared::load(store).unwrap();
+    // The shipped profile, also trusting the test key that signs `set_rollout`.
+    shared.feature_flags = crate::feature_flags::Runtime::open(
+        crate::feature_flags::registry().unwrap(),
+        crate::feature_flags::test_signing::pin(crate::feature_flags::embedded_profile().unwrap()),
+        shared.store.dir(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
     set_rollout(&shared, true);
     shared.claude_desktop.lock().unwrap().test_base_url = Some(base.into());
     shared.settings.lock().unwrap().private_inference = true;
@@ -64,7 +72,10 @@ fn set_rollout(shared: &DaemonShared, enabled: bool) {
     });
     shared
         .feature_flags
-        .accept(&serde_json::to_vec(&manifest).unwrap(), now)
+        .accept(
+            &crate::feature_flags::test_signing::sign(&serde_json::to_vec(&manifest).unwrap()),
+            now,
+        )
         .unwrap();
 }
 async fn call(shared: &DaemonShared, method: &str, params: Value) -> Value {

@@ -1,3 +1,4 @@
+import Foundation
 import TCBridge
 import TCShellCore
 
@@ -33,6 +34,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case changes
     // Private AI.
     case privateAI
+    /// Saved Claude Code, Codex and OpenCode accounts (owner, 2026-11-11):
+    /// off the Private AI tab since #1490, listed beside Private AI.
+    case savedAccounts
     // App (D18, D19).
     case general
     case startup
@@ -54,7 +58,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general, .account, .startup, .notifications, .updates, .privateAI, .compute: true
         // Payouts and Referrals wait: before first run there is no account
         // to pay or to hold a code.
-        case .payouts, .referrals, .watching, .watchedFolders, .tools, .insights, .projects, .consent,
+        case .payouts, .referrals, .savedAccounts, .watching, .watchedFolders, .tools, .insights, .projects, .consent,
              .publicProfile, .changes, .witness: false
         }
     }
@@ -70,7 +74,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .account, .payouts, .referrals: .account
         case .watching, .watchedFolders, .tools, .insights: .capture
         case .projects, .consent, .publicProfile, .changes: .sharing
-        case .privateAI: .privateAI
+        case .privateAI, .savedAccounts: .privateAI
         case .general, .startup, .notifications, .updates: .app
         case .witness, .compute: .advanced
         }
@@ -121,6 +125,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .publicProfile: return nav.profile
         case .changes: return nav.log
         case .privateAI: return nav.privateAI
+        // Not in the core's nav table: the managed table's own title for
+        // the card this section draws, so the row and the card agree.
+        case .savedAccounts: return SettingsWords.savedAccounts
         case .startup: return nav.startup
         // The Updates card's own heading (D19).
         case .updates: return SettingsWords.updates
@@ -163,6 +170,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .publicProfile: "person.crop.circle"
         case .changes: "clock.arrow.circlepath"
         case .privateAI: "key"
+        case .savedAccounts: SavedAccountsSection.symbol
         case .general: "gearshape"
         case .startup: "power"
         case .notifications: "bell"
@@ -193,4 +201,8 @@ enum SettingsWords {
     /// placeholder row.
     static let referrals: String? = TCConsentCopy.referralCopyJSON()
         .flatMap(ReferralCopy.decode(fromJSON:))?.title
+    /// The managed table's "Saved accounts", the title of the card that
+    /// section draws, read once; nil while the export has not arrived.
+    static let savedAccounts: String? = TCDiscovery.managedCopyJSON()
+        .flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }?["accounts_title"] as? String
 }

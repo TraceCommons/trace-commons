@@ -156,6 +156,11 @@
 //! - `background_model_choice` "Model for background tasks" -- the
 //!   picker's accessible name, apart from the model picker's `model_choice`.
 //!   Its default row reuses `model_default` and `model_default_unknown`.
+//! - `background_model_info` "A smaller, faster model the tool uses for
+//!   quick work in the background, like naming the session and searching
+//!   the code. Only models at least as private as your main model are
+//!   listed." -- the text of the "i" beside the title (owner, 2026-11-11).
+//!   Its accessible name is the first-run core's "More about {title}".
 //!
 //! The model picker's group headings, one per NEAR AI privacy tier
 //! (`managed::models::ModelTier`). Named by the owner 2026-10-30; the
@@ -289,6 +294,7 @@ pub fn copy() -> serde_json::Value {
             "model_choice": "Model",
             "background_model_title": "Background model",
             "background_model_choice": "Model for background tasks",
+            "background_model_info": "A smaller, faster model the tool uses for quick work in the background, like naming the session and searching the code. Only models at least as private as your main model are listed.",
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
             "model_group_incognito": "Incognito models",
@@ -470,6 +476,20 @@ mod tests {
         assert_eq!(
             copy["folder_model_unavailable"],
             "The saved model is no longer available, so the default is selected."
+        );
+    }
+
+    /// The background model's "i" explains what the picker is for and
+    /// why its list is shorter. Owner-approved wording, 2026-11-11.
+    #[test]
+    fn the_background_model_has_its_explanation() {
+        let copy = copy();
+        assert_eq!(copy["background_model_title"], "Background model");
+        assert_eq!(
+            copy["background_model_info"],
+            "A smaller, faster model the tool uses for quick work in the \
+             background, like naming the session and searching the code. Only \
+             models at least as private as your main model are listed."
         );
     }
 

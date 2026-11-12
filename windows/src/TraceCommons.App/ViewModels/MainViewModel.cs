@@ -676,10 +676,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public event Action<DaemonSettingsSnapshot?>? PrivateInferenceSettingsChanged;
 
-    /// <summary>
-    /// Whether the switch is on, for the one sentence the quit confirmation
-    /// gains while it is: quitting this app stops the listener with it.
-    /// </summary>
+    /// <summary>Whether the switch is on.</summary>
     public bool PrivateInferenceOn => _privateInferenceOn;
 
     public void ReportPrivateInferenceWriteFailure() =>
@@ -690,9 +687,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (Notice == _privateInferenceCopy?.WriteUnconfirmed) Notice = string.Empty;
     }
 
-    /// <summary>The quit confirmation's extra line, or null.</summary>
-    public string? PrivateInferenceQuitDetail =>
-        PrivateInferenceSurface.QuitDetail(_privateInferenceOn, _privateInferenceState, _privateInferenceCopy);
+    /// <summary>Whether quitting would stop Private AI answering model calls.</summary>
+    public bool PrivateInferenceQuitStops =>
+        PrivateInferenceSurface.QuitStops(_privateInferenceOn, _privateInferenceState);
 
     /// <summary>
     /// Takes what the daemon last reported about the switch and the answer.
@@ -731,7 +728,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(CertificateHeldTitle));
             Raise(nameof(CertificateHeldLine));
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
-            Raise(nameof(PrivateInferenceQuitDetail));
+            Raise(nameof(PrivateInferenceQuitStops));
             Raise(nameof(PrivateInferenceIsWorking));
             Raise(nameof(PrivateInferenceNeedsAttention));
             PrivateInferenceSettingsChanged?.Invoke(settings);
@@ -751,7 +748,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _privateInferenceOn = on;
         Raise(nameof(HasPrivateInferenceOffer));
         Raise(nameof(PrivateInferenceOn));
-        Raise(nameof(PrivateInferenceQuitDetail));
+        Raise(nameof(PrivateInferenceQuitStops));
     }
 
     // Approved sessions held because the privacy witness is busy. Drawn from

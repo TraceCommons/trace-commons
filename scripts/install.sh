@@ -50,7 +50,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installe
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) INSTALL_DIR="${2:?--dir needs a path}"; shift 2 ;;
-    --version) VERSION="${2:?--version needs a version, e.g. 0.1.0}"; shift 2 ;;
+    --version) VERSION="${2:?--version needs a version, e.g. 1.0.0}"; shift 2 ;;
     --staging) CHANNEL=staging; shift ;;
     -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -71,7 +71,7 @@ if [ "$CHANNEL" = staging ]; then
     Linux/x86_64)              target=x86_64-unknown-linux-gnu ;;
     Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-gnu ;;
     Darwin/*)
-      die "the staging build for macOS is the Near.ai Staging app. Download the
+      die "the staging build for macOS is the Near AI Gateway Staging app. Download the
 .dmg from the newest staging pre-release:
   https://github.com/$REPO/releases" ;;
     *)
@@ -137,7 +137,7 @@ elif [ "$VERSION" = latest ]; then
     | sed -e 's/.*"\(contributor-v[^"]*\)"/\1/')" || tag=""
   [ -n "$tag" ] || die "could not work out the latest CLI release. GitHub's API
 may be rate-limiting you. Pass a version explicitly instead:
-  sh install.sh --version 0.1.0"
+  sh install.sh --version 1.0.0"
 else
   tag="contributor-v$VERSION"
 fi

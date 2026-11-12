@@ -541,8 +541,9 @@ impl WarpTab {
             None => String::new(),
         };
         let contents = format!(
-            "name = {name}\ntitle = \"Near.ai\"\n\n[[panes]]\nid = \"main\"\ntype = \"terminal\"\n{directory}commands = [{command}]\n",
+            "name = {name}\ntitle = {title}\n\n[[panes]]\nid = \"main\"\ntype = \"terminal\"\n{directory}commands = [{command}]\n",
             name = toml_string(&name),
+            title = toml_string(crate::brand::APP_NAME),
             command = toml_string(command),
         );
         Ok(WarpTab { name, contents })
@@ -712,8 +713,8 @@ fn write_warp_tab(
 
 /// Whether `path` is a Tab Config this module wrote: a regular file named
 /// `near-ai-<uuid>.toml` whose own `name` is that stem and whose title is
-/// ours. A user's `near-ai-dev.toml`, or a lookalike with another shape,
-/// is not.
+/// the app's current or a former name (one an older version wrote). A
+/// user's `near-ai-dev.toml`, or a lookalike with another shape, is not.
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn is_ours(path: &Path, meta: &std::fs::Metadata) -> Option<Uuid> {
     let stem = path.file_name()?.to_str()?.strip_suffix(".toml")?;
@@ -722,8 +723,9 @@ fn is_ours(path: &Path, meta: &std::fs::Metadata) -> Option<Uuid> {
         return None;
     }
     let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    (parsed.get("name")?.as_str()? == stem && parsed.get("title")?.as_str()? == "Near.ai")
-        .then_some(id)
+    (parsed.get("name")?.as_str()? == stem
+        && crate::brand::is_app_name(parsed.get("title")?.as_str()?))
+    .then_some(id)
 }
 
 /// At daemon start, for the Tab Configs in `folder` an earlier run left:
@@ -1113,7 +1115,7 @@ pub enum TerminalHandle {
         #[serde(deserialize_with = "tty_path")]
         tty: String,
     },
-    /// A Rex tab: the "Near.ai" Rex session, the Rex window (a tab) the
+    /// A Rex tab: the app's Rex session, the Rex window (a tab) the
     /// launch opened in it, and its one block. Each id is checked as Rex
     /// prints it (`session:`, `window:` or `block:` and a UUID) wherever it
     /// came from.

@@ -1,6 +1,6 @@
 # macOS app icons
 
-The Near.ai app's icon, as Icon Composer documents. Each `.icon` is a
+The Near AI Gateway app's icon, as Icon Composer documents. Each `.icon` is a
 directory (`icon.json` plus `Assets/`) that opens in Icon Composer by
 double-click; `scripts/make-icon-document.sh` compiles the channel's document
 into the bundle with `actool`.

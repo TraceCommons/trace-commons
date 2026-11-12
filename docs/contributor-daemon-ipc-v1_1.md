@@ -302,7 +302,8 @@ opens the pipe as a file handle, which has no equivalent of
 > Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
 > and the control flow and nothing about whether the descriptor actually
 > excludes another user, which is a runtime property no cross-compile can observe.
-> The observation is the `windows-pipe-acl` CI job
+> The observation is the named-pipe ACL step of the `windows contributor
+> crates (tests, named-pipe ACL, update conformance)` CI job in `clients.yml`
 > (`scripts/windows/verify-pipe-acl.ps1`, driving
 > `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
 > non-administrator local account, has it attempt to open the pipe, and
@@ -921,7 +922,10 @@ limit: a busy witness never costs a session.
 
 A witness whose evidence could not be fetched (`witness_timeout`,
 `witness_unreachable`, `witness_attestation_unavailable`,
-`witness_collateral_unavailable`) also keeps the approval: the entry stays
+`witness_collateral_unavailable`), or that answered it cannot serve right now
+(`witness_unreachable` also covers any `5xx` other than saturation and
+timeout, such as `503 witness_signing_unavailable`, and a gateway `404` with
+nothing behind it), also keeps the approval: the entry stays
 `approved` under that label and is retried on the transient-upload backoff,
 and the worker takes no other session until that retry, since the next
 would meet the same witness. Once that budget is spent the entry returns to
@@ -1790,7 +1794,10 @@ A review that does not finish within the preview build deadline (seven
 minutes, below) is abandoned and refused as `witness_timeout`. A witness that
 does not answer within its own request bound, or answers
 `504 witness_request_timed_out`, is also `witness_timeout`; one that cannot be
-connected to is `witness_unreachable`. Both carry the `failed_unreachable`
+connected to, or answers that it cannot serve right now (a `5xx`), is
+`witness_unreachable`. A `413 witness_request_too_large` is
+`witness_payload_too_large`, and a `403 witness_inference_*` is
+`admission_evidence_refused`. `witness_timeout` and `witness_unreachable` carry the `failed_unreachable`
 sentence in `result.view`. Nothing is pinned and nothing falls back to local
 redaction.
 
@@ -3578,8 +3585,10 @@ reason no unattended approval can satisfy:
   attestation or no collateral) through every retry. Nothing was judged and
   nothing was sent. While it is still being retried the entry stays
   `approved` under the same label, with `retry_after` set, and is not held.
-  Earlier builds refused such a session as `witness_attestation_unavailable`;
-  a newer build offers that refusal again.
+  Earlier builds refused such a session as `witness_attestation_unavailable`,
+  or as `witness_response_malformed` when the witness answered with an error
+  they did not recognise; a newer build offers that refusal again (the
+  malformed one only when it was approved, back to `approved`).
 - `witness-measurement-not-accepted`: the witness's evidence was fetched and
   verified, but it reports a measurement outside the accepted set. It is not
   retried, and nothing was sent. A person decides; a newer accepted list can
@@ -6264,7 +6273,7 @@ setup refusal's `{terminal}` from `terminal_destination`; from a daemon
 that sends no `launch_destination`, `terminal_destination` serves for both.
 
 `managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
-managed sessions open as tabs of herdr's "Near.ai" workspace, with
+managed sessions open as tabs of herdr's "Near AI Gateway" workspace, with
 `managed_terminal` hosting herdr when no herdr client is running (see
 `docs/managed-sessions.md`). Anything that is not a boolean is `bad_params`
 / `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
@@ -6619,7 +6628,7 @@ state, the harness rows and the credential row:
   `state_running_answered_elsewhere`, `state_running_destination_unknown`,
   `state_running_elsewhere`,
   `state_port_in_use`, `state_start_failed`, `state_crashed`;
-- `quit_also_stops`, `write_unconfirmed`;
+- `write_unconfirmed`;
 - `settings_moved`, `tray_turn_off`, `tray_open_to_turn_on`;
 - `harnesses_title`, `harnesses_what`, `harnesses_spend_scope`,
   `harnesses_none_found`;
@@ -9602,7 +9611,9 @@ This addendum supersedes the initial `model_spend` unavailable-only contract.
 `model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
 selected inference-key organization (or the existing first-active-organization
 fallback for a legacy session), and the fixed trusted management origin
-`https://cloud-api.near.ai`. It requests
+`https://cloud-platform.near.ai` (staging `https://cloud-platform-stg.near.ai`;
+NEAR AI moved its account, organization, usage and credit routes there from
+`cloud-api.near.ai` on 2026-11-06). It requests
 `GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
 [provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
 session-authenticated rolling 24-hour report. No registry price estimate is
@@ -9847,7 +9858,7 @@ tab, whose prompt may hold input not yet run, and the daemon no longer asks
 macOS for the System Events and Accessibility permissions that a new tab
 needed. A launch still sends Apple Events to the terminal app it opens, so
 macOS may still ask once to let the app control that terminal; the bundle's
-`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+`NSAppleEventsUsageDescription` for that prompt is "Near AI Gateway opens Private AI
 sessions in Terminal." (owner, 2026-11-03; both channels).
 
 An older app may still send two fields, which are accepted so that app keeps
@@ -10068,7 +10079,8 @@ feature snapshot: environment, profile digest, daemon-instance UUID, increasing
 snapshot generation, sampled time, source, manifest revision/expiry/freshness,
 and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
 It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
-returns `{"requested":true}` and schedules a coalesced anonymous refresh; it
+returns `{"requested":true}` and schedules a coalesced anonymous refresh (at most
+one fetch start per 30 seconds; a sooner request is deferred, not dropped); it
 cannot accept a URL or flag values. Developer dry runs allow the snapshot read
 but refuse refresh. Neither method grants any operation authorization.
 

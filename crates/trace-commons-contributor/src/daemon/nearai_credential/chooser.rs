@@ -135,8 +135,16 @@ fn button(tag: &str) -> Result<String> {
     }
     let title = crate::private_inference_copy::credential_provider_title(tag)
         .ok_or_else(|| anyhow!("near_ai_credential_provider_unknown"))?;
+    // Bundled vector marks keep this loopback page self-contained under its CSP.
+    let logo = match tag {
+        "near" => include_str!("provider_near.svg"),
+        "github" => include_str!("provider_github.svg"),
+        "google" => include_str!("provider_google.svg"),
+        _ => "",
+    }
+    .trim();
     let mut html = format!(
-        "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{}</button>\n",
+        "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{logo}{}</button>\n",
         escape(title)
     );
     if tag == "near" {
@@ -348,10 +356,14 @@ fn choice(
     if head.origin.as_deref() != Some(format!("http://{authority}").as_str()) {
         return Route::Refused;
     }
+    // Safari 27 marks a person's click on this page's button `none`, not
+    // `same-origin` (a scripted click gets `same-origin`). No other site can
+    // make a browser send `none`, and the origin above is already this
+    // page's, so both are taken; `same-site` and `cross-site` are not.
     if head
         .fetch_site
         .as_deref()
-        .is_some_and(|site| site != "same-origin")
+        .is_some_and(|site| site != "same-origin" && site != "none")
     {
         return Route::Refused;
     }

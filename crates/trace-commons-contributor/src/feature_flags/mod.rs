@@ -101,7 +101,7 @@ impl Snapshot {
 }
 struct State {
     manifest: Option<Manifest>,
-    raw: Vec<u8>,
+    watermark: Option<cache::Watermark>,
     deadline: Option<Instant>,
     expired: bool,
     latched: BTreeMap<String, bool>,
@@ -124,9 +124,22 @@ impl Runtime {
     ) -> anyhow::Result<Self> {
         registry.validate(&profile)?;
         let identity = profile.digest()?;
-        let cache = cache::Cache::new(dir, &identity);
-        let cached = cache.load(profile.environment);
-        let (manifest, raw) = cached.map(|(m, r)| (Some(m), r)).unwrap_or_default();
+        let cache = cache::Cache::new(dir, &identity, profile.environment);
+        cache.remove_other_profiles();
+        let cached = cache.load(&profile);
+        // The higher of the stored watermark and the cached revision: either
+        // write may have been the one that failed.
+        let watermark = [
+            cache.load_watermark(),
+            cached.as_ref().map(|(m, _, d)| cache::Watermark {
+                revision: m.revision,
+                payload_digest: d.clone(),
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|w| w.revision);
+        let manifest = cached.map(|(m, _, _)| m);
         let expired = manifest.as_ref().is_some_and(|m| !m.valid_at(now));
         let flags = evaluate(
             &registry,
@@ -166,7 +179,7 @@ impl Runtime {
             cache,
             state: Mutex::new(State {
                 manifest,
-                raw,
+                watermark,
                 deadline,
                 expired,
                 latched,
@@ -211,26 +224,53 @@ impl Runtime {
     pub fn environment(&self) -> Environment {
         self.profile.environment
     }
+    pub fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("feature flags lock")
+            .snapshot
+            .generation
+    }
+    /// When the held manifest stops applying by the monotonic clock, while
+    /// one applies. Nothing else about the decision changes with time.
+    pub fn next_expiry(&self) -> Option<Instant> {
+        let s = self.state.lock().expect("feature flags lock");
+        s.manifest.as_ref().filter(|_| !s.expired)?;
+        s.deadline
+    }
     pub fn accept(&self, raw: &[u8], now: DateTime<Utc>) -> anyhow::Result<()> {
-        let manifest = parse_manifest(raw, self.profile.environment, now)?;
+        let (manifest, payload_digest) = parse_signed_manifest(raw, &self.profile, now)?;
         let mut s = self.state.lock().expect("feature flags lock");
-        if let Some(old) = s.manifest.as_ref() {
+        if let Some(mark) = s.watermark.as_ref() {
             anyhow::ensure!(
-                manifest.revision >= old.revision,
+                manifest.revision >= mark.revision,
                 "feature-manifest-rollback"
             );
-            if manifest.revision == old.revision {
-                anyhow::ensure!(raw == s.raw, "feature-manifest-revision-conflict");
-                self.recompute(&mut s, now, "remote");
-                return Ok(());
+            if manifest.revision == mark.revision {
+                anyhow::ensure!(
+                    payload_digest == mark.payload_digest,
+                    "feature-manifest-revision-conflict"
+                );
+                if s.manifest
+                    .as_ref()
+                    .is_some_and(|held| held.revision == manifest.revision)
+                {
+                    self.recompute(&mut s, now, "remote");
+                    return Ok(());
+                }
             }
         }
+        let watermark = cache::Watermark {
+            revision: manifest.revision,
+            payload_digest,
+        };
         // Keep persistence and acceptance ordered: a failed atomic write cannot enable a flag.
+        self.cache.save_watermark(&watermark)?;
         self.cache.save(raw)?;
         s.deadline = remaining_deadline(&manifest, now);
         s.expired = false;
         s.manifest = Some(manifest);
-        s.raw = raw.to_vec();
+        s.watermark = Some(watermark);
         self.recompute(&mut s, now, "remote");
         Ok(())
     }
@@ -284,3 +324,32 @@ fn remaining_deadline(manifest: &Manifest, now: DateTime<Utc>) -> Option<Instant
 }
 #[cfg(test)]
 mod tests;
+/// Signing for tests anywhere in the crate. The key is a fixed throwaway,
+/// never a real manifest key, and is pinned only into test profiles.
+#[cfg(test)]
+pub(crate) mod test_signing {
+    use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+    pub(crate) fn key() -> Ed25519KeyPair {
+        Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("fixed test seed")
+    }
+    /// The profile, also trusting the test key.
+    pub(crate) fn pin(mut profile: Profile) -> Profile {
+        profile
+            .signing_keys
+            .insert(hex::encode(key().public_key().as_ref()));
+        profile
+    }
+    /// The served document for `payload`, signed with the test key.
+    pub(crate) fn sign(payload: &[u8]) -> Vec<u8> {
+        let key = key();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().expect("32 bytes");
+        assemble_signed_manifest(
+            String::from_utf8(payload.to_vec()).expect("UTF-8 manifest"),
+            vec![ManifestSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(&signing_input(payload)).as_ref()),
+            }],
+        )
+    }
+}
