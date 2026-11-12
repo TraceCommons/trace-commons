@@ -35,8 +35,9 @@
 //!   could not be fetched (`submit::witness_failure_is_transient`: timeout,
 //!   unreachable, attestation or collateral unavailable) keeps the approval
 //!   and is retried on the transient-upload backoff, and the lane rests
-//!   until that retry, as the pass once stopped at the first; once the
-//!   budget is spent the entry waits for a person under the same label.
+//!   until that retry, as the pass once stopped at the first. The entry
+//!   keeps its approval for as long as that lasts, with no budget (owner,
+//!   2026-11-12).
 //!   Evidence that was fetched and did not verify
 //!   (`submit::witness_trust_hold`) holds the entry for a person under
 //!   `witness-not-trusted` or `witness-measurement-not-accepted`, never
@@ -81,10 +82,18 @@ use uuid::Uuid;
 use super::ipc::{self, DaemonShared};
 use super::queue::{self, QueueEntry, QueueState};
 
-/// Background witness calls in flight at once. One: the witness is a single
-/// enclave that serves background work last, and a second background call
-/// only queues behind the first on its side.
-pub(crate) const BACKGROUND_SLOTS: usize = 1;
+/// Background witness calls in flight at once, once the witness is
+/// answering. Two (owner, 2026-11-12): the witness runs two classify calls
+/// at once and one job sends its windows one after another, so a single
+/// job left the witness's paced NEAR AI budget (30 requests a minute)
+/// mostly idle while a backlog waited.
+///
+/// The second slot opens only after a background call certified a review,
+/// and closes on any other outcome ([`WorkerState::answering`]): a witness
+/// that is failing or busy is still asked once, never once per slot. Past
+/// what a healthy witness can take it answers busy, and the lane rests for
+/// the delay it names.
+pub(crate) const BACKGROUND_SLOTS: usize = 2;
 
 /// A person's explicit reviews in flight at once, on a lane of their own so
 /// a review never waits behind a background call.
@@ -195,6 +204,9 @@ struct WorkerState {
     held_until: Option<DateTime<Utc>>,
     /// The next panic backoff.
     panic_backoff: Option<std::time::Duration>,
+    /// The last background call certified a review, so every slot is open.
+    /// False at start and after any other outcome: one slot, one probe.
+    answering: bool,
     /// A job panicked over a poisoned state lock: nothing more runs until
     /// the next start.
     stopped: bool,
@@ -290,7 +302,7 @@ impl WitnessWorker {
     fn take_next(&self, now: DateTime<Utc>) -> Option<Job> {
         let mut s = self.lock();
         if s.stopped
-            || s.in_flight.len() >= BACKGROUND_SLOTS
+            || s.in_flight.len() >= if s.answering { BACKGROUND_SLOTS } else { 1 }
             || s.held_until.is_some_and(|until| now < until)
         {
             return None;
@@ -313,6 +325,13 @@ impl WitnessWorker {
     fn finish(&self, entry_id: Uuid, end: &JobEnd, now: DateTime<Utc>) {
         let mut s = self.lock();
         s.in_flight.remove(&entry_id);
+        // Only a certified review opens the second slot; a failure, a busy
+        // answer or a panic closes it. A dropped job says nothing either way.
+        match end {
+            JobEnd::Witnessed => s.answering = true,
+            JobEnd::Dropped => {}
+            _ => s.answering = false,
+        }
         match end {
             JobEnd::Busy(until) => {
                 s.held_until = Some(s.held_until.map_or(*until, |held| held.max(*until)));
@@ -328,7 +347,7 @@ impl WitnessWorker {
                 s.stopped = true;
                 s.queued.clear();
             }
-            JobEnd::Done | JobEnd::Dropped => {
+            JobEnd::Witnessed | JobEnd::Done | JobEnd::Dropped => {
                 s.panic_backoff = None;
             }
         }
@@ -338,7 +357,9 @@ impl WitnessWorker {
 /// How one job ended, for the lane.
 #[derive(Debug)]
 enum JobEnd {
-    /// A result was recorded.
+    /// The witness certified a review and it was pinned.
+    Witnessed,
+    /// Some other result was recorded.
     Done,
     /// Nothing was recorded; a later pass re-vets the entry.
     Dropped,
@@ -627,7 +648,7 @@ fn record(
             drop(q);
             // The pinned bytes go out on the next pass, brought forward.
             shared.request_upload_at(Utc::now());
-            JobEnd::Done
+            JobEnd::Witnessed
         }
         super::uploader::WitnessJobOutcome::Decision(decision) => {
             let observed_at = || clock.now();
