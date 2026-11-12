@@ -10,7 +10,7 @@ Scope: desktop integration and packaging; not a Linux release approval.
 | Metadata, icon name and version | Disposable Ubuntu 24.04; install desktop-file-utils and appstream; run `bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh` with checkout mounted read-only | Exit 0; version 1.0.5 agrees. One pedantic uppercase component-ID notice. No host packages installed. |
 | Current-head hosted metadata | `gh run view 43153854476 --json jobs` | [Metadata passed](https://github.com/TraceCommons/trace-commons/actions/runs/43153854476/job/130977821692). |
 | Current-head compositor integration | Same query | [Weston job](https://github.com/TraceCommons/trace-commons/actions/runs/43153854476/job/130977821782) still running at audit time; no passing claim for this head. |
-| Earlier hosted compositor integration | `gh run view 43107619225 --json jobs` | [Weston and portal passed](https://github.com/TraceCommons/trace-commons/actions/runs/43107619225/job/130814967053), head `d51a96ef5030ad8451175f63f9e2e4ae30d3697c`. Not GNOME/KDE or current-head qualification. |
+| Earlier hosted compositor integration | `gh run view 43107619225 --json jobs` | [Weston job passed](https://github.com/TraceCommons/trace-commons/actions/runs/43107619225/job/130814967053), head `d51a96ef5030ad8451175f63f9e2e4ae30d3697c`. The later control-flow audit below found its independent RequestBackground probe unreachable; this pass does not prove that probe ran. Not GNOME/KDE or current-head qualification. |
 | Release workflow | `gh run view 43122606955 --json jobs` | Linux Flatpak skipped. Successful overall release is not Linux build evidence. Linux now runs only on explicit dispatch with platform linux or all. No dispatch performed. |
 | Local environment | `docker ps --format '{{.Names}} {{.Image}}'` | No running container at initial inventory. macOS/Colima, no supplied GNOME/KDE session. Metadata container is not a desktop. |
 
@@ -58,3 +58,11 @@ RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0 cargo test --locked --manifest-path 
 ```
 
 Synthetic serialized D-Bus messages cover granted, denied, cancelled, other response, missing response, missing permission result, unknown response code and malformed body. They exercise decoding and presence classification without a desktop or permission prompt. The protocol interpretation follows [Request.Response](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html) and [Background results](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Background.html). This is unit evidence only, not GNOME/KDE or installed Flatpak qualification.
+
+## Independent portal probe reachability repair
+
+Source inspection found an unconditional `exit "$FAIL"` between the rendering checks and the independent `PORTAL_UP` / RequestBackground probe. The latter block could never execute. Historical successful Weston jobs therefore establish only the checks actually reached; their job name is not evidence that the independent probe ran.
+
+Moved the final exit below the portal block, preserving accumulated rendering failures and adding portal failures to the same exit status. Existing screenshot/OCR and mounted-test gates are unchanged. The wrapper now runs six executable control-flow regressions before starting services. They execute the production tail with mocked D-Bus boundaries and cover probe reachability, preservation of prior failures, missing service ownership, timeout, absent-service replies and bounded non-absence replies. All six failed before repair (eight failing assertions including subcases), then passed. Bash syntax and diff whitespace checks passed.
+
+These are control-flow regressions, not a live portal result. The corrected full Weston job and GNOME/KDE/installed Flatpak matrix remain distinct validation requirements. No screenshots or source logs were uploaded by this repair.

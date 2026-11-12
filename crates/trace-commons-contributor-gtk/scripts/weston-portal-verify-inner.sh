@@ -334,7 +334,7 @@ else
   fi
 fi
 
-exit "$FAIL"
+# --- axis 2: bounded reply from the independent live portal probe ----------
 
 PORTAL_UP=0
 for _ in $(seq 1 20); do
@@ -375,3 +375,6 @@ else
     echo "RequestBackground reached the live portal daemon and got a real (non-absence) reply"
   fi
 fi
+
+# Preserve failures from both rendering and the independent portal probe.
+exit "$FAIL"
