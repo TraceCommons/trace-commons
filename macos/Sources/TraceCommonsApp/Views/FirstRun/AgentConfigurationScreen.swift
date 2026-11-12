@@ -6,8 +6,10 @@ import TCShellCore
 /// Guidance only: opening or copying the prompt does not change setup.
 struct AgentConfigurationScreen: View {
     let copy: FirstRunCopy.AgentConfiguration
-    let backLabel: String
-    let onBack: () -> Void
+    /// Leaves the guidance for the Welcome screen it opened from. Labelled
+    /// with the guidance's own Close (`agent_configuration.close`): Back is
+    /// the frame's alone (`FirstRunFrameTests`).
+    let onClose: () -> Void
     @State private var copied = false
 
     var body: some View {
@@ -29,7 +31,7 @@ struct AgentConfigurationScreen: View {
             }
             .background(GlassColor.textSecondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             HStack {
-                Button(backLabel, action: onBack)
+                Button(copy.close, action: onClose)
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(GlassButtonStyle(.secondary))
                 Spacer()
