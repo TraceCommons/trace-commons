@@ -104,6 +104,7 @@ public class HealthCopyTests
         {
             "nothing has been lost",
             "queue is safe",
+            "traces are saved",
             "rather than going out unscanned",
             "nothing is being sent",
             "nothing has gone out",
