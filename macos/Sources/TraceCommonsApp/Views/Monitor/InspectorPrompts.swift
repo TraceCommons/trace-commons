@@ -51,6 +51,7 @@ struct InspectorPrompts: View {
                 ArmingOfferGlassCard(
                     offer: offer,
                     eyebrow: store.words?.optionalAutomation,
+                    step: model.armingOfferStep,
                     onArm: { model.acceptArmingOffer(offer) },
                     onDecline: { model.declineArmingOffer(offer) }
                 )
