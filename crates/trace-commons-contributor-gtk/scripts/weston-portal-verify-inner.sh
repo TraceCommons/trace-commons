@@ -287,6 +287,11 @@ else
     fail "weston-screenshooter produced no PNG -- cannot check rendering"
   else
     echo "screenshot: $SHOT ($(stat -c%s "$SHOT" 2>/dev/null || echo '?') bytes)"
+    # CI uploads the frame the checks below read, so a failed OCR can be
+    # looked at rather than guessed at from the text alone.
+    if [ -n "${WESTON_SHOT_OUT:-}" ]; then
+      cp "$SHOT" "$WESTON_SHOT_OUT" || true
+    fi
 
     # Not blank/uniform: a flat-colour frame (nothing composited, or a
     # black/white rectangle) has a standard deviation at or near zero. This
