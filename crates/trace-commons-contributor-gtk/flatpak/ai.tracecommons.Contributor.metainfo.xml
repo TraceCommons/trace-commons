@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.5" date="2026-11-12">
+      <description>
+        <p>Signing in again after closing the browser tab now starts a fresh sign-in instead of waiting for the first to time out, and the upload-outage message says uploads retry on their own and nothing needs doing.</p>
+      </description>
+    </release>
     <release version="1.0.4" date="2026-11-11">
       <description>
         <p>Brings saved Claude Code, Codex and OpenCode accounts back on macOS, in Settings, Saved accounts: add, launch with, rename, reconnect, verify and remove them.</p>
