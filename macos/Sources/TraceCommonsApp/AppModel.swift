@@ -436,6 +436,9 @@ final class AppModel: ObservableObject {
     /// alongside `projects`, because every reason the project list changes
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
+    /// Where the offer's Enable is, or nil before it is pressed
+    /// (`ArmingOfferMotion`).
+    @Published private(set) var armingOfferStep: ArmingOfferStep?
     /// The standing Automatic grant, for Settings' sharing choice (#1753
     /// A2). Nil until `automatic_grant` has answered, which the choice draws
     /// as nothing picked. Refreshed alongside `projects`.
@@ -2163,21 +2166,33 @@ final class AppModel: ObservableObject {
     /// cannot drift into offering different things.
     func refreshArmingOffer() {
         perform("arming_suggestion", work: { try $0.armingSuggestion() }) {
-            self.publishIfChanged(\.armingOffer, $0)
+            self.publishIfChanged(\.armingOffer, ArmingOfferMotion.offerAfterRefresh(
+                current: self.armingOffer, answered: $0, step: self.armingOfferStep))
         }
     }
 
     /// Arms the offered project. The offer clears because the daemon's next
     /// answer will not include an armed project, but it is cleared here too
-    /// so the card does not linger for a round trip.
+    /// so the card does not linger for a round trip. Enable is answered on
+    /// the card first (`ArmingOfferMotion`): locked while the daemon arms,
+    /// a check once it has, and the card leaves after a short hold. A
+    /// failure unlocks it and says so in `lastActionError`.
     func acceptArmingOffer(_ offer: ArmingOffer) {
+        guard client != nil, armingOfferStep == nil else { return }
+        armingOfferStep = .arming
         perform(
             "set_project_mode",
-            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) }
+            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) },
+            onFailure: { self.armingOfferStep = nil }
         ) { _ in
-            self.armingOffer = nil
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            withAnimation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion)) { self.armingOfferStep = .armed }
             self.refreshProjects()
             self.refreshAudit()
+            Task { @MainActor in
+                try? await Task.sleep(for: ArmingOfferMotion.hold)
+                self.clearArmingOffer()
+            }
         }
     }
 
@@ -2185,8 +2200,19 @@ final class AppModel: ObservableObject {
     /// and persisted there rather than here, so it survives a relaunch and
     /// applies to whichever shell asks next.
     func declineArmingOffer(_ offer: ArmingOffer) {
+        guard armingOfferStep == nil else { return }
         perform("decline_arming", work: { try $0.declineArming(projectID: offer.projectId) }) { _ in
-            self.armingOffer = nil
+            self.clearArmingOffer()
+        }
+    }
+
+    /// Takes the offer's card away, fading it and sliding what is below it
+    /// up (never under Reduce Motion), and unlocks the next offer's Enable.
+    private func clearArmingOffer() {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        withAnimation(ArmingOfferMotion.exit(reduceMotion: reduceMotion)) {
+            armingOffer = nil
+            armingOfferStep = nil
         }
     }
 
