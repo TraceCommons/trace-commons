@@ -20,14 +20,14 @@ Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout,
 
 | Lane | Deliverable | Dependencies | Acceptance | Status |
 |---|---|---|---|---|
-| A Linux quality | Actual app navigation, layout, CSS, lifecycle checks; resolve Weston failure | Existing merged #2083/#2091 | Direct widget tests plus real app rendered verification; preserve OCR gate | Passed at dc522585 via #2098; newest head pending |
-| B Insights usage | Subscription limits, NEAR AI credit and daily usage | Existing live Overview worker | Read-only entry, no account refresh prompting, unknown/partial handling, stale results guarded | Active |
-| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Benchmarks active; recaps queued |
-| C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Implementing |
-| D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Preview stale-response repair and inspector active |
-| D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Queued |
-| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings active; first-run contract migration queued |
-| F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Audit active |
+| A Linux quality | Actual app navigation, layout, CSS, lifecycle checks; resolve Weston failure | Existing merged #2083/#2091 | Direct widget tests plus real app rendered verification; preserve OCR gate | Passed at dc522585 and 073789798 via #2098; feature PR checks pending |
+| B Insights usage | Subscription limits, NEAR AI credit and daily usage | Existing live Overview worker | Read-only entry, no account refresh prompting, unknown/partial handling, stale results guarded | Draft PR #2101; reviewed and locally tested |
+| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Benchmarks draft PR #2104; recap implemented, in review |
+| C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Draft PR #2102; reviewed and locally tested |
+| D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Draft PR #2105; reviewed and locally tested |
+| D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Implemented, in review |
+| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings review fix active; first-run coordinator implemented, validating |
+| F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Draft PR #2103; container checks pass, desktop matrix unqualified |
 
 ## Review matrix
 
@@ -39,7 +39,7 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 
 - #2083: shared GTK Insights visual system, merged.
 - #2091: live weekly spend and model overview, merged.
-- Their Linux CI still fails; inspect current logs before deciding cause.
+- The earlier Linux CI failure was fixed by #2098; baseline Linux qualification now passes.
 
 ## Session ledger
 
@@ -48,10 +48,19 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 
 ### Reassessment 1
 
-- Linux root cause already repaired externally by merged #2098. Hosted Weston at dc522585 passed 604 unit tests, Clippy, mounted navigation, wrapping/focus, CSS and sparse OCR. Evidence: actions/runs/43152689075/job/130965363543. Current main073789798 job130977821782 pending; do not conflate baseline success with later feature heads.
+- Linux root cause already repaired externally by merged #2098. Hosted Weston at dc522585 passed 604 unit tests, Clippy, mounted navigation, wrapping/focus, CSS and sparse OCR. Evidence: actions/runs/43152689075/job/130965363543. Main 073789798 job130977821782 also passed; do not conflate baseline success with later feature heads.
 - Usage lane owns insights usage module and optional worker reads in tc-wt-linux-insights-usage.
 - Home lane owns additive Home/model, App wiring, shared balance renderer in tc-wt-linux-home-parity.
 - Benchmarks lane owns separate module/tab in tc-wt-linux-insights-benchmarks; integration with usage reviewed later.
 - Traces lane owns preview stale-response guard plus additive contextual inspector in tc-wt-linux-traces-inspector; avoid reparenting full preview sheet.
 - Settings lane owns grouping/navigation in tc-wt-linux-settings-parity; existing GTK first-run commits differ from macOS and require explicit state-machine work before reordering.
 - Desktop lane uses tc-wt-linux-parity-validation for qualification report. No GNOME/KDE real desktop available yet; Flatpak network and broad session-bus permissions require installed-package evidence before altering them.
+
+### Reassessment 2
+
+- Draft PRs: [usage #2101](https://github.com/TraceCommons/trace-commons/pull/2101), [Home #2102](https://github.com/TraceCommons/trace-commons/pull/2102), [portal qualification #2103](https://github.com/TraceCommons/trace-commons/pull/2103), [Benchmarks #2104](https://github.com/TraceCommons/trace-commons/pull/2104), [Traces #2105](https://github.com/TraceCommons/trace-commons/pull/2105). None merged or released.
+- A local integration branch combines those five slices. Cargo check passes; registration and lifecycle hooks were independently reviewed. Final combined tests follow remaining integration.
+- Review repaired Home missing-value handling and sign-in polling, weekly usage pace fallback, and map connector/layout-test issues. Settings compact navigation reactivation is being repaired before publication.
+- User chose container qualification with explicit desktop gaps. Actual GNOME/KDE login, tray, permission behavior and installed Flatpak remain unqualified.
+- The worktree helper exhausted eligible cached donors. Map and recap reuse separately verified clean merged donors without active processes; no open-PR checkout or target copy is used.
+- Next bounded Traces increment is read-only History detail using existing history_detail and shared copy, with owner/request invalidation. It remains queued behind the current validation and integration.
