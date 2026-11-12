@@ -68,7 +68,7 @@ struct Work {
 /// Match native precision without floating-point money arithmetic. Values under
 /// one cent retain up to four decimals; under 100 microdollars keep one
 /// significant digit. Currency is USD, as the daemon's pricing basis specifies.
-fn dollars(micros: u64) -> String {
+pub(super) fn dollars(micros: u64) -> String {
     if micros >= 10_000 {
         let cents = (u128::from(micros) + 5_000) / 10_000;
         return format!("${}.{:02}", cents / 100, cents % 100);
