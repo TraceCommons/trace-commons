@@ -70,7 +70,7 @@ struct AccountSection: View {
                     if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {
                         Button(signIn) { Task { await model.signInToAccount() } }
                             .buttonStyle(GlassButtonStyle(.primary, small: true))
-                            .disabled(model.accountSigningIn)
+                            .disabled(model.accountSigningIn && !model.canRetryAccountSignIn)
                             .fixedSize()
                     }
                 }

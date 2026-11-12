@@ -181,3 +181,41 @@ fn an_unknown_error_never_reaches_the_shell() {
         "account-unavailable"
     );
 }
+
+/// Sign in, close the tab, Sign in again: the second sign-in ends the
+/// first's wait instead of leaving it to time out, and the first, finishing
+/// late, does not forget the second.
+#[tokio::test]
+async fn a_second_sign_in_ends_the_wait_of_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, mut first_ended) = super::sign_in_begin(dir.path());
+    assert!(first_ended.try_recv().is_err(), "nothing replaced it yet");
+
+    let (second, mut second_ended) = super::sign_in_begin(dir.path());
+    assert_ne!(first, second);
+    tokio::time::timeout(std::time::Duration::from_secs(1), first_ended)
+        .await
+        .expect("the first wait ends at once")
+        .expect("ended by the replacement");
+
+    super::sign_in_end(dir.path(), first);
+    let (_, mut third_ended) = super::sign_in_begin(dir.path());
+    second_ended
+        .try_recv()
+        .expect("the second was still registered, so the third ended it");
+    assert!(third_ended.try_recv().is_err());
+
+    // Another directory's sign-in is its own.
+    let other = tempfile::tempdir().unwrap();
+    let (other_generation, mut other_ended) = super::sign_in_begin(other.path());
+    assert!(other_ended.try_recv().is_err());
+    super::sign_in_end(other.path(), other_generation);
+}
+
+#[test]
+fn a_replaced_sign_in_has_its_own_label() {
+    assert_eq!(
+        super::ipc_label("account-sign-in-replaced"),
+        "account-sign-in-replaced"
+    );
+}
