@@ -3922,6 +3922,17 @@ final class AppModel: ObservableObject {
     /// or before a read.
     @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
+    /// `account_sign_in` is out waiting on the browser. Pressing Sign in
+    /// again starts a new one, which the daemon lets replace it
+    /// (`account-sign-in-replaced`), so a closed tab never leaves Sign in
+    /// disabled until the wait times out.
+    @Published private(set) var accountBrowserSignInWaiting = false
+    private var accountBrowserSignInGeneration = 0
+    /// Whether a Sign in on an account card may be pressed while
+    /// `accountSigningIn`: a browser wait of either path is replaced.
+    var canRetryAccountSignIn: Bool {
+        canRestartNearAiBrowserSignIn || accountBrowserSignInWaiting
+    }
     /// The last status read's `renewal_failure`: `near_ai_sign_in_required`
     /// when NEAR AI refused the stored login, so only a fresh browser
     /// sign-in helps. Nil when the last read named none, and before a read.
@@ -4082,11 +4093,21 @@ final class AppModel: ObservableObject {
     func signInToWithdraw() async {
         // A NEAR AI account signs in through NEAR AI.
         if accountSignInPath == "near_ai" { return await signInAgain() }
-        guard !accountSigningIn else { return }
+        // Pressed again while the browser is out (its tab closed, most
+        // often): a new sign-in replaces that one, and only the newest
+        // press's answer is read. The one it replaced ends at the daemon
+        // (`account-sign-in-replaced`) and says nothing here.
+        guard !accountSigningIn || accountBrowserSignInWaiting else { return }
+        accountBrowserSignInGeneration &+= 1
+        let generation = accountBrowserSignInGeneration
         accountSigningIn = true
+        accountBrowserSignInWaiting = true
         accountSignInFailure = nil
+        let answer = await firstRunCall({ try $0.accountSignIn() })
+        guard generation == accountBrowserSignInGeneration else { return }
+        accountBrowserSignInWaiting = false
         defer { accountSigningIn = false }
-        guard case .success = await firstRunCall({ try $0.accountSignIn() }) else {
+        guard case .success = answer else {
             accountSignInFailure = .failed
             return
         }

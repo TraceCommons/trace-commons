@@ -459,7 +459,7 @@ private struct HomeOverview: View {
         let route = HomeFormat.accountSignInRoute(credit: freshCredit)
         return AnyView(HomeAccountSignIn(
             noData: noData, signIn: signIn, signInName: model.managedText("sign_in_near_ai_accessibility"),
-            busy: model.credentialBusy || model.accountSigningIn
+            busy: model.credentialBusy || (model.accountSigningIn && !model.canRetryAccountSignIn)
         ) {
             switch route {
             case .account: Task { await model.signInToAccount() }
@@ -1457,13 +1457,13 @@ private struct HistorySignInControl: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        let label = model.canRestartNearAiBrowserSignIn
+        let label = model.canRetryAccountSignIn
             ? HomeFormat.creditSignInLine ?? words.signInToWithdraw
             : model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw
         Button(label) { Task { await model.signInToWithdraw() } }
             .buttonStyle(GlassButtonStyle(.glass, small: true))
             .frame(minHeight: 44)
-            .disabled(model.accountSigningIn && !model.canRestartNearAiBrowserSignIn)
+            .disabled(model.accountSigningIn && !model.canRetryAccountSignIn)
     }
 }
 

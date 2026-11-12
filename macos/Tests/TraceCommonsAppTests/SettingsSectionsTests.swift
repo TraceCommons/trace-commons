@@ -196,7 +196,7 @@ final class SettingsSectionsTests: XCTestCase {
             // daemon's choice), as the payout card's Sign in again runs it.
             "if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {",
             "Button(signIn) { Task { await model.signInToAccount() } }",
-            ".disabled(model.accountSigningIn)",
+            ".disabled(model.accountSigningIn && !model.canRetryAccountSignIn)",
             // One Sign in in the section: the NEAR AI login card and the
             // devices card, whose own Sign in again would be a second, wait
             // for the account to be signed in.
