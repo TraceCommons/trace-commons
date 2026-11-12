@@ -20,14 +20,14 @@ Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout,
 
 | Lane | Deliverable | Dependencies | Acceptance | Status |
 |---|---|---|---|---|
-| A Linux quality | Actual app navigation, layout, CSS, lifecycle checks; resolve Weston failure | Existing merged #2083/#2091 | Direct widget tests plus real app rendered verification; preserve OCR gate | Active |
+| A Linux quality | Actual app navigation, layout, CSS, lifecycle checks; resolve Weston failure | Existing merged #2083/#2091 | Direct widget tests plus real app rendered verification; preserve OCR gate | Passed at dc522585 via #2098; newest head pending |
 | B Insights usage | Subscription limits, NEAR AI credit and daily usage | Existing live Overview worker | Read-only entry, no account refresh prompting, unknown/partial handling, stale results guarded | Active |
-| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Queued |
-| C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Design active |
-| D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Queued |
+| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Benchmarks active; recaps queued |
+| C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Implementing |
+| D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Preview stale-response repair and inspector active |
 | D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Queued |
-| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Queued |
-| F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Audit queued |
+| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings active; first-run contract migration queued |
+| F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Audit active |
 
 ## Review matrix
 
@@ -45,3 +45,13 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 
 - Created isolated workflow checkout from current origin/main.
 - Dispatched Linux gate diagnosis, Insights usage implementation and read-only Home design.
+
+### Reassessment 1
+
+- Linux root cause already repaired externally by merged #2098. Hosted Weston at dc522585 passed 604 unit tests, Clippy, mounted navigation, wrapping/focus, CSS and sparse OCR. Evidence: actions/runs/43152689075/job/130965363543. Current main073789798 job130977821782 pending; do not conflate baseline success with later feature heads.
+- Usage lane owns insights usage module and optional worker reads in tc-wt-linux-insights-usage.
+- Home lane owns additive Home/model, App wiring, shared balance renderer in tc-wt-linux-home-parity.
+- Benchmarks lane owns separate module/tab in tc-wt-linux-insights-benchmarks; integration with usage reviewed later.
+- Traces lane owns preview stale-response guard plus additive contextual inspector in tc-wt-linux-traces-inspector; avoid reparenting full preview sheet.
+- Settings lane owns grouping/navigation in tc-wt-linux-settings-parity; existing GTK first-run commits differ from macOS and require explicit state-machine work before reordering.
+- Desktop lane uses tc-wt-linux-parity-validation for qualification report. No GNOME/KDE real desktop available yet; Flatpak network and broad session-bus permissions require installed-package evidence before altering them.
