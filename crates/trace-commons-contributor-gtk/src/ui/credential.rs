@@ -179,6 +179,9 @@ pub(super) fn action_explains(action: CredentialAction) -> &'static str {
 /// process doing anything -- the ceremony finishes in a browser -- and a
 /// latched answer would keep claiming the old one.
 pub fn refresh(app: &Rc<App>) {
+    // Balance is independently readable even if credential status fails.
+    // Reuse this same read after a sign-in/forget ceremony and on refresh.
+    super::balance::refresh(app);
     // The attempt is named only when this shell started one. A caller that
     // names no attempt still gets `state`, which is the part this section
     // renders; `attempt_status` is the daemon's answer about the ceremony and
@@ -197,12 +200,6 @@ pub fn refresh(app: &Rc<App>) {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         render(app, state);
-        // The balance is the same fact read the other way round: it is the
-        // account this key spends from, and a sign-in that has just landed
-        // or just been forgotten changes both. Re-read here rather than
-        // waiting for the next screen refresh, so the ceremony a
-        // contributor finishes in a browser lands on both rows at once.
-        super::balance::refresh(app);
     });
 }
 
@@ -280,6 +277,22 @@ pub fn render(app: &Rc<App>, state: &str) {
     if action == CredentialAction::Cancel {
         ensure_poll(app);
     }
+    app.home
+        .balance
+        .set_action_sensitive(!obtain_in_progress(app));
+}
+
+pub(super) fn obtain_in_progress(app: &Rc<App>) -> bool {
+    let view = &app.private_inference.credential;
+    obtain_busy(
+        view.pending.get(),
+        view.polling.get(),
+        view.attempt.borrow().is_some(),
+    )
+}
+
+fn obtain_busy(pending: bool, polling: bool, has_attempt: bool) -> bool {
+    pending || polling || has_attempt
 }
 
 pub(super) fn pending(app: &Rc<App>) -> bool {
@@ -299,6 +312,9 @@ pub(super) fn pending(app: &Rc<App>) -> bool {
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
+    if action == CredentialAction::Obtain && obtain_in_progress(app) {
+        return;
+    }
     let view = &app.private_inference.credential;
     if view.pending.replace(true) {
         return;
@@ -327,6 +343,9 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         }
     }
     view.action.set_sensitive(!view.pending.get());
+    app.home
+        .balance
+        .set_action_sensitive(!obtain_in_progress(app));
 }
 
 /// Open the sign-in page, and say whether anything took it.
@@ -504,6 +523,23 @@ mod tests {
     };
 
     const SOURCE: &str = include_str!("credential.rs");
+
+    #[test]
+    fn obtain_cannot_replace_an_active_browser_ceremony() {
+        let source = include_str!("credential.rs");
+        let act = source.split("pub(super) fn act(").nth(1).unwrap();
+        let guard = act
+            .find("action == CredentialAction::Obtain && obtain_in_progress(app)")
+            .unwrap();
+        let write = act.find("view.pending.replace(true)").unwrap();
+        assert!(guard < write);
+        // Start replied and stored an attempt, but its first status poll
+        // has not replied yet: neither pending nor polling protects this gap.
+        assert!(obtain_busy(false, false, true));
+        assert!(obtain_busy(true, false, false));
+        assert!(obtain_busy(false, true, false));
+        assert!(!obtain_busy(false, false, false));
+    }
 
     /// The failed-revoke sentence is for `removed: true, revoked: false`
     /// only: not a revoke that happened, nothing stored (`null`), or an
