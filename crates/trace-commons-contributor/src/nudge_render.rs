@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(n.title, copy::NOTIFY_SETTLEMENT_TITLE);
         assert_eq!(
             n.body,
-            "About $3.50 to $9 of inference, estimated on this Mac. Nothing was sent."
+            "About $3.50 to $9 of inference, estimated on this Mac."
         );
         let ids: Vec<&str> = n.actions.iter().map(|a| a.id).collect();
         assert_eq!(ids, ["review", "not_now"]);
@@ -771,10 +771,7 @@ mod tests {
         assert!(p.body.starts_with("Pricing changed."), "{}", p.body);
         assert!(p.body.contains("$3.50 to $9"));
         let up = settlement_notification(&total(0, 500_000), false);
-        assert_eq!(
-            up.body,
-            "Up to $0.50 of inference, estimated on this Mac. Nothing was sent."
-        );
+        assert_eq!(up.body, "Up to $0.50 of inference, estimated on this Mac.");
     }
 
     /// A pricing change whose rounded low end is $0 reads "up to", never

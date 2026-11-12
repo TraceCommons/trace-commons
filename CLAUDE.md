@@ -26,10 +26,12 @@ holds both sides of Trace Commons.
 
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
 Tauri work on macOS, and the Tauri app is retired there once the native
-screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
-(#1173 D13, a default for now). Native macOS is also the lead client and the
-parity target: GTK, Windows and Tauri match its terminology, states, flows
-and affordances, and Tauri drift is low priority.
+screens match. Windows stays on Tauri, frozen, until macOS ships (#1173
+D13, a default for now). The Linux GTK app is unfrozen for development
+(owner, 2026-11-11): GTK work is in scope again. Its releases stay off until
+it catches up, so an `app-v*` tag still builds macOS only. Native macOS is
+also the lead client and the parity target: GTK, Windows and Tauri match its
+terminology, states, flows and affordances, and Tauri drift is low priority.
 
 Ironclaw is a separate project and does not live in this tree; the surface it
 shares with this repo is `crates/trace-commons-protocol`. There is **no
@@ -398,8 +400,10 @@ carries the full statement and working rules; the essentials are repeated here.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-sources`, `-contributor-insights`, `-contributor-platform`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`, `-attestation`, the unpublished `-client-server-tests`, and
-  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`)). The shipped
+  `-build-info`, `-attestation`, the unpublished `-client-server-tests`,
+  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`), and the 11
+  `ironwire_*` crates (copyright NEAR AI, imported from nearai/ironwire; see
+  `docs/ironwire/README.md`)). The shipped
   clients can be embedded in proprietary agent harnesses and must stay
   permissive.
 

@@ -4,32 +4,51 @@ using System.Text.Json.Serialization;
 
 namespace TraceCommons.Interop;
 
+/// <summary>What a quit request does.</summary>
+public enum QuitDecision
+{
+    /// <summary>Nothing live: quit without asking.</summary>
+    QuitNow,
+    /// <summary>Show the prompt and quit only if it is confirmed.</summary>
+    Ask,
+    /// <summary>Something is live but the prompt could not be read: do not quit.</summary>
+    Refuse,
+}
+
 /// <summary>
-/// What quitting says, decoded from the core (<c>quit_copy.rs</c>, exported
-/// as <c>tc_quit_prompt_json</c>). Every word is the core's.
+/// The quit prompt, decoded from the core (<c>quit_copy.rs</c>, exported as
+/// <c>tc_quit_reason_prompt_json</c>). Every word is the core's.
 /// </summary>
 /// <remarks>
-/// The true sentence depends on which process is doing the watching, and the
-/// core reads that off the handle rather than taking the shell's word for it.
-/// This app hosts the daemon in-process, so with a daemon running the prompt
-/// is the hosting one; with none started, or one already stopped, it is the
-/// one that claims nothing stops.
+/// Quitting asks only when it would stop something live (compute, or
+/// Private AI answering model calls), and the body is one short sentence
+/// naming which (owner, 2026-11-12).
 /// </remarks>
 public sealed record QuitPrompt
 {
-    /// <summary><c>hosting</c>, <c>attached</c> or <c>unavailable</c>.</summary>
-    [JsonPropertyName("role")] public string Role { get; init; } = "";
     [JsonPropertyName("title")] public string Title { get; init; } = "";
     [JsonPropertyName("body")] public string Body { get; init; } = "";
     [JsonPropertyName("confirm")] public string Confirm { get; init; } = "";
     [JsonPropertyName("cancel")] public string Cancel { get; init; } = "";
 
     /// <summary>
-    /// The prompt for a process with no watcher at all: the NULL-handle
-    /// answer. Null only if the core could not produce one.
+    /// Decides a quit. <paramref name="promptJson"/> is asked only when
+    /// something is live, so a failed read refuses the quit rather than
+    /// becoming a silent one. It defaults to the core's export.
     /// </summary>
-    public static QuitPrompt? WithoutWatcher() =>
-        Parse(NativeMethods.TakeOwnedString(NativeMethods.tc_quit_prompt_json(IntPtr.Zero)));
+    public static QuitDecision Decide(
+        bool stopsCompute,
+        bool stopsPrivateAI,
+        out QuitPrompt? prompt,
+        Func<bool, bool, string?>? promptJson = null)
+    {
+        prompt = null;
+        if (!stopsCompute && !stopsPrivateAI) return QuitDecision.QuitNow;
+        promptJson ??= (compute, privateAI) => NativeMethods.TakeOwnedString(
+            NativeMethods.tc_quit_reason_prompt_json(compute ? 1 : 0, privateAI ? 1 : 0));
+        prompt = Parse(promptJson(stopsCompute, stopsPrivateAI));
+        return prompt is null ? QuitDecision.Refuse : QuitDecision.Ask;
+    }
 
     internal static QuitPrompt? Parse(string? json)
     {

@@ -261,7 +261,7 @@ final class HomeViewTests: XCTestCase {
         let home = try String(
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/HomeViews.swift"), encoding: .utf8)
         XCTAssertTrue(home.contains("case .account: Task { await model.signInToAccount() }"))
-        XCTAssertTrue(home.contains("busy: model.credentialBusy || model.accountSigningIn"))
+        XCTAssertTrue(home.contains("busy: model.credentialBusy || (model.accountSigningIn && !model.canRetryAccountSignIn)"))
     }
 
     /// The heading's words: the core's "No data", a dash, then the managed

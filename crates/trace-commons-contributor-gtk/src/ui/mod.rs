@@ -520,6 +520,7 @@ impl App {
             quit_confirmed: Cell::new(false),
         });
 
+        insights.bind_app(&app);
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
@@ -637,56 +638,35 @@ impl App {
         });
     }
 
-    /// Quitting must say what continues, and the true sentence depends on
-    /// which process is doing the watching.
+    /// Closing the window quits. It asks first only when that would stop
+    /// Private AI answering model calls through this process, in one
+    /// sentence from the core (`quit_copy::quit_prompt`); any other close
+    /// quits at once (owner, 2026-11-12). An attached app stops nothing by
+    /// quitting, so it never asks.
     fn wire_quit(self: &Rc<Self>) {
         let app = Rc::clone(self);
         self.window.connect_close_request(move |window| {
             if app.quit_confirmed.get() {
                 return glib::Propagation::Proceed;
             }
-            let dialog = if app.worker.hosts_the_loop() {
-                let d = adw::MessageDialog::new(
-                    Some(window),
-                    Some(concat!("Quit ", copy::app_name!(), "?")),
-                    Some(copy::QUIT_HOSTING_BODY),
-                );
-                d.add_responses(&[
-                    ("cancel", copy::QUIT_HOSTING_CANCEL),
-                    ("quit", copy::QUIT_HOSTING_CONFIRM),
-                ]);
-                d
-            } else {
-                let d = adw::MessageDialog::new(
-                    Some(window),
-                    Some(concat!("Quit ", copy::app_name!(), "?")),
-                    Some(copy::QUIT_ATTACHED_BODY),
-                );
-                d.add_responses(&[
-                    ("quit", copy::QUIT_ATTACHED_CONFIRM),
-                    ("quit-and-stop", copy::QUIT_ATTACHED_ALSO_STOP),
-                ]);
-                d
+            let stops_private_ai =
+                app.worker.hosts_the_loop() && app.private_inference.quit_stops.get();
+            // GTK hosts no compute worker.
+            let Some(prompt) =
+                trace_commons_contributor::quit_copy::quit_prompt(false, stops_private_ai)
+            else {
+                return glib::Propagation::Proceed;
             };
+            let dialog =
+                adw::MessageDialog::new(Some(window), Some(prompt.title), Some(prompt.body));
+            dialog.add_responses(&[("cancel", prompt.cancel), ("quit", prompt.confirm)]);
             dialog.set_close_response("cancel");
             let app = Rc::clone(&app);
             dialog.connect_response(None, move |dialog, response| {
                 dialog.close();
-                match response {
-                    "quit" => {
-                        app.quit_confirmed.set(true);
-                        app.window.close();
-                    }
-                    "quit-and-stop" => {
-                        app.quit_confirmed.set(true);
-                        // Stop the separate watcher too, since that is what
-                        // the contributor just asked for. The window closes
-                        // either way.
-                        app.call("shutdown", serde_json::json!({}), |app, _| {
-                            app.window.close();
-                        });
-                    }
-                    _ => {}
+                if response == "quit" {
+                    app.quit_confirmed.set(true);
+                    app.window.close();
                 }
             });
             dialog.present();

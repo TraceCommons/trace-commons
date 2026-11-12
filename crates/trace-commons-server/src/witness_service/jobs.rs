@@ -758,7 +758,11 @@ fn oversized_result() -> JobResult {
     JobResult {
         status: 503,
         headers: vec![("content-type".to_string(), b"application/json".to_vec())],
-        body: br#"{"error":"witness_redaction_failed"}"#.to_vec(),
+        body: format!(
+            r#"{{"error":"{}"}}"#,
+            trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED
+        )
+        .into_bytes(),
     }
 }
 

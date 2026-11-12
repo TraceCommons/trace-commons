@@ -279,7 +279,7 @@ against what this directory generates:
 |---|---|---|
 | `public_logs` | `false` | **`true`** |
 | `public_sysinfo` | `false` | **`true`** |
-| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
+| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY, TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
 | `pre_launch_script` | `""` | **~17 KB of Phala boot script** |
 | `kms_enabled`, `local_key_provider_enabled`, `gateway_enabled`, `public_tcbinfo`, `no_instance_id` | as written | as written |
 
@@ -498,8 +498,11 @@ which application id it was launched under.
 
 ### The configuration is measured, and that is the point
 
-Every setting the witness reads is set in `docker-compose.yml`. `allowed_envs`
-in the manifest is empty, so nothing is injectable at runtime.
+Every setting the witness reads is set in `docker-compose.yml`, except the two
+names in `allowed_envs`: the classifier key and the classify pace
+(`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`, owner 2026-11-12). Their names
+are measured and their values are injected encrypted at deploy time. Neither
+can change what is redacted or where text goes; see `build-app-compose.sh`.
 
 That means the redaction mode, the body bound, the bind address and the log
 level are all inside MRCONFIGID. **An operator cannot quietly downgrade a
@@ -733,7 +736,8 @@ is inside the trust boundary of every transcript this witness sees. The
 deterministic pass runs first, so credentials and local paths are masked in
 what goes out; prose PII is not.
 
-The API key is the one value in `allowed_envs` — injected encrypted at deploy
+The API key is one of the two values in `allowed_envs` (the other is the
+classify pace, below) — injected encrypted at deploy
 time rather than written into the measured compose, because this repository is
 public and the manifest is committed. The destination and the model stay
 measured, so an injected key can change which account is billed and cannot
@@ -745,7 +749,14 @@ Changing the mode changes the measurement. See "The configuration is measured".
 ### The classifier key, and the startup check
 
 The key goes in as `TRACE_NEAR_AI_PRIVACY_API_KEY`, through Phala's sealed
-(encrypted) environment at deploy time. It is the only name in `allowed_envs`.
+(encrypted) environment at deploy time, beside the classify pace.
+
+The pace goes in the same way, as `TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`:
+classify requests a minute, retries included (NEAR AI's limit for the key was
+30 on 2026-11-12). It is required; the witness does not start without it. To
+follow a new limit, change the sealed value and restart the CVM. Like a
+key-only update, whether that leaves `MRCONFIGID` where it was has not been
+checked against Phala: read the measurement back after the change.
 The variable's name is measured; its value is not and must never appear in a
 file in this repository. The sealed value is not part of the compose
 hash, but whether a key-only update leaves `MRCONFIGID` where it was has not
@@ -1463,7 +1474,7 @@ what was current when it was written.
 | Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:012c35c88d975ebe3685b2087304a665b56630a112c81eca9227b07afea460c1b8000000000000000000000000000000` |
 | Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2` |
 | `public_logs` / `public_sysinfo` / `public_tcbinfo` | `false` / `false` / `true` |
-| `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY"]` |
+| `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE"]` |
 
 The stable hostname, in-CVM ingress, certificate identity and DNS routing are
 recorded in [the hostname runbook](../../docs/operator/witness-custom-domain.md).

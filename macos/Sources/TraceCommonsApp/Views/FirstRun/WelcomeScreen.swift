@@ -91,8 +91,19 @@ struct WelcomeScreen: View {
     @ObservedObject var runner: FirstRunRunner
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var openedAt = Date()
+    @State private var showingAgentPrompt = false
 
     var body: some View {
+        if showingAgentPrompt, let guidance = copy.agentConfiguration {
+            AgentConfigurationScreen(copy: guidance) {
+                showingAgentPrompt = false
+            }
+        } else {
+            welcome
+        }
+    }
+
+    private var welcome: some View {
         GlassAnimationTimeline(paused: reduceMotion) { date in
             let elapsed = date.timeIntervalSince(openedAt)
             VStack(spacing: 0) {
@@ -118,6 +129,13 @@ struct WelcomeScreen: View {
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
+                if let guidance = copy.agentConfiguration {
+                    Button(guidance.action) { showingAgentPrompt = true }
+                        .buttonStyle(GlassButtonStyle(.secondary))
+                        .padding(.top, GlassTokens.Space.s7)
+                        .modifier(Rise(amount: WelcomeScreenLayout.risen(
+                            after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
+                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -159,14 +159,6 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("state_crashed")]
     public string StateCrashed { get; init; } = string.Empty;
 
-    /// <summary>
-    /// The extra line the quit confirmation carries while the switch is on.
-    /// The rest of that dialog is authored in this shell; this sentence
-    /// deliberately is not.
-    /// </summary>
-    [JsonPropertyName("quit_also_stops")]
-    public string QuitAlsoStops { get; init; } = string.Empty;
-
     /// <summary>A write could not be confirmed; persistence may still have happened.</summary>
     [JsonPropertyName("write_unconfirmed")]
     public string WriteUnconfirmed { get; init; } = string.Empty;
@@ -846,7 +838,6 @@ public sealed record PrivateInferenceCopy
             StatePortInUse,
             StateStartFailed,
             StateCrashed,
-            QuitAlsoStops,
             WriteUnconfirmed,
             SettingsMoved,
             TrayTurnOff,

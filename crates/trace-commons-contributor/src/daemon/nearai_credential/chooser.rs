@@ -356,10 +356,14 @@ fn choice(
     if head.origin.as_deref() != Some(format!("http://{authority}").as_str()) {
         return Route::Refused;
     }
+    // Safari 27 marks a person's click on this page's button `none`, not
+    // `same-origin` (a scripted click gets `same-origin`). No other site can
+    // make a browser send `none`, and the origin above is already this
+    // page's, so both are taken; `same-site` and `cross-site` are not.
     if head
         .fetch_site
         .as_deref()
-        .is_some_and(|site| site != "same-origin")
+        .is_some_and(|site| site != "same-origin" && site != "none")
     {
         return Route::Refused;
     }

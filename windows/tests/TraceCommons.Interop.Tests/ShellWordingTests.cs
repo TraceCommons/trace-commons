@@ -57,7 +57,7 @@ public class ShellWordingTests
             // written a second time in the GTK and macOS shells today.
             { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
-            { "TraceCommons.Interop/HealthCopy.cs", 18 },
+            { "TraceCommons.Interop/HealthCopy.cs", 10 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },
             { "TraceCommons.Interop/OriginalSearchOutcome.cs", 4 },
             // PendingInviteActivation.cs predates this guard: it merged to
@@ -101,7 +101,7 @@ public class ShellWordingTests
             // Window and control code-behind: dialog bodies and one fallback
             // label, written at the call site.
             // Lowered from 3: the quit prompt is now the core's
-            // (tc_quit_prompt_json).
+            // (tc_quit_reason_prompt_json).
             { "TraceCommons.App/MainWindow.xaml.cs", 1 },
             { "TraceCommons.App/StartupRegistration.cs", 4 },
             // Lowered from 3 (button rule, 2026-10-08): "For 1 hour" became

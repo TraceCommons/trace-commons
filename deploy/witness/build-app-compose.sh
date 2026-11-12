@@ -141,7 +141,16 @@ jq -S -n --rawfile compose "${compose}" '{
   # Adding any FURTHER name here needs the same argument made explicitly. A
   # name that changes behaviour rather than authenticating to a measured
   # destination reopens the hole this list exists to close.
-  allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY"],
+  #
+  # TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE (owner, 2026-11-12) is the
+  # one behavioural name admitted, and the argument is this: it only paces
+  # classify requests. It cannot change the redaction mode, the destination,
+  # the model or the body bound, which stay measured. Its worst case is a
+  # witness set too slow, whose reviews fail as transient and are retried --
+  # nothing goes out unreviewed and nothing goes anywhere else. In exchange
+  # the pace can follow the limit NEAR AI sets for the key without a new
+  # measurement and a re-pin everywhere.
+  allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE"],
 
   # Leaving the per-deployment random instance-id in place. It is what makes
   # RTMR3 differ between two instances of identical code, and therefore

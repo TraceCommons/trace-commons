@@ -41,6 +41,7 @@ pub mod witness_configuration;
 pub mod witness_jobs;
 pub mod witness_pacing;
 pub mod witness_provenance;
+pub mod witness_refusal;
 
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
