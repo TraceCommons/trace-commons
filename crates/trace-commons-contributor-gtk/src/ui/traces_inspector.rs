@@ -59,10 +59,17 @@ impl Inspector {
         }
     }
 
+    pub fn selection(&self) -> Selection {
+        self.selected.borrow().clone()
+    }
+
     pub fn select(&self, app: &Rc<App>, selection: Selection) {
         let opening = !self.root.is_visible() && selection != Selection::None;
         *self.selected.borrow_mut() = selection;
         self.render(app);
+        app.queue
+            .map
+            .highlight(&self.selection(), &app.entries.borrow());
         if opening
             && self.root.is_visible()
             && let Some(split) = self.root.parent().and_downcast::<gtk::Paned>()
