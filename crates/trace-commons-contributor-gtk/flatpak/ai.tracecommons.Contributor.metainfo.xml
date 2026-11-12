@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.7" date="2026-11-12">
+      <description>
+        <p>Quitting now asks first only when it would stop compute or Private AI, and says why in one sentence. Traces you approved stay approved while the privacy check is unavailable, and review picks up sooner once it answers again.</p>
+      </description>
+    </release>
     <release version="1.0.6" date="2026-11-12">
       <description>
         <p>Turning on automatic contribution for a folder now shows that it took before the offer closes, and when the privacy check cannot review traces the app says it is waiting on the privacy scan instead of blaming the upload server. Status messages are shorter.</p>
