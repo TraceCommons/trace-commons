@@ -22,11 +22,11 @@ Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout,
 |---|---|---|---|---|
 | A Linux quality | Actual app navigation, layout, CSS, lifecycle checks; resolve Weston failure | Existing merged #2083/#2091 | Direct widget tests plus real app rendered verification; preserve OCR gate | Passed at dc522585 and 073789798 via #2098; feature PR checks pending |
 | B Insights usage | Subscription limits, NEAR AI credit and daily usage | Existing live Overview worker | Read-only entry, no account refresh prompting, unknown/partial handling, stale results guarded | Draft PR #2101; reviewed and locally tested |
-| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Benchmarks draft PR #2104; recap implemented, in review |
+| B2 Insights depth | Recaps and Benchmarks with real destinations | B + shared existing APIs | Correct populations, evidence/actions and empty states | Benchmarks draft PR #2104; recap draft PR #2106 |
 | C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Draft PR #2102; reviewed and locally tested |
 | D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Draft PR #2105; reviewed and locally tested |
-| D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Implemented, in review |
-| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings review fix active; first-run coordinator implemented, validating |
+| D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Draft PR #2107; reviewed and locally tested |
+| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings draft PR #2108; first-run coordinator implemented, validating |
 | F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Draft PR #2103; container checks pass, desktop matrix unqualified |
 
 ## Review matrix
@@ -64,3 +64,11 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 - User chose container qualification with explicit desktop gaps. Actual GNOME/KDE login, tray, permission behavior and installed Flatpak remain unqualified.
 - The worktree helper exhausted eligible cached donors. Map and recap reuse separately verified clean merged donors without active processes; no open-PR checkout or target copy is used.
 - Next bounded Traces increment is read-only History detail using existing history_detail and shared copy, with owner/request invalidation. It remains queued behind the current validation and integration.
+
+### Reassessment 3
+
+- [Recap #2106](https://github.com/TraceCommons/trace-commons/pull/2106), [Map #2107](https://github.com/TraceCommons/trace-commons/pull/2107) and [Settings #2108](https://github.com/TraceCommons/trace-commons/pull/2108) are draft PRs. Recap stacks on Usage; Map stacks on Traces. Final review cleared their source changes.
+- Combined Cargo check passes with all eight published slices; Map and Settings mounted regressions are both retained in the shared Weston list. The required license-boundary suite passed all four tests. No dependencies changed.
+- Hosted Linux desktop jobs passed on Usage, portal response handling, Benchmarks and Traces. Captured frames show empty Overview; they do not establish populated Usage/Benchmarks/inspector visual correctness. Benchmarks navigation is visible and mounted tab switching passes.
+- Home exposed a fixture route assumption after the default screen changed, plus Mac-specific copy. Both are under repair; the OCR gate remains required. A pre-existing unreachable portal probe was also discovered and is being repaired in the qualification lane.
+- First-run review found wallet and browser enrollment lifecycle hazards when navigating Back. Repairs and regression checks precede publication.
