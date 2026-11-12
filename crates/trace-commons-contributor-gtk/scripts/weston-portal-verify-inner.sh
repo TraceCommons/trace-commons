@@ -20,7 +20,8 @@ fail() {
   FAIL=1
 }
 
-# The default destination is Insights, which opens on its Overview tab.
+# The rendering fixture explicitly selects Insights and its Overview tab;
+# the connected shell's default destination is Home.
 # Require the page's own tab switcher -- an interactive control on the
 # Insights page, not the sidebar's "Insights" entry -- and the Overview's
 # "Tokens by day" card heading, which shows its body rendered.
@@ -243,7 +244,7 @@ else
   (
     cd "$WORKDIR" || exit 1
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      GSK_RENDERER=cairo "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 60 \
+      GSK_RENDERER=cairo "$SHELL_BIN" --state-dir "$TC_DIR" --start-page insights --exit-after-realize --realize-seconds 60 \
       >"$WORKDIR/app.log" 2>&1 &
     APP_PID=$!
 

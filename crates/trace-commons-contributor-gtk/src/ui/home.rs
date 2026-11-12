@@ -63,10 +63,10 @@ impl HomeView {
         let balance = balance::BalanceSection::new();
         balance.use_flat_style();
         content.append(&balance.root);
-        let insights = shortcut(
-            words.home_history.insights_action,
-            words.home_history.insights_subtitle,
-        );
+        // The shared Monitor subtitle names macOS. Insights' own intro is
+        // device-neutral and describes the local action this link opens.
+        let insights_words = trace_commons_contributor::insights::service::ui_copy();
+        let insights = shortcut(words.home_history.insights_action, &insights_words["intro"]);
         content.append(&insights);
         links.push((insights, "insights"));
         if missions {
@@ -200,6 +200,24 @@ mod tests {
                 .iter()
                 .all(|(_, target)| *target != "mission-drafts")
         );
+        let insights = view
+            .links
+            .iter()
+            .find(|(_, target)| *target == "insights")
+            .unwrap();
+        let subtitle = insights
+            .0
+            .child()
+            .unwrap()
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        assert_eq!(
+            subtitle.text(),
+            trace_commons_contributor::insights::service::ui_copy()["intro"]
+        );
+        assert!(!subtitle.text().contains("Mac"));
         for (_, target) in &view.links {
             assert!(
                 super::super::screens_with(false)
