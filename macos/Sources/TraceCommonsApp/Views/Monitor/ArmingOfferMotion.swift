@@ -37,8 +37,10 @@ enum ArmingOfferMotion {
         reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.9)
     }
 
-    /// The mark's change from bolt to check.
-    static let markChange: Animation = .spring(response: 0.32, dampingFraction: 0.7)
+    /// The mark's change from bolt to check; none under Reduce Motion.
+    static func markChange(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.7)
+    }
 
     /// The offer after a daemon refresh: the card the person pressed stays
     /// until its own exit, so a refresh that already reads the project as
@@ -66,8 +68,8 @@ struct ArmedPulse: View {
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             .onChange(of: armed) { _, now in
-                guard now, !reduceMotion else { return }
-                withAnimation(.easeOut(duration: 0.7)) { spread = true }
+                guard now else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.7)) { spread = !reduceMotion }
             }
     }
 }

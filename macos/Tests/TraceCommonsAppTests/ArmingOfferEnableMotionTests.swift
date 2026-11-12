@@ -43,6 +43,8 @@ final class ArmingOfferEnableMotionTests: XCTestCase {
     func test_reduceMotionLeavesWithoutMovement() {
         XCTAssertNil(ArmingOfferMotion.exit(reduceMotion: true))
         XCTAssertNotNil(ArmingOfferMotion.exit(reduceMotion: false))
+        XCTAssertNil(ArmingOfferMotion.markChange(reduceMotion: true))
+        XCTAssertNotNil(ArmingOfferMotion.markChange(reduceMotion: false))
         XCTAssertGreaterThan(ArmingOfferMotion.hold, .zero)
         XCTAssertLessThanOrEqual(ArmingOfferMotion.hold, .seconds(1.5), "the card lingers after it is answered")
     }

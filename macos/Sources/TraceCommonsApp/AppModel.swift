@@ -2185,7 +2185,8 @@ final class AppModel: ObservableObject {
             work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) },
             onFailure: { self.armingOfferStep = nil }
         ) { _ in
-            withAnimation(ArmingOfferMotion.markChange) { self.armingOfferStep = .armed }
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            withAnimation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion)) { self.armingOfferStep = .armed }
             self.refreshProjects()
             self.refreshAudit()
             Task { @MainActor in

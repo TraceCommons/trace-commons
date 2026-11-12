@@ -865,6 +865,7 @@ private struct ArmingOfferPopover: View {
     let onClose: () -> Void
     let onArm: () -> Void
     let onDecline: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -880,7 +881,7 @@ private struct ArmingOfferPopover: View {
                 GlassNoticeMark(systemImage: ArmingOfferMotion.symbol(step), tint: ArmingOfferMotion.tint(step))
                     .symbolEffect(.bounce, value: step == .armed)
                     .overlay { ArmedPulse(armed: step == .armed, tint: ArmingOfferMotion.tint(step)) }
-                    .animation(ArmingOfferMotion.markChange, value: step)
+                    .animation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion), value: step)
             } summary: {
                 Text(copy.evidence)
             } details: {
