@@ -730,49 +730,60 @@ impl AnalyticsTabs {
         let requested_week = self.overview_week.get();
         let params = week_params(requested_week, local_offset());
         let weak = Rc::downgrade(self);
-        app.call("insights_week", params, move |_, result| {
-            let Some(tabs) = weak.upgrade() else { return };
-            tabs.live_busy.set(false);
-            if tabs.live_again.replace(false)
-                && tabs.active.get()
-                && tabs.shown.get() == Tab::Overview
-            {
-                tabs.load(Tab::Overview);
-                return;
-            }
-            if !accept_live_result(
-                tabs.active.get(),
-                tabs.shown.get(),
-                tabs.generation(Slot::Overview).get(),
-                generation,
-            ) {
-                return;
-            }
-            if let Some((response, overview)) = result.ok().and_then(|response| {
-                super::live::live_overview(&response)
-                    .filter(|overview| {
-                        requested_week.is_none_or(|week| overview.week_start == week)
-                    })
-                    .map(|overview| (response, overview))
-            }) {
-                clear(&tabs.overview_body);
-                tabs.present_overview_heading(&overview);
-                // Live totals are not evidence links into the saved-snapshot feed.
-                let totals = card_box();
-                totals.append(&styled(&text("analytics_card_sessions"), "heading"));
-                totals.append(&styled(
-                    &figure(Some(u64::from(overview.sessions))),
-                    "title-3",
-                ));
-                for source in &overview.sources {
-                    totals.append(&small(&source_line(source.source)));
-                    totals.append(&styled(&figure(source.tokens), "title-3"));
-                }
-                tabs.overview_body.append(&totals);
-                super::live::append_work_cards(&tabs.overview_body, &response);
-            } else {
-                tabs.load_saved_overview();
-            }
+        app.call("insights_week", params, move |app, result| {
+            app.call(
+                "subscription_usage",
+                serde_json::json!({"refresh":false,"interactive":false}),
+                move |_, subscriptions| {
+                    let Some(tabs) = weak.upgrade() else { return };
+                    tabs.live_busy.set(false);
+                    if tabs.live_again.replace(false)
+                        && tabs.active.get()
+                        && tabs.shown.get() == Tab::Overview
+                    {
+                        tabs.load(Tab::Overview);
+                        return;
+                    }
+                    if !accept_live_result(
+                        tabs.active.get(),
+                        tabs.shown.get(),
+                        tabs.generation(Slot::Overview).get(),
+                        generation,
+                    ) {
+                        return;
+                    }
+                    if let Some((response, overview)) = result.ok().and_then(|response| {
+                        super::live::live_overview(&response)
+                            .filter(|overview| {
+                                requested_week.is_none_or(|week| overview.week_start == week)
+                            })
+                            .map(|overview| (response, overview))
+                    }) {
+                        clear(&tabs.overview_body);
+                        tabs.present_overview_heading(&overview);
+                        // Live totals are not evidence links into the saved-snapshot feed.
+                        let totals = card_box();
+                        totals.append(&styled(&text("analytics_card_sessions"), "heading"));
+                        totals.append(&styled(
+                            &figure(Some(u64::from(overview.sessions))),
+                            "title-3",
+                        ));
+                        for source in &overview.sources {
+                            totals.append(&small(&source_line(source.source)));
+                            totals.append(&styled(&figure(source.tokens), "title-3"));
+                        }
+                        tabs.overview_body.append(&totals);
+                        super::live::append_work_cards(&tabs.overview_body, &response);
+                        super::usage::append(
+                            &tabs.overview_body,
+                            &response,
+                            &subscriptions.unwrap_or_default(),
+                        );
+                    } else {
+                        tabs.load_saved_overview();
+                    }
+                },
+            );
         });
     }
 

@@ -30,6 +30,8 @@ mod analytics;
 mod evidence;
 #[path = "insights_live.rs"]
 mod live;
+#[path = "insights_usage.rs"]
+mod usage;
 
 /// A chooser belongs to the selection and view lifetime that opened it.
 #[derive(Clone)]
