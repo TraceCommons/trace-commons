@@ -63,11 +63,9 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a pass waits for the OS credential store. A read still running
 /// then carries on off the pass and fills the held session for a later one;
-/// this pass keeps R3.
-#[cfg(not(test))]
+/// this pass keeps R3. Test builds set their own bound (`SessionCache`).
+#[cfg_attr(test, allow(dead_code))]
 const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// The longest a spent allowance is held without asking again, whatever
 /// `retry_after_seconds` says. Also what keeps a broken or hostile value
@@ -110,6 +108,23 @@ struct Answer {
 struct SessionCache {
     loaded: Mutex<Option<LoadedAccountSession>>,
     reading: AtomicBool,
+    /// Tests only: how long a pass waits for the store. `None`, the default,
+    /// waits for the read to finish, so a test does not depend on how fast
+    /// a loaded runner gets to it; the stalled-store test sets a bound.
+    #[cfg(test)]
+    read_timeout: Mutex<Option<Duration>>,
+}
+
+impl SessionCache {
+    #[cfg(not(test))]
+    fn read_timeout(&self) -> Option<Duration> {
+        Some(CREDENTIAL_READ_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    fn read_timeout(&self) -> Option<Duration> {
+        *self.read_timeout.lock().expect("read timeout lock")
+    }
 }
 
 /// Clears `reading` however the read ends, a panic included, so one failed
@@ -300,8 +315,12 @@ impl AccountAdmissionState {
                 Err(_) => None,
             }
         });
-        match tokio::time::timeout(CREDENTIAL_READ_TIMEOUT, read).await {
-            Ok(Ok(loaded)) => loaded,
+        let finished = match self.session.read_timeout() {
+            Some(bound) => tokio::time::timeout(bound, read).await.ok(),
+            None => Some(read.await),
+        };
+        match finished {
+            Some(Ok(loaded)) => loaded,
             _ => {
                 tracing::debug!("account session read did not finish; R3 stays in force");
                 None
@@ -479,7 +498,7 @@ pub(crate) fn native_token_for_test(tenant: &str, secret: &str) -> String {
 mod tests {
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
-    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
 
     fn cfg(ingest: &str, tenant: &str) -> ContributorConfig {
         let mut c = crate::commands::unenrolled_preview_config();
@@ -765,12 +784,37 @@ mod tests {
     }
 
     /// The OS credential store as the tests see it, counting reads and able
-    /// to stall them, the way a locked or prompting keychain does.
+    /// to stall them, the way a locked or prompting keychain does. A stalled
+    /// read blocks until the test releases it, not for a set time, so the
+    /// test cannot race the clock.
     #[derive(Default)]
     struct SlowStore {
         inner: super::super::cloud_credential_test_support::MemoryBackend,
         reads: AtomicUsize,
-        delay_ms: AtomicU64,
+        stalled: Mutex<bool>,
+        released: std::sync::Condvar,
+    }
+
+    impl SlowStore {
+        fn stall(&self) {
+            *self.stalled.lock().unwrap() = true;
+        }
+
+        fn release(&self) {
+            *self.stalled.lock().unwrap() = false;
+            self.released.notify_all();
+        }
+    }
+
+    /// Releases a stalled store however the test ends. A read left blocked
+    /// would hold the runtime's shutdown, turning a failed assertion into a
+    /// hang.
+    struct ReleaseOnDrop(Arc<SlowStore>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
     }
 
     impl super::super::credential_store::SecretBackend for SlowStore {
@@ -779,7 +823,12 @@ mod tests {
             reference: &super::super::credential_store::CredentialReference,
         ) -> Result<Vec<u8>, super::super::credential_store::CredentialError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
+            let stalled = self.stalled.lock().unwrap();
+            drop(
+                self.released
+                    .wait_while(stalled, |stalled| *stalled)
+                    .unwrap(),
+            );
             self.inner.read(reference)
         }
         fn write(
@@ -1128,23 +1177,39 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let base = serve(status_router(StatusCode::OK, yes(), None, hits.clone())).await;
         let d = Daemon::new(&base, &token("original"));
-        d.os_store.delay_ms.store(1_500, Ordering::SeqCst);
+        *d.shared
+            .account_admission
+            .session
+            .read_timeout
+            .lock()
+            .unwrap() = Some(Duration::from_millis(50));
+        d.os_store.stall();
+        let _release = ReleaseOnDrop(d.os_store.clone());
 
-        let started = std::time::Instant::now();
-        d.refresh().await;
-        assert!(
-            started.elapsed() < Duration::from_millis(1_200),
-            "the pass waited {:?} for the credential store",
-            started.elapsed()
-        );
+        // The store does not answer until it is released below, so a pass
+        // that waited for it would never return; the outer bound only turns
+        // that hang into a failure.
+        tokio::time::timeout(Duration::from_secs(60), d.refresh())
+            .await
+            .expect("the pass waited for a stalled credential store");
         assert_eq!(d.current(), AccountAdmission::NotAdvertised);
         assert_eq!(hits.load(Ordering::SeqCst), 0);
 
         // While that read is out, a pass does not start another.
-        d.refresh().await;
-        assert_eq!(d.os_store.reads.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(Duration::from_secs(60), d.refresh())
+            .await
+            .expect("the second pass waited for a stalled credential store");
+        assert!(
+            d.shared
+                .account_admission
+                .session
+                .reading
+                .load(Ordering::SeqCst),
+            "the stalled read is still out"
+        );
 
-        tokio::time::timeout(Duration::from_secs(10), async {
+        d.os_store.release();
+        tokio::time::timeout(Duration::from_secs(60), async {
             while d
                 .shared
                 .account_admission
@@ -1157,6 +1222,11 @@ mod tests {
         })
         .await
         .expect("the stalled read finishes");
+        assert_eq!(
+            d.os_store.reads.load(Ordering::SeqCst),
+            1,
+            "a pass started a second read while the first was out"
+        );
         d.refresh().await;
         assert_eq!(d.current(), AccountAdmission::Advertised);
         assert_eq!(
