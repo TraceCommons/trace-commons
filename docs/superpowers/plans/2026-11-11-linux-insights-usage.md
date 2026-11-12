@@ -12,7 +12,7 @@ Remaining parity: explicit per-login refresh, Projects drill, referral earnings,
 
 ## Verification
 
-- GTK full suite: 618 library, 2 shell and 8 integration tests passed. After the final default-login label adjustment, all 6 usage regressions passed again.
+- GTK full suite: 610 library, 2 shell and 8 integration tests passed; 8 library tests were ignored. After the final default-login label adjustment, all 6 usage regressions passed again.
 - GTK all-target clippy passed with the repository's five documented baseline allowances; the initial strict run reported only pre-existing baseline categories outside the changed files.
 - Formatting and diff whitespace checks passed. Independent review caught a weekly-pace precedence defect; the corrected selection and regression were re-reviewed.
 - Parent owns the aggregate license-boundary gate. No manifests or dependencies changed.
