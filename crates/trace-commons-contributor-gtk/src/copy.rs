@@ -1244,7 +1244,8 @@ pub fn health_sentence(label: &str) -> &'static str {
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
         "claim-mint-failed" | "ingest-unreachable" => {
-            "Can't reach the server right now. Your queue is safe; it'll retry on its own."
+            "Can't reach the upload server. Your traces are saved and uploads will retry \
+             automatically. You don't need to do anything."
         }
         "queue-full" => {
             concat!(

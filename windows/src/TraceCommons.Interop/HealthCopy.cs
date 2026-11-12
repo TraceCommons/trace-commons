@@ -108,8 +108,9 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "automatically.",
                 null),
             "claim-mint-failed" or "ingest-unreachable" => new HealthCopy(
-                "Can't upload right now.",
-                "Your queue is safe; it'll retry on its own.",
+                "Can't reach the upload server.",
+                "Your traces are saved and uploads will retry automatically. You don't need "
+                + "to do anything.",
                 null),
             "queue-full" => new HealthCopy(
                 "Near.ai has stopped queuing new traces",
