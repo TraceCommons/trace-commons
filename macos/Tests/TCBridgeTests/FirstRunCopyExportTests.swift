@@ -85,4 +85,17 @@ final class FirstRunCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.welcome.start, "Get started")
     }
 
+    func testAgentConfigurationPromptAndOlderExportCompatibility() throws {
+        let json = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())
+        let copy = try XCTUnwrap(FirstRunCopy.decode(json))
+        let guidance = try XCTUnwrap(copy.agentConfiguration)
+        XCTAssertTrue(guidance.prompt.contains("--json config preview"))
+        XCTAssertTrue(guidance.prompt.contains("Do not approve or submit individual traces"))
+        XCTAssertEqual(guidance.copy, "Copy prompt")
+        var tree = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        tree.removeValue(forKey: "agent_configuration")
+        let older = String(decoding: try JSONSerialization.data(withJSONObject: tree), as: UTF8.self)
+        XCTAssertNil(try XCTUnwrap(FirstRunCopy.decode(older)).agentConfiguration)
+    }
+
 }

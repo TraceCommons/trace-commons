@@ -83,7 +83,30 @@ final class NativeOnboardingRenderTests: XCTestCase {
     }
 
     @MainActor
-    private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
+    func testAgentConfigurationGuidanceRendersWithoutChangingSetup() async throws {
+        let copy = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode))
+        let guidance = try XCTUnwrap(copy.agentConfiguration)
+        let runner = FirstRunRunner(state: FirstRunState(step: .welcome), daemon: RecordingFirstRunDaemon())
+        let before = runner.state
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"]
+            .map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try render(ZStack { FirstRunBackdrop(); WelcomeScreen(copy: copy, runner: runner) },
+            size: CGSize(width: 860, height: 640),
+            to: directory.appendingPathComponent("agent-configuration-welcome.png"), settle: 3)
+        var wentBack = false
+        try render(ZStack {
+            FirstRunBackdrop()
+            AgentConfigurationScreen(copy: guidance, backLabel: copy.frame.back) { wentBack = true }
+        },
+            size: CGSize(width: 860, height: 640),
+            to: directory.appendingPathComponent("agent-configuration-inline.png"))
+        XCTAssertFalse(wentBack)
+        XCTAssertEqual(runner.state, before)
+    }
+
+    @MainActor
+    private func render<V: View>(_ view: V, size: CGSize, to url: URL, settle: TimeInterval = 0) throws {
         // ImageRenderer cannot draw AppKit-backed TextFields: it emits a
         // yellow placeholder instead. Host the real native hierarchy so this
         // test exercises the same controls the app displays.
@@ -99,6 +122,7 @@ final class NativeOnboardingRenderTests: XCTestCase {
         window.contentView = hosting
         defer { window.close() }
         hosting.layoutSubtreeIfNeeded()
+        if settle > 0 { RunLoop.main.run(until: Date().addingTimeInterval(settle)) }
         window.displayIfNeeded()
         let representation = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
         hosting.cacheDisplay(in: bounds, to: representation)
