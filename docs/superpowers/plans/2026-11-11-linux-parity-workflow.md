@@ -1,12 +1,12 @@
 # Dynamic Linux parity workflow
 
-Status: executing. User authorized workflow and execution across all six Linux priorities.
+Status (2026-11-12): executing. Nine implementation PRs are open as drafts; nothing is merged or released. This file is a point-in-time log: the SHAs and job links below describe the heads at that date.
 
 ## Operating rules
 
 Current native macOS is the parity reference. Deliver independently reviewable increments, preserve existing Linux behavior, and distinguish source/unit evidence from rendered real-app behavior. No new dependencies, unsolicited notices, credential collection, uploads or activation defaults. Shared service copy/data remain authoritative. New notices or dependency exceptions require their existing explicit approval gates. No automatic merge/release authorization is inferred from this workflow.
 
-Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout, never a fresh worktree or copied target. Preserve primary checkout. Every Cargo command uses `RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0`. Finish task edits before final suite per repository rules. Use bounded parallel lanes with disjoint ownership; one integration owner for shell wiring. Independent review and exact-head validation precede each PR.
+Make each implementation checkout by taking over a finished worktree whose PR is merged or closed (`git worktree move` it, check out the new branch from `origin/main`), never by copying a `target/`; a fresh `git worktree add` is fine when no finished worktree is free. The maintainer's local `.claude/bin/tc-worktree <branch> [base]` does this, but it is not in the repository (`.claude/` is ignored). Preserve primary checkout. Every Cargo command uses `RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0`. Finish task edits before final suite per repository rules. Use bounded parallel lanes with disjoint ownership; one integration owner for shell wiring. Independent review and exact-head validation precede each PR.
 
 ## Dispatch and adaptation
 
@@ -33,7 +33,7 @@ Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout,
 
 For every changed screen cover populated/empty/unavailable/loading, light/dark, narrow/wide, large text, keyboard navigation and canceled operations. Live values never open saved-data evidence. Linux tray is optional and never the only route to an action. Counter-pass/local analytics stays separate from contribution enrollment and upload authority.
 
-Full device matrix work may need a Linux desktop beyond local Colima; missing environments remain explicit blockers, not claimed successes. CI screenshot/log artifact upload was previously rejected by automatic approval review, so this workflow does not add such uploads. Local synthetic captures are marked as component evidence.
+Full device matrix work needs a real Linux desktop beyond the local container; missing environments remain explicit blockers, not claimed successes. This workflow adds no CI screenshot or log artifact uploads. Local synthetic captures are marked as component evidence.
 
 ## Deliveries already completed
 
@@ -49,12 +49,12 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 ### Reassessment 1
 
 - Linux root cause already repaired externally by merged #2098. Hosted Weston at dc522585 passed 604 unit tests, Clippy, mounted navigation, wrapping/focus, CSS and sparse OCR. Evidence: actions/runs/43152689075/job/130965363543. Main 073789798 job130977821782 also passed; do not conflate baseline success with later feature heads.
-- Usage lane owns insights usage module and optional worker reads in tc-wt-linux-insights-usage.
-- Home lane owns additive Home/model, App wiring, shared balance renderer in tc-wt-linux-home-parity.
-- Benchmarks lane owns separate module/tab in tc-wt-linux-insights-benchmarks; integration with usage reviewed later.
-- Traces lane owns preview stale-response guard plus additive contextual inspector in tc-wt-linux-traces-inspector; avoid reparenting full preview sheet.
-- Settings lane owns grouping/navigation in tc-wt-linux-settings-parity; existing GTK first-run commits differ from macOS and require explicit state-machine work before reordering.
-- Desktop lane uses tc-wt-linux-parity-validation for qualification report. No GNOME/KDE real desktop available yet; Flatpak network and broad session-bus permissions require installed-package evidence before altering them.
+- Usage lane owns insights usage module and optional worker reads.
+- Home lane owns additive Home/model, App wiring, shared balance renderer.
+- Benchmarks lane owns separate module/tab; integration with usage reviewed later.
+- Traces lane owns preview stale-response guard plus additive contextual inspector; avoid reparenting full preview sheet.
+- Settings lane owns grouping/navigation; existing GTK first-run commits differ from macOS and require explicit state-machine work before reordering.
+- Desktop lane owns the qualification report. No GNOME/KDE real desktop available yet; Flatpak network and broad session-bus permissions require installed-package evidence before altering them.
 
 ### Reassessment 2
 
@@ -62,7 +62,7 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 - A local integration branch combines those five slices. Cargo check passes; registration and lifecycle hooks were independently reviewed. Final combined tests follow remaining integration.
 - Review repaired Home missing-value handling and sign-in polling, weekly usage pace fallback, and map connector/layout-test issues. Settings compact navigation reactivation is being repaired before publication.
 - User chose container qualification with explicit desktop gaps. Actual GNOME/KDE login, tray, permission behavior and installed Flatpak remain unqualified.
-- The worktree helper exhausted eligible cached donors. Map and recap reuse separately verified clean merged donors without active processes; no open-PR checkout or target copy is used.
+- Map and recap checkouts reuse finished worktrees of merged PRs; no open-PR checkout or target copy is used.
 - Next bounded Traces increment is read-only History detail using existing history_detail and shared copy, with owner/request invalidation. It remains queued behind the current validation and integration.
 
 ### Reassessment 3
@@ -87,10 +87,12 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 - Portal `166e4429b` passed the corrected [live probe job](https://github.com/TraceCommons/trace-commons/actions/runs/43159789245/job/130988129138): the daemon replied with UnknownMethod for the unavailable Background interface. This proves a bounded live service reply, not a user permission grant.
 - Settings first hosted run failed its initial wide-layout assertion after a fixed 180ms delay. Follow-up `2ad9e0cca` waits for actual mapped allocation, retains every wide/narrow assertion and adds diagnostic timeout state. Regular suite passed 616 tests; combined test compilation passes. Its [hosted rerun](https://github.com/TraceCommons/trace-commons/actions/runs/43161134691/job/130992455864) passed the actual mounted resize/navigation test in 1.94 seconds, with the original wide/narrow and repeat-selection assertions intact.
 - First-run `befaa7cd8` passed its [hosted Linux job](https://github.com/TraceCommons/trace-commons/actions/runs/43160040468/job/130988771554), including new pure planning/Terms tests and existing account-free startup and baseline mounted Insights/OCR checks. There is no mounted seven-step first-run interaction test or first-run screenshot evidence; that qualification remains open.
-- Other current checks are not fully green: Usage and Benchmarks have the same unchanged macOS layout assertion failure ([Benchmarks job](https://github.com/TraceCommons/trace-commons/actions/runs/43158099621/job/130982642813)); Usage has an [unchanged macOS layout test failure](https://github.com/TraceCommons/trace-commons/actions/runs/43157845135/job/130981834216); Map has an [unchanged Windows account-admission test failure](https://github.com/TraceCommons/trace-commons/actions/runs/43159159551/job/130986002900) and a downstream missing artifact. These have not been reproduced or established as flakes.
+- Other current checks are not fully green. None of these jobs builds code the Linux PRs change: #2101, #2104, #2105 and #2107 touch only the GTK crate (its own Cargo workspace) and docs.
+  - `macOS app tests` fails on Usage, Benchmarks and Map with `FirstRunFrameTests.test_everyScreenTakesTheRunnerAndNamesItsLayoutAlike` ([Usage](https://github.com/TraceCommons/trace-commons/actions/runs/43157845135/job/130981834216), [Benchmarks](https://github.com/TraceCommons/trace-commons/actions/runs/43158099621/job/130982642813), [Map](https://github.com/TraceCommons/trace-commons/actions/runs/43159159551/job/130986003031)). These branches are based on `073789798`; the test was fixed on main by #2110 (`8c1ed9354`), so a rebase onto main should clear it.
+  - Map's `windows contributor crates` job failed one core test, `daemon::account_admission::tests::the_pass_after_a_rotation_presents_the_rotated_token` ([job](https://github.com/TraceCommons/trace-commons/actions/runs/43159159551/job/130986002900)); `windows contributor app` then failed only because that job produced no `windows-ffi-cdylib` artifact. Main passed both jobs at `8c1ed9354` ([run](https://github.com/TraceCommons/trace-commons/actions/runs/43160020591)). Not yet triaged: rerun after the rebase before calling it a flake.
 
 ## Execution checkpoint
 
 All nine implementation PRs have passing Linux desktop jobs on their current heads. The workflow and implementation remain draft and unmerged. Combined source passed 669 regular GTK tests, four license tests, six portal script regressions and configured lint/format checks; the later Settings test-only follow-up passed combined test compilation and its hosted mounted test.
 
-This completes the implemented increment across all six lanes, not exhaustive macOS parity. Remaining qualification includes populated screen states, the seven-step onboarding interaction, real GNOME/KDE login/tray/permission behavior and installed Flatpak. Read-only History detail is the next scoped implementation increment. Unchanged-source macOS/Windows failures are tracked above and prevent an all-CI-green claim.
+This completes the implemented increment across all six lanes, not exhaustive macOS parity. Remaining qualification includes populated screen states, the seven-step onboarding interaction, real GNOME/KDE login/tray/permission behavior and installed Flatpak. Read-only History detail is the next scoped implementation increment. The macOS and Windows failures listed above are not caused by these PRs' changes, but they are not yet cleared and prevent an all-CI-green claim.
