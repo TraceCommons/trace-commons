@@ -13,8 +13,6 @@
 //!   time.
 //! * **Never name the mechanism.** "Privacy filter", "claim", "ingest",
 //!   "canary" are internal words.
-//! * **Always state the data consequence.** "Nothing was sent unscanned",
-//!   "your queue is safe", "nothing has been lost".
 
 /// The app's name, re-exported from its one definition.
 ///
@@ -1227,26 +1225,14 @@ pub fn health_sentence(label: &str) -> &'static str {
         "opencode-export-version-unsupported" => {
             trace_commons_contributor::source_copy::OPENCODE_VERSION_DETAIL
         }
-        "not-logged-in" => {
-            "Not connected. Traces are being queued, but nothing can be sent until you \
-             reconnect. Nothing has been lost."
-        }
-        "pii-filter-unavailable" => {
-            "The extra privacy scan isn't reachable. Your traces are waiting rather than going \
-             out unscanned. Retrying automatically."
-        }
-        "privacy-filter-canary-failed" => {
-            "The privacy scan failed its own self-test, so nothing is being sent through it. \
-             This is deliberate -- a scan we can't verify doesn't get used."
-        }
+        "not-logged-in" => "Not connected.",
+        "pii-filter-unavailable" => "Waiting on the privacy scan.",
+        "privacy-filter-canary-failed" => "Privacy scan failed its self-test.",
         "near-ai-notice-not-acknowledged" => {
             "One thing to confirm. You chose the extra privacy scan, which sends message text to \
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
-        "claim-mint-failed" | "ingest-unreachable" => {
-            "Can't reach the upload server. Your traces are saved and uploads will retry \
-             automatically. You don't need to do anything."
-        }
+        "claim-mint-failed" | "ingest-unreachable" => "Can't reach the upload server.",
         "queue-full" => {
             concat!(
                 app_name!(),
@@ -1257,7 +1243,7 @@ pub fn health_sentence(label: &str) -> &'static str {
         // An unrecognized label is still a real condition. Say the true
         // thing that holds for every blocking label rather than inventing a
         // mechanism name for it.
-        _ => "Something is holding contributions up. Your queue is safe; nothing has been lost.",
+        _ => "Contributions on hold.",
     }
 }
 
@@ -2463,10 +2449,9 @@ mod tests {
 
     #[test]
     fn the_roots_copy_says_what_leaving_one_blank_actually_does() {
-        // The rule is "always state the data consequence". A screen that
-        // said only "answer both" would leave the contributor thinking a
-        // blank means "skip that one", which is the fail-open this whole
-        // slice removes.
+        // A screen that said only "answer both" would leave the
+        // contributor thinking a blank means "skip that one", which is the
+        // fail-open this whole slice removes.
         assert!(ROOTS_BOTH.contains("falls back"));
         assert!(ROOTS_BODY.contains("will not watch anything until you say"));
     }

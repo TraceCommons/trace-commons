@@ -38,4 +38,13 @@ final class HealthCopyExportTests: XCTestCase {
         XCTAssertNil(HealthLineCopy.decode(
             fromJSON: #"{"title":"","detail":"x","action":null,"action_kind":null,"severity":"waiting"}"#))
     }
+
+    /// A banner may be its title alone (owner, 2026-11-12): an empty detail
+    /// still decodes.
+    func testATitleOnlyBannerDecodes() {
+        let line = HealthLineCopy.decode(
+            fromJSON: #"{"title":"Not connected.","detail":"","action":null,"action_kind":null,"severity":"waiting"}"#)
+        XCTAssertEqual(line?.title, "Not connected.")
+        XCTAssertEqual(line?.detail, "")
+    }
 }

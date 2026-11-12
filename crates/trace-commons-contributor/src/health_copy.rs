@@ -13,12 +13,12 @@
 //! this change and still carry their own copies until a shell PR switches
 //! them over.
 //!
-//! Two rules bind every sentence below, both the shared design's:
-//! - **Never name the mechanism.** "Privacy filter", "claim", "ingest",
-//!   "canary" and "PII" are internal words. The label carries them; the
-//!   sentence must not.
-//! - **Always state the data consequence.** "Nothing has been lost", "your
-//!   queue is safe", "rather than going out unscanned".
+//! One rule binds every sentence below, the shared design's:
+//! **never name the mechanism.** "Privacy filter", "claim", "ingest",
+//! "canary" and "PII" are internal words. The label carries them; the
+//! sentence must not. A banner need not also say what happens to the data
+//! (owner, 2026-11-12, dropping the design's second rule): a short line that
+//! names the wait is enough.
 //!
 //! `status.health.last_error_label` carries ONE label at a time, already
 //! resolved by the daemon's precedence order (`daemon::health::precedence`).
@@ -113,21 +113,15 @@ impl HealthLineCopy {
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
         // Approved by the owner 2026-11-04 (Settings copy pass 2, P2).
-        "Can't reach the background service.",
-        "Nothing is being watched or sent while it's down. Your queue and the traces \
-         already sent are safe, and traces from while it was down will be picked up when \
-         it's running again.",
+        "Background service isn't running.",
+        "",
         None,
     )
 }
 
 /// The generic banner: a real condition this build has no sentence for.
 pub fn on_hold_copy() -> HealthLineCopy {
-    HealthLineCopy::waiting(
-        "Contributions are on hold.",
-        "Something is stopping traces from being sent. Nothing has been lost, and nothing has \
-         gone out.",
-    )
+    HealthLineCopy::waiting("Contributions on hold.", "")
 }
 
 /// The banner for one `last_error_label`, word for word from the macOS and
@@ -148,8 +142,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
     match label {
         health::LABEL_NOT_LOGGED_IN => HealthLineCopy::actionable(
             "Not connected.",
-            "Traces are being queued, but nothing can be sent until you reconnect. Nothing \
-             has been lost.",
+            "",
             Some(("Reconnect", HealthActionKind::Reconnect)),
         ),
         health::LABEL_NEAR_AI_NOTICE_PENDING => {
@@ -164,15 +157,15 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 Some((copy.recovery_action, HealthActionKind::PrivacyScanNotice)),
             )
         }
-        health::LABEL_CANARY_FAILED => HealthLineCopy::waiting(
-            "The privacy scan failed its own self-test,",
-            "so nothing is being sent through it. This is deliberate -- a scan we can't verify \
-             doesn't get used.",
-        ),
-        health::LABEL_PII_FILTER_UNAVAILABLE => HealthLineCopy::waiting(
-            "The extra privacy scan isn't reachable.",
-            "Your traces are waiting rather than going out unscanned. Retrying automatically.",
-        ),
+        health::LABEL_CANARY_FAILED => {
+            HealthLineCopy::waiting("Privacy scan failed its self-test.", "")
+        }
+        health::LABEL_PII_FILTER_UNAVAILABLE => {
+            // The scan or the privacy witness cannot review traces right
+            // now; they wait and retry on their own. Title only (owner,
+            // 2026-11-12): the three-sentence line was too long.
+            HealthLineCopy::waiting("Waiting on the privacy scan.", "")
+        }
         // The upload servers, not the app's own background service, are out
         // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
@@ -181,11 +174,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             // (`daemon::transient_upload_kind`, #1358), and a pass that hits
             // one stops so later traces wait in the queue too. Nothing the
             // contributor does changes that, so the copy says so.
-            HealthLineCopy::waiting(
-                "Can't reach the upload server.",
-                "Your traces are saved and uploads will retry automatically. You don't need to \
-                 do anything.",
-            )
+            HealthLineCopy::waiting("Can't reach the upload server.", "")
         }
         health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => {
             // Delegated, not repeated: the same words the source settings
@@ -222,8 +211,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
 /// service), so it claims neither that the service is down nor that what is
 /// on screen is a last-known answer. A failed read changes nothing, which is
 /// the data consequence it states. Approved 2026-10-06.
-pub const READ_UNAVAILABLE: &str =
-    "This couldn't be read just now. Nothing has changed. Try again in a moment.";
+pub const READ_UNAVAILABLE: &str = "Couldn't load. Try again.";
 
 /// What the app says instead of starting when its bundle and its core
 /// library come from different builds (staging design, section 4.3): a
@@ -326,19 +314,10 @@ mod tests {
     /// can -- that the detail states the data consequence.
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
+        // Title only (owner, 2026-11-12).
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach the background service.");
-        assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
-        assert!(
-            copy.detail.contains("already sent are safe"),
-            "{}",
-            copy.detail
-        );
-        assert!(copy.detail.contains("picked up"), "{}", copy.detail);
-        assert!(
-            !copy.detail.contains("nothing new will be queued"),
-            "must not imply new sessions are lost"
-        );
+        assert_eq!(copy.title, "Background service isn't running.");
+        assert!(copy.detail.is_empty(), "{}", copy.detail);
         assert!(copy.action.is_none());
         assert!(copy.action_kind.is_none());
     }
@@ -348,7 +327,6 @@ mod tests {
         for label in ALL_LABELS {
             let copy = health_copy_for_label(label, Some(500));
             assert!(!copy.title.is_empty(), "{label}");
-            assert!(!copy.detail.is_empty(), "{label}");
             for mechanism in ["privacy filter", "claim", "ingest", "canary", "PII"] {
                 assert!(
                     !copy
@@ -370,7 +348,7 @@ mod tests {
     fn an_unknown_label_gets_the_generic_on_hold_sentence_not_the_raw_label() {
         let copy = health_copy_for_label("a-future-label-this-build-has-never-heard-of", None);
         assert_eq!(copy, on_hold_copy());
-        assert_eq!(copy.title, "Contributions are on hold.");
+        assert_eq!(copy.title, "Contributions on hold.");
         assert!(!copy.detail.contains("a-future-label"));
     }
 
@@ -415,17 +393,10 @@ mod tests {
             health::LABEL_CLAIM_MINT_FAILED,
         ] {
             let copy = health_copy_for_label(label, None);
-            assert!(
-                !copy.detail.contains("won't be retried"),
-                "{label}: {}",
-                copy.detail
-            );
-            assert!(
-                copy.detail.contains("retry automatically")
-                    && copy.detail.contains("You don't need to do anything"),
-                "{label} says it retries and needs nothing: {}",
-                copy.detail
-            );
+            // Title only (owner, 2026-11-12): the outage retries on its
+            // own, and the banner asks nothing.
+            assert_eq!(copy.title, "Can't reach the upload server.", "{label}");
+            assert!(copy.detail.is_empty(), "{label}: {}", copy.detail);
             assert!(copy.action.is_none(), "{label} offers no button");
         }
     }
@@ -491,7 +462,8 @@ mod tests {
     fn serialized_copy_carries_every_field() {
         let value = serde_json::to_value(core_down_copy()).unwrap();
         assert!(value["title"].as_str().is_some_and(|t| !t.is_empty()));
-        assert!(value["detail"].as_str().is_some_and(|t| !t.is_empty()));
+        // Present as a string, empty for a title-only banner.
+        assert!(value["detail"].as_str().is_some());
         assert!(value["action"].is_null());
         assert!(value["action_kind"].is_null());
         assert_eq!(value["severity"], "actionable");

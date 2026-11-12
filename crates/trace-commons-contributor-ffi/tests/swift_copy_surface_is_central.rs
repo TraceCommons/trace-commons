@@ -714,25 +714,6 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
 const ALLOWED: &[(&str, &str, &str)] = &[
-    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
-    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
-    // returns NULL for a reported label -- a caught panic -- so a reported
-    // condition is never drawn as healthy.
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Contributions are on hold.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Something is stopping traces from being sent.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Nothing has been lost, and nothing has gone out.",
-        "health export-failure fallback",
-    ),
     // The legacy History rollup tallies and the queue's week figures, which
     // held the core's status words as headings, left the shell with the
     // legacy screens (R15); their allowances went with them.

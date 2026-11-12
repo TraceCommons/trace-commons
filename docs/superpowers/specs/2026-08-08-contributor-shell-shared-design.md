@@ -495,20 +495,20 @@ should say so.
 
 | State | Surface | Copy |
 |---|---|---|
-| `not-logged-in` | Amber dot, banner | **Not connected.** Sessions are being queued, but nothing can be sent until you reconnect. Nothing has been lost. `[ Reconnect ]` |
-| `pii-filter-unavailable` | Amber dot | **The extra privacy scan isn't reachable.** Your traces are waiting rather than going out unscanned. Retrying automatically. |
-| `privacy-filter-canary-failed` | Amber dot | **The privacy scan failed its own self-test**, so nothing is being sent through it. This is deliberate — a scan we can't verify doesn't get used. |
+| `not-logged-in` | Amber dot, banner | **Not connected.** `[ Reconnect ]` |
+| `pii-filter-unavailable` | Amber dot | **Waiting on the privacy scan.** (owner, 2026-11-12: title only; also shown when the privacy witness cannot review) |
+| `privacy-filter-canary-failed` | Amber dot | **Privacy scan failed its self-test.** |
 | `near-ai-notice-not-acknowledged` | Amber dot + banner with action | **One thing to confirm.** You chose the extra privacy scan, which sends message text to NEAR AI. Confirm you're OK with that and contributions resume. `[ Review and confirm ]` |
-| `claim-mint-failed`, `ingest-unreachable` | Grey dot, merged | **Can't reach Trace Commons right now.** Your queue is safe; it'll retry on its own. |
+| `claim-mint-failed`, `ingest-unreachable` | Grey dot, merged | **Can't reach the upload server.** |
 | `daily-cap-reached` | Menu line only | **Daily limit reached.** The rest goes out tomorrow. |
 | `queue-full` | **Notification** | **Trace Commons has stopped queuing new sessions** — 500 are already waiting. Review or clear some to start again. |
 | Expiring entries | **Notification**, once at 3 days | **4 sessions you haven't decided on will be dropped in 3 days.** Dropped means never sent. `[ Review ]  [ Let them go ]` |
 | Loop not running | Window replaces itself | **The background watcher isn't running.** Nothing is being watched or sent right now. `[ Start it ]` |
 
-Two copy rules throughout: **never name the mechanism** — "privacy filter",
-"claim", "ingest", "canary" are internal words — and **always state the data
-consequence**: "nothing was sent unscanned", "your queue is safe", "nothing
-has been lost".
+Banner titles stand alone (owner, 2026-11-12). One copy rule throughout: **never name the mechanism** — "privacy filter",
+"claim", "ingest", "canary" are internal words. (A second rule, "always state
+the data consequence", was dropped by the owner on 2026-11-12: a banner may
+name the wait and stop there.)
 
 Connection state is a first-class UI state, not an error. Not-running is the
 common case on first launch and needs a "start it" affordance, never a spinner
