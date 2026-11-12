@@ -610,14 +610,12 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
     );
     add(
         "quit_copy::quit_prompt",
-        [
-            quit_copy::QuitRole::Hosting,
-            quit_copy::QuitRole::Attached,
-            quit_copy::QuitRole::Unavailable,
-        ]
-        .into_iter()
-        .flat_map(|role| table(json!(quit_copy::quit_prompt(role))))
-        .collect(),
+        [(true, false), (false, true), (true, true)]
+            .into_iter()
+            .flat_map(|(compute, private_ai)| {
+                table(json!(quit_copy::quit_prompt(compute, private_ai)))
+            })
+            .collect(),
     );
 
     // The words the macOS shell wrote in Swift until #1146 parity
@@ -1044,17 +1042,10 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "quit prompt",
-        "TraceCommonsApp/AppModel.swift",
-        "quitPromptJSON()",
-        "TCBridge/TCDaemon.swift",
-        "tc_quit_prompt_json",
-    ),
-    (
-        "quit prompt without a watcher",
         "TraceCommonsApp/AppDelegate.swift",
-        "TCCoreCopy.quitPromptWithoutWatcherJSON",
+        "TCCoreCopy.quitReasonPromptJSON",
         "TCBridge/TCCoreCopy.swift",
-        "tc_quit_prompt_json",
+        "tc_quit_reason_prompt_json",
     ),
     (
         "first run",
@@ -1212,8 +1203,8 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
     }
 
     // The quit alert shows the prompt it was handed and is not confirmable
-    // without one; the hosting sentence it used to hard-code is false for
-    // an attached app.
+    // without one: a prompt that cannot be read refuses the quit rather
+    // than quitting while compute or Private AI is still running.
     let delegate = read("TraceCommonsApp/AppDelegate.swift");
     let delegate_code = swift_code(&delegate);
     for rendered in [
@@ -1221,7 +1212,8 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
         "prompt.body",
         "prompt.confirm",
         "prompt.cancel",
-        "guardletpromptelse{returnfalse}",
+        "QuitPrompt.decision(",
+        "case.refuse:returnfalse",
     ] {
         assert!(
             delegate_code

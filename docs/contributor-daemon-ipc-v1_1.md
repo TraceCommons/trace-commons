@@ -6628,7 +6628,7 @@ state, the harness rows and the credential row:
   `state_running_answered_elsewhere`, `state_running_destination_unknown`,
   `state_running_elsewhere`,
   `state_port_in_use`, `state_start_failed`, `state_crashed`;
-- `quit_also_stops`, `write_unconfirmed`;
+- `write_unconfirmed`;
 - `settings_moved`, `tray_turn_off`, `tray_open_to_turn_on`;
 - `harnesses_title`, `harnesses_what`, `harnesses_spend_scope`,
   `harnesses_none_found`;

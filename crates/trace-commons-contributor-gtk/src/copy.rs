@@ -1073,23 +1073,9 @@ pub const ARMING_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 
 // --- Quitting ----------------------------------------------------------
 
-// Which body is shown is decided at runtime by whether this process hosts
-// the watcher or is attached to one -- getting it wrong is a lie about
-// whether the machine is still watching. Both sentences are shared with the
-// other shells through `trace_commons_contributor::quit_copy`.
-//
-// COPY-MIGRATED-BEGIN
-pub use trace_commons_contributor::quit_copy::{QUIT_ATTACHED_BODY, QUIT_HOSTING_BODY};
-// COPY-MIGRATED-END
-
-pub const QUIT_ATTACHED_CONFIRM: &str = "Quit";
-/// GTK talks to an attached watcher over the raw control socket, which
-/// carries `shutdown`, so this shell can offer to stop it. A shell attached
-/// through `AttachedDaemon` cannot.
-pub const QUIT_ATTACHED_ALSO_STOP: &str = "Quit and stop watching";
-
-pub const QUIT_HOSTING_CANCEL: &str = "Cancel";
-pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
+// Quitting asks only when it would stop Private AI, in the core's one
+// sentence (`trace_commons_contributor::quit_copy`), shared with the other
+// shells.
 
 // --- Notifications -----------------------------------------------------
 

@@ -531,9 +531,10 @@ final class AppModel: ObservableObject {
             ?? PrivateInferenceState(label: "", port: nil)
     }
 
-    var privateInferenceQuitDetail: String? {
-        PrivateInferenceSurface.quitDetail(on: daemonSettings?.privateInferenceOn ?? false,
-            state: privateInferenceState, copy: privateInferenceCopy, calls: privateInferenceCalls)
+    /// Whether quitting would stop Private AI answering model calls.
+    var privateInferenceQuitStops: Bool {
+        PrivateInferenceSurface.quitStops(on: daemonSettings?.privateInferenceOn ?? false,
+            state: privateInferenceState, calls: privateInferenceCalls)
     }
 
     /// Whether to put the offer in front of the contributor right now.
@@ -1713,15 +1714,6 @@ final class AppModel: ObservableObject {
     /// stopped from here and cannot open a redacted body preview, and a
     /// contributor who is not told that meets it as a dead control.
     var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
-
-    /// The quit prompt that is true for this process, from the core
-    /// (`tc_quit_prompt_json`): the ABI reads off the daemon handle whether
-    /// this app hosts the watcher, is attached to one, or has none, and
-    /// chooses the sentence. Nil only on a caught panic.
-    var quitPrompt: QuitPrompt? {
-        QuitPrompt.decode(fromJSON: daemon?.quitPromptJSON()
-            ?? TCCoreCopy.quitPromptWithoutWatcherJSON())
-    }
 
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
