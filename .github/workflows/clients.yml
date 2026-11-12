@@ -548,7 +548,17 @@ jobs:
             -A clippy::manual_option_as_slice -A clippy::useless_vec \
             -A clippy::redundant_pattern_matching
       - name: Run weston + portal verification
+        env:
+          WESTON_SHOT_OUT: ${{ runner.temp }}/weston-insights.png
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
+      - name: Upload the captured frame
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: weston-insights-frame
+          path: ${{ runner.temp }}/weston-insights.png
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows-contributor-app:
     name: windows contributor app
