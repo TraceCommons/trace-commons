@@ -60,12 +60,20 @@ pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared 
     shared
 }
 fn set_rollout(shared: &DaemonShared, enabled: bool) {
+    // A restarted daemon on the same store keeps the revision watermark but
+    // may hold no manifest, so `snapshot.revision + 1` can repeat a revision
+    // with a different body, which the runtime refuses as a conflict. Draw
+    // from a counter that only rises across the whole test process instead.
+    static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let snapshot = shared.feature_flags.snapshot();
     let now = chrono::Utc::now();
+    let revision = NEXT_REVISION
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .max(snapshot.revision.unwrap_or(0) + 1);
     let manifest = json!({
         "schema_version":1,
         "environment":snapshot.environment,
-        "revision":snapshot.revision.unwrap_or(0) + 1,
+        "revision":revision,
         "issued_at":now,
         "expires_at":now + chrono::Duration::hours(1),
         "flags":{"claude_desktop_private_ai":enabled}

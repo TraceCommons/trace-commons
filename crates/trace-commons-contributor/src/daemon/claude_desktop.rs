@@ -255,7 +255,7 @@ fn observed(store: &ConfigStore, binding: &Binding) -> bool {
     let Ok(home) = std::fs::canonicalize(home) else {
         return false;
     };
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    let Ok(mut conn) = rusqlite::Connection::open_with_flags(
         home.join("ledger.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -265,7 +265,12 @@ fn observed(store: &ConfigStore, binding: &Binding) -> bool {
     };
     let _ = conn.busy_timeout(std::time::Duration::from_millis(50));
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-    conn.progress_handler(1000, Some(move || std::time::Instant::now() >= deadline));
+    if conn
+        .progress_handler(1000, Some(move || std::time::Instant::now() >= deadline))
+        .is_err()
+    {
+        return false;
+    }
     conn.query_row("SELECT EXISTS(SELECT 1 FROM exchanges WHERE path='/v1/messages' AND backend='nearai' AND status BETWEEN 200 AND 299 AND failure IS NULL AND response_sha256 IS NOT NULL AND served_model IN (?1,?2))",
         [&binding.model,&binding.background_model],|row|row.get::<_,bool>(0)).unwrap_or(false)
 }

@@ -206,9 +206,7 @@ impl ManagedRoute {
                 _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
                 fetched = super::models::fetch(&client, base_url) => fetched,
             };
-            if let Some(models) = fetched
-                .filter(|models| !models.is_empty())
-            {
+            if let Some(models) = fetched.filter(|models| !models.is_empty()) {
                 let selected = super::models::select(tool, requested, &models)?;
                 break (models, selected);
             }
