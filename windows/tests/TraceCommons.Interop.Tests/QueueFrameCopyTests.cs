@@ -91,32 +91,6 @@ public class HealthCopyTests
     }
 
     /// <summary>
-    /// The design's second copy rule: always state the data consequence.
-    /// </summary>
-    [Theory]
-    [MemberData(nameof(EveryLabel))]
-    public void EverySentenceStatesWhatHappenedToTheData(string label)
-    {
-        HealthCopy copy = HealthCopy.ForLabel(label)!;
-        string text = (copy.Title + " " + copy.Detail).ToLowerInvariant();
-
-        string[] consequences =
-        {
-            "nothing has been lost",
-            "queue is safe",
-            "traces are saved",
-            "rather than going out unscanned",
-            "nothing is being sent",
-            "nothing has gone out",
-            "contributions resume",
-            "goes out tomorrow",
-            "stopped queuing",
-        };
-
-        Assert.Contains(consequences, c => text.Contains(c, StringComparison.Ordinal));
-    }
-
-    /// <summary>
     /// Only conditions with a contributor recovery step get an action. Every other
     /// condition clears on its own, and a button that cannot change what it
     /// sits beside is a button that teaches people not to trust buttons.
@@ -161,10 +135,7 @@ public class HealthCopyTests
 
         HealthCopy notConnected = HealthCopy.ForLabel("not-logged-in")!;
         Assert.Equal("Not connected.", notConnected.Title);
-        Assert.Equal(
-            "Traces are being queued, but nothing can be sent until you reconnect. "
-            + "Nothing has been lost.",
-            notConnected.Detail);
+        Assert.Equal("", notConnected.Detail);
     }
 
     /// <summary>

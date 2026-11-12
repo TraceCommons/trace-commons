@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CryptoKit
 import Foundation
@@ -12,6 +13,10 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var featureFlags: FeatureFlagSnapshot?
+    var featureFlagReadGeneration: UInt64 = 0
+    private var featureFlagWake: AnyCancellable?
+    var featureFlagClient: DaemonClient? { client }
     @Published var managedSnapshot: ManagedSnapshot? {
         didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
     }
@@ -436,6 +441,9 @@ final class AppModel: ObservableObject {
     /// alongside `projects`, because every reason the project list changes
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
+    /// Where the offer's Enable is, or nil before it is pressed
+    /// (`ArmingOfferMotion`).
+    @Published private(set) var armingOfferStep: ArmingOfferStep?
     /// The standing Automatic grant, for Settings' sharing choice (#1753
     /// A2). Nil until `automatic_grant` has answered, which the choice draws
     /// as nothing picked. Refreshed alongside `projects`.
@@ -528,9 +536,10 @@ final class AppModel: ObservableObject {
             ?? PrivateInferenceState(label: "", port: nil)
     }
 
-    var privateInferenceQuitDetail: String? {
-        PrivateInferenceSurface.quitDetail(on: daemonSettings?.privateInferenceOn ?? false,
-            state: privateInferenceState, copy: privateInferenceCopy, calls: privateInferenceCalls)
+    /// Whether quitting would stop Private AI answering model calls.
+    var privateInferenceQuitStops: Bool {
+        PrivateInferenceSurface.quitStops(on: daemonSettings?.privateInferenceOn ?? false,
+            state: privateInferenceState, calls: privateInferenceCalls)
     }
 
     /// Whether to put the offer in front of the contributor right now.
@@ -1711,15 +1720,6 @@ final class AppModel: ObservableObject {
     /// contributor who is not told that meets it as a dead control.
     var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
 
-    /// The quit prompt that is true for this process, from the core
-    /// (`tc_quit_prompt_json`): the ABI reads off the daemon handle whether
-    /// this app hosts the watcher, is attached to one, or has none, and
-    /// chooses the sentence. Nil only on a caught panic.
-    var quitPrompt: QuitPrompt? {
-        QuitPrompt.decode(fromJSON: daemon?.quitPromptJSON()
-            ?? TCCoreCopy.quitPromptWithoutWatcherJSON())
-    }
-
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
         return !requiresOnboarding
@@ -1734,13 +1734,13 @@ final class AppModel: ObservableObject {
     /// dylib, or names no channel, refuses here with the core's sentence and
     /// resolves no directory and starts no daemon (staging design, 4.3).
     /// `start(configDirectory:)` below is a test seam that skips this check.
-    func start(plistChannel: String?) {
+    func start(plistChannel: String?, featureProfileAgrees: Bool = BuildChannelGate.featureProfileAgrees) {
         guard case .starting = startup else { return }
         let channel: BuildChannel
-        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        switch BuildChannelGate.verdict(plistChannel: plistChannel, featureProfileAgrees: featureProfileAgrees) {
         case .agreed(let agreed):
             channel = agreed
-        case .refused(let sentence):
+        case .refused(_, let sentence):
             startup = .refused(sentence)
             return
         }
@@ -1784,6 +1784,9 @@ final class AppModel: ObservableObject {
                 self.client = DaemonClient(daemon: daemon)
                 self.liveData = DaemonDataWiring.live(daemon)
                 self.startup = .running
+                self.featureFlags = nil
+                self.featureFlagWake = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+                    .sink { [weak self] _ in Task { @MainActor in self?.refreshFeatureFlagsAfterWake() } }
                 self.subscribe()
                 self.refreshAll()
                 #if DEBUG
@@ -1827,10 +1830,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        // Declares nothing yet: `reengage_due` is declared on this same
-        // subscription once the system's answer is known, and only while a
+        // Feature changes are always accepted. `reengage_due` is declared
+        // on this same subscription once the system's answer is known, only while a
         // notification can be posted (`refreshReengageDeclaration`).
-        let subscription = daemon.subscribe { json in
+        let subscription = daemon.subscribe(accepts: ["feature_flags_changed"]) { json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1861,7 +1864,7 @@ final class AppModel: ObservableObject {
     /// prompt is answered, and when the app comes forward (the contributor
     /// may have changed it in System Settings).
     func refreshReengageDeclaration() async {
-        let accepts = await reengageAccepts()
+        let accepts = await reengageAccepts() + ["feature_flags_changed"]
         reengage?.update(accepts: accepts)
     }
 
@@ -1910,8 +1913,11 @@ final class AppModel: ObservableObject {
         await self?.refreshStatus()?.value
     }
 
+    // Internal so transport-gap recovery can be exercised without flooding the event bus.
     func handle(event: DaemonEvent) {
         switch event {
+        case .featureFlagsChanged:
+            refreshFeatureFlags()
         case .snapshot(let pending, let status):
             statusReadGeneration = ReadEpoch()
             applyPendingUpdate(pending)
@@ -1962,6 +1968,7 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshFeatureFlags()
             refreshAutomaticGrant()
             refreshManagedSessions()
             refreshQueue()
@@ -1994,6 +2001,9 @@ final class AppModel: ObservableObject {
     /// a few seconds in the bad case; that is the correct trade against
     /// freeing memory another thread is reading.
     func shutdown() {
+        featureFlagWake = nil
+        featureFlags = nil
+        featureFlagReadGeneration &+= 1
         daemonStartup.cancel()
         isStartingDaemon = false
         undoTask?.cancel()
@@ -2051,6 +2061,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshFeatureFlags()
         refreshManagedSessions()
         // Before `refreshStatus`: its answer, even a failure, starts the
         // account-scoped reads (`accountScopedReadsAwaitStatus`).
@@ -2163,21 +2174,33 @@ final class AppModel: ObservableObject {
     /// cannot drift into offering different things.
     func refreshArmingOffer() {
         perform("arming_suggestion", work: { try $0.armingSuggestion() }) {
-            self.publishIfChanged(\.armingOffer, $0)
+            self.publishIfChanged(\.armingOffer, ArmingOfferMotion.offerAfterRefresh(
+                current: self.armingOffer, answered: $0, step: self.armingOfferStep))
         }
     }
 
     /// Arms the offered project. The offer clears because the daemon's next
     /// answer will not include an armed project, but it is cleared here too
-    /// so the card does not linger for a round trip.
+    /// so the card does not linger for a round trip. Enable is answered on
+    /// the card first (`ArmingOfferMotion`): locked while the daemon arms,
+    /// a check once it has, and the card leaves after a short hold. A
+    /// failure unlocks it and says so in `lastActionError`.
     func acceptArmingOffer(_ offer: ArmingOffer) {
+        guard client != nil, armingOfferStep == nil else { return }
+        armingOfferStep = .arming
         perform(
             "set_project_mode",
-            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) }
+            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) },
+            onFailure: { self.armingOfferStep = nil }
         ) { _ in
-            self.armingOffer = nil
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            withAnimation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion)) { self.armingOfferStep = .armed }
             self.refreshProjects()
             self.refreshAudit()
+            Task { @MainActor in
+                try? await Task.sleep(for: ArmingOfferMotion.hold)
+                self.clearArmingOffer()
+            }
         }
     }
 
@@ -2185,8 +2208,19 @@ final class AppModel: ObservableObject {
     /// and persisted there rather than here, so it survives a relaunch and
     /// applies to whichever shell asks next.
     func declineArmingOffer(_ offer: ArmingOffer) {
+        guard armingOfferStep == nil else { return }
         perform("decline_arming", work: { try $0.declineArming(projectID: offer.projectId) }) { _ in
-            self.armingOffer = nil
+            self.clearArmingOffer()
+        }
+    }
+
+    /// Takes the offer's card away, fading it and sliding what is below it
+    /// up (never under Reduce Motion), and unlocks the next offer's Enable.
+    private func clearArmingOffer() {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        withAnimation(ArmingOfferMotion.exit(reduceMotion: reduceMotion)) {
+            armingOffer = nil
+            armingOfferStep = nil
         }
     }
 

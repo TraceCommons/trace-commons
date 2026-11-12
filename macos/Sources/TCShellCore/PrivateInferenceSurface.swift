@@ -46,7 +46,6 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let statePortInUse: String
     public let stateStartFailed: String
     public let stateCrashed: String
-    public let quitAlsoStops: String
     public let writeUnconfirmed: String
     public let settingsMoved: String
     public let trayTurnOff: String
@@ -348,7 +347,6 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case statePortInUse = "state_port_in_use"
         case stateStartFailed = "state_start_failed"
         case stateCrashed = "state_crashed"
-        case quitAlsoStops = "quit_also_stops"
         case writeUnconfirmed = "write_unconfirmed"
         case settingsMoved = "settings_moved"
         case trayTurnOff = "tray_turn_off"
@@ -702,15 +700,9 @@ public enum PrivateInferenceSurface {
         [settingsKey: on, offerSeenKey: true]
     }
 
-    /// The extra sentence the quit confirmation carries while the switch is
-    /// on.
-    ///
-    /// `nil` when it is off: a contributor who never turned it on should not
-    /// be warned about losing it. The words are the payload's, never this
-    /// shell's -- the rest of that dialog is Swift-authored, and this
-    /// sentence deliberately is not.
-    public static func quitDetail(on: Bool, state: PrivateInferenceState, copy: PrivateInferenceCopy?, calls: PrivateInferenceCalls) -> String? {
-        guard calls.quitNeedsNotice(on, state.label), let copy else { return nil }
-        return copy.quitAlsoStops
+    /// Whether quitting stops Private AI, so the quit asks first. False when
+    /// it is off: a contributor who never turned it on is not asked.
+    public static func quitStops(on: Bool, state: PrivateInferenceState, calls: PrivateInferenceCalls) -> Bool {
+        calls.quitNeedsNotice(on, state.label)
     }
 }

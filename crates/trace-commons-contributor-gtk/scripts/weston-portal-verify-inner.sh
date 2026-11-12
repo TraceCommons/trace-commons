@@ -20,7 +20,8 @@ fail() {
   FAIL=1
 }
 
-# The default destination is Insights, which opens on its Overview tab.
+# The rendering fixture explicitly selects Insights and its Overview tab;
+# the connected shell's default destination is Home.
 # Require the page's own tab switcher -- an interactive control on the
 # Insights page, not the sidebar's "Insights" entry -- and the Overview's
 # "Tokens by day" card heading, which shows its body rendered.
@@ -163,12 +164,14 @@ else
 
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   for test_name in \
+    ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
+    ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      run_ignored_test "Insights display regression failed: $test_name" \
+      run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
       -- --exact --ignored --test-threads=1
   done
@@ -241,7 +244,7 @@ else
   (
     cd "$WORKDIR" || exit 1
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      GSK_RENDERER=cairo "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 60 \
+      GSK_RENDERER=cairo "$SHELL_BIN" --state-dir "$TC_DIR" --start-page insights --exit-after-realize --realize-seconds 60 \
       >"$WORKDIR/app.log" 2>&1 &
     APP_PID=$!
 
@@ -335,7 +338,7 @@ else
   fi
 fi
 
-exit "$FAIL"
+# --- axis 2: bounded reply from the independent live portal probe ----------
 
 PORTAL_UP=0
 for _ in $(seq 1 20); do
@@ -376,3 +379,6 @@ else
     echo "RequestBackground reached the live portal daemon and got a real (non-absence) reply"
   fi
 fi
+
+# Preserve failures from both rendering and the independent portal probe.
+exit "$FAIL"

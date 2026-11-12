@@ -167,10 +167,11 @@ fn on_sigterm(quit: impl Fn() + 'static) -> gtk::glib::SourceId {
 }
 
 fn local_start(drivers: &Drivers) -> bool {
-    drivers.start_page.as_deref() == Some("insights")
-        || (!drivers.exit_after_realize
-            && drivers.start_page.is_none()
-            && drivers.onboarding_page.is_none())
+    // Realize smoke drivers exercise the connected shell (Worker and
+    // desktop integration), including when its selected page is Insights.
+    !drivers.exit_after_realize
+        && (drivers.start_page.as_deref() == Some("insights")
+            || (drivers.start_page.is_none() && drivers.onboarding_page.is_none()))
 }
 
 fn connect_local_startup(
@@ -502,6 +503,21 @@ mod insights_startup_tests {
         std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("insights".into());
         assert!(local_start(&d));
     }
+    #[test]
+    fn insights_realize_driver_preserves_connected_desktop_startup() {
+        let mut d = drivers();
+        let d = std::rc::Rc::get_mut(&mut d).unwrap();
+        d.exit_after_realize = true;
+        assert!(!local_start(d));
+        d.start_page = Some("insights".into());
+        assert!(
+            !local_start(d),
+            "the screenshot must still exercise the connected shell"
+        );
+        d.exit_after_realize = false;
+        assert!(local_start(d), "ordinary Insights stays account-free");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]

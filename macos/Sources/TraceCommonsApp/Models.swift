@@ -936,6 +936,7 @@ struct EnrollResult: Decodable, Equatable {
 // MARK: - Events
 
 enum DaemonEvent: Equatable {
+    case featureFlagsChanged
     case snapshot(pending: [QueueEntry], status: DaemonStatus)
     case queueChanged
     case statusChanged

@@ -101910,11 +101910,11 @@ mod credit_estimate_tests {
         assert!(response.fit.is_none());
         assert_eq!(response.rows.len(), 3);
 
-        for i in 0..3 {
+        for (i, features) in fx.features.iter().enumerate().take(3) {
             let row = response
                 .rows
                 .iter()
-                .find(|row| row.features == fx.features[i])
+                .find(|row| row.features == *features)
                 .unwrap_or_else(|| panic!("row {i} present"));
             assert!(row.tenant_tag.starts_with('t'), "{}", row.tenant_tag);
             match i {

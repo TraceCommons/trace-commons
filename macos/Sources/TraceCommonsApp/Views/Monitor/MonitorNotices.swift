@@ -350,6 +350,7 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "arming-offer:" + offer.projectId) {
                 ArmingOfferPopover(
                     offer: offer, eyebrow: traces.words?.optionalAutomation,
+                    step: model.armingOfferStep,
                     closeLabel: closeWord, onClose: close("arming-offer:" + offer.projectId),
                     onArm: { model.acceptArmingOffer(offer) },
                     onDecline: { model.declineArmingOffer(offer) })
@@ -857,10 +858,14 @@ private struct ArmingOfferPopover: View {
     let offer: ArmingOffer
     /// The core's "OPTIONAL AUTOMATION"; nil draws no tag.
     let eyebrow: String?
+    /// Where Enable is (`ArmingOfferMotion`): the mark turns to a check
+    /// once the project is armed.
+    let step: ArmingOfferStep?
     let closeLabel: String
     let onClose: () -> Void
     let onArm: () -> Void
     let onDecline: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -873,7 +878,10 @@ private struct ArmingOfferPopover: View {
                 title: copy.question, tag: eyebrow, tagTone: .neutral,
                 detailsLabel: MonitorWords.noticeDetails, closeLabel: closeLabel, onClose: onClose
             ) {
-                GlassNoticeMark(systemImage: "bolt", tint: GlassColor.accentText)
+                GlassNoticeMark(systemImage: ArmingOfferMotion.symbol(step), tint: ArmingOfferMotion.tint(step))
+                    .symbolEffect(.bounce, value: step == .armed)
+                    .overlay { ArmedPulse(armed: step == .armed, tint: ArmingOfferMotion.tint(step)) }
+                    .animation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion), value: step)
             } summary: {
                 Text(copy.evidence)
             } details: {
@@ -881,6 +889,7 @@ private struct ArmingOfferPopover: View {
             } actions: {
                 Button(copy.confirm, action: onArm)
                     .buttonStyle(GlassButtonStyle(.primary))
+                    .disabled(ArmingOfferMotion.enableLocked(step))
                 Button(copy.decline, action: onDecline)
                     .buttonStyle(GlassButtonStyle(.link))
             }

@@ -19,7 +19,6 @@ namespace TraceCommons.Interop;
 /// turnaround time.</item>
 /// <item><b>Never name the mechanism.</b> "Privacy filter", "claim",
 /// "ingest", "canary" are internal words.</item>
-/// <item><b>Always state the data consequence.</b></item>
 /// </list>
 /// </summary>
 public static class HistoryCopy

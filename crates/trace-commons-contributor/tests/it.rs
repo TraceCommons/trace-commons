@@ -28,6 +28,7 @@ mod daemon_reads_staged_imports;
 mod daemon_upload_pass_guards;
 mod daemon_wallet_signup_without_env;
 mod evidence_import_cli;
+mod feature_flags_cli;
 mod local_insights_cli;
 mod local_redaction_audit;
 mod macos_shell_settings_contract;
