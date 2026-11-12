@@ -312,7 +312,43 @@ pub(super) fn pending(app: &Rc<App>) -> bool {
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
-    if action == CredentialAction::Obtain && obtain_in_progress(app) {
+    act_guarded(app, action, Rc::new(|| true), None);
+}
+
+/// A transient Join surface may leave before a start reply arrives. Keep the
+/// existing account actions, but never open a browser for a stale appearance.
+#[derive(Default)]
+pub(super) struct OwnedAttempt(RefCell<Option<String>>);
+impl OwnedAttempt {
+    fn record(&self, id: &str) {
+        if !id.is_empty() {
+            self.0.replace(Some(id.to_owned()));
+        }
+    }
+    fn take(&self) -> Option<String> {
+        self.0.borrow_mut().take()
+    }
+}
+
+/// Leave only the ceremony this transient surface started. An absent id must
+/// never become an unqualified cancellation of another account surface.
+pub(super) fn cancel_owned(app: &Rc<App>, attempt: &OwnedAttempt) {
+    if let Some(id) = attempt.take() {
+        app.call(
+            "near_ai_credential_cancel",
+            serde_json::json!({"attempt_id":id}),
+            |app, _| refresh(app),
+        );
+    }
+}
+
+pub(super) fn act_guarded(
+    app: &Rc<App>,
+    action: CredentialAction,
+    current: Rc<dyn Fn() -> bool>,
+    owned: Option<Rc<OwnedAttempt>>,
+) {
+    if !current() || (action == CredentialAction::Obtain && obtain_in_progress(app)) {
         return;
     }
     let view = &app.private_inference.credential;
@@ -327,7 +363,7 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         }
         CredentialAction::Obtain => {
             crate::ui::funding::credential_pending(app);
-            start(app);
+            start(app, current, owned);
         }
         CredentialAction::Cancel => {
             crate::ui::funding::credential_pending(app);
@@ -380,16 +416,43 @@ pub(super) fn open_browser(url: &str) -> bool {
 /// happened, which a call whose answer was lost cannot know, and the re-read
 /// beside it draws whatever the daemon actually holds. Before this, the
 /// screen did not change at all and a press read as unheard (#728).
-fn start(app: &Rc<App>) {
+fn start(app: &Rc<App>, current: Rc<dyn Fn() -> bool>, owned: Option<Rc<OwnedAttempt>>) {
     app.call(
         "near_ai_credential_start",
         serde_json::json!({}),
-        |app, result| {
+        move |app, result| {
+            if !current() {
+                // Cancel only this returned ceremony. Never use an empty id,
+                // which would cancel another surface's current attempt.
+                if let Some(id) = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.get("attempt_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    app.call(
+                        "near_ai_credential_cancel",
+                        serde_json::json!({"attempt_id":id}),
+                        |app, _| {
+                            app.private_inference.credential.pending.set(false);
+                            refresh(app);
+                        },
+                    );
+                } else {
+                    app.private_inference.credential.pending.set(false);
+                    refresh(app);
+                }
+                return;
+            }
             let view = &app.private_inference.credential;
             let opened = match result {
                 Ok(value) => {
                     if let Some(id) = value.get("attempt_id").and_then(serde_json::Value::as_str) {
                         view.attempt.replace(Some(id.to_string()));
+                        if let Some(owned) = &owned {
+                            owned.record(id);
+                        }
                     }
                     value
                         .get("browser_url")
@@ -400,6 +463,9 @@ fn start(app: &Rc<App>) {
                 Err(_) => false,
             };
             if !opened && view.attempt.borrow().is_some() {
+                if let Some(owned) = &owned {
+                    owned.take();
+                }
                 // `pending` stays set on purpose: the cancel that follows is
                 // the same press still being answered, and clears it itself.
                 cancel(app);
@@ -516,6 +582,19 @@ fn ensure_poll(app: &Rc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn leaving_a_surface_consumes_only_its_owned_attempt_once() {
+        let join = super::OwnedAttempt::default();
+        let other = super::OwnedAttempt::default();
+        join.record("");
+        assert!(join.take().is_none());
+        join.record("join-attempt");
+        other.record("settings-attempt");
+        assert_eq!(join.take().as_deref(), Some("join-attempt"));
+        assert!(join.take().is_none());
+        assert_eq!(other.take().as_deref(), Some("settings-attempt"));
+    }
+
     use super::*;
     use trace_commons_contributor::private_inference_copy::{
         LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_FAILED,

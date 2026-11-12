@@ -119,11 +119,37 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     card.root.append(&card.sign_in_explains);
     card.root.append(&card.sign_in);
 
+    let owned_attempt = Rc::new(credential::OwnedAttempt::default());
+    if onboarding.embedded() {
+        onboarding.on_join_cancel({
+            let weak_app = Rc::downgrade(app);
+            let owned = owned_attempt.clone();
+            move || {
+                if let Some(app) = weak_app.upgrade() {
+                    credential::cancel_owned(&app, &owned);
+                }
+            }
+        });
+    }
     let sign_in_card = card.clone();
     let sign_in_app = app.clone();
+    let sign_in_onboarding = onboarding.clone();
     card.sign_in.connect_clicked(move |button| {
+        let generation = sign_in_onboarding.join_generation();
+        if !sign_in_onboarding.join_valid(generation) {
+            return;
+        }
         button.set_sensitive(false);
-        credential::act(&sign_in_app, sign_in_card.sign_in_action.get());
+        let weak = Rc::downgrade(&sign_in_onboarding);
+        credential::act_guarded(
+            &sign_in_app,
+            sign_in_card.sign_in_action.get(),
+            Rc::new(move || {
+                weak.upgrade()
+                    .is_some_and(|onboarding| onboarding.join_valid(generation))
+            }),
+            Some(owned_attempt.clone()),
+        );
     });
 
     let entry_card = card.clone();
@@ -133,7 +159,11 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let click_app = app.clone();
     let click_onboarding = onboarding.clone();
     card.join.connect_clicked(move |_| {
-        if click_card.pending.get() || click_onboarding.connection_busy.get() {
+        let generation = click_onboarding.join_generation();
+        if !click_onboarding.join_valid(generation)
+            || click_card.pending.get()
+            || click_onboarding.connection_busy.get()
+        {
             return;
         }
         click_card.pending.set(true);
@@ -143,6 +173,9 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         let result_card = click_card.clone();
         let result_onboarding = click_onboarding.clone();
         click_app.call("near_ai_account_enroll", params, move |app, result| {
+            if !result_onboarding.join_valid(generation) {
+                return;
+            }
             enrollment_result::complete(
                 result,
                 &result_onboarding.connection_busy,
@@ -161,6 +194,7 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     // credential surface can both change the retained session.
     let mapped_card = Rc::downgrade(&card);
     let mapped_app = Rc::downgrade(app);
+    let mapped_onboarding = Rc::downgrade(onboarding);
     card.root.connect_map(move |_| {
         let (Some(app), Some(card)) = (mapped_app.upgrade(), mapped_card.upgrade()) else {
             return;
@@ -168,9 +202,13 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         if card.polling.replace(true) {
             return;
         }
-        refresh_sign_in(&app, &card);
+        let Some(onboarding) = mapped_onboarding.upgrade() else {
+            return;
+        };
+        refresh_sign_in(&app, &card, &onboarding);
         let weak_card = Rc::downgrade(&card);
         let weak_app = Rc::downgrade(&app);
+        let weak_onboarding = Rc::downgrade(&onboarding);
         gtk::glib::timeout_add_seconds_local(2, move || {
             let (Some(app), Some(card)) = (weak_app.upgrade(), weak_card.upgrade()) else {
                 return gtk::glib::ControlFlow::Break;
@@ -179,7 +217,10 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 card.polling.set(false);
                 return gtk::glib::ControlFlow::Break;
             }
-            refresh_sign_in(&app, &card);
+            let Some(onboarding) = weak_onboarding.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            refresh_sign_in(&app, &card, &onboarding);
             gtk::glib::ControlFlow::Continue
         });
     });
@@ -188,7 +229,12 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     card.root.clone()
 }
 
-fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
+fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>, onboarding: &Rc<Onboarding>) {
+    let generation = onboarding.join_generation();
+    if !onboarding.join_valid(generation) {
+        return;
+    }
+    let onboarding = onboarding.clone();
     if card.reading_status.replace(true) {
         return;
     }
@@ -198,6 +244,9 @@ fn refresh_sign_in(app: &Rc<App>, card: &Rc<NearAiJoin>) {
         serde_json::json!({}),
         move |app, result| {
             status_card.reading_status.set(false);
+            if !onboarding.join_valid(generation) || !status_card.root.is_mapped() {
+                return;
+            }
             let value = result.ok();
             let state = value
                 .as_ref()
