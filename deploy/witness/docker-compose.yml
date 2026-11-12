@@ -222,6 +222,14 @@ services:
       TRACE_NEAR_AI_PRIVACY_BASE_URL: "https://cloud-api.near.ai/v1"
       TRACE_NEAR_AI_PRIVACY_MODEL: "openai/privacy-filter"
 
+      # NEAR AI allows this key 30 privacy/classify requests a minute
+      # (2026-11-12). The witness spaces every classify attempt, retries
+      # included, two seconds apart across the whole process, and a 429
+      # holds every caller for its Retry-After. Unset is unpaced. MEASURED,
+      # like the endpoint and model above: a contributor who has verified
+      # the measurement knows the bound this enclave keeps.
+      TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE: "30"
+
       # Injected encrypted at deploy time and declared in app-compose.json's
       # `allowed_envs`. The NAME is measured; the VALUE is not, and must never
       # be written into this file -- app-compose.json embeds this compose
