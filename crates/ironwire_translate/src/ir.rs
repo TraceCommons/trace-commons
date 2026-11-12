@@ -376,7 +376,8 @@ pub enum Delta {
     Start {
         /// Provider's id, where it gave one.
         id: String,
-        /// Model to report to the client — the one it asked for.
+        /// Provider-reported model, or empty when absent. Ordinary emission
+        /// retains the client alias unless provider reporting is selected.
         model: String,
     },
     /// Prose, incremental.

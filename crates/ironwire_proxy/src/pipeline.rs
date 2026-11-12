@@ -426,6 +426,15 @@ async fn dispatch_inner(
         )
     });
 
+    // This is a trusted, immutable host restriction, not a client header or a
+    // mutable control pin. Forced routes retain the ordinary eligibility gate
+    // and cannot descend to another backend or sibling model on failure.
+    let route_override = state
+        .vertex_gateway
+        .as_ref()
+        .map(|gateway| gateway.route(peek.requested_model.as_deref()))
+        .or(route_override);
+
     let cross_account_fallback = state
         .policy
         .lock()
@@ -717,7 +726,15 @@ async fn dispatch_inner(
                         response,
                         inbound,
                         target,
-                        peek.requested_model.as_deref().unwrap_or("unknown"),
+                        ResponseModel {
+                            fallback: if state.vertex_gateway.is_some() {
+                                decision.model.clone()
+                            } else {
+                                peek.requested_model.clone()
+                            }
+                            .unwrap_or_else(|| "unknown".into()),
+                            provider: state.vertex_gateway.is_some(),
+                        },
                         peek.stream,
                         confidence.clone(),
                         &body,
@@ -1017,13 +1034,20 @@ fn is_completion_path(path: &str) -> bool {
         || path.ends_with("/v1/chat/completions")
 }
 
+/// Ordinary translations retain the client alias. A host-bound listener
+/// prefers an explicit provider model, with its forced model as fallback.
+struct ResponseModel {
+    fallback: String,
+    provider: bool,
+}
+
 /// Map an answer that arrived on `target` back into the shape the client asked
 /// for on `inbound`.
 fn translate_response(
     response: UpstreamResponse,
     inbound: Protocol,
     target: Protocol,
-    requested_model: &str,
+    model: ResponseModel,
     stream: bool,
     confidence: ConfidenceSink,
     original_request: &Bytes,
@@ -1058,7 +1082,7 @@ fn translate_response(
             response.body,
             inbound,
             target,
-            requested_model.to_string(),
+            model,
             confidence,
             namespaces,
         )
@@ -1068,7 +1092,7 @@ fn translate_response(
             response.body,
             inbound,
             target,
-            requested_model.to_string(),
+            model,
             confidence,
             namespaces,
         )
@@ -1087,7 +1111,7 @@ fn translated_body(
     inner: futures_util::stream::BoxStream<'static, Result<Bytes, UpstreamError>>,
     inbound: Protocol,
     target: Protocol,
-    requested_model: String,
+    model: ResponseModel,
     confidence: ConfidenceSink,
     namespaces: ironwire_translate::namespaces::NamespaceMap,
 ) -> impl Stream<Item = Result<Bytes, UpstreamError>> + Send {
@@ -1108,8 +1132,18 @@ fn translated_body(
             ));
         }
         let completion = ironwire_translate::parse_completion(target, &parsed);
+        let reported = model
+            .provider
+            .then(|| {
+                parsed
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+            .flatten()
+            .unwrap_or(&model.fallback);
         let (mut translated, _) =
-            ironwire_translate::emit_completion(inbound, &completion, &requested_model);
+            ironwire_translate::emit_completion(inbound, &completion, reported);
         namespaces.restore_response(&mut translated);
         Ok(Bytes::from(
             serde_json::to_vec(&translated).unwrap_or_else(|_| b"{}".to_vec()),
@@ -1122,18 +1156,18 @@ fn translated_stream(
     inner: futures_util::stream::BoxStream<'static, Result<Bytes, UpstreamError>>,
     inbound: Protocol,
     target: Protocol,
-    requested_model: String,
+    model: ResponseModel,
     confidence: ConfidenceSink,
     namespaces: ironwire_translate::namespaces::NamespaceMap,
 ) -> impl Stream<Item = Result<Bytes, UpstreamError>> + Send {
-    let state = (
-        inner,
-        Some(
-            ironwire_translate::Translator::new(target, inbound, requested_model)
-                .with_namespaces(namespaces),
-        ),
-        confidence,
-    );
+    let translator = ironwire_translate::Translator::new(target, inbound, model.fallback)
+        .with_namespaces(namespaces);
+    let translator = if model.provider {
+        translator.with_provider_model()
+    } else {
+        translator
+    };
+    let state = (inner, Some(translator), confidence);
     futures_util::stream::unfold(
         state,
         |(mut inner, mut translator, confidence)| async move {
@@ -1842,7 +1876,10 @@ mod tests {
             body,
             Protocol::AnthropicMessages,
             Protocol::OpenAiChat,
-            "claude-opus-4-6".to_string(),
+            ResponseModel {
+                fallback: "claude-opus-4-6".into(),
+                provider: false,
+            },
             confidence.clone(),
             ironwire_translate::namespaces::NamespaceMap::default(),
         );
@@ -1871,7 +1908,10 @@ mod tests {
             stream::iter(vec![Ok(body)]).boxed(),
             Protocol::AnthropicMessages,
             Protocol::OpenAiChat,
-            "claude-opus-4-6".to_string(),
+            ResponseModel {
+                fallback: "claude-opus-4-6".into(),
+                provider: false,
+            },
             confidence.clone(),
             ironwire_translate::namespaces::NamespaceMap::default(),
         );
@@ -1892,7 +1932,10 @@ mod tests {
             stream::iter(vec![Ok(Bytes::from(frames))]).boxed(),
             Protocol::AnthropicMessages,
             Protocol::OpenAiChat,
-            "claude-opus-4-6".to_string(),
+            ResponseModel {
+                fallback: "claude-opus-4-6".into(),
+                provider: false,
+            },
             confidence.clone(),
             ironwire_translate::namespaces::NamespaceMap::default(),
         );

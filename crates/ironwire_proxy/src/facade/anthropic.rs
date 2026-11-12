@@ -164,7 +164,7 @@ async fn list_models(state: AppState, client_login: Option<BackendId>) -> Respon
     axum::Json(serde_json::json!({ "data": data, "has_more": false })).into_response()
 }
 
-async fn forward(
+pub(crate) async fn forward(
     claim: RowClaim,
     state: AppState,
     headers: HeaderMap,

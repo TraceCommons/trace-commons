@@ -494,3 +494,62 @@ not the underlying error chain. `StartupReport::home` is the canonical home used
 for discovery, including when the caller supplied a symlink. A CLI lock refusal
 confirms health before claiming that the recorded port is already running;
 an owner still starting or stopping is reported separately.
+
+
+## A dedicated Vertex listener
+
+Hosts integrating a managed Desktop client can bind inference to a private
+capability and one destination through the existing assembly:
+
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use ironwire_proxy::embed::{EmbedOptions, VertexGateway, start_with_options};
+// Generate a fresh random UUID in the host; this value is only an example.
+let project = "nearai-0123456789abcdef0123456789abcdef".to_owned();
+let gateway = VertexGateway::new(
+    project,
+    "nearai".into(),
+    "configured-main-model".into(),
+    Some("configured-background-model".into()),
+)?;
+let proxy = start_with_options(
+    std::path::Path::new("/path/to/private/desktop-ironwire"),
+    Some(0),
+    EmbedOptions::default().with_vertex_gateway(gateway),
+    |_, _| {},
+).await?;
+// Give the client /vertex as its base URL and the private capability as project.
+// Before reporting disconnect or replacing the route, stop and drain it.
+proxy.shutdown().await;
+# Ok(())
+# }
+```
+
+The constructor accepts `nearai-` followed by 32 hexadecimal UUID digits (the
+unhyphenated `nearai` prefix is also accepted), and nonempty ASCII backend/model
+IDs without whitespace or control characters. Errors are fixed labels and
+`Debug` never displays the capability. Matching uses exact bytes, including case.
+The capability is held in memory, not `config.toml` or the discovery pointer.
+Use a separate owned home and listener per connection, keep the capability
+private, and generate a new one on every replacement.
+
+A bound listener has no Anthropic/OpenAI facade to bypass the restriction.
+It ignores control pins, refuses inbound route overrides, maps IDs containing
+`haiku` case-insensitively to the optional background model, and sends every
+other ID to the main model. Eligibility still applies and failures never fall
+back to another destination. Translated responses report the provider's explicit
+model when supplied (including substitutions), otherwise the forced configured
+model; the ledger keeps the Desktop alias separately as `requested_model`. Counting remains a terminal 400 after capability
+authentication. See `docs/PROTOCOL.md` for the wire contract and `docs/TRUST.md`
+for the bearer-secret boundary. Hosts own Desktop configuration, process state,
+connection persistence and installed-client validation.
+
+`EmbeddedProxy::stop_accepting(&mut self).await` requests graceful shutdown and
+waits for an explicit listener destruction acknowledgement. The OS listener is
+closed before this barrier returns, while already accepted inference streams
+can continue indefinitely. It is cancellation-safe and repeatable. A host that
+must report disconnect promptly can await this barrier, then move the owner
+into a retained background `proxy.shutdown()` task. Full drain still owns the
+home lock, discovery pointer and maintenance tasks until it completes; replacing
+a connection before drain finishes therefore needs a distinct owned home.
+The ordinary `shutdown().await` behavior remains a complete graceful drain.

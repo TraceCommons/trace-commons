@@ -198,21 +198,22 @@ impl Parser {
         }
     }
 
-    fn start(&mut self, id: &str, out: &mut Vec<Delta>) {
+    fn start(&mut self, id: &str, model: &str, out: &mut Vec<Delta>) {
         if self.started {
             return;
         }
         self.started = true;
         out.push(Delta::Start {
             id: id.to_string(),
-            // Filled in by the emitter, which knows what the client asked for.
-            model: String::new(),
+            // Kept as an observation; the emitter defaults to the client alias
+            // unless the host explicitly requests provider model reporting.
+            model: model.to_string(),
         });
     }
 
     /// Everything owed at the end of the stream.
     fn finish(&mut self, out: &mut Vec<Delta>) {
-        self.start("", out);
+        self.start("", "", out);
         self.tool_calls.complete_all(out, self.source);
         let stop = self.stop.clone().unwrap_or({
             // A stream that ended without saying why, but handed us a call, was
@@ -238,6 +239,9 @@ impl Parser {
                     data.pointer("/message/id")
                         .and_then(Value::as_str)
                         .unwrap_or(""),
+                    data.pointer("/message/model")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
                     out,
                 );
                 if let Some(usage) = data.pointer("/message/usage") {
@@ -257,7 +261,7 @@ impl Parser {
                         // fragments even when it also sends an empty object
                         // here, so nothing is accumulated from this event.
                     }
-                    _ => self.start("", out),
+                    _ => self.start("", "", out),
                 }
             }
             Some("content_block_delta") => {
@@ -318,7 +322,11 @@ impl Parser {
         else {
             return;
         };
-        self.start(data.get("id").and_then(Value::as_str).unwrap_or(""), out);
+        self.start(
+            data.get("id").and_then(Value::as_str).unwrap_or(""),
+            data.get("model").and_then(Value::as_str).unwrap_or(""),
+            out,
+        );
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.stop = Some(chat::parse_stop_reason(Some(reason)));
@@ -384,6 +392,9 @@ impl Parser {
         match kind {
             "response.created" => self.start(
                 data.pointer("/response/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                data.pointer("/response/model")
                     .and_then(Value::as_str)
                     .unwrap_or(""),
                 out,
@@ -952,6 +963,7 @@ fn write_data(out: &mut Vec<u8>, payload: &Value) {
 /// forward downstream. Call [`Translator::finish`] when the upstream ends.
 #[derive(Debug)]
 pub struct Translator {
+    provider_model: bool,
     parser: Parser,
     emitter: Emitter,
     buffer: Vec<u8>,
@@ -969,12 +981,25 @@ impl Translator {
     #[must_use]
     pub fn new(source: Protocol, target: Protocol, requested_model: impl Into<String>) -> Self {
         Self {
+            provider_model: false,
             parser: Parser::new(source),
             emitter: Emitter::new(target, requested_model.into()),
             buffer: Vec::new(),
             resyncing: false,
             closed: false,
         }
+    }
+
+    /// Report the provider's model from its initial stream envelope when given.
+    ///
+    /// The constructor's model remains the fallback when that envelope omits
+    /// one. This is opt-in: ordinary translations retain the client alias for
+    /// clients whose bookkeeping requires it. Later frames cannot relabel an
+    /// answer that has already begun.
+    #[must_use]
+    pub fn with_provider_model(mut self) -> Self {
+        self.provider_model = true;
+        self
     }
 
     /// Restore Responses namespace identities from this request after translation.
@@ -1080,6 +1105,13 @@ impl Translator {
         let mut deltas = Vec::new();
         self.parser.feed(event, &value, &mut deltas);
         for delta in &deltas {
+            if self.provider_model
+                && !self.emitter.started
+                && let Delta::Start { model, .. } = delta
+                && !model.is_empty()
+            {
+                self.emitter.model.clone_from(model);
+            }
             // A stop from the wire closes the stream here, so a second one —
             // or a trailing `[DONE]` — cannot write a second terminal event.
             if matches!(delta, Delta::Stop { .. }) {
@@ -1735,5 +1767,57 @@ mod responses_lifecycle_tests {
         assert_eq!(completed.len(), 3);
         assert_eq!(completed[0]["content"][0]["text"], "before");
         assert_eq!(completed[2]["content"][0]["text"], "after");
+    }
+
+    #[test]
+    fn provider_model_reporting_is_opt_in_for_each_source_wire() {
+        for (source, frame) in [
+            (
+                Protocol::OpenAiChat,
+                r#"data: {"id":"c","model":"provider-model","choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+            ),
+            (
+                Protocol::AnthropicMessages,
+                r#"data: {"type":"message_start","message":{"id":"m","model":"provider-model"}}"#,
+            ),
+            (
+                Protocol::OpenAiResponses,
+                r#"data: {"type":"response.created","response":{"id":"r","model":"provider-model"}}"#,
+            ),
+        ] {
+            for provider in [false, true] {
+                let translator =
+                    Translator::new(source, Protocol::AnthropicMessages, "fallback-model");
+                let mut translator = if provider {
+                    translator.with_provider_model()
+                } else {
+                    translator
+                };
+                let mut out = translator.push(format!("{frame}\n\n").as_bytes());
+                out.extend(translator.finish());
+                let out = String::from_utf8(out).unwrap();
+                let expected = if provider {
+                    "provider-model"
+                } else {
+                    "fallback-model"
+                };
+                assert!(
+                    out.contains(&format!("\"model\":\"{expected}\"")),
+                    "{source} provider={provider}: {out}"
+                );
+            }
+        }
+        let mut translator = Translator::new(
+            Protocol::OpenAiChat,
+            Protocol::AnthropicMessages,
+            "fallback-model",
+        )
+        .with_provider_model();
+        let out = translator.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n");
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("\"model\":\"fallback-model\"")
+        );
     }
 }

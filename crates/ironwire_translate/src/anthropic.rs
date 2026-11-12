@@ -479,8 +479,9 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
 
 /// Write a non-streaming Anthropic answer.
 ///
-/// `requested_model` is the model the client asked for, not the one that served
-/// it: a foreign slug here would make the client's own bookkeeping incoherent.
+/// `requested_model` is the caller's chosen label: ordinarily the client alias
+/// for its bookkeeping, or an explicitly selected provider model for a bound
+/// listener. This emitter does not decide that policy.
 #[must_use]
 pub fn emit_completion(completion: &Completion, requested_model: &str) -> (Value, Dropped) {
     let mut dropped = Dropped::default();
