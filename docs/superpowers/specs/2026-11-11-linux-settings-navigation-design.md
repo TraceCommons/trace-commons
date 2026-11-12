@@ -4,11 +4,11 @@ The authorized first slice brings the existing GTK Settings controls into the na
 
 ## Approach
 
-Keep one scrollable body and add grouped navigation. A page-per-section stack would hide adjacent context and differ from macOS; leaving the long column alone would not provide direct navigation. The selected approach reuses the existing cards and action handlers. Wide windows use a sidebar; below 760 logical pixels the same selection is a dropdown above the body. No dependencies, notices, or daemon changes.
+Keep one scrollable body and add grouped navigation. A page-per-section stack would hide adjacent context and differ from macOS; leaving the long column alone would not provide direct navigation. The selected approach reuses the existing cards and action handlers. Wide windows use a sidebar; below 760 logical pixels the same selection is a section menu above the body. No dependencies, notices, or daemon changes.
 
 Existing controls form Account, Watching, Tools, Projects, Public profile, Change log, Private AI, Startup & notifications, and Redaction witness. Shared monitor settings navigation copy names every section. Unsupported sections are not fabricated. Connection evidence and pause remain together under Watching; account recovery and login changes move under Account. Timing controls stay beside the watcher. Public profile keeps its existing state-dependent heading.
 
-Keyboard and assistive technology use native ListBox and DropDown controls; the chooser uses the existing Settings name. Section choices scroll to the requested group, clamped to valid scroll bounds. Resizing preserves selection and entered field values; it never rebuilds controls or sends settings writes.
+Keyboard and assistive technology use native ListBox and MenuButton controls; the chooser uses the existing Settings name. Section choices scroll to the requested group, clamped to valid scroll bounds. Resizing preserves selection and entered field values; it never rebuilds controls or sends settings writes.
 
 ## Separate queued onboarding migration
 
