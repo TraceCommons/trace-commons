@@ -55,7 +55,7 @@ struct SavedAccountsSection: View {
             accessory: { EmptyView() }, content: { EmptyView() })
     }
 
-    static let symbol = "person.crop.circle.badge.checkmark"
+    nonisolated static let symbol = "person.crop.circle.badge.checkmark"
 
     /// The accounts card, laid out as it was on the Private AI tab before
     /// #1490: the re-read after the title, where a launch opens behind the
