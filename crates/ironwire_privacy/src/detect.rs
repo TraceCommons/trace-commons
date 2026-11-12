@@ -508,10 +508,7 @@ fn is_reserved(text: &str, range: &Range<usize>) -> bool {
     }
     let digits: String = lower.chars().filter(char::is_ascii_digit).collect();
     let national = digits.strip_prefix('1').unwrap_or(&digits);
-    if national.len() == 10 && (national.starts_with("555") || &national[3..6] == "555") {
-        return true;
-    }
-    false
+    national.len() == 10 && (national.starts_with("555") || &national[3..6] == "555")
 }
 
 /// `172.16.0.0/12` — the second octet is 16..=31, which a prefix test cannot

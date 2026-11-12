@@ -1843,8 +1843,8 @@ jobs:
           # One pass line per binary, each naming at least one test: a filter
           # that matches nothing in one crate passes with "0 passed" there.
           awk '
-            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
-            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /Running.*unittests.*[(\/]trace_commons_server-[0-9a-f]+\)/ { bin = "server" }
+            /Running.*unittests.*[(\/]trace_commons_ingest-[0-9a-f]+\)/ { bin = "ingest" }
             /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
             END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
           ' gcs-client-tests.log
@@ -1950,8 +1950,8 @@ jobs:
           # One pass line per binary, each naming at least one test: a filter
           # that matches nothing in one crate passes with "0 passed" there.
           awk '
-            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
-            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /Running.*unittests.*[(\/]trace_commons_server-[0-9a-f]+\)/ { bin = "server" }
+            /Running.*unittests.*[(\/]trace_commons_ingest-[0-9a-f]+\)/ { bin = "ingest" }
             /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
             END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
           ' near-attestation.log

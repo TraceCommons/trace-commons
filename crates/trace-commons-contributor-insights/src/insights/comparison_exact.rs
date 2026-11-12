@@ -431,11 +431,10 @@ impl BigNat {
         let length = self.0.len().max(other.0.len());
         self.0.resize(length, 0);
         let mut carry = 0u64;
-        for index in 0..length {
-            let value = u64::from(self.0[index])
-                + u64::from(other.0.get(index).copied().unwrap_or(0))
-                + carry;
-            self.0[index] = value as u32;
+        for (index, slot) in self.0.iter_mut().enumerate() {
+            let value =
+                u64::from(*slot) + u64::from(other.0.get(index).copied().unwrap_or(0)) + carry;
+            *slot = value as u32;
             carry = value >> 32;
         }
         if carry != 0 {
