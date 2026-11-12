@@ -93,6 +93,23 @@ pub fn client_session_header(protocol: Protocol) -> &'static str {
     }
 }
 
+/// The header a coding agent uses to name a subagent inside its session, per
+/// inbound wire, where it sends one.
+///
+/// Measured, not guessed: Claude Code 2.1.322 sends a subagent's requests under
+/// its parent's `x-claude-code-session-id` and adds `x-claude-code-agent-id`
+/// (`a` and 16 hex digits), stable across one subagent's turns and distinct
+/// between parallel subagents; the main thread never sends it. Codex has not
+/// been measured, so the OpenAI wires name none. Like the session header it is
+/// forwarded untouched; IronWire only reads it.
+#[must_use]
+pub fn client_agent_header(protocol: Protocol) -> Option<&'static str> {
+    match protocol {
+        Protocol::AnthropicMessages => Some("x-claude-code-agent-id"),
+        Protocol::OpenAiResponses | Protocol::OpenAiChat => None,
+    }
+}
+
 /// Whether an upstream response header should be forwarded to the client.
 ///
 /// Content encoding is included deliberately: we do not decompress, so the
@@ -135,6 +152,20 @@ mod tests {
             "session-id"
         );
         assert_eq!(client_session_header(Protocol::OpenAiChat), "session-id");
+    }
+
+    #[test]
+    fn only_claude_code_names_its_subagents() {
+        assert_eq!(
+            client_agent_header(Protocol::AnthropicMessages),
+            Some("x-claude-code-agent-id")
+        );
+        assert_eq!(client_agent_header(Protocol::OpenAiResponses), None);
+        assert_eq!(client_agent_header(Protocol::OpenAiChat), None);
+        assert!(
+            forward_request_header("x-claude-code-agent-id"),
+            "the agent id is read, never stripped"
+        );
     }
 
     #[test]

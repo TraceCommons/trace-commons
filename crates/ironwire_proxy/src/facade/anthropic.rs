@@ -198,12 +198,18 @@ async fn forward(
     }
     peek.client_login = client_login;
     peek.client_session = client_session_id(&headers, PROTOCOL);
+    // A Claude Code subagent shares its parent's session header and adds its
+    // own agent id; keyed by both, each subagent holds its own affinity
+    // instead of riding the main thread's. Read only beside a session: an
+    // agent id with no session has nothing to be a subagent of.
+    let agent = super::client_agent_id(&headers, PROTOCOL);
     let key = peek.client_session.as_deref().map_or_else(
         || super::key_for_login(conversation_key(&parsed), peek.client_login.as_ref()),
         |session| {
-            ironwire_core::policy::ConversationKey::for_session(
+            super::key_for_session(
                 PROTOCOL,
                 session,
+                agent.as_deref(),
                 peek.client_login.as_ref(),
             )
         },

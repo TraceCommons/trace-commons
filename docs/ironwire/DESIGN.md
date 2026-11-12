@@ -144,8 +144,15 @@ IronWire has no session ID from the client. It derives one:
 
 ```
 conversation_key = H(protocol, client session, client login)  # when session supplied
+  plus the subagent's id, for a Claude Code subagent (`x-claude-code-agent-id`)
 otherwise: H(protocol family, system_preamble[..512 bytes], sorted tool names, client login)
 ```
+
+Claude Code sends a subagent's requests under its parent's session id and adds
+`x-claude-code-agent-id`. Mixing that id in gives each subagent its own
+affinity, so a subagent's descent never moves the main thread and the main
+thread's route does not carry into its subagents. The row is still recorded
+under the parent's session id.
 
 Deliberately not the messages, which change every turn: a key that changes
 every turn is not affinity. Keys are memory-only, TTL-evicted, and never
