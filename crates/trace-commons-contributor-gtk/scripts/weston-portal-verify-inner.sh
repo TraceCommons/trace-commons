@@ -167,7 +167,8 @@ else
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
-    ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion; do
+    ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion \
+    ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
