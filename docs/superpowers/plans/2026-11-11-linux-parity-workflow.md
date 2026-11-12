@@ -26,7 +26,7 @@ Use `.claude/bin/tc-worktree <branch> [base]` for every implementation checkout,
 | C Home | Unified status/balance/activity and existing-action shortcuts | A gate, existing daemon model | No fabricated activity, shared labels, accessible responsive layout | Draft PR #2102; reviewed and locally tested |
 | D Traces | Unified Queue/History navigation with contextual inspector | C shell design | Preserve consent/send/delete boundaries, selection and preview lifecycle | Draft PR #2105; reviewed and locally tested |
 | D2 Map | Useful trace map and restrained motion | D | Same underlying state as list; reduced motion and accessible alternative | Draft PR #2107; reviewed and locally tested |
-| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings draft PR #2108; first-run coordinator implemented, validating |
+| E Onboarding/Settings | macOS-aligned guided setup and section navigation | C + platform rules | Preserve Linux folder/portal semantics, existing grants and auth flows | Settings draft PR #2108; first-run draft PR #2111 |
 | F Desktop delivery | GNOME/KDE, Wayland/X11, Flatpak, update/autostart/tray qualification | A; final repeat after C-E | Record observed environment/device matrix, actual tests, unresolved gaps | Draft PR #2103; container checks pass, desktop matrix unqualified |
 
 ## Review matrix
@@ -72,3 +72,11 @@ Full device matrix work may need a Linux desktop beyond local Colima; missing en
 - Hosted Linux desktop jobs passed on Usage, portal response handling, Benchmarks and Traces. Captured frames show empty Overview; they do not establish populated Usage/Benchmarks/inspector visual correctness. Benchmarks navigation is visible and mounted tab switching passes.
 - Home exposed a fixture route assumption after the default screen changed, plus Mac-specific copy. Both are under repair; the OCR gate remains required. A pre-existing unreachable portal probe was also discovered and is being repaired in the qualification lane.
 - First-run review found wallet and browser enrollment lifecycle hazards when navigating Back. Repairs and regression checks precede publication.
+
+### Reassessment 4
+
+- [First run #2111](https://github.com/TraceCommons/trace-commons/pull/2111) implements Welcome → Tools → Private AI → Traces → Uses → Terms → Join, with shared consent planning, exact-document acceptance and ordered confirmed writes. Its final suite passed 636 tests, with eight display tests ignored locally; configured Clippy and independent auth/consent review passed.
+- Home repair `5182bb2a9` explicitly selects Insights in the connected Weston driver and uses device-neutral shared copy. Its 619 regular tests passed; final source review cleared it.
+- Portal repair `166e4429b` runs the formerly unreachable independent live probe. Six production-tail regressions failed before the repair and pass afterward; historical green jobs do not establish that probe ran.
+- All nine implementation slices now combine at integration commit `8a5fd9cdb`. Review verified the Home/first-run conflict resolution preserves duplicate-sign-in checks, Join lifecycle guards and exact-attempt cancellation. Final combined GTK suite passed 669 tests with 11 display-dependent tests ignored locally; all four license-boundary tests passed again on this integration. Repository-configured all-target Clippy, formatting and shell syntax checks passed; the six portal control-flow tests passed as well.
+- No new dependencies or manifest changes. Nothing in this workflow has been merged or released.
