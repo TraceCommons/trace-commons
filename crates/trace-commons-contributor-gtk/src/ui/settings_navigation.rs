@@ -94,7 +94,9 @@ pub(super) struct Navigation {
     #[cfg(test)]
     sidebar: gtk::ScrolledWindow,
     #[cfg(test)]
-    compact: gtk::DropDown,
+    compact: gtk::MenuButton,
+    #[cfg(test)]
+    compact_choices: Vec<gtk::Button>,
     #[cfg(test)]
     list: gtk::ListBox,
     #[cfg(test)]
@@ -140,7 +142,21 @@ impl Navigation {
             content.append(&body);
             anchors.push(body.downgrade());
         }
-        let compact = gtk::DropDown::from_strings(&Section::ALL.map(Section::title));
+        let compact = gtk::MenuButton::builder()
+            .label(Section::Account.title())
+            .build();
+        let choices = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+        let compact_choices: Vec<_> = Section::ALL
+            .iter()
+            .map(|section| {
+                let button = gtk::Button::with_label(section.title());
+                button.add_css_class("flat");
+                choices.append(&button);
+                button
+            })
+            .collect();
+        let popover = gtk::Popover::builder().child(&choices).build();
+        compact.set_popover(Some(&popover));
         compact.set_margin_start(space::XL);
         compact.set_margin_end(space::XL);
         compact.set_margin_top(space::S);
@@ -170,26 +186,13 @@ impl Navigation {
         root.append(&compact);
         root.append(&body);
         body.set_vexpand(true);
-        // Both controls select the same list row. A synchronized dropdown
-        // notification is a no-op, so one user choice scrolls exactly once.
-        compact.connect_selected_notify({
-            let list = list.downgrade();
-            move |choice| {
-                let Some(list) = list.upgrade() else { return };
-                let index = choice.selected() as i32;
-                if list.selected_row().is_some_and(|row| row.index() == index) {
-                    return;
-                }
-                list.select_row(list.row_at_index(index).as_ref());
-            }
-        });
         let navigate = std::rc::Rc::new({
             let compact = compact.downgrade();
             let content = content.downgrade();
             let scroller = scroller.downgrade();
             move |index: usize| {
                 if let Some(compact) = compact.upgrade() {
-                    compact.set_selected(index as u32);
+                    compact.set_label(Section::ALL[index].title());
                 }
                 let (Some(anchor), Some(content), Some(scroller)) = (
                     anchors.get(index).and_then(|a| a.upgrade()),
@@ -210,6 +213,23 @@ impl Navigation {
                 }
             }
         });
+        // A section choice is an action, including the current section.
+        // DropDown's selected-notify cannot represent reselecting the same
+        // value after manual scrolling, so each compact row is a button.
+        for (index, button) in compact_choices.iter().enumerate() {
+            let list = list.downgrade();
+            let popover = popover.downgrade();
+            let navigate = navigate.clone();
+            button.connect_clicked(move |_| {
+                if let Some(list) = list.upgrade() {
+                    list.select_row(list.row_at_index(index as i32).as_ref());
+                }
+                navigate(index);
+                if let Some(popover) = popover.upgrade() {
+                    popover.popdown();
+                }
+            });
+        }
         list.connect_row_selected({
             let navigate = navigate.clone();
             move |_, row| {
@@ -242,6 +262,8 @@ impl Navigation {
             sidebar,
             #[cfg(test)]
             compact,
+            #[cfg(test)]
+            compact_choices,
             #[cfg(test)]
             list,
             #[cfg(test)]
@@ -310,7 +332,10 @@ mod tests {
             .list
             .select_row(navigation.list.row_at_index(3).as_ref());
         settle();
-        assert_eq!(navigation.compact.selected(), 3);
+        assert_eq!(
+            navigation.compact.label().as_deref(),
+            Some(Section::Projects.title())
+        );
         assert!(navigation.scroller.vadjustment().value() > 0.0);
         let before = navigation.scroller.vadjustment().value();
         navigation.scroller.vadjustment().set_value(0.0);
@@ -318,7 +343,7 @@ mod tests {
         navigation.list.emit_by_name::<()>("row-activated", &[&row]);
         settle();
         assert_eq!(navigation.scroller.vadjustment().value(), before);
-        navigation.compact.set_selected(0);
+        navigation.compact_choices[0].emit_clicked();
         settle();
         assert_eq!(navigation.list.selected_row().unwrap().index(), 0);
         assert!(navigation.scroller.vadjustment().value() < before);
@@ -326,14 +351,28 @@ mod tests {
         settle();
         assert!(!navigation.sidebar.is_visible());
         assert!(navigation.compact.is_visible());
-        navigation.compact.set_selected(8);
+        navigation.compact_choices[8].emit_clicked();
         settle();
         assert_eq!(navigation.list.selected_row().unwrap().index(), 8);
         assert!(navigation.scroller.vadjustment().value() > 0.0);
+        let witness_scroll = navigation.scroller.vadjustment().value();
+        navigation.scroller.vadjustment().set_value(0.0);
+        settle();
+        // The label still names Witness, but choosing it again is an action.
+        assert_eq!(
+            navigation.compact.label().as_deref(),
+            Some(Section::Witness.title())
+        );
+        navigation.compact_choices[8].emit_clicked();
+        settle();
+        assert_eq!(navigation.scroller.vadjustment().value(), witness_scroll);
         window.set_default_size(1000, 600);
         settle();
         assert!(navigation.sidebar.is_visible());
-        assert_eq!(navigation.compact.selected(), 8);
+        assert_eq!(
+            navigation.compact.label().as_deref(),
+            Some(Section::Witness.title())
+        );
         assert_eq!(field.text(), "unsaved input");
         window.close();
     }
