@@ -19,6 +19,9 @@
 //! edit" is labelled inferred (owner decision D9); a Codex session has no
 //! turn series (owner decision D11). Feed S compares no weeks, so every
 //! change reads as the dash; this shell shows feed S only and says so.
+#[path = "insights_recap.rs"]
+mod recap;
+
 use super::super::style::brand_tokens::insights as metrics;
 use super::label;
 use adw::prelude::*;
@@ -761,6 +764,7 @@ impl AnalyticsTabs {
                     }) {
                         clear(&tabs.overview_body);
                         tabs.present_overview_heading(&overview);
+                        tabs.load_recap(&response, generation);
                         // Live totals are not evidence links into the saved-snapshot feed.
                         let totals = card_box();
                         totals.append(&styled(&text("analytics_card_sessions"), "heading"));
