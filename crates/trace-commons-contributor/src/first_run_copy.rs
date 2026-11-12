@@ -504,9 +504,24 @@ pub struct PrivateAiCopy {
     pub can_connect_one: &'static str,
 }
 
+/// Agent configuration guidance introduced during first run.
+/// The prompt is bundled from the documented example to prevent drift.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentConfigurationCopy {
+    pub action: &'static str,
+    pub title: &'static str,
+    pub body: &'static str,
+    pub prerequisite: &'static str,
+    pub prompt: &'static str,
+    pub copy: &'static str,
+    pub copied: &'static str,
+    pub close: &'static str,
+}
+
 /// Every first-run string, grouped by screen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FirstRunCopy {
+    pub agent_configuration: AgentConfigurationCopy,
     pub frame: FrameCopy,
     pub welcome: WelcomeCopy,
     pub join: JoinCopy,
@@ -522,6 +537,16 @@ pub struct FirstRunCopy {
 #[must_use]
 pub fn first_run_copy() -> FirstRunCopy {
     FirstRunCopy {
+        agent_configuration: AgentConfigurationCopy {
+            action: "Set up with an agent",
+            title: "Set up with your AI agent",
+            body: "Copy this prompt into a terminal-capable AI agent, then replace the bracketed details with your preferences.",
+            prerequisite: "Keep the app open. If the agent reports that the app is not ready, continue setup in the app, then try again.",
+            prompt: include_str!("../../../docs/examples/agent-configuration-prompt.md"),
+            copy: "Copy prompt",
+            copied: "Copied",
+            close: "Close",
+        },
         frame: FrameCopy {
             quick_setup: "Quick setup",
             custom_setup: "Custom setup",
@@ -1241,6 +1266,9 @@ mod tests {
         // The terms reader's retry and Rules' retry read the same today; one
         // reloads a document over the network, the other rescans folders.
         const MAY_DIVERGE: &[&[&str]] = &[
+            // Closing agent guidance and closing another onboarding sheet are
+            // independent actions, even when their labels agree.
+            &[".agent_configuration.close", ".frame.close"],
             &[".frame.step_private_ai", ".private_ai.title_bold"],
             &[".rules.retry", ".welcome.legal.retry"],
         ];

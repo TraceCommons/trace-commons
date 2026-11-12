@@ -15,7 +15,7 @@ use trace_commons_contributor::{
         attached::AttachedDaemon,
         ipc::{DaemonShared, EVENT_RESYNC_REQUIRED, Event, Response},
     },
-    quit_copy::QuitRole,
+    private_inference_copy::quit_needs_notice,
 };
 
 #[derive(Clone)]
@@ -29,17 +29,6 @@ impl DaemonConnection {
         match self {
             Self::Embedded(_) => true,
             Self::Attached(daemon) => !daemon.is_closed(),
-        }
-    }
-
-    /// What quitting this app does to the watcher. An attached watcher
-    /// belongs to another process and outlives this one; a dropped
-    /// attachment is no longer a watcher this app can speak for.
-    pub(crate) fn quit_role(&self) -> QuitRole {
-        match self {
-            Self::Embedded(_) => QuitRole::Hosting,
-            Self::Attached(daemon) if !daemon.is_closed() => QuitRole::Attached,
-            Self::Attached(_) => QuitRole::Unavailable,
         }
     }
 }
@@ -193,19 +182,31 @@ impl AppState {
             .filter(DaemonConnection::is_alive))
     }
 
-    /// Which quit prompt is true for this process right now. A poisoned
-    /// lock cannot tell, so it falls to the role that claims nothing.
-    pub(crate) fn quit_role(&self) -> QuitRole {
-        self.runtime
-            .lock()
-            .ok()
-            .and_then(|runtime| {
-                runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.connection.as_ref())
-                    .map(DaemonConnection::quit_role)
-            })
-            .unwrap_or(QuitRole::Unavailable)
+    /// What quitting this app would stop: (a compute worker still
+    /// running, Private AI answering through a watcher this process hosts).
+    /// An attached watcher outlives this app, so its Private AI does not
+    /// count. A state that cannot be read is an error, never "nothing".
+    pub(crate) fn quit_stops(&self) -> Result<(bool, bool), String> {
+        let (compute, connection) = {
+            let runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| "application state lock poisoned".to_owned())?;
+            match runtime.as_ref() {
+                None => return Ok((false, false)),
+                Some(runtime) => (
+                    !runtime.compute.snapshot().worker_stopped,
+                    runtime.connection.clone(),
+                ),
+            }
+        };
+        let private_ai = match connection {
+            Some(embedded @ DaemonConnection::Embedded(_)) => private_ai_quit_stops(
+                &crate::ipc::call_daemon_blocking(embedded, "get_settings", serde_json::json!({}))?,
+            ),
+            _ => false,
+        };
+        Ok((compute, private_ai))
     }
 
     pub(crate) fn state_directory(&self) -> Result<PathBuf, String> {
@@ -444,25 +445,59 @@ pub(crate) fn compute_command(
     state.inner().compute_command(command)
 }
 
+/// `get_settings`' switch and listener state, through the shared
+/// `quit_needs_notice` table.
+fn private_ai_quit_stops(settings: &serde_json::Value) -> bool {
+    let on = settings
+        .get("private_inference")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let label = settings
+        .get("private_inference_state")
+        .and_then(|state| state.get("state"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    quit_needs_notice(on, label)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use trace_commons_contributor::{
-        config::ConfigStore, daemon::ipc::DaemonShared, quit_copy::QuitRole,
-    };
-
-    use super::{AppState, DaemonConnection};
+    use super::{AppState, private_ai_quit_stops};
 
     #[test]
-    fn quit_role_is_unavailable_without_a_watcher() {
-        assert_eq!(AppState::default().quit_role(), QuitRole::Unavailable);
+    fn nothing_started_stops_nothing_on_quit() {
+        assert_eq!(AppState::default().quit_stops(), Ok((false, false)));
     }
 
+    /// The quit check reads `get_settings` from the embedded daemon itself,
+    /// not hand-written JSON: a renamed key would read as "off" and quit
+    /// silently while Private AI was answering.
     #[test]
-    fn an_embedded_watcher_is_hosted_by_this_process() {
+    fn the_embedded_daemon_reports_the_keys_the_quit_check_reads() {
+        use std::sync::Arc;
+
+        use trace_commons_contributor::{config::ConfigStore, daemon::ipc::DaemonShared};
+
+        let dir = tempfile_dir("tc-tauri-quit-settings");
+        let shared = DaemonShared::load(ConfigStore::open(dir.clone()).unwrap()).unwrap();
+        let settings = crate::ipc::call_daemon_blocking(
+            super::DaemonConnection::Embedded(Arc::new(shared)),
+            "get_settings",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(settings["private_inference"], serde_json::json!(false));
+        assert!(
+            settings["private_inference_state"]["state"].is_string(),
+            "get_settings must carry the listener state: {settings}"
+        );
+        assert!(!private_ai_quit_stops(&settings));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "tc-tauri-quit-role-{}-{}",
+            "{prefix}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -470,11 +505,22 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let shared = DaemonShared::load(ConfigStore::open(dir.clone()).unwrap()).unwrap();
-        let connection = DaemonConnection::Embedded(Arc::new(shared));
-        assert_eq!(connection.quit_role(), QuitRole::Hosting);
-        drop(connection);
-        let _ = std::fs::remove_dir_all(dir);
+        dir
+    }
+
+    #[test]
+    fn private_ai_counts_only_while_the_core_says_quitting_stops_it() {
+        let settings = |on: bool, state: &str| {
+            serde_json::json!({
+                "private_inference": on,
+                "private_inference_state": { "state": state },
+            })
+        };
+        assert!(!private_ai_quit_stops(&serde_json::json!({})));
+        assert!(!private_ai_quit_stops(&settings(false, "off")));
+        assert!(private_ai_quit_stops(&settings(true, "running")));
+        assert!(private_ai_quit_stops(&settings(false, "stopping")));
+        assert!(!private_ai_quit_stops(&settings(true, "running_elsewhere")));
     }
 
     #[test]

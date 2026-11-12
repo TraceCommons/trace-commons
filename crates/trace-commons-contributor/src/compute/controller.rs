@@ -69,7 +69,6 @@ pub struct ComputeCopy {
     pub disable: &'static str,
     pub loading: &'static str,
     pub unavailable: &'static str,
-    pub quit_detail: &'static str,
     pub quit_refused: &'static str,
 }
 
@@ -95,7 +94,6 @@ impl Default for ComputeCopy {
             // #1146 (`settings-modal.tsx`, `use-compute-status.ts`).
             loading: "Reading compute settings…",
             unavailable: "Compute settings unavailable.",
-            quit_detail: "Enabled compute must stop before the app quits. Worker termination and coordinator drain acknowledgement are separate; a forced exit does not confirm a completed handoff.",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P305).
             quit_refused: "Quit cancelled: compute hasn't stopped yet. Quit again once it has.",
         }
@@ -364,6 +362,8 @@ mod tests {
         }
         assert_eq!(controller.snapshot().state, ComputeState::Starting);
         assert!(controller.snapshot().can_pause);
+        // A worker being started is live: quitting asks (`quit_copy`).
+        assert!(!controller.snapshot().worker_stopped);
         // A previous stop must not leave a cancellation permit that consumes
         // the next explicit Resume or Enable without attempting startup.
         for (stop, stopped_state, start) in [
@@ -390,6 +390,8 @@ mod tests {
             }
             assert_eq!(controller.snapshot().state, stopped_state);
             assert!(!controller.snapshot().command_pending);
+            // Paused or disabled leaves nothing live: quitting does not ask.
+            assert!(controller.snapshot().worker_stopped, "{stopped_state:?}");
             crate::compute::resource::tests::healthy(&controller);
             controller.command(start);
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -422,6 +424,46 @@ mod tests {
                 .unwrap()
                 .consent_granted()
         );
+    }
+
+    /// Quitting asks about compute only while a worker runs
+    /// (`quit_copy::quit_prompt`). A controller with no worker -- every
+    /// build without local development -- must say so in every state it
+    /// can reach, or the quit prompt would appear on every quit.
+    #[test]
+    fn a_controller_without_a_worker_never_reports_one_running() {
+        let root = tempfile::tempdir().unwrap();
+        let controller = ComputeController::open(root.path()).unwrap();
+        let mut seen = vec![controller.snapshot()];
+        for command in [
+            ComputeCommand::Enable {
+                ram_allowance_gib: 8,
+            },
+            ComputeCommand::Resume {},
+            ComputeCommand::Pause {},
+            ComputeCommand::Disable {},
+        ] {
+            seen.push(controller.command(command));
+        }
+        let store = ComputeSettingsStore::open(root.path()).unwrap();
+        store.save(&ComputeSettings::grant(8).unwrap()).unwrap();
+        let granted = ComputeController::open(root.path()).unwrap();
+        seen.push(granted.snapshot());
+        seen.push(granted.command(ComputeCommand::Resume {}));
+        seen.push(granted.command(ComputeCommand::Pause {}));
+        seen.push(granted.shutdown(std::time::Duration::from_secs(1)));
+        let states: std::collections::BTreeSet<String> =
+            seen.iter().map(|s| format!("{:?}", s.state)).collect();
+        assert_eq!(
+            states,
+            ["Disabled", "Paused", "Unavailable"]
+                .map(String::from)
+                .into(),
+            "every idle state is covered"
+        );
+        for snapshot in seen {
+            assert!(snapshot.worker_stopped, "{:?}", snapshot.state);
+        }
     }
 
     #[test]

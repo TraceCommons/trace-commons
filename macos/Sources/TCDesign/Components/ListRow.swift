@@ -181,10 +181,13 @@ public struct GlassListRow: View {
                     .foregroundStyle(Self.titleInk(selected: selected, off: off).color)
                     .lineLimit(1)
                 if let sub {
+                    // Wraps rather than clipping: it carries whole sentences
+                    // (why a trace is held), and the row has a minimum height,
+                    // not a fixed one. See ListRowSubLineTests.
                     Text(sub)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(subColor)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

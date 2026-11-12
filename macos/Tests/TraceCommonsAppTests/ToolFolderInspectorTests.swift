@@ -130,22 +130,17 @@ final class ToolFolderInspectorTests: XCTestCase {
         XCTAssertFalse(source.contains("TracesTreeView.submitTitle("), "the inspector's Submit is the tree pill's")
     }
 
-    /// Automatic always goes through the arming confirmation, in the core's
-    /// words; Never asks first when sessions are waiting; Ask is a
+    /// Automatic is a direct write with no confirmation box (owner,
+    /// 2026-11-11); Never asks first when sessions are waiting; Ask is a
     /// direct write. The inspector's picker takes the same route as the
     /// tree's switch and menu, and writes only through it.
     func test_automaticGoesThroughTheArmingConfirmation() throws {
         let folder = TracesTree.FolderNode(
             id: "p1", label: "api", mode: .ask, offerableModes: [.ask, .autoUpload, .ignore],
             sessions: [try recordedEntry()])
-        guard case .confirm(let arming) = TracesTreeView.modeChange(folder, .autoUpload),
-            case .arm(let copy) = arming.words
-        else {
-            return XCTFail("Automatic must ask first")
+        guard case .apply = TracesTreeView.modeChange(folder, .autoUpload) else {
+            return XCTFail("Automatic is set without a confirmation")
         }
-        let core = try XCTUnwrap(ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(project: "api", count: 0)))
-        XCTAssertEqual(copy.question, core.question)
-        XCTAssertEqual(arming.mode, .autoUpload)
 
         guard case .confirm(let ignoring) = TracesTreeView.modeChange(folder, .ignore), case .ignore = ignoring.words else {
             return XCTFail("Never with sessions waiting asks first")
@@ -160,10 +155,7 @@ final class ToolFolderInspectorTests: XCTestCase {
         XCTAssertTrue(source.contains("TracesTreeView.modeChange(folder, wanted)"))
         XCTAssertTrue(source.contains("TracesTreeView.modeChange(folder, .ignore)"))
         XCTAssertEqual(source.components(separatedBy: "store.setFolderMode(").count - 1, 1, "one write, after the route")
-        // Ron's whole-window confirmation: arming is the default action,
-        // declining is the cancel.
-        XCTAssertTrue(source.contains("GlassModalAction(copy.confirm, isDefault: true) { apply(pending.mode) }"))
-        XCTAssertTrue(source.contains(".cancel(copy.decline, action: cancel)"))
+        XCTAssertFalse(source.contains("case .arm"), "no arming confirmation in the inspector")
     }
 
     /// Submit all as is a modal: each of its three outcomes sends that

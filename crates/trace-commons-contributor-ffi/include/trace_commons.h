@@ -2824,13 +2824,13 @@ char*       tc_sent_traces_training_copy_json(void);
  */
 char*       tc_automatic_contribution_copy_json(const char* config_dir);
 
-/* The quit prompt true for the process holding handle (quit_copy::
- * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
- * the handle: hosting for a daemon run in this process, attached for one
- * another process runs, unavailable for NULL, a handle that is not live, or
- * a stopped daemon. NULL only on a caught panic.
+/* The quit prompt for what quitting would stop (quit_copy::quit_prompt):
+ * {title, body, confirm, cancel}, body one sentence. stops_compute and
+ * stops_private_ai are boolean (0/nonzero). A shell quits without asking
+ * when both are 0 and does not call this; called that way it returns NULL.
+ * Otherwise NULL only on a caught panic, which refuses the quit.
  */
-char*       tc_quit_prompt_json(const tc_handle* handle);
+char*       tc_quit_reason_prompt_json(int32_t stops_compute, int32_t stops_private_ai);
 
 /* The withdrawal confirmation for a trace whose reach this machine cannot
  * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a

@@ -610,14 +610,12 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
     );
     add(
         "quit_copy::quit_prompt",
-        [
-            quit_copy::QuitRole::Hosting,
-            quit_copy::QuitRole::Attached,
-            quit_copy::QuitRole::Unavailable,
-        ]
-        .into_iter()
-        .flat_map(|role| table(json!(quit_copy::quit_prompt(role))))
-        .collect(),
+        [(true, false), (false, true), (true, true)]
+            .into_iter()
+            .flat_map(|(compute, private_ai)| {
+                table(json!(quit_copy::quit_prompt(compute, private_ai)))
+            })
+            .collect(),
     );
 
     // The words the macOS shell wrote in Swift until #1146 parity
@@ -714,25 +712,6 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
 const ALLOWED: &[(&str, &str, &str)] = &[
-    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
-    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
-    // returns NULL for a reported label -- a caught panic -- so a reported
-    // condition is never drawn as healthy.
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Contributions are on hold.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Something is stopping traces from being sent.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Nothing has been lost, and nothing has gone out.",
-        "health export-failure fallback",
-    ),
     // The legacy History rollup tallies and the queue's week figures, which
     // held the core's status words as headings, left the shell with the
     // legacy screens (R15); their allowances went with them.
@@ -1014,17 +993,12 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
     ),
+    // Settings > Projects and first-run Tools no longer confirm Automatic:
+    // #2093 turns it on at once everywhere. The offer's words still show
+    // on the Traces card above and in the Monitor's popover.
     (
-        "arming confirmation",
-        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
-        "TCCoreCopy.armingOfferCopyJSON",
-        "TCBridge/TCCoreCopy.swift",
-        "tc_arming_offer_copy_json",
-    ),
-    (
-        // A repo's rule under Customize on Tools, where Rules now lives.
-        "first-run arming confirmation",
-        "TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
+        "arming offer popover",
+        "TraceCommonsApp/Views/Monitor/MonitorNotices.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
@@ -1068,17 +1042,10 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "quit prompt",
-        "TraceCommonsApp/AppModel.swift",
-        "quitPromptJSON()",
-        "TCBridge/TCDaemon.swift",
-        "tc_quit_prompt_json",
-    ),
-    (
-        "quit prompt without a watcher",
         "TraceCommonsApp/AppDelegate.swift",
-        "TCCoreCopy.quitPromptWithoutWatcherJSON",
+        "TCCoreCopy.quitReasonPromptJSON",
         "TCBridge/TCCoreCopy.swift",
-        "tc_quit_prompt_json",
+        "tc_quit_reason_prompt_json",
     ),
     (
         "first run",
@@ -1236,8 +1203,8 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
     }
 
     // The quit alert shows the prompt it was handed and is not confirmable
-    // without one; the hosting sentence it used to hard-code is false for
-    // an attached app.
+    // without one: a prompt that cannot be read refuses the quit rather
+    // than quitting while compute or Private AI is still running.
     let delegate = read("TraceCommonsApp/AppDelegate.swift");
     let delegate_code = swift_code(&delegate);
     for rendered in [
@@ -1245,7 +1212,8 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
         "prompt.body",
         "prompt.confirm",
         "prompt.cancel",
-        "guardletpromptelse{returnfalse}",
+        "QuitPrompt.decision(",
+        "case.refuse:returnfalse",
     ] {
         assert!(
             delegate_code

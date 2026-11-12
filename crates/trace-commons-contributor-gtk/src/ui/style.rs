@@ -448,7 +448,15 @@ fn stylesheet(dark: bool) -> String {
     } else {
         (brand_tokens::LIGHT_CSS, LIGHT_TOKENS)
     };
-    format!("{brand}\n{tokens}\n{}", include_str!("style.css"))
+    let insights = if dark {
+        brand_tokens::INSIGHTS_DARK_CSS
+    } else {
+        brand_tokens::INSIGHTS_LIGHT_CSS
+    };
+    format!(
+        "{brand}\n{tokens}\n{}\n{insights}",
+        include_str!("style.css")
+    )
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -639,6 +647,27 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{brand_tokens, stylesheet};
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn both_schemes_parse_with_insights_styles() {
+        assert_eq!(std::env::consts::OS, "linux");
+        adw::init().expect("GTK display unavailable");
+        for dark in [false, true] {
+            let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = errors.clone();
+            let provider = gtk::CssProvider::new();
+            provider.connect_parsing_error(move |_, _, error| {
+                captured.borrow_mut().push(error.to_string());
+            });
+            provider.load_from_data(&stylesheet(dark));
+            assert!(
+                errors.borrow().is_empty(),
+                "dark={dark}: {:?}",
+                errors.borrow()
+            );
+        }
+    }
 
     const GROUNDS: [&str; 3] = ["tc_bg", "tc_surface", "tc_surface2"];
 

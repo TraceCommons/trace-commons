@@ -881,11 +881,13 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("codex");
-        std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
+        // A shell whose `$0` is a `codex` path: a `codex` symlink to
+        // `/bin/sleep` exits at once where `sleep` is uutils' multi-call
+        // binary (Ubuntu 26.04), which picks its tool by `argv[0]`.
         let mut child = OwnedChild(
-            std::process::Command::new(&executable)
-                .arg("30")
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30; :"])
+                .arg(dir.path().join("codex"))
                 .spawn()
                 .unwrap(),
         );

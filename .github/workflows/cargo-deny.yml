@@ -31,12 +31,10 @@
 # it from this tree. Read that list rather than trusting this comment's
 # count: it is the thing that has to stay true.
 #
-# One of those five, RUSTSEC-2026-0118, is a live remote-input
-# vulnerability (an unbounded loop in hickory-proto's NSEC3 validation,
-# reachable when the ingest host resolves NEAR AI endpoints). It is carried
-# because hickory-proto is pinned by hickory-resolver 0.25.x, which reqwest
-# 0.13.3 requires by semver -- the fix needs a reqwest release, not a
-# lockfile bump. It is the first thing to re-check when reqwest moves.
+# RUSTSEC-2026-0118, a live remote-input vulnerability in hickory-proto's
+# NSEC3 validation, was carried while reqwest 0.13.3 pinned hickory-resolver
+# 0.25.x. reqwest 0.13.5 moved to hickory-resolver 0.26, so the lockfile
+# bump lifted it and its ignore was removed (2026-11-12).
 #
 # `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
 # and configures no deny/skip list, so the check is a standing no-op today.

@@ -368,19 +368,18 @@ public class PrivateInferenceTests
     }
 
     /// <summary>
-    /// The quit sentence is added only while the switch is on, and it is the
-    /// payload's words rather than this shell's.
+    /// Quitting asks about Private AI only when the core says quitting would
+    /// stop it: while the switch is on, or while it is still stopping, and
+    /// never for a listener another app runs.
     /// </summary>
     [Fact]
-    public void TheQuitSentenceIsOnlyAddedWhenTheSwitchIsOn()
+    public void QuitStopsPrivateAIOnlyWhenTheCoreSaysSo()
     {
-        PrivateInferenceCopy copy = Copy();
-        Assert.Null(PrivateInferenceSurface.QuitDetail(on: false, State(string.Empty), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(on: true, State(string.Empty), null));
-        Assert.Equal(copy.QuitAlsoStops, PrivateInferenceSurface.QuitDetail(on: true, State(string.Empty), copy));
-        Assert.Equal(copy.QuitAlsoStops, PrivateInferenceSurface.QuitDetail(false, State("stopping"), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(true, State("running_elsewhere"), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(true, State("off"), copy));
+        Assert.False(PrivateInferenceSurface.QuitStops(on: false, State(string.Empty)));
+        Assert.True(PrivateInferenceSurface.QuitStops(on: true, State(string.Empty)));
+        Assert.True(PrivateInferenceSurface.QuitStops(false, State("stopping")));
+        Assert.False(PrivateInferenceSurface.QuitStops(true, State("running_elsewhere")));
+        Assert.False(PrivateInferenceSurface.QuitStops(true, State("off")));
     }
 
     /// <summary>

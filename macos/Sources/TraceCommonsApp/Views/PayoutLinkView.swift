@@ -44,7 +44,7 @@ struct PayoutLinkView: View {
                             }
                         }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        .disabled(app.accountSigningIn && !app.canRestartNearAiBrowserSignIn)
+                        .disabled(app.accountSigningIn && !app.canRetryAccountSignIn)
                     } else {
                         Text(surface.refusalLine(refusal))
                             .glassType(GlassTokens.TypeScale.body)

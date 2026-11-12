@@ -14,8 +14,8 @@ import TCShellCore
 ///
 /// There is no Tool inspector: the tree has no tool level (owner,
 /// 2026-10-05). Every mode change takes the tree's route
-/// (`TracesTreeView.modeChange`), so Automatic always asks first in the
-/// core's words, and Never asks first when sessions are waiting.
+/// (`TracesTreeView.modeChange`), so Never asks first when sessions are
+/// waiting.
 ///
 /// Every word is the core's: the Monitor tables (`MonitorTracesCopy`), the
 /// disclosure bundle's outcome words and folder mode names, and the
@@ -262,14 +262,6 @@ struct FolderInspector: View {
                 actions: [
                     .cancel(copy.keep, action: cancel),
                     .destructive(copy.button) { apply(pending.mode) },
-                ],
-                onCancel: cancel)
-        case .arm(let copy):
-            return GlassConfirmation(
-                title: pending.title, message: pending.body,
-                actions: [
-                    .cancel(copy.decline, action: cancel),
-                    GlassModalAction(copy.confirm, isDefault: true) { apply(pending.mode) },
                 ],
                 onCancel: cancel)
         }
