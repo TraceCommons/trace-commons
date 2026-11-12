@@ -10,6 +10,8 @@ pub mod balance;
 pub mod community_brand;
 pub mod credential;
 mod css_contract;
+mod first_run;
+mod first_run_terms;
 pub mod funding;
 pub mod history;
 pub mod insights;
