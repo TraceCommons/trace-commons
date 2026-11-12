@@ -547,6 +547,72 @@ fn present_what_gets_removed(parent: &adw::Window) {
     dialog.present();
 }
 
+/// Reference material only: opening and copying the prompt never changes setup.
+fn present_agent_configuration(parent: &adw::Window) {
+    let copy = trace_commons_contributor::first_run_copy::first_run_copy().agent_configuration;
+    let dialog = adw::Window::builder()
+        .title(copy.title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(680)
+        .default_height(600)
+        .build();
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::M)
+        .margin_top(space::L)
+        .margin_bottom(space::L)
+        .margin_start(space::L)
+        .margin_end(space::L)
+        .build();
+    let heading = body_label(copy.title);
+    heading.add_css_class("tc-brand-dialog-title");
+    content.append(&heading);
+    content.append(&body_label(copy.body));
+    content.append(&body_label(copy.prerequisite));
+
+    let prompt = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .monospace(true)
+        .left_margin(space::M)
+        .right_margin(space::M)
+        .top_margin(space::M)
+        .bottom_margin(space::M)
+        .build();
+    prompt.buffer().set_text(copy.prompt);
+    prompt.update_property(&[gtk::accessible::Property::Label(copy.title)]);
+    let scroll = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&prompt)
+        .build();
+    content.append(&scroll);
+
+    let close = gtk::Button::with_label(copy.close);
+    close.connect_clicked({
+        let dialog = dialog.downgrade();
+        move |_| {
+            if let Some(dialog) = dialog.upgrade() {
+                dialog.close();
+            }
+        }
+    });
+    let copy_prompt = gtk::Button::with_label(copy.copy);
+    copy_prompt.add_css_class("suggested-action");
+    copy_prompt.connect_clicked(move |button| {
+        button.clipboard().set_text(copy.prompt);
+        button.set_label(copy.copied);
+    });
+    let actions = button_row(&close);
+    actions.append(&copy_prompt);
+    content.append(&actions);
+    dialog.set_content(Some(&content));
+    dialog.present();
+}
+
 fn button_row(button: &gtk::Button) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -621,7 +687,22 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
         let onboarding = onboarding.clone();
         move |_| onboarding.go(Step::Connect)
     });
-    outer.append(&button_row(&next));
+    let agent = gtk::Button::with_label(
+        trace_commons_contributor::first_run_copy::first_run_copy()
+            .agent_configuration
+            .action,
+    );
+    agent.connect_clicked({
+        let window = onboarding.window.downgrade();
+        move |_| {
+            if let Some(window) = window.upgrade() {
+                present_agent_configuration(&window);
+            }
+        }
+    });
+    let actions = button_row(&agent);
+    actions.append(&next);
+    outer.append(&actions);
     outer
 }
 

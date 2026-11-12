@@ -8,6 +8,20 @@ import Foundation
 /// file names no wire key. Decoding is here so it is testable without the
 /// dylib; `TCBridgeTests` checks it against the real export.
 public struct FirstRunCopy: Decodable, Equatable, Sendable {
+    public struct AgentConfiguration: Decodable, Equatable, Sendable {
+        public let action: String
+        public let title: String
+        public let body: String
+        public let prerequisite: String
+        public let prompt: String
+        public let copy: String
+        public let copied: String
+        public let close: String
+    }
+
+    /// Older core exports can still show the normal first-run flow.
+    public let agentConfiguration: AgentConfiguration?
+
     public struct Frame: Decodable, Equatable, Sendable {
         public let quickSetup: String
         public let customSetup: String
