@@ -95,7 +95,7 @@ struct WelcomeScreen: View {
 
     var body: some View {
         if showingAgentPrompt, let guidance = copy.agentConfiguration {
-            AgentConfigurationScreen(copy: guidance, backLabel: copy.frame.back) {
+            AgentConfigurationScreen(copy: guidance) {
                 showingAgentPrompt = false
             }
         } else {
