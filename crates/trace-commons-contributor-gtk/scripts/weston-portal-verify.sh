@@ -55,6 +55,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 CRATE_DIR="$REPO_ROOT/crates/trace-commons-contributor-gtk"
 
+# Guard probe reachability and combined failure status before starting services.
+python3 "$HERE/test_weston_portal_gate.py"
+
 # shellcheck source=fixture.sh
 source "$HERE/fixture.sh"
 
