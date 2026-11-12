@@ -612,7 +612,7 @@ async fn supervise(
     // it for the life of the process; see `pass_supervisor`. The catch is
     // inline, so `run`'s cancel-safety (its doc) holds.
     let passes_shared = Arc::clone(&shared);
-    let result = pass_supervisor::run_restarting(
+    let passes = pass_supervisor::run_restarting(
         &shared,
         &mut signal,
         pass_supervisor::Backoff::daemon(),
@@ -620,8 +620,11 @@ async fn supervise(
             let shared = Arc::clone(&passes_shared);
             Box::pin(async move { supervise_passes(&shared, dry_run, signal).await })
         },
-    )
-    .await;
+    );
+    let result = tokio::select! {
+        result = passes => result,
+        _ = crate::feature_flags::run(&shared, dry_run) => Ok(()),
+    };
     // However the loop ended (a signal included, which sets nothing else),
     // so work running off the loop stops at its next check: the Insights
     // counter pass between files, the settlement scan between traces.

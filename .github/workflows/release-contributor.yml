@@ -17,6 +17,9 @@ on:
   # -- it is not a free dry run for the signing path.
   workflow_dispatch:
 
+env:
+  TC_FEATURE_PROFILE: production
+
 concurrency:
   group: release-contributor-${{ github.ref }}
   cancel-in-progress: false
