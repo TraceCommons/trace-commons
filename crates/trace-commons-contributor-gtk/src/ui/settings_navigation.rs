@@ -324,7 +324,7 @@ mod tests {
             .child(&navigation.root)
             .build();
         window.present();
-        settle();
+        wait_for_layout(&navigation, true);
         assert!(navigation.sidebar.is_visible());
         assert!(!navigation.compact.is_visible());
         field.set_text("unsaved input");
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(navigation.list.selected_row().unwrap().index(), 0);
         assert!(navigation.scroller.vadjustment().value() < before);
         window.set_default_size(550, 600);
-        settle();
+        wait_for_layout(&navigation, false);
         assert!(!navigation.sidebar.is_visible());
         assert!(navigation.compact.is_visible());
         navigation.compact_choices[8].emit_clicked();
@@ -367,7 +367,7 @@ mod tests {
         settle();
         assert_eq!(navigation.scroller.vadjustment().value(), witness_scroll);
         window.set_default_size(1000, 600);
-        settle();
+        wait_for_layout(&navigation, true);
         assert!(navigation.sidebar.is_visible());
         assert_eq!(
             navigation.compact.label().as_deref(),
@@ -375,6 +375,53 @@ mod tests {
         );
         assert_eq!(field.text(), "unsaved input");
         window.close();
+    }
+
+    // Wayland configure/allocate and the responsive tick are asynchronous.
+    // A default size is a request, not evidence a frame has that size. The
+    // hosted failure occurred before that old fixed 180ms wait observed a
+    // wide layout; renderer startup also reported unavailable GPU drivers.
+    // Require the actual allocated layout, keeping wide/narrow assertions
+    // equally strict and reporting enough state to distinguish no configure
+    // from a responsive control that failed to follow its allocation.
+    fn wait_for_layout(navigation: &Navigation, wide: bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            while gtk::glib::MainContext::default().pending() {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            let width = navigation.root.width();
+            let ready = navigation.root.is_mapped()
+                && width > 0
+                && (width >= 760) == wide
+                && navigation.sidebar.is_mapped() == wide
+                && navigation.compact.is_mapped() != wide
+                && if wide {
+                    navigation.sidebar.width() > 0
+                } else {
+                    navigation.compact.width() > 0
+                }
+                && navigation.scroller.vadjustment().page_size() > 0.0;
+            if ready {
+                eprintln!("Settings layout ready: wide={wide}, allocated width={width}");
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Settings layout timed out: requested wide={wide}, root mapped={}, allocated={}x{}, sidebar visible={} mapped={} width={}, compact visible={} mapped={} width={}, scroll page={}",
+                navigation.root.is_mapped(),
+                width,
+                navigation.root.height(),
+                navigation.sidebar.is_visible(),
+                navigation.sidebar.is_mapped(),
+                navigation.sidebar.width(),
+                navigation.compact.is_visible(),
+                navigation.compact.is_mapped(),
+                navigation.compact.width(),
+                navigation.scroller.vadjustment().page_size()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn settle() {
