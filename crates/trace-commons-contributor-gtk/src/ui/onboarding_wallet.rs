@@ -128,10 +128,26 @@ pub(super) fn build(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             glib::Propagation::Proceed
         }
     });
+    if onboarding.embedded() {
+        onboarding.on_join_cancel({
+            let weak_wallet = Rc::downgrade(&wallet);
+            let weak_app = Rc::downgrade(app);
+            move || {
+                if let (Some(wallet), Some(app)) = (weak_wallet.upgrade(), weak_app.upgrade()) {
+                    wallet.closed.set(true);
+                    cancel_flow(&app, &wallet.view.borrow().flow_id);
+                }
+            }
+        });
+    }
     command(app, onboarding, &wallet, "open");
     wallet.root.clone()
 }
 fn command(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, action: &'static str) {
+    let generation = onboarding.join_generation();
+    if action != "cancel" && (!onboarding.join_valid(generation) || wallet.closed.get()) {
+        return;
+    }
     wallet.pending.set(true);
     wallet.refresh(onboarding);
     let params = serde_json::json!({"action":action,"flow_id":wallet.view.borrow().flow_id,"ingest_url":wallet.commons.text().as_str(),"account_id":wallet.account.text().as_str()});
@@ -139,6 +155,15 @@ fn command(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, acti
         let wallet = wallet.clone();
         let onboarding = onboarding.clone();
         move |app, result| {
+            if !onboarding.join_valid(generation) || wallet.closed.get() {
+                if action != "cancel"
+                    && let Ok(value) = &result
+                    && let Some(id) = value.get("flow_id").and_then(serde_json::Value::as_str)
+                {
+                    cancel_flow(app, id);
+                }
+                return;
+            }
             wallet.pending.set(false);
             match result
                 .ok()
@@ -165,16 +190,15 @@ fn command(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, acti
             }
             if action == "start" {
                 let browser = wallet.view.borrow().browser_url.clone();
-                if let Some(browser) = browser {
-                    if gtk::gio::AppInfo::launch_default_for_uri(
+                if let Some(browser) = browser
+                    && gtk::gio::AppInfo::launch_default_for_uri(
                         &browser,
                         None::<&gtk::gio::AppLaunchContext>,
                     )
                     .is_err()
-                    {
-                        command(app, &onboarding, &wallet, "cancel");
-                        return;
-                    }
+                {
+                    command(app, &onboarding, &wallet, "cancel");
+                    return;
                 }
             }
             let wait = wallet.view.borrow().wait;
@@ -188,6 +212,16 @@ fn command(app: &Rc<App>, onboarding: &Rc<Onboarding>, wallet: &Rc<Wallet>, acti
             }
         }
     });
+}
+/// Cancel the exact stale ceremony, without launching or polling anything.
+fn cancel_flow(app: &Rc<App>, flow_id: &str) {
+    if !flow_id.is_empty() {
+        app.call(
+            "native_wallet_flow",
+            serde_json::json!({"action":"cancel","flow_id":flow_id}),
+            |_, _| {},
+        );
+    }
 }
 #[cfg(test)]
 mod tests {
