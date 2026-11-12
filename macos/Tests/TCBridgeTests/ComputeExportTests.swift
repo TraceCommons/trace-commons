@@ -7,7 +7,6 @@ final class ComputeExportTests: XCTestCase {
     func testCopyExportDoesNotRequireSettingsOrEnrollment() throws {
         let copy = try XCTUnwrap(ComputeCopy.decode(XCTUnwrap(TCCompute.copyJSON())))
         XCTAssertFalse(copy.destination.isEmpty)
-        XCTAssertFalse(try XCTUnwrap(copy.quitDetail).isEmpty)
         XCTAssertFalse(try XCTUnwrap(copy.quitRefused).isEmpty)
     }
 
@@ -33,6 +32,27 @@ final class ComputeExportTests: XCTestCase {
         XCTAssertEqual(stopped["worker_stopped"] as? Bool, true)
         XCTAssertNotEqual(stopped["drain_outcome"] as? String, "acknowledged")
         XCTAssertFalse(try compute.statusJSON().isEmpty)
+    }
+
+    /// An idle compute controller makes quit silent; only a snapshot whose
+    /// worker has not stopped makes it ask. The idle half is the case the
+    /// owner reported (a prompt on every quit), checked on the real export.
+    func testOnlyARunningWorkerMakesQuitAsk() throws {
+        let compute = try TCCompute(configDirectory: directory().path)
+        defer { compute.close() }
+        let json = try compute.statusJSON()
+        XCTAssertFalse(QuitPrompt.stopsCompute(try XCTUnwrap(ComputeSnapshot.decode(json))))
+        XCTAssertFalse(QuitPrompt.stopsCompute(nil))
+
+        var payload = try snapshot(json)
+        payload["worker_stopped"] = false
+        let running = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertTrue(QuitPrompt.stopsCompute(
+            try XCTUnwrap(ComputeSnapshot.decode(String(decoding: running, as: UTF8.self)))))
+        payload.removeValue(forKey: "worker_stopped")
+        let unsaid = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertTrue(QuitPrompt.stopsCompute(
+            try XCTUnwrap(ComputeSnapshot.decode(String(decoding: unsaid, as: UTF8.self)))))
     }
 
     private func directory() throws -> URL {

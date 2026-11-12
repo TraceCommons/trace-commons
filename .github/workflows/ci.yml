@@ -147,6 +147,8 @@ jobs:
       # Seconds, no build. The macOS Info.plist per bundle channel: a
       # production plist byte-identical to the one before the channel files,
       # a staging plist with only staging identity and feed.
+      - name: Feature profiles and manifest publisher
+        run: scripts/ci/test-feature-profiles.sh
       - name: macOS Info.plist per bundle channel
         run: scripts/ci/test-macos-channel-plist.sh
       # Seconds, no build. The release workflows scan the shipped dylib and
@@ -1841,8 +1843,8 @@ jobs:
           # One pass line per binary, each naming at least one test: a filter
           # that matches nothing in one crate passes with "0 passed" there.
           awk '
-            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
-            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /Running.*unittests.*[(\/]trace_commons_server-[0-9a-f]+\)/ { bin = "server" }
+            /Running.*unittests.*[(\/]trace_commons_ingest-[0-9a-f]+\)/ { bin = "ingest" }
             /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
             END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
           ' gcs-client-tests.log
@@ -1948,8 +1950,8 @@ jobs:
           # One pass line per binary, each naming at least one test: a filter
           # that matches nothing in one crate passes with "0 passed" there.
           awk '
-            /Running.*unittests.*deps\/trace_commons_server-/ { bin = "server" }
-            /Running.*unittests.*deps\/trace_commons_ingest-/ { bin = "ingest" }
+            /Running.*unittests.*[(\/]trace_commons_server-[0-9a-f]+\)/ { bin = "server" }
+            /Running.*unittests.*[(\/]trace_commons_ingest-[0-9a-f]+\)/ { bin = "ingest" }
             /test result: ok\. [1-9][0-9]* passed; 0 failed/ { if (bin != "") ok[bin] = 1; bin = "" }
             END { if (!ok["server"] || !ok["ingest"]) { print "a crate ran none of its selected tests"; exit 1 } }
           ' near-attestation.log

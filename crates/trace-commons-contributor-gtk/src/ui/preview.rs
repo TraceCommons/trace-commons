@@ -34,6 +34,46 @@ use crate::copy;
 use crate::model::{ApproveResult, PreviewSummary, human_bytes, human_when};
 use crate::transcript_paging::{self, ResidentChunks, TranscriptDocument};
 
+/// Each load is a distinct request, even when it names the same session.
+/// Closing invalidates outstanding preview, permission and search replies.
+#[derive(Default)]
+struct RequestEpoch(Cell<u64>);
+
+impl RequestEpoch {
+    fn begin(&self) -> u64 {
+        let next = self
+            .0
+            .get()
+            .checked_add(1)
+            .expect("preview request epoch overflow");
+        self.0.set(next);
+        next
+    }
+
+    fn invalidate(&self) {
+        self.begin();
+    }
+
+    fn accepts(&self, requested: u64) -> bool {
+        self.0.get() == requested
+    }
+}
+
+/// Resolve identity against the live pending list at click time.
+pub fn open_entry(app: &Rc<App>, entry_id: &str) {
+    let index = pending_index(&app.entries.borrow(), entry_id);
+    if let Some(index) = index {
+        open(app, index);
+    }
+}
+
+fn pending_index(entries: &[crate::model::QueueEntry], entry_id: &str) -> Option<usize> {
+    entries
+        .iter()
+        .filter(|entry| entry.state == "pending")
+        .position(|entry| entry.entry_id == entry_id)
+}
+
 /// Open the preview sheet on the `index`-th pending entry.
 pub fn open(app: &Rc<App>, index: usize) {
     open_with_search(app, index, None, None)
@@ -69,6 +109,7 @@ struct Sheet {
     witness_requested: Cell<bool>,
     witness_busy: Cell<bool>,
     witness_supported: Cell<bool>,
+    epoch: RequestEpoch,
     window: adw::Window,
     title: adw::WindowTitle,
     pending: Vec<crate::model::QueueEntry>,
@@ -657,6 +698,7 @@ impl Sheet {
             witness_requested: Cell::new(false),
             witness_busy: Cell::new(false),
             witness_supported: Cell::new(false),
+            epoch: RequestEpoch::default(),
             window: window.clone(),
             title,
             pending,
@@ -684,6 +726,14 @@ impl Sheet {
             verdict: RefCell::new(None),
             correction_group: correction_group.clone(),
             correction_view: correction_view.clone(),
+        });
+
+        let closing = Rc::downgrade(&sheet);
+        window.connect_close_request(move |_| {
+            if let Some(sheet) = closing.upgrade() {
+                sheet.epoch.invalidate();
+            }
+            glib::Propagation::Proceed
         });
 
         let admission_sheet = Rc::clone(&sheet);
@@ -983,6 +1033,13 @@ impl Sheet {
     }
 
     fn load(self: &Rc<Self>) {
+        let request = self.epoch.begin();
+        *self.body.borrow_mut() = None;
+        for container in [&self.permissions, &self.whats_in_it, &self.removed_summary] {
+            while let Some(child) = container.first_child() {
+                container.remove(&child);
+            }
+        }
         self.admission_message.set_label("");
         let Some(entry) = self.current() else {
             self.window.close();
@@ -1029,6 +1086,9 @@ impl Sheet {
         let entry_id = entry.entry_id.clone();
         let requested = entry_id.clone();
         self.app.preview(&requested, move |app, result| {
+            if !sheet.epoch.accepts(request) {
+                return;
+            }
             match result {
                 Ok((summary, body)) => {
                     app.previews
@@ -1284,10 +1344,14 @@ impl Sheet {
         style::append_body(&self.permissions, copy::PERMISSIONS_INTRO);
         let sheet = Rc::clone(self);
         let scopes = summary.consent_scopes.clone();
+        let request = self.epoch.0.get();
         self.app.call(
             "consent_options",
             serde_json::json!({}),
             move |_, result| {
+                if !sheet.epoch.accepts(request) {
+                    return;
+                }
                 let described: Vec<crate::model::ConsentScope> = result
                     .ok()
                     .and_then(|v| serde_json::from_value(v.get("scopes").cloned()?).ok())
@@ -1502,12 +1566,16 @@ impl Sheet {
         let sheet = Rc::clone(self);
         let asked = needle.to_string();
         let asked_of = entry_id.clone();
+        let request = self.epoch.0.get();
         self.app
             .search_original(&entry_id, &asked.clone(), move |_, original| {
                 let still_here = sheet
                     .current()
                     .is_some_and(|entry| entry.entry_id == asked_of);
-                if !still_here || sheet.search_entry.text().trim() != asked {
+                if !sheet.epoch.accepts(request)
+                    || !still_here
+                    || sheet.search_entry.text().trim() != asked
+                {
                     return;
                 }
                 sheet.apply_original_count(remaining, original);
@@ -2570,5 +2638,54 @@ mod tests {
             let excerpt = context_around(body, start, start + "Acme Corp".len());
             assert_eq!(&excerpt.text[excerpt.hit.clone()], "Acme Corp", "{body}");
         }
+    }
+}
+
+#[cfg(test)]
+mod request_epoch_tests {
+    use super::{RequestEpoch, pending_index};
+
+    #[test]
+    fn entry_opener_resolves_only_live_pending_positions() {
+        use crate::model::QueueEntry;
+        let entry = |id: &str, state: &str| QueueEntry {
+            entry_id: id.into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let rows = [
+            entry("sent", "approved"),
+            entry("b", "pending"),
+            entry("a", "pending"),
+        ];
+        assert_eq!(pending_index(&rows, "a"), Some(1));
+        assert_eq!(pending_index(&rows, "b"), Some(0));
+        assert_eq!(pending_index(&rows, "sent"), None);
+        assert_eq!(pending_index(&rows, "gone"), None);
+    }
+
+    #[test]
+    fn advancing_rejects_the_previous_preview() {
+        let epoch = RequestEpoch::default();
+        let first = epoch.begin();
+        let second = epoch.begin();
+        assert!(!epoch.accepts(first));
+        assert!(epoch.accepts(second));
+    }
+
+    #[test]
+    fn closing_rejects_in_flight_preview_and_permissions() {
+        let epoch = RequestEpoch::default();
+        let pending = epoch.begin();
+        epoch.invalidate();
+        assert!(!epoch.accepts(pending));
+    }
+
+    #[test]
+    fn same_entry_reloaded_never_accepts_its_old_answer() {
+        let epoch = RequestEpoch::default();
+        let old = epoch.begin();
+        epoch.begin();
+        assert!(!epoch.accepts(old));
     }
 }

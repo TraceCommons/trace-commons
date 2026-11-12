@@ -437,10 +437,9 @@ pub const ESTIMATE_TOTAL_ACTION: &str = "Review traces";
 pub const NOTIFY_SETTLEMENT_TITLE: &str = "Estimate for traces on this Mac";
 /// The settlement notification's body.
 pub const NOTIFY_SETTLEMENT_BODY: &str =
-    "About {low} to {high} of inference, estimated on this Mac. Nothing was sent.";
+    "About {low} to {high} of inference, estimated on this Mac.";
 /// [`NOTIFY_SETTLEMENT_BODY`] when the rounded low end is $0.
-pub const NOTIFY_SETTLEMENT_BODY_UP_TO: &str =
-    "Up to {high} of inference, estimated on this Mac. Nothing was sent.";
+pub const NOTIFY_SETTLEMENT_BODY_UP_TO: &str = "Up to {high} of inference, estimated on this Mac.";
 /// The body when the published pricing changed.
 pub const NOTIFY_SETTLEMENT_BODY_PRICING: &str =
     "Pricing changed. Traces on this Mac are now estimated at about {low} to {high} of inference.";

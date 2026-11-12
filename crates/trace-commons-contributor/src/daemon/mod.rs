@@ -612,7 +612,7 @@ async fn supervise(
     // it for the life of the process; see `pass_supervisor`. The catch is
     // inline, so `run`'s cancel-safety (its doc) holds.
     let passes_shared = Arc::clone(&shared);
-    let result = pass_supervisor::run_restarting(
+    let passes = pass_supervisor::run_restarting(
         &shared,
         &mut signal,
         pass_supervisor::Backoff::daemon(),
@@ -620,8 +620,11 @@ async fn supervise(
             let shared = Arc::clone(&passes_shared);
             Box::pin(async move { supervise_passes(&shared, dry_run, signal).await })
         },
-    )
-    .await;
+    );
+    let result = tokio::select! {
+        result = passes => result,
+        _ = crate::feature_flags::run(&shared, dry_run) => Ok(()),
+    };
     // However the loop ended (a signal included, which sets nothing else),
     // so work running off the loop stops at its next check: the Insights
     // counter pass between files, the settlement scan between traces.
@@ -2088,24 +2091,25 @@ fn apply_upload_decision(
                 // Nothing was judged (#1358). The entry keeps its
                 // approval, and with it every guard a retry re-runs,
                 // until the budget is spent; then it ends `Failed`
-                // under the same label, which reads as what it is --
-                // or, for a witness that never answered, waits for a
-                // person under that label (`REASONS_NEEDING_A_PERSON`),
-                // so it is neither dropped nor re-approved unattended.
+                // under the same label, which reads as what it is.
+                // A witness that cannot review has no budget (owner,
+                // 2026-11-12): it judged nothing, so nothing calls for a
+                // new decision, and the entry is retried at the capped
+                // wait, an hour, for as long as the outage lasts. Before
+                // this, six hours of a classifier outage handed every
+                // approval it touched back to the contributor.
                 let observed_at = observed_at();
                 let (failures, run_started) =
                     q.record_transient_upload_failure(entry.entry_id, observed_at);
-                if transient_upload_budget_spent(failures, run_started, observed_at) {
+                if kind != TransientUpload::Witness
+                    && transient_upload_budget_spent(failures, run_started, observed_at)
+                {
                     q.record_attempt(entry.entry_id, None);
-                    if kind == TransientUpload::Witness {
-                        q.revoke_approval(entry.entry_id, &reason_label);
-                    } else {
-                        q.set_state(
-                            entry.entry_id,
-                            queue::QueueState::Failed,
-                            Some(reason_label),
-                        );
-                    }
+                    q.set_state(
+                        entry.entry_id,
+                        queue::QueueState::Failed,
+                        Some(reason_label),
+                    );
                 } else {
                     // Ingest's `Retry-After` says nothing about the
                     // witness, so it does not stretch a witness wait.
@@ -2355,8 +2359,9 @@ enum TransientUpload {
     /// The witness did not answer in time or could not be reached
     /// (`submit::witness_failure_is_transient`). One witness serves every
     /// session, so the pass stops at the first, as a `submit` batch does
-    /// (`submit::WITNESS_BATCH_STOP_LABELS`). A spent budget holds the entry
-    /// for a person rather than failing it.
+    /// (`submit::WITNESS_BATCH_STOP_LABELS`). It has no budget: the entry
+    /// keeps its approval and is retried at most an hour apart for as long
+    /// as the witness cannot review (owner, 2026-11-12).
     Witness,
 }
 
@@ -5756,6 +5761,7 @@ mod tests {
         h.witness_delay_ms.store(200, Ordering::SeqCst);
         let now = TransientRetryHarness::now();
         drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        // One probe first: the second slot opens once a review is certified.
         assert_eq!(h.shared.witness_worker.queued(), 2);
         assert!(settle_witness_worker_for_test(&h.shared).await);
         assert_eq!(h.witness_calls.lock().unwrap().len(), 3);
@@ -6816,26 +6822,34 @@ mod tests {
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
     }
 
-    /// Once the transient-upload budget is spent, a witness that never
-    /// answered leaves the session waiting for a person under the same
-    /// label: not failed, not dropped, and not re-approved unattended.
+    /// A witness that cannot review a trace never hands it back (owner,
+    /// 2026-11-12). Nothing was judged, so nothing calls for a new
+    /// decision: well past the old six-hour budget the session keeps its
+    /// approval and its label, and is retried at most an hour apart. Before
+    /// this a day-long classifier outage revoked every approval it touched.
     #[tokio::test]
-    async fn a_witness_that_never_answers_is_held_for_a_person_after_the_budget() {
+    async fn a_witness_that_never_answers_keeps_the_approval_and_retries_hourly() {
         let h = TransientRetryHarness::build_with(true, true).await;
         let mut now = TransientRetryHarness::now();
-        for _ in 0..(MAX_TRANSIENT_UPLOAD_FAILURES * 4) {
+        for _ in 0..(MAX_TRANSIENT_UPLOAD_FAILURES * 3) {
             h.pass(now).await;
             let entry = h.entry();
-            if entry.state != queue::QueueState::Approved {
-                break;
-            }
-            now = entry.retry_after.expect("a retry time");
+            assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+            assert_eq!(entry.reason_label.as_deref(), Some("witness_unreachable"));
+            assert!(!entry.held_for_review(), "{entry:?}");
+            let next = entry.retry_after.expect("a retry time");
+            assert!(
+                next > now && next - now <= chrono::Duration::hours(1),
+                "{entry:?}"
+            );
+            now = next;
         }
-        let held = h.entry();
-        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
-        assert_eq!(held.reason_label.as_deref(), Some("witness_unreachable"));
-        assert!(held.held_for_review(), "{held:?}");
-        assert!(held.transient_upload_failures >= MAX_TRANSIENT_UPLOAD_FAILURES);
+        let entry = h.entry();
+        assert!(entry.transient_upload_failures >= MAX_TRANSIENT_UPLOAD_FAILURES * 3);
+        assert!(
+            now - TransientRetryHarness::now() > transient_upload_give_up_horizon(),
+            "the run outlasted the old budget"
+        );
     }
 
     #[test]

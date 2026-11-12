@@ -39,7 +39,7 @@ services:
     # By digest, never a tag: a tag is a moving target and a measurement
     # pinned over one is pinning nothing.
     #
-    # Built by the `witness-image` workflow from commit a692cad -- natively
+    # Built by the `witness-image` workflow from commit 3644ca0 -- natively
     # amd64, because TDX is Intel, and in CI rather than on a developer
     # machine because this image is not reproducibly buildable. A measurement
     # therefore pins a specific artifact only its builder can produce, which
@@ -48,7 +48,7 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:af99d33f29d2fc9401062f0b3c3ff8bd3304c6fe76d9b8871460e1f6b9e65546
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:15d6c664589ccb42593fd0cbd686bfdf8221110d8f3efd2612591b1169aca21b
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
@@ -221,6 +221,18 @@ services:
       # disassembling the image to read a compiled-in default.
       TRACE_NEAR_AI_PRIVACY_BASE_URL: "https://cloud-api.near.ai/v1"
       TRACE_NEAR_AI_PRIVACY_MODEL: "openai/privacy-filter"
+
+      # Most privacy/classify requests a minute, retries included, spaced
+      # evenly; a 429 holds every caller for its Retry-After. NEAR AI
+      # allowed this key 30 a minute on 2026-11-12. Injected encrypted at
+      # deploy time, like the key below, and declared in `allowed_envs`, so
+      # it can follow NEAR AI's limit without a new measurement (owner,
+      # 2026-11-12). The NAME is measured; the VALUE is not. It changes only
+      # how fast traces are reviewed -- never what is redacted, where the
+      # text goes, or which model reads it, which all stay measured above.
+      # Required: a deploy that forgets it fails to start rather than
+      # running unpaced.
+      TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE: ${TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE:?set at deploy time}
 
       # Injected encrypted at deploy time and declared in app-compose.json's
       # `allowed_envs`. The NAME is measured; the VALUE is not, and must never

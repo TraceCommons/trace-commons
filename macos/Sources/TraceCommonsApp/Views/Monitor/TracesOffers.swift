@@ -233,6 +233,8 @@ struct ArmingOfferGlassCard: View {
     let offer: ArmingOffer
     /// The core's "OPTIONAL AUTOMATION"; nil draws no eyebrow.
     let eyebrow: String?
+    /// Where Enable is (`ArmingOfferMotion`); nil before it is pressed.
+    var step: ArmingOfferStep? = nil
     let onArm: () -> Void
     let onDecline: () -> Void
 
@@ -269,6 +271,7 @@ struct ArmingOfferGlassCard: View {
                     HStack(spacing: GlassTokens.Space.s4) {
                         Button(copy.confirm, action: onArm)
                             .buttonStyle(GlassButtonStyle(.glass))
+                            .disabled(ArmingOfferMotion.enableLocked(step))
                         Button(copy.decline, action: onDecline)
                             .buttonStyle(GlassButtonStyle(.link))
                     }

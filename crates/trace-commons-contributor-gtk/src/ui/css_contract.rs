@@ -26,6 +26,7 @@ mod tests {
         ),
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
+        ("home.rs", include_str!("home.rs")),
         ("settings.rs", include_str!("settings.rs")),
         ("queue.rs", include_str!("queue.rs")),
         ("preview.rs", include_str!("preview.rs")),

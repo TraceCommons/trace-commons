@@ -94,14 +94,14 @@ final class NativeOnboardingRenderTests: XCTestCase {
         try render(ZStack { FirstRunBackdrop(); WelcomeScreen(copy: copy, runner: runner) },
             size: CGSize(width: 860, height: 640),
             to: directory.appendingPathComponent("agent-configuration-welcome.png"), settle: 3)
-        var wentBack = false
+        var closed = false
         try render(ZStack {
             FirstRunBackdrop()
-            AgentConfigurationScreen(copy: guidance, backLabel: copy.frame.back) { wentBack = true }
+            AgentConfigurationScreen(copy: guidance) { closed = true }
         },
             size: CGSize(width: 860, height: 640),
             to: directory.appendingPathComponent("agent-configuration-inline.png"))
-        XCTAssertFalse(wentBack)
+        XCTAssertFalse(closed)
         XCTAssertEqual(runner.state, before)
     }
 
