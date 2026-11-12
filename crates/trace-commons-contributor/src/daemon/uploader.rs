@@ -424,6 +424,14 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "claim-mint-failed" => Some(LABEL_CLAIM_MINT_FAILED),
             crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
+            // The privacy witness could not review the trace: unreachable,
+            // past its deadline, or its own classifier failed (`503
+            // witness_redaction_failed`, read as `witness_unreachable`).
+            // That is the privacy scan waiting, not the upload server down,
+            // so it takes the scan's line rather than the catch-all below.
+            label if crate::submit::witness_failure_is_transient(label) => {
+                Some(LABEL_PII_FILTER_UNAVAILABLE)
+            }
             // A refusal the commons sent on purpose, before the catch-all
             // that reads everything else as an outage.
             other => match AdmissionRefusal::from_label(other) {
@@ -1262,6 +1270,34 @@ mod tests {
             reason_label: "upload-failed".into(),
         };
         assert_eq!(health_label_for(&d), Some(LABEL_INGEST_UNREACHABLE));
+    }
+
+    /// A privacy witness that could not review a trace is not the upload
+    /// server being down. Every transient witness label fell through to
+    /// `ingest-unreachable`, so a witness whose classifier failed
+    /// (`503 witness_redaction_failed`, read as `witness_unreachable`) told
+    /// the contributor "Can't reach the upload server" while ingest was up.
+    #[test]
+    fn a_witness_that_could_not_review_is_not_an_upload_outage() {
+        for label in [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ] {
+            assert!(
+                crate::submit::witness_failure_is_transient(label),
+                "{label}"
+            );
+            let d = UploadDecision::Failed {
+                reason_label: label.into(),
+            };
+            assert_eq!(
+                health_label_for(&d),
+                Some(LABEL_PII_FILTER_UNAVAILABLE),
+                "{label} is reported as the upload server being down"
+            );
+        }
     }
 
     #[test]

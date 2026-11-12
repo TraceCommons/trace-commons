@@ -26,6 +26,8 @@ use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionI
 
 #[path = "insights_analytics.rs"]
 mod analytics;
+#[path = "insights_benchmarks.rs"]
+mod benchmarks;
 #[path = "insights_evidence.rs"]
 mod evidence;
 #[path = "insights_live.rs"]
@@ -424,6 +426,7 @@ impl InsightsView {
         for tab in analytics::Tab::ALL {
             let page: gtk::Widget = match tab {
                 analytics::Tab::Overview => analytics.overview.clone().upcast(),
+                analytics::Tab::Benchmarks => analytics.benchmarks.root.clone().upcast(),
                 analytics::Tab::Patterns => analytics.patterns.clone().upcast(),
                 analytics::Tab::Sessions => analytics.sessions.clone().upcast(),
                 analytics::Tab::Analyze => analyze.clone().upcast(),

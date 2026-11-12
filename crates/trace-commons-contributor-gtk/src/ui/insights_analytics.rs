@@ -438,18 +438,26 @@ pub(super) fn marker_lines(marker: &DrillMarker, threshold: u64) -> Vec<String> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
     Overview,
+    Benchmarks,
     Patterns,
     Sessions,
     Analyze,
 }
 
 impl Tab {
-    pub(super) const ALL: [Tab; 4] = [Tab::Overview, Tab::Patterns, Tab::Sessions, Tab::Analyze];
+    pub(super) const ALL: [Tab; 5] = [
+        Tab::Overview,
+        Tab::Benchmarks,
+        Tab::Patterns,
+        Tab::Sessions,
+        Tab::Analyze,
+    ];
 
     /// The page name in the tab stack.
     pub(super) fn name(self) -> &'static str {
         match self {
             Tab::Overview => "overview",
+            Tab::Benchmarks => "benchmarks",
             Tab::Patterns => "patterns",
             Tab::Sessions => "sessions",
             Tab::Analyze => "analyze",
@@ -460,6 +468,7 @@ impl Tab {
     pub(super) fn title_key(self) -> &'static str {
         match self {
             Tab::Overview => "analytics_tab_overview",
+            Tab::Benchmarks => "analytics_tab_benchmarks",
             Tab::Patterns => "analytics_tab_patterns",
             Tab::Sessions => "analytics_tab_sessions",
             Tab::Analyze => "analytics_tab_analyze",
@@ -602,6 +611,7 @@ fn summary_grid() -> gtk::FlowBox {
 /// The three analytics tabs. Analyze is the caller's.
 pub(super) struct AnalyticsTabs {
     pub overview: gtk::ScrolledWindow,
+    pub benchmarks: Rc<super::benchmarks::Benchmarks>,
     pub patterns: gtk::ScrolledWindow,
     pub sessions: gtk::ScrolledWindow,
     overview_body: gtk::Box,
@@ -653,6 +663,7 @@ impl AnalyticsTabs {
         let sessions_body = gtk::Box::new(gtk::Orientation::Vertical, metrics::SECTION_GAP);
         Rc::new(Self {
             overview: scrolled(&overview_body),
+            benchmarks: super::benchmarks::Benchmarks::new(),
             patterns: scrolled(&patterns_body),
             sessions: scrolled(&sessions_body),
             overview_body,
@@ -679,6 +690,7 @@ impl AnalyticsTabs {
 
     pub(super) fn bind_app(&self, app: &Rc<super::super::App>) {
         *self.app.borrow_mut() = Rc::downgrade(app);
+        self.benchmarks.bind_app(app);
         self.suspend();
     }
 
@@ -688,6 +700,7 @@ impl AnalyticsTabs {
     }
 
     pub(super) fn invalidate(&self) {
+        self.benchmarks.suspend();
         self.live_again.set(false);
         for generation in &self.generations {
             generation.set(generation.get().wrapping_add(1));
@@ -806,6 +819,7 @@ impl AnalyticsTabs {
             return;
         };
         self.bump(Slot::Overview);
+        self.benchmarks.suspend();
         self.shown.set(tab);
         self.load(tab);
     }
@@ -835,6 +849,7 @@ impl AnalyticsTabs {
         }
         let tz = local_offset();
         match tab {
+            Tab::Benchmarks => self.benchmarks.show(),
             Tab::Overview => {
                 // A drill-down still in flight belongs to the old cards.
                 self.open_inputs.set(None);

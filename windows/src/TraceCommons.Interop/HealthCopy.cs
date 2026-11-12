@@ -9,14 +9,9 @@ namespace TraceCommons.Interop;
 /// title/body pair the visual design draws for the Windows frame
 /// (2026-08-17 section 5.1 item 3).
 ///
-/// Two rules bind every sentence here, and both are the design's:
-/// <list type="bullet">
-/// <item><b>Never name the mechanism.</b> "Privacy filter", "claim",
-/// "ingest", "canary" and "PII" are internal words. The label carries them;
-/// the sentence must not.</item>
-/// <item><b>Always state the data consequence.</b> "Nothing has been lost",
-/// "your queue is safe", "rather than going out unscanned".</item>
-/// </list>
+/// One rule binds every sentence here, the design's: <b>never name the
+/// mechanism.</b> "Privacy filter", "claim", "ingest", "canary" and "PII" are
+/// internal words. The label carries them; the sentence must not.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -98,8 +93,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
         {
             "not-logged-in" => new HealthCopy(
                 "Not connected.",
-                "Traces are being queued, but nothing can be sent until you reconnect. "
-                + "Nothing has been lost.",
+                "",
                 "Reconnect"),
             "near-ai-notice-not-acknowledged" => new HealthCopy(
                 "One thing to confirm.",
@@ -107,14 +101,12 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "Confirm you're OK with that and contributions resume.",
                 "Review and confirm"),
             "privacy-filter-canary-failed" => new HealthCopy(
-                "The privacy scan failed its own self-test,",
-                "so nothing is being sent through it. This is deliberate -- a scan we can't "
-                + "verify doesn't get used.",
+                "Privacy scan failed its self-test.",
+                "",
                 null),
             "pii-filter-unavailable" => new HealthCopy(
-                "The extra privacy scan isn't reachable.",
-                "Your traces are waiting rather than going out unscanned. Retrying "
-                + "automatically.",
+                "Waiting on the privacy scan.",
+                "",
                 null),
             "queue-full" => new HealthCopy(
                 "Near.ai has stopped queuing new traces",
@@ -127,9 +119,8 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
             // label is an internal name, and showing it would break the
             // never-name-the-mechanism rule by the most direct route there is.
             _ => new HealthCopy(
-                "Contributions are on hold.",
-                "Something is stopping traces from being sent. Nothing has been lost, and "
-                + "nothing has gone out.",
+                "Contributions on hold.",
+                "",
                 null),
         };
     }

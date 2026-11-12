@@ -12,6 +12,7 @@ pub mod credential;
 mod css_contract;
 pub mod funding;
 pub mod history;
+pub mod home;
 pub mod insights;
 pub mod legacy_move;
 mod managed_sessions;
@@ -135,7 +136,14 @@ pub fn peek_state_dir() -> std::path::PathBuf {
 
 /// The screens in switcher order for a given switch position.
 pub(crate) fn screens_with(missions: bool) -> Vec<(&'static str, &'static str, &'static str)> {
-    let mut screens = BASE_SCREENS.to_vec();
+    let mut screens = vec![(
+        "home",
+        trace_commons_contributor::preview_copy::monitor_screens_copy()
+            .shell
+            .tab_home,
+        "go-home-symbolic",
+    )];
+    screens.extend_from_slice(&BASE_SCREENS);
     if missions {
         screens.push(MISSION_DRAFTS_SCREEN);
     }
@@ -203,6 +211,7 @@ pub struct App {
     /// attestation.
     pub evidence_admitted: std::cell::Cell<bool>,
 
+    pub home: home::HomeView,
     pub queue: queue::QueueView,
     pub history: history::HistoryView,
     /// The model-calls screen. Its own destination rather than a card on
@@ -350,6 +359,7 @@ impl App {
 
         window.set_widget_name("contributions-window");
         let stack = adw::ViewStack::new();
+        let home = home::HomeView::new(missions_shown());
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
         let private_inference = private_inference::PrivateInferenceView::new();
@@ -364,6 +374,7 @@ impl App {
         let mission_drafts =
             missions_shown().then(|| mission_drafts::MissionDraftsView::new(&window));
         let mut pages: Vec<&gtk::Box> = vec![
+            &home.root,
             &insights.root,
             &queue.root,
             &history.root,
@@ -380,8 +391,8 @@ impl App {
                 .set_icon_name(Some(icon_name));
         }
 
-        // This window is entered by the explicit Contributions action.
-        stack.set_visible_child_name("queue");
+        // Home is the overview; explicit screen actions still choose their destination.
+        stack.set_visible_child_name("home");
         let queue_badge = gtk::Label::builder().visible(false).build();
         queue_badge.add_css_class("tc-count-badge");
         queue_badge.set_valign(gtk::Align::Center);
@@ -487,6 +498,7 @@ impl App {
             toasts,
             stack,
             evidence_admitted: std::cell::Cell::new(false),
+            home,
             queue,
             history,
             private_inference,
@@ -520,6 +532,7 @@ impl App {
             quit_confirmed: Cell::new(false),
         });
 
+        app.home.bind(&app);
         insights.bind_app(&app);
         app.wire_result_pump();
         app.wire_event_pump();
@@ -638,56 +651,35 @@ impl App {
         });
     }
 
-    /// Quitting must say what continues, and the true sentence depends on
-    /// which process is doing the watching.
+    /// Closing the window quits. It asks first only when that would stop
+    /// Private AI answering model calls through this process, in one
+    /// sentence from the core (`quit_copy::quit_prompt`); any other close
+    /// quits at once (owner, 2026-11-12). An attached app stops nothing by
+    /// quitting, so it never asks.
     fn wire_quit(self: &Rc<Self>) {
         let app = Rc::clone(self);
         self.window.connect_close_request(move |window| {
             if app.quit_confirmed.get() {
                 return glib::Propagation::Proceed;
             }
-            let dialog = if app.worker.hosts_the_loop() {
-                let d = adw::MessageDialog::new(
-                    Some(window),
-                    Some(concat!("Quit ", copy::app_name!(), "?")),
-                    Some(copy::QUIT_HOSTING_BODY),
-                );
-                d.add_responses(&[
-                    ("cancel", copy::QUIT_HOSTING_CANCEL),
-                    ("quit", copy::QUIT_HOSTING_CONFIRM),
-                ]);
-                d
-            } else {
-                let d = adw::MessageDialog::new(
-                    Some(window),
-                    Some(concat!("Quit ", copy::app_name!(), "?")),
-                    Some(copy::QUIT_ATTACHED_BODY),
-                );
-                d.add_responses(&[
-                    ("quit", copy::QUIT_ATTACHED_CONFIRM),
-                    ("quit-and-stop", copy::QUIT_ATTACHED_ALSO_STOP),
-                ]);
-                d
+            let stops_private_ai =
+                app.worker.hosts_the_loop() && app.private_inference.quit_stops.get();
+            // GTK hosts no compute worker.
+            let Some(prompt) =
+                trace_commons_contributor::quit_copy::quit_prompt(false, stops_private_ai)
+            else {
+                return glib::Propagation::Proceed;
             };
+            let dialog =
+                adw::MessageDialog::new(Some(window), Some(prompt.title), Some(prompt.body));
+            dialog.add_responses(&[("cancel", prompt.cancel), ("quit", prompt.confirm)]);
             dialog.set_close_response("cancel");
             let app = Rc::clone(&app);
             dialog.connect_response(None, move |dialog, response| {
                 dialog.close();
-                match response {
-                    "quit" => {
-                        app.quit_confirmed.set(true);
-                        app.window.close();
-                    }
-                    "quit-and-stop" => {
-                        app.quit_confirmed.set(true);
-                        // Stop the separate watcher too, since that is what
-                        // the contributor just asked for. The window closes
-                        // either way.
-                        app.call("shutdown", serde_json::json!({}), |app, _| {
-                            app.window.close();
-                        });
-                    }
-                    _ => {}
+                if response == "quit" {
+                    app.quit_confirmed.set(true);
+                    app.window.close();
                 }
             });
             dialog.present();
@@ -792,7 +784,10 @@ impl App {
     /// to any event.
     pub fn refresh(self: &Rc<Self>) {
         self.call("status", serde_json::json!({}), |app, result| {
-            if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
+            let result = result.map(serde_json::from_value::<Status>);
+            app.home
+                .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+            if let Ok(Ok(status)) = result {
                 app.render_health(&status);
                 app.render_grant_voids(&status);
                 settings::render_status(app, &status);
@@ -882,7 +877,12 @@ impl App {
         // band is filled in whether or not History has ever been opened;
         // `history_rollup` is a read of counters the daemon already holds.
         self.call("history_rollup", serde_json::json!({}), |app, result| {
-            if let Ok(Ok(rollup)) = result.map(serde_json::from_value::<HistoryRollup>) {
+            let home_rollup = result.as_ref().ok().and_then(|value| {
+                serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
+            });
+            app.home.render_rollup(home_rollup.as_ref());
+            let result = result.map(serde_json::from_value::<HistoryRollup>);
+            if let Ok(Ok(rollup)) = result {
                 *app.rollup.borrow_mut() = rollup;
                 queue::render(app);
             }
@@ -2189,8 +2189,9 @@ mod screen_tests {
     /// length itself, so the next screen has to grow both.
     #[test]
     fn every_screen_has_a_page() {
-        assert_eq!(screens_with(false).len(), 5);
-        assert_eq!(screens_with(true).len(), 6);
+        assert_eq!(screens_with(false).len(), 6);
+        assert_eq!(screens_with(true).len(), 7);
+        assert_eq!(screens_with(false)[0].0, "home");
         for (name, label, icon) in screens_with(true) {
             assert!(!name.is_empty(), "a screen needs a stack name");
             assert!(!label.is_empty(), "a screen needs a switcher label");

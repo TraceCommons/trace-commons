@@ -208,12 +208,11 @@ public static class PrivateInferenceSurface
             new Dictionary<string, bool> { [SettingsKey] = on, [OfferSeenKey] = true });
 
     /// <summary>
-    /// The extra sentence the quit confirmation carries while the switch is
-    /// on, or null. Null when it is off: a contributor who never turned it on
-    /// should not be warned about losing it.
+    /// Whether quitting stops Private AI, so the quit asks first. False when
+    /// it is off: a contributor who never turned it on is not asked.
     /// </summary>
-    public static string? QuitDetail(bool on, PrivateInferenceState state, PrivateInferenceCopy? copy) =>
-        NativeMethods.tc_private_inference_quit_needs_notice(on ? 1 : 0, state.Label) != 0 && copy is not null ? copy.QuitAlsoStops : null;
+    public static bool QuitStops(bool on, PrivateInferenceState state) =>
+        NativeMethods.tc_private_inference_quit_needs_notice(on ? 1 : 0, state.Label) != 0;
 
     /// <summary>
     /// The ABI value, spelled out rather than cast.

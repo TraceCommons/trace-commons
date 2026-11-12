@@ -222,6 +222,9 @@ pub struct NearAiPrivacyFilterAdapter {
     /// The key is a hash and the value is offsets and labels, so the cache
     /// holds no plaintext.
     window_cache: std::sync::Mutex<ClassifyWindowCache>,
+    /// Spacing between classify requests, or `None` for none (the
+    /// default). See [`pacing`] and [`Self::with_requests_per_minute`].
+    pacer: Option<Arc<pacing::Pacer>>,
 }
 
 /// Per-adapter memo table. The adapter is constructed once per driver tick,
@@ -340,6 +343,7 @@ impl NearAiPrivacyFilterAdapter {
             timeout_base_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             timeout_per_kib_ms: DEFAULT_TIMEOUT_PER_KIB_MS,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
+            pacer: None,
         })
     }
 }
@@ -363,6 +367,15 @@ impl NearAiPrivacyFilterAdapter {
 
     /// The part of each request's timeout that grows with its body, per KiB.
     /// `timeout` passed to the constructor is the fixed part.
+    /// Space classify requests so this adapter sends at most `requests` a
+    /// minute, retries included, evenly rather than in a burst. Zero leaves
+    /// it unpaced. Every caller sharing this adapter shares the one
+    /// schedule; the witness builds one adapter for the process.
+    pub fn with_requests_per_minute(mut self, requests: u32) -> Self {
+        self.pacer = pacing::Pacer::per_minute(requests).map(Arc::new);
+        self
+    }
+
     pub fn with_timeout_per_kib_ms(mut self, per_kib_ms: u64) -> Self {
         self.timeout_per_kib_ms = per_kib_ms;
         self
@@ -503,6 +516,16 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
     )?
     .with_max_batch_inputs(max_batch_inputs)
     .with_timeout_per_kib_ms(timeout_per_kib_ms);
+    // Opt-in: unset is unpaced, as before. The witness sets it in its
+    // measured compose file, so the bound is part of its identity.
+    let adapter = match requests_per_minute_from(
+        std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE")
+            .ok()
+            .as_deref(),
+    )? {
+        Some(requests) => adapter.with_requests_per_minute(requests),
+        None => adapter,
+    };
     Ok(Arc::new(adapter))
 }
 
@@ -542,6 +565,27 @@ struct NearAiSpan {
 /// controls (`\n`, `\r`, `\t`, backspace, form feed) take 2 bytes, every
 /// other control below 0x20 takes 6 (`\u00XX`), and everything else,
 /// including non-ASCII UTF-8, is copied as is.
+/// `TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`: unset or empty is
+/// unpaced; otherwise a whole number of requests a minute, above zero.
+/// Zero is refused rather than read as "unlimited", the same rule the body
+/// cap follows, so nobody believes a bound is in force that is not.
+fn requests_per_minute_from(value: Option<&str>) -> Result<Option<u32>, PrivacyFilterConfigError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    match value.parse::<u32>() {
+        Ok(0) => Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE",
+            reason: "must be greater than zero; unset it for no pacing".to_string(),
+        }),
+        Ok(requests) => Ok(Some(requests)),
+        Err(err) => Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE",
+            reason: err.to_string(),
+        }),
+    }
+}
+
 fn json_escaped_len(text: &str) -> usize {
     text.bytes()
         .map(|byte| match byte {
@@ -1093,6 +1137,17 @@ impl NearAiPrivacyFilterAdapter {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // Every attempt, retries included, takes the next paced slot.
+            // A slot that would start after the caller's deadline is not
+            // taken: the window fails as transient, the slot stays free.
+            if let Some(pacer) = &self.pacer {
+                let now = std::time::Instant::now();
+                match pacer.reserve(now, deadline) {
+                    Some(slot) if slot > now => tokio::time::sleep(slot - now).await,
+                    Some(_) => {}
+                    None => return Err(budget_spent(inputs, attempt)),
+                }
+            }
             // The first attempt runs, cut short at the caller's deadline if
             // that comes first; a retry runs only if a whole attempt still
             // fits before the deadline (`may_retry`). The deadline is the
@@ -1133,8 +1188,9 @@ impl NearAiPrivacyFilterAdapter {
                         body.len(),
                         started.elapsed(),
                     );
-                    if may_retry(attempt, full_attempt, deadline) {
-                        backoff(attempt).await;
+                    let wait = Duration::from_millis(backoff_ms(attempt));
+                    if may_retry(attempt, wait, full_attempt, deadline) {
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                     // Retries are spent and the request never reached the
@@ -1173,8 +1229,21 @@ impl NearAiPrivacyFilterAdapter {
             }
             if !status.is_success() {
                 let transient = crate::privacy_filter_spans::is_transient_classifier_status(status);
-                if transient && may_retry(attempt, full_attempt, deadline) {
-                    backoff(attempt).await;
+                let wait = retry_wait(
+                    attempt,
+                    status,
+                    retry_after_secs(response.headers()),
+                    self.pacer.as_ref().map(|pacer| pacer.interval()),
+                );
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // Every caller on this adapter waits out a rate limit,
+                    // not only the one that met it.
+                    if let Some(pacer) = &self.pacer {
+                        pacer.hold_until(std::time::Instant::now() + wait);
+                    }
+                }
+                if transient && may_retry(attempt, wait, full_attempt, deadline) {
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
                 // Hash the body for audit; do not include it verbatim.
@@ -1332,14 +1401,55 @@ fn classify_input_diagnostics(windows: &[&str]) -> String {
 /// Whether another attempt may start after `attempt` failed: attempts are
 /// left, and -- with a caller deadline -- the backoff and a whole attempt at
 /// `full_attempt` still fit before it.
-fn may_retry(attempt: usize, full_attempt: Duration, deadline: Option<std::time::Instant>) -> bool {
+fn may_retry(
+    attempt: usize,
+    wait: Duration,
+    full_attempt: Duration,
+    deadline: Option<std::time::Instant>,
+) -> bool {
     if attempt >= MAX_CLASSIFY_ATTEMPTS {
         return false;
     }
-    deadline.is_none_or(|deadline| {
-        std::time::Instant::now() + Duration::from_millis(backoff_ms(attempt)) + full_attempt
-            <= deadline
-    })
+    deadline.is_none_or(|deadline| std::time::Instant::now() + wait + full_attempt <= deadline)
+}
+
+/// The longest `Retry-After` honoured. Past it the window gives up and the
+/// trace is retried later on the caller's own schedule.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// How long to wait after the `attempt`th failure, answered `status`.
+///
+/// Never less than [`backoff_ms`]. A 429 waits for its `Retry-After`, or
+/// one pacing interval when it names none: the plain 250 ms backoff spent
+/// all three attempts inside a second against a per-minute limit. A 503
+/// with a `Retry-After` waits for it too. Both are capped at
+/// [`MAX_RETRY_AFTER`].
+fn retry_wait(
+    attempt: usize,
+    status: reqwest::StatusCode,
+    retry_after_secs: Option<u64>,
+    pacing_interval: Option<Duration>,
+) -> Duration {
+    let backoff = Duration::from_millis(backoff_ms(attempt));
+    let asked = match status {
+        reqwest::StatusCode::TOO_MANY_REQUESTS => retry_after_secs
+            .map(Duration::from_secs)
+            .or(pacing_interval),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => retry_after_secs.map(Duration::from_secs),
+        _ => None,
+    };
+    asked.map_or(backoff, |asked| backoff.max(asked.min(MAX_RETRY_AFTER)))
+}
+
+/// A `Retry-After` given in seconds. The HTTP-date form is not read.
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The caller's deadline passed before a window could be attempted.
@@ -1357,10 +1467,6 @@ fn budget_spent(inputs: &[&str], attempt: usize) -> TraceContributionError {
             "near-ai privacy classifier: caller deadline reached before attempt {attempt} {diagnostics}"
         ),
     }
-}
-
-async fn backoff(failed_attempt: usize) {
-    tokio::time::sleep(Duration::from_millis(backoff_ms(failed_attempt))).await;
 }
 
 /// The pause after the `failed_attempt`th failure: 250 ms, doubling.
@@ -1403,6 +1509,200 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    // ---- Pacing (owner, 2026-11-12: NEAR AI allows 30 classify requests a
+    // minute). Schedules are checked on injected instants, never the wall
+    // clock; adapter tests count requests rather than time them.
+
+    #[test]
+    fn the_pacer_spaces_requests_evenly_with_no_burst() {
+        let pacer = pacing::Pacer::per_minute(30).expect("30 is a rate");
+        assert_eq!(pacer.interval(), Duration::from_secs(2));
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(2)));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(4)));
+        // A caller arriving after the queue drained starts at once.
+        let later = t0 + Duration::from_secs(60);
+        assert_eq!(pacer.reserve(later, None), Some(later));
+    }
+
+    #[test]
+    fn a_slot_past_the_deadline_is_refused_and_not_spent() {
+        let pacer = pacing::Pacer::per_minute(30).unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        // The next slot is t0+2s; a caller that must be done by t0+1s gets
+        // none, and the slot stays free for the next caller.
+        assert_eq!(pacer.reserve(t0, Some(t0 + Duration::from_secs(1))), None);
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_rate_limit_answer_holds_every_caller() {
+        let pacer = pacing::Pacer::per_minute(30).unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        pacer.hold_until(t0 + Duration::from_secs(20));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(20)));
+        // Holding to an earlier time never pulls the schedule back.
+        pacer.hold_until(t0 + Duration::from_secs(5));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(22)));
+    }
+
+    #[test]
+    fn zero_is_not_a_rate() {
+        assert!(pacing::Pacer::per_minute(0).is_none());
+    }
+
+    #[test]
+    fn the_rate_setting_is_off_when_unset_and_refuses_zero_or_junk() {
+        assert_eq!(requests_per_minute_from(None).unwrap(), None);
+        assert_eq!(requests_per_minute_from(Some("")).unwrap(), None);
+        assert_eq!(requests_per_minute_from(Some(" 30 ")).unwrap(), Some(30));
+        for bad in ["0", "-1", "thirty", "1.5"] {
+            assert!(requests_per_minute_from(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_waits_for_retry_after_capped_and_never_less_than_backoff() {
+        use reqwest::StatusCode;
+        let interval = Some(Duration::from_secs(2));
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, Some(7), interval),
+            Duration::from_secs(7)
+        );
+        // No Retry-After: one pacing interval.
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, None, interval),
+            Duration::from_secs(2)
+        );
+        // A huge Retry-After is capped.
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, Some(3_600), interval),
+            MAX_RETRY_AFTER
+        );
+        // Never shorter than the plain backoff.
+        assert_eq!(
+            retry_wait(2, StatusCode::TOO_MANY_REQUESTS, Some(0), None),
+            Duration::from_millis(backoff_ms(2))
+        );
+        // A 502 keeps the plain backoff.
+        assert_eq!(
+            retry_wait(1, StatusCode::BAD_GATEWAY, None, interval),
+            Duration::from_millis(backoff_ms(1))
+        );
+    }
+
+    fn classify_ok() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "data": [{ "spans": [] }] }))
+    }
+
+    /// A paced adapter sends nothing it cannot start before the caller's
+    /// deadline: the second window waits for a slot a minute away, so it
+    /// fails as transient and the classifier sees one request, not two.
+    #[tokio::test]
+    async fn a_paced_adapter_does_not_send_past_the_deadline() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(classify_ok())
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap()
+        .with_requests_per_minute(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        assert!(
+            adapter
+                .redact_text_before("first window", deadline)
+                .await
+                .is_ok()
+        );
+        let second = adapter.redact_text_before("second window", deadline).await;
+        assert!(
+            matches!(
+                second,
+                Err(TraceContributionError::TransientRedactionFailed { .. })
+            ),
+            "{second:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A 429 whose Retry-After will not fit the deadline is not retried
+    /// at once (the old 250 ms backoff would have spent all three attempts
+    /// inside a second): one request, then a transient failure.
+    #[tokio::test]
+    async fn a_rate_limited_window_is_not_hammered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap()
+        .with_requests_per_minute(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let answer = adapter.redact_text_before("one window", deadline).await;
+        assert!(
+            matches!(
+                answer,
+                Err(TraceContributionError::TransientRedactionFailed { .. })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// Unpaced (the default, and what `new` builds) is unchanged: three
+    /// windows go out back to back.
+    #[tokio::test]
+    async fn an_unpaced_adapter_is_unchanged() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(classify_ok())
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for text in ["a window", "b window", "c window"] {
+            assert!(
+                adapter.redact_text_before(text, deadline).await.is_ok(),
+                "{text}"
+            );
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
     /// A span whose reported text is not the text at its offsets fails the
@@ -1868,6 +2168,64 @@ mod tests {
 /// The witness serves a snapshot at `GET /v1/diagnostics`, because its CVM's
 /// logs are not readable and this is the only way an operator can tell a
 /// rejected key from a slow endpoint from a down one.
+/// Even spacing between classify requests.
+///
+/// NEAR AI allows the witness 30 `privacy/classify` requests a minute
+/// (2026-11-12). The witness held at most two in flight and paced nothing,
+/// so at the endpoint's quicker latencies it went over. Requests are spaced
+/// one interval apart with no burst: a slot is reserved under a short lock
+/// and the wait happens outside it.
+pub mod pacing {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    pub struct Pacer {
+        interval: Duration,
+        /// The earliest the next request may start; `None` before the first.
+        next: Mutex<Option<Instant>>,
+    }
+
+    impl Pacer {
+        /// `requests` a minute, or `None` for zero.
+        pub fn per_minute(requests: u32) -> Option<Self> {
+            (requests > 0).then(|| Self {
+                interval: Duration::from_secs(60) / requests,
+                next: Mutex::new(None),
+            })
+        }
+
+        pub fn interval(&self) -> Duration {
+            self.interval
+        }
+
+        /// Reserve the first free slot at or after `now` and return when it
+        /// starts. `None`, reserving nothing, when that slot would start at
+        /// or after `latest`.
+        pub fn reserve(&self, now: Instant, latest: Option<Instant>) -> Option<Instant> {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let slot = next.map_or(now, |next| next.max(now));
+            if latest.is_some_and(|latest| slot >= latest) {
+                return None;
+            }
+            *next = Some(slot + self.interval);
+            Some(slot)
+        }
+
+        /// Hold every later slot until at least `until`: the endpoint said
+        /// to wait. Never moves the schedule earlier.
+        pub fn hold_until(&self, until: Instant) {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *next = Some(next.map_or(until, |next| next.max(until)));
+        }
+    }
+}
+
 pub mod diagnostics {
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

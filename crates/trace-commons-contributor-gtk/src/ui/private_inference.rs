@@ -105,6 +105,10 @@ pub struct PrivateInferenceView {
     /// which is not an off declaration.
     confirmed: std::cell::Cell<Option<bool>>,
     write_pending: std::cell::Cell<bool>,
+    /// Whether quitting would stop Private AI
+    /// (`private_inference_copy::quit_needs_notice`), from the last settings
+    /// read. The quit prompt asks only while this is true.
+    pub quit_stops: std::cell::Cell<bool>,
 }
 
 impl Default for PrivateInferenceView {
@@ -236,6 +240,7 @@ impl PrivateInferenceView {
             filling: std::cell::Cell::new(false),
             confirmed: std::cell::Cell::new(None),
             write_pending: std::cell::Cell::new(false),
+            quit_stops: std::cell::Cell::new(false),
         }
     }
 }
@@ -774,7 +779,10 @@ pub fn wire(app: &Rc<App>) {
 pub fn refresh(app: &Rc<App>) {
     super::managed_sessions::refresh(app);
     app.call("get_settings", serde_json::json!({}), |app, result| {
-        let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>) else {
+        let result = result.map(serde_json::from_value::<crate::model::Settings>);
+        app.home
+            .render_inference(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+        let Ok(Ok(settings)) = result else {
             return;
         };
         render(app, &settings);
@@ -798,6 +806,18 @@ pub fn refresh(app: &Rc<App>) {
 pub fn render(app: &Rc<App>, settings: &crate::model::Settings) {
     let view = &app.private_inference;
     view.confirmed.set(Some(settings.private_inference));
+    // Whether quitting would stop Private AI, for the quit prompt. Read
+    // here with the requested setting, before the status row is built.
+    let reported = settings
+        .private_inference_state
+        .as_ref()
+        .map_or("", |state| state.state.as_str());
+    view.quit_stops.set(
+        trace_commons_contributor::private_inference_copy::quit_needs_notice(
+            settings.private_inference,
+            reported,
+        ),
+    );
     // The tray's action row points off the confirmed switch, so it is
     // written here, where the daemon's own answer arrives, rather than
     // optimistically at the press. It is the switch's position and nothing
