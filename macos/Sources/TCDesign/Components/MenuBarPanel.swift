@@ -300,9 +300,10 @@ public struct GlassDayGraph: View {
 /// the menu bar's height and drawn on the bar itself with nothing behind
 /// them. Each step is a pair of bars side by side: Private AI on the left,
 /// verified calls (green) up and all calls (amber) down; traces on the
-/// right, shared (purple) up and kept (blue) down. A badge counting
-/// decisions owed, 99+ past 99, sits against the bars' bottom-right
-/// corner, clear of the newest step; hidden at zero or unknown.
+/// right, shared (purple) up and kept (blue) down. A red dot, drawn while
+/// any decision is owed whatever the count (owner, 2026-11-12, replacing a
+/// 99+ badge), sits against the bars' bottom-right corner, clear of the
+/// newest step; hidden at zero or unknown.
 ///
 /// The mark and the bars take the menu bar's appearance from
 /// `colorScheme`: the logo kit's white mark on a dark bar, its black mark on
@@ -427,12 +428,6 @@ public struct GlassMenuBarStrip: View {
         return badge
     }
 
-    /// The badge's figure: two digits at most, 99+ past them (owner,
-    /// 2026-10-21). The item's accessibility label still says the count.
-    static func badgeText(_ badge: Int) -> String {
-        badge > 99 ? "99+" : String(badge)
-    }
-
     /// Whether the attention mark is drawn.
     static func showsAttention(_ condition: Condition) -> Bool {
         condition == .attention || condition == .unavailable
@@ -444,14 +439,15 @@ public struct GlassMenuBarStrip: View {
         condition == .paused || condition == .unavailable || condition == .loading
     }
 
-    /// The badge's height (and least width), its figure's size and inset,
+    /// The badge slot's height (and least width), the attention mark's figure size,
     /// how far it sits above the item's bottom edge (room for the halo),
     /// and how far it reaches back over the bars: not at all, since the
     /// newest step's bars are the last ones. Sized to other menu-bar items'
     /// badges (owner, 2026-10-21).
     static let badgeSize: CGFloat = 11
+    /// The waiting dot's diameter, centred in the badge's slot.
+    static let dotSize: CGFloat = 8
     static let badgeGlyph: CGFloat = 7
-    static let badgeInset: CGFloat = 2.5
     static let badgeLift: CGFloat = haloReach
     static let badgeOverlap: CGFloat = 0
     /// How far the halo reaches past the badge's edge: its inset and half
@@ -542,22 +538,21 @@ public struct GlassMenuBarStrip: View {
     @ViewBuilder
     private var slot: some View {
         let shownMark = Self.shownMark(mark, badge: badge, condition: condition)
-        if let badge = Self.shownBadge(badge, condition: condition) {
-            // Smaller, with no edge (owner, 2026-10-11).
-            Text(Self.badgeText(badge))
-                .glassGlyph(Self.badgeGlyph, weight: .bold)
-                .foregroundStyle(Color.white)
-                .padding(.horizontal, Self.badgeInset)
-                .frame(minWidth: Self.badgeSize, minHeight: Self.badgeSize)
-                .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
-                // The halo: the accent line colour, outside the badge's
-                // own edge, as `GlassStatusDot`'s ring sits outside it.
+        if Self.shownBadge(badge, condition: condition) != nil {
+            // A dot, never a number: the count is in the item's
+            // accessibility label (owner, 2026-11-12).
+            Circle()
+                .fill(GlassTokens.Color.menuModeNever.color)
+                .frame(width: Self.dotSize, height: Self.dotSize)
+                // The halo: the accent line colour, outside the dot's own
+                // edge, as `GlassStatusDot`'s ring sits outside it.
                 .overlay {
                     if shownMark == .ready {
-                        Capsule().stroke(ink(GlassTokens.Color.purpleText).color, lineWidth: Self.haloLine)
+                        Circle().stroke(ink(GlassTokens.Color.purpleText).color, lineWidth: Self.haloLine)
                             .padding(-Self.haloInset)
                     }
                 }
+                .frame(width: Self.badgeSize, height: Self.badgeSize)
                 .padding(.bottom, Self.badgeLift)
         } else if Self.showsAttention(condition) {
             // The shipping mark's attention state, in the badge's place.

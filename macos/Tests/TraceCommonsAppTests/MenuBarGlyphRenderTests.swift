@@ -126,20 +126,19 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         }
     }
 
-    /// A count past 99 draws as 99+, whatever the count (owner, 2026-10-21).
-    /// The two drawings of 99+ match byte for byte.
+    /// Traces waiting draw one red dot, never a number (owner,
+    /// 2026-11-12, replacing the 99+ badge): every count draws the same
+    /// pixels, and a dot is drawn where zero draws none.
     @MainActor
-    func testACountPastNinetyNineDrawsNinetyNinePlus() throws {
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(100), "99+")
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(4_321), "99+")
-        XCTAssertEqual(GlassMenuBarStrip.badgeText(99), "99")
+    func testAnyWaitingCountDrawsTheSameDot() throws {
         for scheme in [ColorScheme.light, .dark] {
-            let hundred = try XCTUnwrap(render(.live, badge: 100, scheme: scheme, scale: 2))
-            let thousands = try XCTUnwrap(render(.live, badge: 4_321, scheme: scheme, scale: 2))
-            let ninetyNine = try XCTUnwrap(render(.live, badge: 99, scheme: scheme, scale: 2))
-            XCTAssertEqual(hundred.weight, thousands.weight)
-            XCTAssertEqual(hundred.png, thousands.png)
-            XCTAssertNotEqual(hundred.weight, ninetyNine.weight)
+            let one = try XCTUnwrap(render(.live, badge: 1, scheme: scheme, scale: 2))
+            for count in [9, 99, 100, 4_321] {
+                let other = try XCTUnwrap(render(.live, badge: count, scheme: scheme, scale: 2))
+                XCTAssertEqual(one.png, other.png, "\(scheme): \(count) drew differently from 1")
+            }
+            let none = try XCTUnwrap(render(.live, badge: nil, scheme: scheme, scale: 2))
+            XCTAssertNotEqual(one.weight, none.weight, "\(scheme): no dot drawn")
         }
     }
 
@@ -316,7 +315,8 @@ final class MenuBarGlyphRenderTests: XCTestCase {
                 for name in ["3", "12", "120", "paused", "attention", "unavailable"] {
                     XCTAssertNotEqual(drawn[name], live, "\(name) must draw something the live strip does not")
                 }
-                XCTAssertGreaterThan(try XCTUnwrap(inked["120"]), try XCTUnwrap(inked["12"]))
+                // One dot whatever the count (owner, 2026-11-12).
+                XCTAssertEqual(try XCTUnwrap(inked["120"]), try XCTUnwrap(inked["12"]), "a count drew a number")
                 XCTAssertNotEqual(drawn["attention"], drawn["paused"])
                 XCTAssertNotEqual(drawn["3"], drawn["3-paused"])
                 XCTAssertNotEqual(drawn["3-paused"], drawn["paused"], "a paused strip still shows the count")
