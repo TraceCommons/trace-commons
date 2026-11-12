@@ -48,9 +48,12 @@ const CONTENT_GAP: i32 = 14;
 
 #[path = "traces_inspector.rs"]
 mod inspector;
+#[path = "traces_map.rs"]
+mod traces_map;
 
 pub struct QueueView {
     inspector: inspector::Inspector,
+    map: traces_map::TraceMap,
     pub root: gtk::Box,
     first_contribution: gtk::Expander,
     /// The arming offer, above the cards it is about. Persistent and
@@ -134,6 +137,8 @@ impl QueueView {
             .margin_end(space::XL)
             .build();
         column.append(&heading);
+        let map = traces_map::TraceMap::new();
+        column.append(&map.root);
         column.append(&list);
         column.append(&disclaimer);
         column.append(&disclosure);
@@ -295,10 +300,15 @@ impl QueueView {
         // allocation, not the persisted default window width; change the
         // layout only when crossing the breakpoint.
         let weak_split = split.downgrade();
+        let map_body = map.body.downgrade();
         root.add_tick_callback(move |root, _| {
             let Some(split) = weak_split.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if let Some(body) = map_body.upgrade() {
+                let width = body.parent().map_or(root.width(), |parent| parent.width());
+                traces_map::TraceMap::orient(&body, width);
+            }
             let orientation = inspector::orientation(root.width());
             if split.orientation() != orientation {
                 split.set_orientation(orientation);
@@ -314,6 +324,7 @@ impl QueueView {
         Self {
             root,
             inspector,
+            map,
             first_contribution,
             arming_offer,
             private_inference_offer,
@@ -478,6 +489,7 @@ pub(super) fn render_badge(app: &Rc<App>) {
 
 pub fn render(app: &Rc<App>) {
     app.queue.inspector.render(app);
+    app.queue.map.render(app);
     render_badge(app);
     let view = &app.queue;
     view.first_contribution
