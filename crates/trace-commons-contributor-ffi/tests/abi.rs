@@ -5878,7 +5878,7 @@ fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
     let unknown = cstr_str("a-future-label");
     let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr(), 500) });
     assert_eq!(banner, serde_json::to_value(on_hold_copy()).unwrap());
-    assert_eq!(banner["title"], "Contributions are on hold.");
+    assert_eq!(banner["title"], "Contributions on hold.");
 
     // A label that is not UTF-8 is still a reported condition: the on-hold
     // banner, never NULL, which a shell would read as healthy.

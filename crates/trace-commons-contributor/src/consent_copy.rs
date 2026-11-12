@@ -945,17 +945,11 @@ pub struct WitnessCapacityCopy {
 /// machine, and the daemon retries on its own.
 #[must_use]
 pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
-    const REST: &str = "because the privacy witness is busy checking other traces. Nothing is sent until the witness can check";
+    // Short (owner, 2026-11-12): the count and what they wait on.
     let body = match waiting_sessions {
-        0 => format!(
-            "Approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
-        ),
-        1 => format!(
-            "1 approved trace is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
-        ),
-        n => format!(
-            "{n} approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
-        ),
+        0 => "Traces waiting on the privacy scan.".to_string(),
+        1 => "1 trace waiting on the privacy scan.".to_string(),
+        n => format!("{n} traces waiting on the privacy scan."),
     };
     WitnessCapacityCopy {
         title: WITNESS_CAPACITY_TITLE,
@@ -1415,7 +1409,7 @@ pub const GATE_HELD_TITLE: &str = "Automatic contributing is on hold";
 /// Approved 2026-10-06. "On their own" is what separates this hold from
 /// the indefinite one rev 6 rejected: it releases the first full pass that
 /// finds the requirement met.
-pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while they wait, and nothing has been lost. They go out on their own once this changes.";
+pub const GATE_HELD_RELEASE: &str = "These go out once this changes.";
 
 /// What the contributor can do meanwhile. Shown beside a folder's
 /// [`ASK_ME_FIRST_ACTION`].
@@ -4291,22 +4285,12 @@ mod tests {
         let many = witness_capacity_notice(3);
         let uncounted = witness_capacity_notice(0);
         assert_eq!(one.title, WITNESS_CAPACITY_TITLE);
-        assert!(
-            one.body.starts_with("1 approved trace is waiting"),
-            "{}",
-            one.body
-        );
-        assert!(
-            many.body.starts_with("3 approved traces are waiting"),
-            "{}",
-            many.body
-        );
+        assert_eq!(one.body, "1 trace waiting on the privacy scan.");
+        assert_eq!(many.body, "3 traces waiting on the privacy scan.");
         assert!(!uncounted.body.contains('0'), "{}", uncounted.body);
         for notice in [&one, &many, &uncounted] {
             let lower = notice.body.to_lowercase();
-            assert!(lower.contains("privacy witness is busy"), "{}", notice.body);
-            assert!(lower.contains("nothing is sent until"), "{}", notice.body);
-            assert!(lower.contains("nothing has been lost"), "{}", notice.body);
+            assert!(lower.contains("privacy scan"), "{}", notice.body);
             for word in ["error", "failed", "503", "saturated", "capacity"] {
                 assert!(!lower.contains(word), "{word} in: {}", notice.body);
             }

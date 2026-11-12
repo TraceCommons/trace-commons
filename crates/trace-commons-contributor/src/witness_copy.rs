@@ -801,13 +801,13 @@ pub fn witness_copy() -> WitnessCopy {
             failed: "The witness review could not be confirmed. The trace may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
             failed_host_not_allowed: "The review could not go ahead, because the reviewer's address is not on the allowed list for this computer. Nothing left the machine. Whoever set this computer up needs to allow it.",
             failed_measurement_unpinned: "The review could not go ahead, because this computer has nothing recorded to check the reviewer against, or what it reported did not match. Nothing was sent. Record the value your commons publishes for its reviewer, then try again.",
-            failed_unreachable: "The review could not go ahead, because the reviewer did not answer, or answered something this app could not read. Nothing has been approved and nothing has been lost. Try again in a little while.",
+            failed_unreachable: "The privacy scan didn't answer. Try again later.",
             failed_unproven: "The review was refused, because the reviewer could not show it is the one you recorded. Nothing was sent onward and nothing has been approved. This is deliberate -- a reviewer that cannot prove itself does not get used. Ask whoever runs your commons before trying again.",
             failed_bodies_returned: "The review was refused, because what came back still held the model text it was given, which a finished review never does. That trace has not been approved and will not be sent. Ask whoever runs your commons about it before reviewing anything else.",
             failed_too_large: "This trace is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this trace's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
-            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other traces. Nothing was sent and nothing has been approved. It will be free again soon.",
+            failed_busy: "The privacy scan is busy.",
             busy_retry_at: "Try again after",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
@@ -1174,7 +1174,7 @@ pub(crate) mod tests {
     fn the_busy_sentence_reads_alone_and_above_a_retry_time() {
         let review = witness_copy().review;
         assert!(
-            review.failed_busy.ends_with("It will be free again soon."),
+            review.failed_busy == "The privacy scan is busy.",
             "{}",
             review.failed_busy
         );
