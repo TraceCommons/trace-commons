@@ -850,9 +850,9 @@ private struct NoticeLines: View {
 
 /// The offer to stop being asked about one project, as a popover notice
 /// (`ArmingOfferGlassCard`'s words and order): the evidence under the
-/// question, what arming does behind Details, and the confirm, which opens
-/// a whole-window confirmation with the core's body before anything is
-/// armed. Arming is a grant, so nothing is drawn without the core's words.
+/// question, what arming does behind Details, and the confirm, which arms
+/// at once with no confirmation box (owner, 2026-11-11). Nothing is drawn
+/// without the core's words.
 private struct ArmingOfferPopover: View {
     let offer: ArmingOffer
     /// The core's "OPTIONAL AUTOMATION"; nil draws no tag.
@@ -861,7 +861,6 @@ private struct ArmingOfferPopover: View {
     let onClose: () -> Void
     let onArm: () -> Void
     let onDecline: () -> Void
-    @State private var confirming = false
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -880,24 +879,10 @@ private struct ArmingOfferPopover: View {
             } details: {
                 Text(copy.body)
             } actions: {
-                Button(copy.confirm) { confirming = true }
+                Button(copy.confirm, action: onArm)
                     .buttonStyle(GlassButtonStyle(.primary))
                 Button(copy.decline, action: onDecline)
                     .buttonStyle(GlassButtonStyle(.link))
-            }
-            // Declining here closes the confirmation only; the offer stays
-            // until it is answered on the card.
-            .glassModal(isPresented: $confirming) {
-                GlassConfirmation(
-                    title: copy.question, message: copy.body,
-                    actions: [
-                        .cancel(copy.decline) { confirming = false },
-                        GlassModalAction(copy.confirm, isDefault: true) {
-                            confirming = false
-                            onArm()
-                        },
-                    ],
-                    onCancel: { confirming = false })
             }
         }
     }

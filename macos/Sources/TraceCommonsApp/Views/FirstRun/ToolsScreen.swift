@@ -896,7 +896,6 @@ private struct ToolRepoList: View {
     @ObservedObject var repos: CustomizeRepos
     let kind: SourceKind
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var armingCandidate: ProjectRow?
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
@@ -947,34 +946,10 @@ private struct ToolRepoList: View {
                 }
             }
         }
-        .glassModal(isPresented: Binding(
-            get: { armingCandidate.flatMap(armingCopy) != nil },
-            set: { if !$0 { armingCandidate = nil } })
-        ) {
-            // Never presented without the core's words: arming is never
-            // confirmed against a sentence this shell wrote.
-            if let project = armingCandidate, let words = armingCopy(project) {
-                GlassConfirmation(
-                    title: words.question, message: words.body,
-                    actions: [
-                        .cancel(words.decline) { armingCandidate = nil },
-                        GlassModalAction(words.confirm, isDefault: true) {
-                            _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
-                            armingCandidate = nil
-                        },
-                    ],
-                    onCancel: { armingCandidate = nil })
-            }
-        }
     }
 
     @EnvironmentObject private var model: AppModel
     private var sourceModel: any FirstRunRulesSource { model }
-
-    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
-        ProjectArmingCopy.decode(
-            fromJSON: TCCoreCopy.armingOfferCopyJSON(project: project.displayLabel, count: 0))
-    }
 
     @ViewBuilder private func repoRow(_ project: ProjectRow) -> some View {
         #if DEBUG
@@ -1047,7 +1022,7 @@ private struct ToolRepoList: View {
 
     /// Ask, Automatic and Never side by side, as the canvas draws them (Ron,
     /// 2026-10-22: no status dot). Automatic can be picked before sign-in:
-    /// it is confirmed now and armed at Start.
+    /// it is recorded now and armed at Start.
     @ViewBuilder private func rulePicker(_ project: ProjectRow) -> some View {
         if let words = ProjectModeWords.table {
             FirstRunSegmented(
@@ -1055,10 +1030,7 @@ private struct ToolRepoList: View {
                 selection: Binding(
                     get: { RulesScreenLayout.rule(runner.state, for: project) },
                     set: { wanted in
-                        // Arming is a grant, so it is never silent.
-                        if RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted) == .needsConfirmation {
-                            armingCandidate = project
-                        }
+                        _ = RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted)
                     }),
                 options: RulesScreenLayout.offeredModes(project, state: runner.state).compactMap { mode in
                     words.label(for: mode).map { .init(title: $0, value: mode) }
