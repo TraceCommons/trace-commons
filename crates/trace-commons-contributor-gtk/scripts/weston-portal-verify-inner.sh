@@ -21,14 +21,25 @@ fail() {
 }
 
 # The default destination is Insights, which opens on its Overview tab.
-# Require the page's own tab switcher on one line (Overview, Breakdown,
-# Sessions, Analyze) -- an interactive control on the Insights page, not the
-# sidebar's "Insights" entry -- and the Overview's "Tokens by day" card
-# heading, which shows its body rendered. Tesseract has misread tab names
-# before ("Details" as "Deta"), so only Breakdown's first letters are required. The capture loop below
+# Require the page's own tab switcher -- an interactive control on the
+# Insights page, not the sidebar's "Insights" entry -- and the Overview's
+# "Tokens by day" card heading, which shows its body rendered.
+#
+# $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
+# the page in a shaded bar, and Tesseract's default layout analysis skips
+# that bar entirely, so the tab names are read word by word instead of as
+# one line. The selected tab (Overview, white on the accent) is not read
+# even then -- not inverted, thresholded or upscaled either -- so the check
+# asks for two unselected tabs: "Breakdown", and "Analyze" as a whole,
+# case-sensitive word ("analyzed" is in the page's own text). Every label
+# and the switching itself are asserted by the mounted
+# `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
+# run above. Tesseract has misread tab names before ("Details" as "Deta"),
+# so only Breakdown's first letters are required. The capture loop below
 # retries while the body loads.
 insights_frame() {
-  grep -qiE 'Overview[[:space:]]+Br[[:alpha:]]*[[:space:]]+Sessions[[:space:]]+Analyze' <<< "$1" &&
+  grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
+    grep -qE '(^|[[:space:]])Analyze([[:space:]]|$)' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
@@ -260,7 +271,7 @@ else
       WAYLAND_DISPLAY="$WAYLAND_SOCKET" weston-screenshooter || true
       CANDIDATE=$(ls -t "$WORKDIR"/*.png 2>/dev/null | head -1 || true)
       [ -z "$CANDIDATE" ] && continue
-      CANDIDATE_TEXT=$(tesseract "$CANDIDATE" - 2>/dev/null || true)
+      CANDIDATE_TEXT=$(tesseract "$CANDIDATE" - --psm 11 2>/dev/null || true)
       if insights_frame "$CANDIDATE_TEXT"; then
         echo "frame with readable text captured on attempt $attempt"
         CAPTURED=1
@@ -308,8 +319,8 @@ else
     fi
 
     if command -v tesseract >/dev/null 2>&1; then
-      OCR_TEXT=$(tesseract "$SHOT" stdout 2>/dev/null || echo "")
-      echo "--- OCR text ---"
+      OCR_TEXT=$(tesseract "$SHOT" stdout --psm 11 2>/dev/null || echo "")
+      echo "--- OCR text (sparse, --psm 11) ---"
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
