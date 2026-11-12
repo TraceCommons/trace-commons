@@ -139,7 +139,8 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("ui/queue.rs", 8),
     // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became
     // "1 hour", which is a length, not a sentence.
-    ("ui/settings.rs", 20),
+    // Settings navigation removes the local "How it behaves" heading.
+    ("ui/settings.rs", 19),
     ("update.rs", 2),
     ("worker.rs", 1),
 ];

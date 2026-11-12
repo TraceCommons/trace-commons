@@ -17,6 +17,10 @@
 //! conventions. It is drawn from [`community_brand`], the one stylesheet
 //! History's Community panel shares.
 
+#[path = "settings_navigation.rs"]
+mod navigation;
+use navigation::{Section, Sections};
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -252,17 +256,7 @@ impl SettingsView {
     pub fn new() -> Self {
         community_brand::install();
 
-        // §4.1's Linux content padding is `16px 20px 22px`, and §5.4 puts
-        // the settings sections 18px apart. 18 is not a step in
-        // `style::space`; `XL` (20) is the nearest one above it.
-        let content = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(space::XL)
-            .margin_top(space::L)
-            .margin_bottom(space::XXL)
-            .margin_start(space::XL)
-            .margin_end(space::XL)
-            .build();
+        let sections = Sections::new();
 
         // What is running, and the one control that changes it, in one
         // card. These two facts belong together: reading "a background
@@ -273,17 +267,16 @@ impl SettingsView {
         // and three check rows; the sentences underneath are this shell's
         // and say what the chip cannot -- which process is watching, and
         // what is still true while it is paused.
-        content.append(&style::section(copy::CONNECTION_HEADING));
         let state_card = style::card(gtk::Orientation::Vertical, space::M);
         let connection_chip = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         connection_chip.set_halign(gtk::Align::Start);
         state_card.append(&connection_chip);
         let account_attention = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         account_attention.set_visible(false);
-        state_card.append(&account_attention);
+        sections.body(Section::Account).append(&account_attention);
         let login_change = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         login_change.set_visible(false);
-        state_card.append(&login_change);
+        sections.body(Section::Account).append(&login_change);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
         connection.add_css_class("tc-body");
         state_card.append(&connection);
@@ -299,11 +292,13 @@ impl SettingsView {
         pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
-        content.append(&state_card);
+        sections.body(Section::Watching).append(&state_card);
         let legacy_move = super::legacy_move::Controls::new(false);
-        content.append(&legacy_move.root);
+        sections.body(Section::Account).append(&legacy_move.root);
 
-        content.append(&style::section(CONTRIBUTION_HEADING));
+        sections
+            .body(Section::Account)
+            .append(&style::section(CONTRIBUTION_HEADING));
         let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
         let contribution_status = gtk::Label::builder()
             .label(REFRESH_LINE)
@@ -321,7 +316,7 @@ impl SettingsView {
         let invite_redeem = gtk::Button::with_label(REDEEM_ACTION);
         contribution_card.append(&invite_redeem);
         style::append_body(&contribution_card, PENDING_CREDIT_LINE);
-        content.append(&contribution_card);
+        sections.body(Section::Account).append(&contribution_card);
 
         // The Tools card. It is deliberately one concept: whether what a
         // tool sends is kept private on this machine. The port and the
@@ -329,11 +324,6 @@ impl SettingsView {
         // the front door -- the conventional port is already in the field
         // and the folder box is empty, so the common case is one switch
         // and nothing to fill in.
-        // Owner dropped the Tools heading 2026-11-04 (Settings copy pass 2, P117):
-        // the core sends "", and nothing empty is drawn.
-        if !copy::TOOLS_HEADING.is_empty() {
-            content.append(&style::section(copy::TOOLS_HEADING));
-        }
         let routing_card = style::card(gtk::Orientation::Vertical, space::M);
         let routing_tools = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         routing_card.append(&routing_tools);
@@ -421,7 +411,7 @@ impl SettingsView {
         // Nothing here waits on the app being started again: the daemon
         // swaps the reader when the declaration lands.
         style::append_caveat(&routing_card, copy::IRONWIRE_APPLIES_AT_ONCE);
-        content.append(&routing_card);
+        sections.body(Section::Tools).append(&routing_card);
 
         // Answering model calls on this computer. The switch, the exposure
         // sentence and the line saying what the listener actually did all
@@ -431,7 +421,6 @@ impl SettingsView {
         //
         // The card stays rather than going: somebody who learned where the
         // switch was should find a sentence and a way there, not a hole.
-        content.append(&style::section(copy::PRIVATE_INFERENCE_TITLE));
         let private_inference_card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(
             &private_inference_card,
@@ -444,13 +433,15 @@ impl SettingsView {
             .halign(gtk::Align::Start)
             .build();
         private_inference_card.append(&private_inference_link);
-        content.append(&private_inference_card);
+        sections
+            .body(Section::PrivateAI)
+            .append(&private_inference_card);
 
         // Which terminal managed sessions open in (#1406), under Private AI
         // as on macOS. Hidden until the daemon offers a terminal.
         let managed_terminal = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         managed_terminal.set_visible(false);
-        content.append(&managed_terminal);
+        sections.body(Section::PrivateAI).append(&managed_terminal);
 
         // K11: where sessions go, above the witness it names. Its title and
         // card are both drawn by `render_disclosure` -- the title only when
@@ -458,7 +449,7 @@ impl SettingsView {
         // daemon answers.
         let disclosure = gtk::Box::new(gtk::Orientation::Vertical, space::XL);
         disclosure.set_visible(false);
-        content.append(&disclosure);
+        sections.body(Section::Witness).append(&disclosure);
 
         // The witness card. Its own section rather than a row on the card
         // above: routing is about what a tool sends, this is about who does
@@ -468,7 +459,6 @@ impl SettingsView {
         // core's own words -- the three shells print this card and a word
         // kept in three places is a privacy claim that stops matching
         // itself. Nothing here is authored in this view.
-        content.append(&style::section(copy::WITNESS_HEADING));
         let witness_card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(&witness_card, copy::WITNESS_INTRO);
         // The two rows `render_witness` paints. Empty until it runs: this
@@ -594,13 +584,11 @@ impl SettingsView {
             witness_card.append(button);
         }
 
-        content.append(&witness_card);
+        sections.body(Section::Witness).append(&witness_card);
 
-        content.append(&style::section("Projects"));
         let projects = style::card(gtk::Orientation::Vertical, space::M);
-        content.append(&projects);
+        sections.body(Section::Projects).append(&projects);
 
-        content.append(&style::section("How it behaves"));
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
         // Ranges, not free numbers. The daemon accepts any `u64` for all
         // three, and a contributor who typed one into a text field could
@@ -642,9 +630,8 @@ impl SettingsView {
             24.0,
         );
         style::append_caveat(&knobs, copy::KNOBS_NOTE);
-        content.append(&knobs);
+        sections.body(Section::Watching).append(&knobs);
 
-        content.append(&style::section(copy::AUTOSTART_HEADING));
         let autostart_card = style::card(gtk::Orientation::Vertical, space::M);
         let autostart_body = gtk::Label::builder().xalign(0.0).wrap(true).build();
         autostart_body.add_css_class("tc-body");
@@ -673,7 +660,7 @@ impl SettingsView {
         background_body.add_css_class("tc-meta");
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
-        content.append(&autostart_card);
+        sections.body(Section::Startup).append(&autostart_card);
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
@@ -682,31 +669,12 @@ impl SettingsView {
         // included: on the roster the brand panel carries its own heading
         // and a native eyebrow above it would say the same words twice.
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
-        content.append(&public);
+        sections.body(Section::Profile).append(&public);
 
-        // The core's "Change log" (owner ruling, 2026-10-08), for every shell.
-        content.append(&style::section(
-            trace_commons_contributor::preview_copy::monitor_screens_copy()
-                .shell
-                .changes_heading,
-        ));
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
-        content.append(&audit);
+        sections.body(Section::Changes).append(&audit);
 
-        // §5.4: "prose column, kept narrow on purpose" -- `max-width:520px`.
-        let clamp = adw::Clamp::builder()
-            .maximum_size(520)
-            .tightening_threshold(440)
-            .child(&content)
-            .build();
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
-            .child(&clamp)
-            .build();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.add_css_class("tc-root");
-        root.append(&scroller);
+        let root = navigation::Navigation::new(sections).root;
 
         Self {
             root,
