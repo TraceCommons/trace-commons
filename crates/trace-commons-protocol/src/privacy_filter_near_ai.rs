@@ -1046,11 +1046,6 @@ impl NearAiPrivacyFilterAdapter {
         hit
     }
 
-    /// Record a successful classification for reuse within this tick.
-    /// Cache `spans` as `window`'s verified answer. Spans that do not fit
-    /// the window are never stored: verification refuses them first, and
-    /// this guard keeps any later path from caching what `apply_spans` would
-    /// refuse.
     /// Whether `key` is in the window cache, without counting a hit or a
     /// miss: a prediction is not a lookup.
     fn window_is_cached(&self, key: &[u8; 32]) -> bool {
@@ -1060,6 +1055,11 @@ impl NearAiPrivacyFilterAdapter {
         }
     }
 
+    /// Record a successful classification for reuse within this tick.
+    /// Cache `spans` as `window`'s verified answer. Spans that do not fit
+    /// the window are never stored: verification refuses them first, and
+    /// this guard keeps any later path from caching what `apply_spans` would
+    /// refuse.
     fn remember_window(&self, window: &str, spans: &[ClassifySpan]) {
         if !crate::privacy_filter_spans::spans_fit(window, spans) {
             tracing::warn!(

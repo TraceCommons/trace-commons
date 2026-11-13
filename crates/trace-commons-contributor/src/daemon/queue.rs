@@ -1075,10 +1075,14 @@ const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavai
 /// was what earlier builds recorded for every witness refusal they did not
 /// spell, a witness that was down among them; only an approved one is
 /// offered again, and it goes back to approved.
+/// `witness_trace_too_large_for_review` depends on the witness's pace and
+/// classify budget as much as on the trace, so a newer build offers it again
+/// rather than keeping a refusal a later configuration would not give.
 pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
     crate::envelope::REASON_REDACTION_PANICKED,
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
     REASON_WITNESS_RESPONSE_MALFORMED,
+    trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
 ];
 
 /// `witness_response_malformed`, as `witness::WitnessTrustError` spells it.
@@ -2294,9 +2298,6 @@ impl Queue {
         changed
     }
 
-    /// Record the build a refusal happened on, when it is one a newer build
-    /// offers again ([`REOFFERED_ON_A_NEWER_BUILD`]); any other refusal is
-    /// left as it is.
     /// Record, or clear with `None`, the counts a too-large-to-review
     /// refusal came with. Kept only on an entry refused under exactly that
     /// label; anything else is cleared.
@@ -2313,6 +2314,9 @@ impl Queue {
         }
     }
 
+    /// Record the build a refusal happened on, when it is one a newer build
+    /// offers again ([`REOFFERED_ON_A_NEWER_BUILD`]); any other refusal is
+    /// left as it is.
     pub fn note_refusal_version(&mut self, entry_id: Uuid, version: &str) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id)
             && e.state == QueueState::Refused
@@ -3908,6 +3912,40 @@ mod tests {
         assert_eq!(untouched.reason_label.as_deref(), Some("redaction-failed"));
         // Nothing left to move.
         assert!(!q.reoffer_panicked_refusals("0.24.2"));
+    }
+
+    /// A too-large-to-review refusal depends on the witness's pace and
+    /// budget, not only on the trace, so a newer build offers it again (the
+    /// witness may since allow more), with the stored counts cleared.
+    #[test]
+    fn a_too_large_refusal_is_offered_again_on_a_newer_build_without_its_counts() {
+        let too_large = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let approved = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("too-large", "2026-11-12T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        q.upsert(approved.clone(), 5000).unwrap();
+        q.set_state(
+            approved.entry_id,
+            QueueState::Refused,
+            Some(too_large.to_string()),
+        );
+        q.note_review_limits(approved.entry_id, Some((1800, 720)));
+        q.note_refusal_version(approved.entry_id, "1.0.7");
+        let refused = q.get(approved.entry_id).unwrap();
+        assert_eq!(refused.refused_on_version.as_deref(), Some("1.0.7"));
+        assert_eq!(refused.review_windows_needed, Some(1800));
+
+        assert!(!q.reoffer_panicked_refusals("1.0.7"));
+        assert_eq!(q.get(approved.entry_id).unwrap().state, QueueState::Refused);
+
+        assert!(q.reoffer_panicked_refusals("1.0.8"));
+        let back = q.get(approved.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(back.review_windows_needed, None);
+        assert_eq!(back.review_windows_allowed, None);
     }
 
     /// Builds before the witness's refusals were read by status and label

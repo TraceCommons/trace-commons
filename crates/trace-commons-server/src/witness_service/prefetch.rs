@@ -83,6 +83,24 @@ pub const REVIEW_CAPACITY_PERCENT: u64 = 80;
 /// Classifier requests one review allows: [`REVIEW_CAPACITY_PERCENT`] of the
 /// paced slots in `budget`, whole slots only. `None` for an unpaced
 /// interval, which sets no bound. Zero when not even one slot fits.
+/// Refuse a configuration under which every paced trace would be refused
+/// up front: a classify budget shorter than one paced request interval
+/// allows zero requests. A refusal for that reason is final on the client
+/// until a newer build offers it again, so the witness must not start this
+/// way. Unpaced (`None`) has no up-front refusal and nothing to check.
+pub fn check_review_capacity(
+    budget: std::time::Duration,
+    interval: Option<std::time::Duration>,
+) -> Result<(), &'static str> {
+    match interval.and_then(|interval| review_capacity(budget, interval)) {
+        Some(0) => Err(
+            "witness classify budget is shorter than one paced classifier request: \
+             every trace would be refused as too large to review",
+        ),
+        _ => Ok(()),
+    }
+}
+
 pub fn review_capacity(budget: std::time::Duration, interval: std::time::Duration) -> Option<u64> {
     let interval_ms = interval.as_millis();
     if interval_ms == 0 {
@@ -426,6 +444,11 @@ impl PrefetchingContributionRedaction {
         let Some(windows_allowed) = review_capacity(budget, interval) else {
             return Ok(());
         };
+        // The count is over the record pass's texts, which can exceed what
+        // the real pass sends: a classified tool name switches its payload
+        // to a profile that masks the payload instead of classifying it.
+        // Rare, and a refusal for this reason is offered again by a newer
+        // client build, so an over-count is not final.
         let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
         let Some(needed) = self.adapter.requests_needed(&borrowed) else {
             return Ok(());
@@ -529,8 +552,10 @@ impl PrefetchingContributionRedaction {
                 Ok((index, results)) => {
                     done.insert(index, results);
                 }
-                // A panicking classifier call: stop. The replay meets the
-                // texts it left unanswered and refuses.
+                // A panicking classifier call: stop. The replay classifies
+                // the texts it left unanswered through the real adapter, as
+                // for any miss; a classifier that panics again there is
+                // refused by the caller's panic guard.
                 Err(_) => break,
             }
             while let Some(results) = done.remove(&next_to_take) {
@@ -606,6 +631,29 @@ impl ContributionRedactor for PrefetchingContributionRedaction {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_review_capacity_of_zero_refuses_to_start() {
+        use std::time::Duration;
+        // Production: 520 s budget at 100 a minute.
+        assert_eq!(
+            super::check_review_capacity(
+                Duration::from_secs(520),
+                Some(Duration::from_millis(600))
+            ),
+            Ok(())
+        );
+        // A budget shorter than one paced interval would refuse every trace.
+        assert!(
+            super::check_review_capacity(Duration::from_secs(1), Some(Duration::from_secs(2)))
+                .is_err()
+        );
+        // Unpaced: no up-front refusal, nothing to check.
+        assert_eq!(
+            super::check_review_capacity(Duration::from_secs(1), None),
+            Ok(())
+        );
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

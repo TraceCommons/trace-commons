@@ -562,6 +562,11 @@ async fn main() -> Result<()> {
                 backend,
             )),
             {
+                trace_commons_server::witness_service::prefetch::check_review_capacity(
+                    classify_budget(args.request_timeout_secs),
+                    adapter.request_interval(),
+                )
+                .map_err(|reason| anyhow::anyhow!(reason))?;
                 let redaction = trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)
                  .with_classify_budget(classify_budget(args.request_timeout_secs));
                 classify_queue = Some(redaction.classify_queue());

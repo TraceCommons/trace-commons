@@ -168,11 +168,17 @@ queue: `422 {"error":"witness_trace_too_large_for_review",
 windows its text needs that are not already cached, counted as the NEAR AI
 adapter windows them; `M` is 80% of the paced request slots in the classify
 budget, `floor(budget / pace interval) * 0.8`, rounded down. The budget is
-the 540 s request timeout less a 20 s margin; the pace is the deploy-time
-`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`. At 100 a minute (600 ms)
-that is `floor(866 * 0.8) = 692`; at 30 a minute, 208. With no pace configured, or a
-batching adapter, there is no up-front refusal. Not a `413`, which stays
-the request-bytes bound. Clients treat it as final for that session.
+the 540 s request timeout less a 20 s margin; the pace is
+`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`, the sealed value injected at
+deploy time, not a compose default. At 100 a minute (600 ms), production's
+sealed pace since 2026-11-12, that is `floor(866 * 0.8) = 692`; at 30 a
+minute, 208. With no pace configured there is no up-front refusal, and with
+`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` above 1 the adapter cannot count
+requests, so the check is skipped silently. A budget shorter than one paced
+interval would allow 0, so the witness refuses to start that way. Not a
+`413`, which stays the request-bytes bound. Clients treat it as final for
+that session until a newer client build offers it again (the limit depends
+on the witness's pace and budget, not only on the trace).
 
 A job whose prose classifier stayed unavailable through the adapter's
 retries (transport errors, timeouts, 5xx, rate limits), or whose classify
