@@ -1087,7 +1087,14 @@ pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
     trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
     // A witness improvement may classify what this one could not.
     trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
+    // The witness's request-body bound as much as the trace.
+    REASON_WITNESS_PAYLOAD_TOO_LARGE,
 ];
+
+/// `witness_payload_too_large`, as `witness::WitnessTrustError` spells it.
+/// Offered again on a newer build: it is the witness's request-body bound as
+/// much as the trace (raised from 1 MiB to 16 MiB on 2026-11-13).
+const REASON_WITNESS_PAYLOAD_TOO_LARGE: &str = "witness_payload_too_large";
 
 /// `witness_response_malformed`, as `witness::WitnessTrustError` spells it.
 const REASON_WITNESS_RESPONSE_MALFORMED: &str = "witness_response_malformed";
@@ -2368,7 +2375,9 @@ impl Queue {
                 }
                 None => matches!(
                     reason,
-                    REASON_WITNESS_ATTESTATION_UNAVAILABLE | REASON_WITNESS_RESPONSE_MALFORMED
+                    REASON_WITNESS_ATTESTATION_UNAVAILABLE
+                        | REASON_WITNESS_RESPONSE_MALFORMED
+                        | REASON_WITNESS_PAYLOAD_TOO_LARGE
                 ),
             };
             if !newer {
@@ -3932,6 +3941,44 @@ mod tests {
         assert_eq!(untouched.reason_label.as_deref(), Some("redaction-failed"));
         // Nothing left to move.
         assert!(!q.reoffer_panicked_refusals("0.24.2"));
+    }
+
+    /// `witness_payload_too_large` is the witness's request-body bound as much
+    /// as the trace (raised from 1 MiB to 16 MiB on 2026-11-13), so a newer
+    /// build offers it again: one recorded on an older build, and one with
+    /// no recorded build at all, since no build recorded one before this rule.
+    #[test]
+    fn a_payload_too_large_refusal_is_offered_again_on_a_newer_build() {
+        let label = "witness_payload_too_large";
+        assert!(REOFFERED_ON_A_NEWER_BUILD.contains(&label));
+        let recorded = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("recorded", "2026-11-12T00:00:00Z")
+        };
+        let unrecorded = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("unrecorded", "2026-11-12T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        q.upsert(recorded.clone(), 5000).unwrap();
+        q.upsert(unrecorded.clone(), 5000).unwrap();
+        for e in [&recorded, &unrecorded] {
+            q.set_state(e.entry_id, QueueState::Refused, Some(label.to_string()));
+        }
+        q.note_refusal_version(recorded.entry_id, "1.0.7");
+
+        assert!(q.reoffer_panicked_refusals("1.0.7"));
+        assert_eq!(q.get(recorded.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(
+            q.get(unrecorded.entry_id).unwrap().state,
+            QueueState::Approved
+        );
+
+        assert!(q.reoffer_panicked_refusals("1.0.8"));
+        assert_eq!(
+            q.get(recorded.entry_id).unwrap().state,
+            QueueState::Approved
+        );
     }
 
     /// A too-large-to-review refusal depends on the witness's pace and
