@@ -38,7 +38,7 @@ pass() {
 
 # Every key a test might leak in from the caller's shell, cleared.
 render() {
-  env -u TC_CHANNEL -u TC_SPARKLE_PUBLIC_ED_KEY -u TC_STAGING_SPARKLE_PUBLIC_ED_KEY \
+  env -u TC_FEATURE_PROFILE -u TC_CHANNEL -u TC_SPARKLE_PUBLIC_ED_KEY -u TC_STAGING_SPARKLE_PUBLIC_ED_KEY \
     "$@" bash "$script" 1.2.3 45
 }
 
@@ -305,28 +305,31 @@ cp "$repo/macos/channels/staging.env" "$scratch/tree/macos/channels/staging.env"
 # library must all agree, and the library's URL scheme must be the channel's.
 if command -v cc >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
   fake_app() {
-    local app="$1" plist_channel="$2" cli_channel="$3" lib_json="$4"
+    local app="$1" plist_channel="$2" cli_channel="$3" lib_json="$4" feature_json
+    feature_json="$(python3 "$repo/scripts/feature-flags/profile.py" --channel staging)"
     rm -rf "$app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
-    python3 -I -c 'import plistlib, sys
+    python3 -I -c 'import json, plistlib, sys
+profile=json.loads(sys.argv[3])
 with open(sys.argv[1], "wb") as f:
-    plistlib.dump({"TCChannel": sys.argv[2]}, f)' "$app/Contents/Info.plist" "$plist_channel"
-    printf '#!/bin/sh\necho "near-ai 1.2.3 (0000000) channel %s"\n' "$cli_channel" \
-      >"$app/Contents/MacOS/near-ai"
+    plistlib.dump({"TCChannel": sys.argv[2], "TCFeatureEnvironment": profile["environment"], "TCFeatureProfileDigest": profile["profile_digest"]}, f)' "$app/Contents/Info.plist" "$plist_channel" "$feature_json"
+    python3 -I -c 'import json, pathlib, shlex, sys
+pathlib.Path(sys.argv[1]).write_text("#!/bin/sh\nif [ \"$1\" = feature-flags ]; then\n  printf \"%s\\n\" " + shlex.quote(sys.argv[3]) + "\nelse\n  echo \"near-ai 1.2.3 (0000000) channel " + sys.argv[2] + "\"\nfi\n")' "$app/Contents/MacOS/near-ai" "$cli_channel" "$feature_json"
     chmod +x "$app/Contents/MacOS/near-ai"
     if [[ -n "$lib_json" ]]; then
       python3 -I -c 'import json, sys
-body = json.dumps(sys.argv[2])
+body = json.dumps(sys.argv[2]); feature = json.dumps(sys.argv[3])
 open(sys.argv[1], "w").write(
     "#include <stdlib.h>\n#include <string.h>\n"
     "char *tc_build_channel_json(void) { return strdup(%s); }\n"
-    "void tc_string_free(char *s) { free(s); }\n" % body)' "$scratch/stub.c" "$lib_json"
+    "char *tc_feature_profile_json(void) { return strdup(%s); }\n"
+    "void tc_string_free(char *s) { free(s); }\n" % (body, feature))' "$scratch/stub.c" "$lib_json" "$feature_json"
       cc -shared -fPIC -o "$app/Contents/Frameworks/libtrace_commons_contributor_ffi.dylib" \
         "$scratch/stub.c"
     fi
   }
   bundle_check() {
-    env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging bash -c '
+    env -u TC_FEATURE_PROFILE -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging bash -c '
       source "$1/macos/scripts/channel.sh"
       load_channel && assert_bundle_channel "$2"' _ "$repo" "$1" >"$scratch/bundle.out" 2>&1
   }

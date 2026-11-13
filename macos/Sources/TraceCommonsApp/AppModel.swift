@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CryptoKit
 import Foundation
@@ -12,6 +13,10 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var featureFlags: FeatureFlagSnapshot?
+    var featureFlagReadGeneration: UInt64 = 0
+    private var featureFlagWake: AnyCancellable?
+    var featureFlagClient: DaemonClient? { client }
     @Published var managedSnapshot: ManagedSnapshot? {
         didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
     }
@@ -1729,13 +1734,13 @@ final class AppModel: ObservableObject {
     /// dylib, or names no channel, refuses here with the core's sentence and
     /// resolves no directory and starts no daemon (staging design, 4.3).
     /// `start(configDirectory:)` below is a test seam that skips this check.
-    func start(plistChannel: String?) {
+    func start(plistChannel: String?, featureProfileAgrees: Bool = BuildChannelGate.featureProfileAgrees) {
         guard case .starting = startup else { return }
         let channel: BuildChannel
-        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        switch BuildChannelGate.verdict(plistChannel: plistChannel, featureProfileAgrees: featureProfileAgrees) {
         case .agreed(let agreed):
             channel = agreed
-        case .refused(let sentence):
+        case .refused(_, let sentence):
             startup = .refused(sentence)
             return
         }
@@ -1779,6 +1784,9 @@ final class AppModel: ObservableObject {
                 self.client = DaemonClient(daemon: daemon)
                 self.liveData = DaemonDataWiring.live(daemon)
                 self.startup = .running
+                self.featureFlags = nil
+                self.featureFlagWake = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+                    .sink { [weak self] _ in Task { @MainActor in self?.refreshFeatureFlagsAfterWake() } }
                 self.subscribe()
                 self.refreshAll()
                 #if DEBUG
@@ -1822,10 +1830,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        // Declares nothing yet: `reengage_due` is declared on this same
-        // subscription once the system's answer is known, and only while a
+        // Feature changes are always accepted. `reengage_due` is declared
+        // on this same subscription once the system's answer is known, only while a
         // notification can be posted (`refreshReengageDeclaration`).
-        let subscription = daemon.subscribe { json in
+        let subscription = daemon.subscribe(accepts: ["feature_flags_changed"]) { json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1856,7 +1864,7 @@ final class AppModel: ObservableObject {
     /// prompt is answered, and when the app comes forward (the contributor
     /// may have changed it in System Settings).
     func refreshReengageDeclaration() async {
-        let accepts = await reengageAccepts()
+        let accepts = await reengageAccepts() + ["feature_flags_changed"]
         reengage?.update(accepts: accepts)
     }
 
@@ -1905,8 +1913,11 @@ final class AppModel: ObservableObject {
         await self?.refreshStatus()?.value
     }
 
+    // Internal so transport-gap recovery can be exercised without flooding the event bus.
     func handle(event: DaemonEvent) {
         switch event {
+        case .featureFlagsChanged:
+            refreshFeatureFlags()
         case .snapshot(let pending, let status):
             statusReadGeneration = ReadEpoch()
             applyPendingUpdate(pending)
@@ -1957,6 +1968,7 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshFeatureFlags()
             refreshAutomaticGrant()
             refreshManagedSessions()
             refreshQueue()
@@ -1989,6 +2001,9 @@ final class AppModel: ObservableObject {
     /// a few seconds in the bad case; that is the correct trade against
     /// freeing memory another thread is reading.
     func shutdown() {
+        featureFlagWake = nil
+        featureFlags = nil
+        featureFlagReadGeneration &+= 1
         daemonStartup.cancel()
         isStartingDaemon = false
         undoTask?.cancel()
@@ -2046,6 +2061,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshFeatureFlags()
         refreshManagedSessions()
         // Before `refreshStatus`: its answer, even a failure, starts the
         // account-scoped reads (`accountScopedReadsAwaitStatus`).

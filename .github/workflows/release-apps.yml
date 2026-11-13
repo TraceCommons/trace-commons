@@ -47,6 +47,9 @@ on:
         type: boolean
         default: false
 
+env:
+  TC_FEATURE_PROFILE: production
+
 concurrency:
   group: release-apps-${{ github.ref }}
   cancel-in-progress: false

@@ -16,24 +16,26 @@ final class ChannelGateTests: XCTestCase {
 
     func testAChannelMismatchRefusesToStart() throws {
         let model = AppModel()
-        model.start(plistChannel: try otherChannel())
+        model.start(plistChannel: try otherChannel(), featureProfileAgrees: true)
         XCTAssertEqual(model.startup, .refused(try XCTUnwrap(TCBuildChannel.mismatchLine())))
         XCTAssertEqual(model.configDirectory, "", "no state directory was resolved")
     }
 
     func testAMissingPlistChannelRefusesToStart() throws {
         let model = AppModel()
-        model.start(plistChannel: nil)
+        model.start(plistChannel: nil, featureProfileAgrees: true)
         XCTAssertEqual(model.startup, .refused(try XCTUnwrap(TCBuildChannel.mismatchLine())))
         XCTAssertEqual(model.configDirectory, "")
     }
 
     func testTheDylibsOwnChannelAgrees() throws {
-        guard case .refused = BuildChannelGate.verdict(plistChannel: try otherChannel()) else {
+        guard case .refused = BuildChannelGate.verdict(
+            plistChannel: try otherChannel(), featureProfileAgrees: true) else {
             return XCTFail("a mismatch must refuse")
         }
         guard case .agreed = BuildChannelGate.verdict(
-            plistChannel: try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json())).channel)
+            plistChannel: try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json())).channel,
+            featureProfileAgrees: true)
         else { return XCTFail("the dylib's own channel agrees") }
     }
 
@@ -41,7 +43,7 @@ final class ChannelGateTests: XCTestCase {
     /// gated the same way, and it says the same sentence.
     func testAChannelMismatchRefusesCompute() async throws {
         let model = ComputeModel()
-        await model.start(plistChannel: try otherChannel())
+        await model.start(plistChannel: try otherChannel(), featureProfileAgrees: true)
         XCTAssertEqual(model.failureLabel, "channel-mismatch")
         XCTAssertEqual(model.refusalSentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
         XCTAssertNil(model.requestedDirectory, "no state directory was opened")
@@ -50,9 +52,46 @@ final class ChannelGateTests: XCTestCase {
 
     func testAMissingPlistChannelRefusesCompute() async throws {
         let model = ComputeModel()
-        await model.start(plistChannel: nil)
+        await model.start(plistChannel: nil, featureProfileAgrees: true)
         XCTAssertEqual(model.failureLabel, "channel-mismatch")
         XCTAssertEqual(model.refusalSentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
         XCTAssertNil(model.requestedDirectory)
+    }
+
+    private func agreedChannel() throws -> String {
+        try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json())).channel
+    }
+
+    func testChannelMismatchVerdictKeepsItsLabelAndTheCoresSentence() throws {
+        guard case .refused(let label, let sentence) = BuildChannelGate.verdict(
+            plistChannel: try otherChannel(), featureProfileAgrees: true)
+        else { return XCTFail("a channel mismatch must refuse") }
+        XCTAssertEqual(label, "channel-mismatch")
+        XCTAssertEqual(sentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
+    }
+
+    func testFeatureProfileMismatchVerdictHasItsOwnLabelAndAFullSentence() throws {
+        guard case .refused(let label, let sentence) = BuildChannelGate.verdict(
+            plistChannel: try agreedChannel(), featureProfileAgrees: false)
+        else { return XCTFail("a feature-profile mismatch must refuse") }
+        XCTAssertEqual(label, "feature-profile-mismatch")
+        XCTAssertEqual(sentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
+        XCTAssertNotEqual(sentence, label, "the person sees a sentence, not the label")
+    }
+
+    func testFeatureProfileMismatchRefusesTheDaemon() throws {
+        let model = AppModel()
+        model.start(plistChannel: try agreedChannel(), featureProfileAgrees: false)
+        XCTAssertEqual(model.startup, .refused(try XCTUnwrap(TCBuildChannel.mismatchLine())))
+        XCTAssertEqual(model.configDirectory, "")
+    }
+
+    func testFeatureProfileMismatchRefusesComputeAndClearsTheSnapshot() async throws {
+        let model = ComputeModel()
+        await model.start(plistChannel: try agreedChannel(), featureProfileAgrees: false)
+        XCTAssertEqual(model.failureLabel, "feature-profile-mismatch")
+        XCTAssertEqual(model.refusalSentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
+        XCTAssertNil(model.requestedDirectory)
+        XCTAssertNil(model.snapshot)
     }
 }

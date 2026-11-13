@@ -26,6 +26,8 @@ pub mod copy;
 mod dbus;
 pub mod disclosure;
 pub mod eligibility;
+pub mod first_run;
+pub mod home;
 pub mod model;
 pub mod notify;
 pub mod original_search;

@@ -88,6 +88,9 @@ struct ScopeOption {
 pub struct Onboarding {
     pub(super) window: adw::Window,
     stack: gtk::Stack,
+    joined: Option<Box<dyn Fn()>>,
+    join_lifetime: JoinLifetime,
+    join_cancellations: RefCell<Vec<Box<dyn Fn()>>>,
     /// The invite field. Read once, on Connect, and never re-read into any
     /// label -- the raw text is a credential.
     pub(super) invite: gtk::Entry,
@@ -254,7 +257,82 @@ pub fn present_after_unenroll(app: &Rc<App>) {
 
 /// Build and show the onboarding window.
 pub fn present(app: &Rc<App>) {
-    present_at(app, None);
+    let window = super::first_run::present(app);
+    register_automatic_window(&window);
+}
+
+/// Track the first-run coordinator so shared setup completion closes it.
+pub(super) fn register_automatic_window(window: &adw::Window) {
+    AUTOMATIC_WINDOW.with(|current| *current.borrow_mut() = Some(window.downgrade()));
+}
+
+/// Enrollment controls embedded after Terms in the first-run coordinator.
+/// Authentication remains in the existing Linux adapters; success returns to
+/// the coordinator before any consent or sharing changes are made.
+pub(super) fn join_surface(
+    app: &Rc<App>,
+    window: &adw::Window,
+    on_joined: impl Fn() + 'static,
+) -> gtk::Box {
+    let invite_error = body_label(copy::ONBOARD_CONNECT_FAILED);
+    invite_error.add_css_class("tc-refused");
+    invite_error.set_visible(false);
+    let invite_instance = body_label("");
+    invite_instance.add_css_class("tc-meta");
+    invite_instance.set_visible(false);
+    let connect_button = gtk::Button::with_label(copy::ONBOARD_CONNECT_BUTTON);
+    connect_button.add_css_class("suggested-action");
+    connect_button.set_sensitive(false);
+    let onboarding = Rc::new(Onboarding {
+        window: window.clone(),
+        stack: gtk::Stack::new(),
+        joined: Some(Box::new(on_joined)),
+        join_lifetime: JoinLifetime::default(),
+        join_cancellations: RefCell::new(Vec::new()),
+        invite: gtk::Entry::builder()
+            .placeholder_text(copy::ONBOARD_CONNECT_PLACEHOLDER)
+            .hexpand(true)
+            .build(),
+        invite_error,
+        invite_instance,
+        connect_button,
+        connection_busy: std::cell::Cell::new(false),
+        scope_checks: RefCell::new(Vec::new()),
+        consent_body: gtk::Box::new(gtk::Orientation::Vertical, space::M),
+        scan_local_only: gtk::CheckButton::new(),
+        scan_offered: std::cell::Cell::new(false),
+    });
+    let page = connect_page(app, &onboarding);
+    page.connect_map({
+        let weak = Rc::downgrade(&onboarding);
+        move |_| {
+            if let Some(onboarding) = weak.upgrade() {
+                onboarding.join_lifetime.active.set(true);
+            }
+        }
+    });
+    page.connect_unmap({
+        let weak = Rc::downgrade(&onboarding);
+        move |_| {
+            if let Some(onboarding) = weak.upgrade() {
+                onboarding.invalidate_join();
+            }
+        }
+    });
+    window.connect_close_request({
+        let weak = Rc::downgrade(&onboarding);
+        move |_| {
+            if let Some(onboarding) = weak.upgrade() {
+                onboarding.invalidate_join();
+            }
+            glib::Propagation::Proceed
+        }
+    });
+    // Consume the credential only here: deep links must never skip Terms.
+    if let Some(invite) = PENDING_INVITE.with(|pending| pending.borrow_mut().take()) {
+        onboarding.invite.set_text(&invite);
+    }
+    page
 }
 
 /// Build and show the window, optionally opening on a specific screen.
@@ -328,6 +406,9 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     let onboarding = Rc::new(Onboarding {
         window: window.clone(),
         stack: stack.clone(),
+        joined: None,
+        join_lifetime: JoinLifetime::default(),
+        join_cancellations: RefCell::new(Vec::new()),
         invite: invite.clone(),
         invite_error: invite_error.clone(),
         invite_instance: invite_instance.clone(),
@@ -366,23 +447,9 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     content.append(&stack);
     window.set_content(Some(&content));
 
-    // An invite arrived by deep link: fill it in and open on Connect, where
-    // the instance is named and the button still has to be pressed. The
-    // welcome screen is skipped because someone who clicked an invite has
-    // already been told what this is by whoever sent it.
-    let automatic = start.is_none() && PENDING_INVITE.with(|pending| pending.borrow().is_none());
-    match (start, PENDING_INVITE.with(|p| p.borrow_mut().take())) {
-        // An explicit starting screen wins: it is only ever set by someone
-        // who clicked a control asking for that screen.
-        (Some(step), _) => onboarding.go(step),
-        (None, Some(invite)) => {
-            onboarding.invite.set_text(&invite);
-            onboarding.go(Step::Connect);
-        }
-        (None, None) => onboarding.go(Step::Welcome),
-    }
-    if automatic {
-        AUTOMATIC_WINDOW.with(|current| *current.borrow_mut() = Some(window.downgrade()));
+    onboarding.go(start.unwrap_or(Step::Welcome));
+    if start.is_none() {
+        register_automatic_window(&window);
     }
     window.present();
 }
@@ -431,6 +498,10 @@ pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
 }
 
 pub fn present_for_health(app: &Rc<App>, label: &str) {
+    if label == "not-logged-in" {
+        present(app);
+        return;
+    }
     let Some(step) = health_step(label) else {
         return;
     };
@@ -451,8 +522,59 @@ fn health_step(label: &str) -> Option<Step> {
     }
 }
 
+/// A callback may continue only during the appearance that started it.
+struct JoinLifetime {
+    generation: std::cell::Cell<u64>,
+    active: std::cell::Cell<bool>,
+}
+impl Default for JoinLifetime {
+    fn default() -> Self {
+        Self {
+            generation: std::cell::Cell::new(0),
+            active: std::cell::Cell::new(true),
+        }
+    }
+}
+impl JoinLifetime {
+    fn valid(&self, generation: u64) -> bool {
+        self.active.get() && self.generation.get() == generation
+    }
+    fn invalidate(&self) {
+        self.active.set(false);
+        self.generation.set(self.generation.get().wrapping_add(1));
+    }
+}
+
 impl Onboarding {
+    pub(super) fn embedded(&self) -> bool {
+        self.joined.is_some()
+    }
+    pub(super) fn join_generation(&self) -> u64 {
+        self.join_lifetime.generation.get()
+    }
+    pub(super) fn join_valid(&self, generation: u64) -> bool {
+        self.join_lifetime.valid(generation)
+    }
+    pub(super) fn on_join_cancel(&self, callback: impl Fn() + 'static) {
+        self.join_cancellations
+            .borrow_mut()
+            .push(Box::new(callback));
+    }
+    fn invalidate_join(&self) {
+        self.join_lifetime.invalidate();
+        self.connection_busy.set(false);
+        for cancel in self.join_cancellations.borrow().iter() {
+            cancel();
+        }
+    }
+
     pub(super) fn go(self: &Rc<Self>, step: Step) {
+        if step == Step::Consent
+            && let Some(joined) = &self.joined
+        {
+            joined();
+            return;
+        }
         self.stack.set_visible_child_name(step.page_name());
     }
 
@@ -773,7 +895,8 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         let onboarding = onboarding.clone();
         let wallet = wallet.clone();
         move |button| {
-            if onboarding.connection_busy.replace(true) {
+            let generation = onboarding.join_generation();
+            if !onboarding.join_valid(generation) || onboarding.connection_busy.replace(true) {
                 return;
             }
             wallet.set_sensitive(false);
@@ -784,30 +907,62 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             // No `scopes` here on purpose: absent means floor-scope-only,
             // and the scopes screen is next. Sending a guess now would
             // grant something the contributor has not been asked about.
-            app.call("enroll", serde_json::json!({ "invite": invite }), {
+            let enroll = {
                 let onboarding = onboarding.clone();
                 let wallet = wallet.clone();
-                move |app, result| {
-                    onboarding.connection_busy.set(false);
-                    wallet.set_sensitive(true);
-                    onboarding.invite.set_sensitive(true);
-                    match result {
-                        Ok(_) => {
-                            // The field held a credential and its work is
-                            // done. Clearing it keeps the invite out of the
-                            // window for the rest of the session.
-                            onboarding.invite.set_text("");
-                            load_consent_options(app, &onboarding);
-                            onboarding.go(Step::Consent);
+                move |app: &Rc<App>| {
+                    if !onboarding.join_valid(generation) {
+                        return;
+                    }
+                    app.call("enroll", serde_json::json!({"invite":invite}), {
+                        let onboarding = onboarding.clone();
+                        let wallet = wallet.clone();
+                        move |app, result| {
+                            if !onboarding.join_valid(generation) {
+                                return;
+                            }
+                            onboarding.connection_busy.set(false);
+                            wallet.set_sensitive(true);
+                            onboarding.invite.set_sensitive(true);
+                            if result.is_ok() {
+                                onboarding.invite.set_text("");
+                                load_consent_options(app, &onboarding);
+                                onboarding.go(Step::Consent);
+                            } else {
+                                onboarding.invite_error.set_visible(true);
+                                onboarding.connect_button.set_sensitive(true);
+                            }
                         }
-                        Err(_) => {
-                            // Deliberately ignoring which error this was.
+                    });
+                }
+            };
+            if onboarding.embedded() {
+                let onboarding = onboarding.clone();
+                let wallet = wallet.clone();
+                app.call(
+                    "invite_lookup",
+                    serde_json::json!({"code":onboarding.invite.text().as_str()}),
+                    move |app, result| {
+                        if !onboarding.join_valid(generation) {
+                            return;
+                        }
+                        if result
+                            .ok()
+                            .is_some_and(|value| value["valid"].as_bool() == Some(true))
+                        {
+                            enroll(app);
+                        } else {
+                            onboarding.connection_busy.set(false);
+                            wallet.set_sensitive(true);
+                            onboarding.invite.set_sensitive(true);
                             onboarding.invite_error.set_visible(true);
                             onboarding.connect_button.set_sensitive(true);
                         }
-                    }
-                }
-            });
+                    },
+                );
+            } else {
+                enroll(&app);
+            }
         }
     });
 
@@ -825,6 +980,9 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
 /// Fill the consent screen from `consent_options`, and decide on the way
 /// past whether screen 4 has anything to offer.
 pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
+    if onboarding.joined.is_some() {
+        return;
+    }
     app.call("consent_options", serde_json::json!({}), {
         let onboarding = onboarding.clone();
         move |_app, result| {
@@ -932,6 +1090,27 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
     );
 }
 
+/// A failed consent write stays on the same page and may be retried.
+#[derive(Default)]
+struct ConsentSubmission {
+    pending: bool,
+}
+
+impl ConsentSubmission {
+    fn begin(&mut self) -> bool {
+        if self.pending {
+            return false;
+        }
+        self.pending = true;
+        true
+    }
+
+    fn finish<T, E>(&mut self, result: &Result<T, E>) -> bool {
+        let pending = std::mem::take(&mut self.pending);
+        pending && result.is_ok()
+    }
+}
+
 fn consent_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_CONSENT_TITLE);
     body.append(&body_label(copy::ONBOARD_CONSENT_SUBTITLE));
@@ -943,12 +1122,26 @@ fn consent_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         .build();
     body.append(&scroller);
 
+    let error = body_label(
+        trace_commons_contributor::first_run_copy::first_run_copy()
+            .uses
+            .scopes_failed,
+    );
+    error.add_css_class("tc-refused");
+    error.set_visible(false);
+    body.append(&error);
+    let submission = Rc::new(RefCell::new(ConsentSubmission::default()));
     let next = gtk::Button::with_label(copy::ONBOARD_CONTINUE);
     next.add_css_class("suggested-action");
     next.connect_clicked({
         let app = app.clone();
         let onboarding = onboarding.clone();
-        move |_| {
+        move |button| {
+            if !submission.borrow_mut().begin() {
+                return;
+            }
+            button.set_sensitive(false);
+            error.set_visible(false);
             // The floor scope is not sent: it is not optional, and
             // `set_consent_scopes` validates against the same VALID_SCOPES
             // the options came from.
@@ -964,7 +1157,17 @@ fn consent_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 serde_json::json!({ "scopes": chosen }),
                 {
                     let onboarding = onboarding.clone();
-                    move |_app, _result| onboarding.after_consent()
+                    let submission = submission.clone();
+                    let button = button.clone();
+                    let error = error.clone();
+                    move |_app, result| {
+                        let saved = submission.borrow_mut().finish(&result);
+                        button.set_sensitive(true);
+                        error.set_visible(!saved);
+                        if saved {
+                            onboarding.after_consent();
+                        }
+                    }
                 },
             );
         }
@@ -1319,6 +1522,37 @@ mod tests {
     }
 
     #[test]
+    fn leaving_join_invalidates_pending_enrollment_even_after_return() {
+        let lifetime = JoinLifetime::default();
+        let started = lifetime.generation.get();
+        assert!(lifetime.valid(started));
+        lifetime.invalidate();
+        assert!(!lifetime.valid(started));
+        lifetime.active.set(true);
+        assert!(!lifetime.valid(started));
+        assert!(lifetime.valid(lifetime.generation.get()));
+    }
+
+    #[test]
+    fn failed_consent_stays_put_and_retry_advances_only_after_success() {
+        let mut submission = ConsentSubmission::default();
+        let saved: Result<(), &str> = Ok(());
+        assert!(
+            !submission.finish(&saved),
+            "unsolicited completion cannot advance"
+        );
+        assert!(submission.begin());
+        assert!(
+            !submission.begin(),
+            "duplicate clicks cannot submit another write"
+        );
+        assert!(!submission.finish(&Err::<(), _>("offline")));
+        assert!(submission.begin(), "a failed write remains retryable");
+        assert!(submission.finish(&saved));
+        assert!(!submission.finish(&saved), "a completion is consumed once");
+    }
+
+    #[test]
     fn no_tenant_is_never_complete() {
         // Before `enroll` there is no tenant, so there is nothing to have
         // finished -- and onboarding must run rather than be skipped.
@@ -1331,7 +1565,7 @@ mod tests {
     /// inherit whatever `enroll`'s floor-only default left behind.
     #[test]
     fn one_tenants_completion_is_not_anothers() {
-        let tenants = vec!["tenant-a".to_string()];
+        let tenants = ["tenant-a".to_string()];
         assert!(tenants.iter().any(|t| t == "tenant-a"));
         assert!(!tenants.iter().any(|t| t == "tenant-b"));
     }

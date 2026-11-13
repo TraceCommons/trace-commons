@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "registry_version": 1,
+  "environment": "staging",
+  "capabilities": [],
+  "remote_enable": [],
+  "signing_keys": [
+    "044cb512150ded39f6b345ade36aa8038f5eb4ae382fbb08d7ba05cce53babcb"
+  ]
+}

@@ -347,6 +347,8 @@ char*       tc_settings_ranges_json(void);
  * string; free it with tc_string_free. NULL only on a caught panic.
  */
 char*       tc_build_channel_json(void);
+/* Immutable feature profile; free with tc_string_free. */
+char*       tc_feature_profile_json(void);
 
 /* The command-line tool's state for the app at bundle_path, as a JSON
  * object:
@@ -2492,6 +2494,10 @@ uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void
  * freeing ctx. Clear or note the prior tc_last_error value first so a
  * leftover error is not mistaken for this one.
  */
+/* Attached handles also disable cloned reader sinks and drain active callbacks;
+ * calling from an attached callback is refused with the same context label.
+ * A refused attached unsubscribe still stops delivery to ctx, but ctx must stay
+ * valid until a retry from a plain thread succeeds. */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.
