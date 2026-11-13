@@ -645,7 +645,8 @@ extension NSHostingView: HostingWindowSizing {}
 
 /// The menu-bar item in the glass system: the NEAR AI mark and the last 24
 /// hours as paired up-and-down bars (`GlassMenuBarStrip`), with the
-/// decisions-owed badge. Trace bars grey while paused.
+/// decisions-owed badge. Trace bars grey while paused; no bars until this
+/// Mac has a few days of trace data (`MenuPanelStore.stripShowsGraph`).
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
@@ -697,7 +698,8 @@ struct MenuBarStripLabel: View {
                 privateAI: inputs.privateAI,
                 condition: inputs.condition,
                 badge: inputs.badge,
-                mark: inputs.mark)
+                mark: inputs.mark,
+                graph: inputs.graph)
                 .padding(.trailing, GlassMenuBarStrip.haloReach)
                 .environment(\.colorScheme, scheme))
             renderer.scale = inputs.scale
@@ -717,6 +719,8 @@ struct MenuBarStripInputs: Equatable {
     let badge: Int?
     let mark: GlassMenuBarStrip.Mark
     let scale: CGFloat
+    /// Whether the graph is drawn: only after a few days of trace data.
+    var graph = true
 
     @MainActor
     static func of(model: AppModel, store: MenuPanelStore, scale: CGFloat) -> MenuBarStripInputs {
@@ -735,7 +739,8 @@ struct MenuBarStripInputs: Equatable {
             condition: condition,
             badge: MenuPanelStatus.badge(model.decisionsOwed),
             mark: MenuPanelStatus.mark(store.status?.nudge, available: available),
-            scale: scale)
+            scale: scale,
+            graph: store.stripShowsGraph)
     }
 }
 

@@ -56,6 +56,14 @@ final class MenuPanelStore {
     /// How often an open popover re-reads the glance: the ledger can stop
     /// refreshing with no event, and only a re-read sees it go stale.
     static let glanceRefresh: Duration = .seconds(60)
+    /// Where `firstTraceAt` is kept between launches.
+    @ObservationIgnored private let defaults: UserDefaults
+    /// The oldest trace this Mac's menu-bar item has seen: a contribution's
+    /// or a waiting session's date. Only ever moves earlier, and is kept
+    /// between launches, so the graph never goes away again once shown,
+    /// whatever later reads hold (a waiting session contributed today
+    /// leaves only today's date behind, and the history read is capped).
+    private(set) var firstTraceAt: Date?
 
     private(set) var client: (any DaemonDataClient)?
 
@@ -72,8 +80,10 @@ final class MenuPanelStore {
     /// An override write is in flight.
     private(set) var writingOverride = false
 
-    init(client: (any DaemonDataClient)?) {
+    init(client: (any DaemonDataClient)?, defaults: UserDefaults = .standard) {
         self.client = client
+        self.defaults = defaults
+        firstTraceAt = defaults.object(forKey: MenuPanelData.firstTraceKey) as? Date
     }
 
     // MARK: The nudge row
@@ -314,7 +324,20 @@ final class MenuPanelStore {
         unreadable = failed
         stale = failed.contains(.status)
         stripNow = clock()
+        noteFirstTrace()
         await loadGlance()
+    }
+
+    /// Moves `firstTraceAt` back to the oldest trace the reads hold, and
+    /// keeps it. The reads keep their last answers when one fails, so what
+    /// they hold was read, never made up.
+    private func noteFirstTrace() {
+        let oldest = MenuPanelData.oldestTrace(
+            shared: history.compactMap(\.submittedAt),
+            kept: TracesGraphModel.keptTimes(pending, tool: nil))
+        guard let oldest, firstTraceAt.map({ oldest < $0 }) ?? true else { return }
+        firstTraceAt = oldest
+        defaults.set(oldest, forKey: MenuPanelData.firstTraceKey)
     }
 
     /// Reads the glance alone. Any failure, an older daemon's
@@ -410,6 +433,12 @@ final class MenuPanelStore {
     var stripSpan: MenuPanelData.Span {
         let span = stripPrivateAI == nil ? nil : activity.flatMap(MenuPanelData.span)
         return span ?? MenuPanelData.Span(end: stripNow)
+    }
+
+    /// Whether the menu-bar item draws its graph: only once this Mac has a
+    /// few days of trace data (`MenuPanelData.showsGraph`).
+    var stripShowsGraph: Bool {
+        MenuPanelData.showsGraph(firstTraceAt: firstTraceAt, now: stripNow)
     }
 }
 
@@ -555,6 +584,25 @@ enum MenuPanelData {
             if (buckets.count - 1 - index) % 2 != 0 { bucket.label = "" }
             return TracesGraphFooter.bar(bucket, words: words)
         }
+    }
+
+    /// How old the oldest trace must be before the menu-bar item draws its
+    /// graph (owner, 2026-11-12: no graph without a few days of data).
+    static let graphAfter: TimeInterval = 3 * 24 * 3600
+    /// The defaults key `MenuPanelStore.firstTraceAt` is kept under.
+    static let firstTraceKey = "menuBar.firstTraceAt"
+
+    /// Whether the menu-bar item draws its graph: the oldest trace seen is
+    /// at least `graphAfter` old. No trace seen yet draws none.
+    static func showsGraph(firstTraceAt: Date?, now: Date) -> Bool {
+        guard let firstTraceAt else { return false }
+        return now.timeIntervalSince(firstTraceAt) >= graphAfter
+    }
+
+    /// The oldest of the contributions' and the waiting sessions' dates, or
+    /// nil when there are none.
+    static func oldestTrace(shared: [Date], kept: [Date]) -> Date? {
+        (shared + kept).min()
     }
 
     /// The menu-bar item's span: `count` steps of `stepHours`, the last

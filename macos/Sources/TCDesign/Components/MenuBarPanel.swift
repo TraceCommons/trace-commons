@@ -304,6 +304,11 @@ public struct GlassDayGraph: View {
 /// decisions owed, 99+ past 99, sits against the bars' bottom-right
 /// corner, clear of the newest step; hidden at zero or unknown.
 ///
+/// The bars are left out until the caller has a few days of trace data
+/// to draw (owner, 2026-11-12): until then the item is the mark and the
+/// badge's slot alone. The badge is the mark's own ink with its figure cut
+/// out of it, never red (owner, 2026-11-12).
+///
 /// The mark and the bars take the menu bar's appearance from
 /// `colorScheme`: the logo kit's white mark on a dark bar, its black mark on
 /// a light one. Each colour is chosen per scheme here rather than resolved
@@ -356,6 +361,7 @@ public struct GlassMenuBarStrip: View {
     private let condition: Condition
     private let badge: Int?
     private let mark: Mark
+    private let graph: Bool
     @Environment(\.colorScheme) private var colorScheme
 
     /// `traces` is shared (up) over kept (down) per step, oldest first.
@@ -363,16 +369,18 @@ public struct GlassMenuBarStrip: View {
     /// nil while unknown, which draws no Private AI segments rather than
     /// empty ones. A zero draws no segment either, as a trace zero does, so
     /// known steps with no calls and unknown ones draw the same; the
-    /// popover has the counts.
+    /// popover has the counts. `graph` false draws no bars and no centre
+    /// line: the mark, then the badge's slot.
     public init(
         traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, condition: Condition, badge: Int?,
-        mark: Mark = .none
+        mark: Mark = .none, graph: Bool = true
     ) {
         self.traces = traces
         self.privateAI = privateAI
         self.condition = condition
         self.badge = badge
         self.mark = mark
+        self.graph = graph
     }
 
     /// The mark drawn: the ring only with no badge on a live strip (no
@@ -490,6 +498,17 @@ public struct GlassMenuBarStrip: View {
         return CGFloat(count) * 2 * barWidth + CGFloat(count - 1) * stepGap
     }
 
+    /// The drawn width before the badge's slot: the mark, and past it the
+    /// graph for `count` steps when the graph is drawn.
+    static func width(steps count: Int, graph: Bool) -> CGFloat {
+        graph ? markSize + markGap + graphWidth(steps: count) : markSize
+    }
+
+    /// The gap between the mark and the badge's slot while no graph is
+    /// drawn: the badge clears the mark rather than touching it, as it
+    /// touches the bars.
+    static let markOnlyGap: CGFloat = 2
+
     /// A token in the bar's scheme, never left for the system to resolve.
     private func ink(_ rgba: GlassRGBA) -> GlassRGBA {
         colorScheme == .dark ? rgba.dark : rgba.light
@@ -504,15 +523,19 @@ public struct GlassMenuBarStrip: View {
         let kept = grey ? paused : ink(GlassTokens.Color.menuStripKept)
         let verified = ink(GlassTokens.Color.menuStripVerified)
         let calls = ink(GlassTokens.Color.menuStripCalls)
-        let width = Self.markSize + Self.markGap + Self.graphWidth(steps: steps.count)
+        let width = Self.width(steps: steps.count, graph: graph)
         let halo = Self.shownMark(mark, badge: badge, condition: condition) == .ready
-        HStack(alignment: .bottom, spacing: halo ? Self.haloReach : -Self.badgeOverlap) {
-            Canvas { context, size in
+        // The badge touches the bars; with no bars it clears the mark. A
+        // halo moves it out by its own reach either way.
+        let gap = graph ? (halo ? Self.haloReach : -Self.badgeOverlap) : Self.markOnlyGap + (halo ? Self.haloReach : 0)
+        HStack(alignment: .bottom, spacing: gap) {
+            Canvas { [graph] context, size in
                 if let logo = GlassBrandMark.path(
                     at: CGPoint(x: 0, y: (size.height - Self.markSize) / 2), size: Self.markSize)
                 {
                     context.fill(logo, with: .color(markInk.color))
                 }
+                guard graph else { return }
                 let left = Self.markSize + Self.markGap
                 let above = Self.graphTop + Self.reach
                 let below = above + Self.centreLine
@@ -543,13 +566,17 @@ public struct GlassMenuBarStrip: View {
     private var slot: some View {
         let shownMark = Self.shownMark(mark, badge: badge, condition: condition)
         if let badge = Self.shownBadge(badge, condition: condition) {
-            // Smaller, with no edge (owner, 2026-10-11).
+            // Smaller, with no edge (owner, 2026-10-11). The mark's ink, not
+            // red (owner, 2026-11-12), with the figure cut out of it so the
+            // menu bar shows through, as a template item's badge does.
             Text(Self.badgeText(badge))
                 .glassGlyph(Self.badgeGlyph, weight: .bold)
-                .foregroundStyle(Color.white)
+                .foregroundStyle(Color.black)
+                .blendMode(.destinationOut)
                 .padding(.horizontal, Self.badgeInset)
                 .frame(minWidth: Self.badgeSize, minHeight: Self.badgeSize)
-                .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
+                .background(Capsule().fill(ink(GlassTokens.Color.menuItemMark).color))
+                .compositingGroup()
                 // The halo: the accent line colour, outside the badge's
                 // own edge, as `GlassStatusDot`'s ring sits outside it.
                 .overlay {
