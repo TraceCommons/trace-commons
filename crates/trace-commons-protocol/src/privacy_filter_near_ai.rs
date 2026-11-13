@@ -1430,8 +1430,22 @@ impl NearAiPrivacyFilterAdapter {
                 Err((kind, reason)) => {
                     self.diagnostics
                         .record_body_shape(kind, body.len(), started.elapsed());
-                    Err(TraceContributionError::RedactionFailed {
-                        reason: format!("{reason} body_shape={}", kind.label()),
+                    let reason = format!("{reason} body_shape={}", kind.label());
+                    // A span answer that could not be verified or
+                    // re-anchored is about the text: NEAR AI answers it the
+                    // same way every time. A body that does not parse, is
+                    // empty or has the wrong entry count is the classifier
+                    // misbehaving, which says nothing about the text.
+                    Err(match kind {
+                        diagnostics::BodyShape::SpanTextMismatch
+                        | diagnostics::BodyShape::SpanOutOfRange => {
+                            TraceContributionError::UnclassifiableText { reason }
+                        }
+                        diagnostics::BodyShape::ParseError
+                        | diagnostics::BodyShape::EmptyData
+                        | diagnostics::BodyShape::EntryCountMismatch => {
+                            TraceContributionError::RedactionFailed { reason }
+                        }
                     })
                 }
             };
@@ -2105,7 +2119,7 @@ mod tests {
                 .expect_err("a span text mismatch must fail closed");
         assert!(matches!(
             error,
-            TraceContributionError::RedactionFailed { .. }
+            TraceContributionError::UnclassifiableText { .. }
         ));
         assert!(error.to_string().contains(SPAN_TEXT_MISMATCH_LABEL));
         assert!(!error.to_string().contains("Ada"), "never echo the text");

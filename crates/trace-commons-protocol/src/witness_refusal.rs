@@ -69,6 +69,13 @@ pub fn review_limits(body: &serde_json::Value) -> Option<(u64, u64)> {
     Some((needed, allowed))
 }
 
+/// `422`: the witness's prose-PII classifier could not classify some of
+/// this contribution's text -- its answer could not be verified or
+/// corrected -- so nothing was certified. The classifier answers that text
+/// the same way every time: about the content, not the witness being down.
+/// Final for this submission; a newer client build may offer it again.
+pub const WITNESS_TEXT_UNCLASSIFIABLE: &str = "witness_text_unclassifiable";
+
 /// The `503` refusals that say the witness could not do its job right now.
 /// None of them is about the contributor's input being wrong.
 pub const WITNESS_UNAVAILABLE_REFUSALS: [&str; 6] = [
@@ -129,6 +136,8 @@ pub enum WitnessRefusalClass {
     /// `422` [`WITNESS_TRACE_TOO_LARGE_FOR_REVIEW`]: final for this
     /// submission.
     TraceTooLargeForReview,
+    /// `422` [`WITNESS_TEXT_UNCLASSIFIABLE`]: final for this submission.
+    TextUnclassifiable,
     /// Anything else: a client error this module does not name, or a label
     /// that does not agree with its status.
     Unrecognised,
@@ -155,6 +164,7 @@ pub fn classify_witness_refusal(status: u16, label: Option<&str>) -> WitnessRefu
         (422, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW)) => {
             WitnessRefusalClass::TraceTooLargeForReview
         }
+        (422, Some(WITNESS_TEXT_UNCLASSIFIABLE)) => WitnessRefusalClass::TextUnclassifiable,
         (500..=599, _) => WitnessRefusalClass::Unavailable,
         (404 | 408 | 429, None) => WitnessRefusalClass::Unavailable,
         _ => WitnessRefusalClass::Unrecognised,
@@ -177,6 +187,7 @@ mod tests {
             WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
             "witness_trace_too_large_for_review"
         );
+        assert_eq!(WITNESS_TEXT_UNCLASSIFIABLE, "witness_text_unclassifiable");
         assert_eq!(WITNESS_WINDOWS_NEEDED_FIELD, "windows_needed");
         assert_eq!(WITNESS_WINDOWS_ALLOWED_FIELD, "windows_allowed");
         assert_eq!(
@@ -267,6 +278,11 @@ mod tests {
             (422, Some("something_else"), Unrecognised),
             (413, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW), Unrecognised),
             (503, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW), Unavailable),
+            // Text the classifier could not classify: final for this
+            // submission, on the exact pair only.
+            (422, Some(WITNESS_TEXT_UNCLASSIFIABLE), TextUnclassifiable),
+            (400, Some(WITNESS_TEXT_UNCLASSIFIABLE), Unrecognised),
+            (503, Some(WITNESS_TEXT_UNCLASSIFIABLE), Unavailable),
             // A label never moves a 4xx on its own.
             (404, Some(WITNESS_REDACTION_FAILED), Unrecognised),
             (404, Some(WITNESS_CLASSIFIER_UNAVAILABLE), Unrecognised),

@@ -1078,11 +1078,15 @@ const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavai
 /// `witness_trace_too_large_for_review` depends on the witness's pace and
 /// classify budget as much as on the trace, so a newer build offers it again
 /// rather than keeping a refusal a later configuration would not give.
+/// `witness_text_unclassifiable` is the witness's classifier failing on the
+/// text, which a later witness may not.
 pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
     crate::envelope::REASON_REDACTION_PANICKED,
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
     REASON_WITNESS_RESPONSE_MALFORMED,
     trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+    // A witness improvement may classify what this one could not.
+    trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
 ];
 
 /// `witness_response_malformed`, as `witness::WitnessTrustError` spells it.
@@ -3807,6 +3811,17 @@ mod tests {
             Some("witness_timeout".into()),
         );
         assert!(q.get(e.entry_id).unwrap().held_for_review());
+    }
+
+    /// Text the witness's classifier could not classify is offered again on
+    /// a newer build: a witness improvement may classify what this one could
+    /// not.
+    #[test]
+    fn unclassifiable_text_is_offered_again_on_a_newer_build() {
+        assert!(
+            REOFFERED_ON_A_NEWER_BUILD
+                .contains(&trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE)
+        );
     }
 
     /// A session the witness refused as too large to review keeps the two

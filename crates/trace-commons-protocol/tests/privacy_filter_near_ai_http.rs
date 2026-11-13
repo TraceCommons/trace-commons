@@ -776,8 +776,8 @@ async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, TraceContributionError::RedactionFailed { .. }),
-        "permanent, not transient: {error}"
+        matches!(error, TraceContributionError::UnclassifiableText { .. }),
+        "permanent and about the text, not transient: {error}"
     );
     let message = error.to_string();
     assert!(
@@ -811,7 +811,7 @@ async fn a_span_without_text_fails_closed() {
         .unwrap_err();
     assert!(matches!(
         error,
-        TraceContributionError::RedactionFailed { .. }
+        TraceContributionError::UnclassifiableText { .. }
     ));
     assert!(
         error
@@ -1415,6 +1415,10 @@ async fn an_out_of_range_span_is_refused_counted_and_never_cached() {
     let recorder = Arc::new(Recorder::default());
     let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
     let error = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+    assert!(
+        matches!(error, TraceContributionError::UnclassifiableText { .. }),
+        "{error}"
+    );
     let message = error.to_string();
     assert!(
         message.contains("privacy_filter_span_out_of_range"),
@@ -1743,4 +1747,31 @@ async fn good_and_re_anchorable_spans_are_both_applied() {
         "[REDACTED:private_email] wrote to [REDACTED:private_person]"
     );
     assert_eq!(recorder.spans_reanchored(), 1);
+}
+
+/// A span answer that could not be verified or corrected is about the text:
+/// permanent `UnclassifiableText`. A body that does not parse, is empty, or
+/// has the wrong entry count is the classifier misbehaving, not the text,
+/// and stays the ordinary permanent `RedactionFailed`.
+#[tokio::test]
+async fn only_an_unverifiable_span_answer_is_unclassifiable_text() {
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::BodyShape;
+    for (kind, unclassifiable) in [
+        (BodyShape::SpanTextMismatch, true),
+        (BodyShape::SpanOutOfRange, true),
+        (BodyShape::ParseError, false),
+        (BodyShape::EmptyData, false),
+    ] {
+        let server = server_with(move |_: &wiremock::Request| malformed_alice_answer(kind)).await;
+        let error = adapter(server.uri())
+            .redact_text(ALICE_TEXT)
+            .await
+            .unwrap_err();
+        assert!(!error.is_transient(), "{kind:?}: {error}");
+        assert_eq!(
+            matches!(error, TraceContributionError::UnclassifiableText { .. }),
+            unclassifiable,
+            "{kind:?}: {error}"
+        );
+    }
 }

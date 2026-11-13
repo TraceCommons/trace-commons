@@ -93643,6 +93643,19 @@ fn driver_failures_classify_from_typed_markers_not_message_text() {
         DriverFailureClass::UpstreamUnavailable
     );
 
+    // Text the privacy classifier could not classify is the content's:
+    // charged to the trace, which quarantines after its attempts, never an
+    // upstream outage that holds it forever.
+    let unclassifiable = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::TraceContributionError::UnclassifiableText {
+            reason: "privacy_filter_span_text_mismatch".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&unclassifiable),
+        DriverFailureClass::ContentRejected
+    );
+
     // The permanent variant is the content's fault, not the system's.
     let permanent_scorer =
         anyhow::Error::new(trace_commons_gate_enclave::ScorerFailure::ScorerFailed {

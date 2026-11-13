@@ -87,8 +87,8 @@ use trace_commons_protocol::witness_refusal::{
     WITNESS_INFERENCE_CALL_ABSENT, WITNESS_INFERENCE_CALL_UNATTESTABLE,
     WITNESS_INFERENCE_RECEIPT_UNVERIFIED, WITNESS_MEASUREMENT_UNAVAILABLE,
     WITNESS_REDACTION_FAILED, WITNESS_REQUEST_TIMED_OUT, WITNESS_REQUEST_TOO_LARGE,
-    WITNESS_SIGNING_UNAVAILABLE, WITNESS_TRACE_TOO_LARGE_FOR_REVIEW, WITNESS_WINDOWS_ALLOWED_FIELD,
-    WITNESS_WINDOWS_NEEDED_FIELD,
+    WITNESS_SIGNING_UNAVAILABLE, WITNESS_TEXT_UNCLASSIFIABLE, WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+    WITNESS_WINDOWS_ALLOWED_FIELD, WITNESS_WINDOWS_NEEDED_FIELD,
 };
 
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
@@ -705,6 +705,14 @@ fn refusal_for(error: WitnessError) -> Refusal {
             WITNESS_CLASSIFIER_UNAVAILABLE,
         )
         .retry_after(WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS),
+        // Not a 503: the witness can serve, and this text gets the same
+        // answer every time. A client reading an outage would stop its whole
+        // upload pass behind this one session. 422: understood, and cannot
+        // be processed; no Retry-After.
+        WitnessError::TextUnclassifiable => Refusal::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            WITNESS_TEXT_UNCLASSIFIABLE,
+        ),
         // 422, not 503: retrying the same trace needs the same requests, so
         // a client must not keep resubmitting it. Not 413 either, which is
         // the request-bytes bound. The two counts go in the body.
@@ -2134,10 +2142,35 @@ mod tests {
         }
     }
 
-    /// A prose classifier that refuses every text: transiently (it stayed
-    /// unavailable through its retries) or not.
+    /// A prose classifier that refuses every text with the error `fail`
+    /// builds: transient (it stayed unavailable through its retries),
+    /// permanent, or unclassifiable text.
     struct FailingFilter {
-        transient: bool,
+        fail: fn(String) -> trace_commons_protocol::trace_contribution::TraceContributionError,
+    }
+
+    fn transiently(
+        reason: String,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionError {
+        trace_commons_protocol::trace_contribution::TraceContributionError::TransientRedactionFailed {
+            reason,
+        }
+    }
+
+    fn permanently(
+        reason: String,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionError {
+        trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+            reason,
+        }
+    }
+
+    fn unclassifiably(
+        reason: String,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionError {
+        trace_commons_protocol::trace_contribution::TraceContributionError::UnclassifiableText {
+            reason,
+        }
     }
 
     #[async_trait]
@@ -2149,23 +2182,20 @@ mod tests {
             Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
             trace_commons_protocol::trace_contribution::TraceContributionError,
         > {
-            use trace_commons_protocol::trace_contribution::TraceContributionError;
-            let reason = "synthetic classifier failure".to_string();
-            Err(if self.transient {
-                TraceContributionError::TransientRedactionFailed { reason }
-            } else {
-                TraceContributionError::RedactionFailed { reason }
-            })
+            Err((self.fail)("synthetic classifier failure".to_string()))
         }
     }
 
     /// A structured service whose classifier fails, through the sequential
     /// pipeline or the prefetching one the deployed witness runs.
-    fn service_with_failing_classifier(transient: bool, prefetching: bool) -> Arc<WitnessService> {
+    fn service_with_failing_classifier(
+        fail: fn(String) -> trace_commons_protocol::trace_contribution::TraceContributionError,
+        prefetching: bool,
+    ) -> Arc<WitnessService> {
         use trace_commons_protocol::trace_contribution::{
             PrivacyFilterAdapter, PrivacyFilterBackendTag,
         };
-        let adapter: Arc<dyn PrivacyFilterAdapter> = Arc::new(FailingFilter { transient });
+        let adapter: Arc<dyn PrivacyFilterAdapter> = Arc::new(FailingFilter { fail });
         let redactor: Arc<dyn super::super::ContributionRedactor> = if prefetching {
             Arc::new(
                 super::super::prefetch::PrefetchingContributionRedaction::new(
@@ -2208,7 +2238,7 @@ mod tests {
         let marker = "zzq-classifier-marker-zzq Alice Brannigan";
         for prefetching in [false, true] {
             let (status, headers, body) = send_full(
-                service_with_failing_classifier(true, prefetching),
+                service_with_failing_classifier(transiently, prefetching),
                 post_witness(contribution_body(marker)),
             )
             .await;
@@ -2234,7 +2264,7 @@ mod tests {
             assert!(!body.contains("zzq-classifier-marker-zzq"));
 
             let (status, headers, body) = send_full(
-                service_with_failing_classifier(false, prefetching),
+                service_with_failing_classifier(permanently, prefetching),
                 post_witness(contribution_body(marker)),
             )
             .await;
@@ -2320,6 +2350,32 @@ mod tests {
         assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
         assert!(!String::from_utf8_lossy(&body).contains(marker));
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Text the classifier could not classify -- an answer that could not be
+    /// verified or corrected -- is about the content, never the witness
+    /// being down: `422 witness_text_unclassifiable`, through the sealed job
+    /// on both pipelines, with no `Retry-After`, no certificate and no echo.
+    #[tokio::test]
+    async fn unclassifiable_text_is_a_422_not_an_outage() {
+        let marker = "zzq-unclassifiable-marker-zzq";
+        for prefetching in [false, true] {
+            let (status, headers, body) = send_full(
+                service_with_failing_classifier(unclassifiably, prefetching),
+                post_witness(contribution_body(marker)),
+            )
+            .await;
+            let body = String::from_utf8_lossy(&body).into_owned();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{prefetching}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"error": "witness_text_unclassifiable"}),
+                "{prefetching}"
+            );
+            assert!(headers.get(header::RETRY_AFTER).is_none());
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(!body.contains(marker));
+        }
     }
 
     #[tokio::test]

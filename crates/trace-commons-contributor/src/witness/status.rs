@@ -899,6 +899,7 @@ mod refusal_label_set_tests {
                 windows_needed: 1800,
                 windows_allowed: 208,
             },
+            WitnessTrustError::WitnessTextUnclassifiable,
         ];
         assert_eq!(
             every.len(),

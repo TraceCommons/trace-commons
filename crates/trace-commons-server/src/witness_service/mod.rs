@@ -210,6 +210,13 @@ pub enum WitnessError {
     /// a permanent classifier refusal or a residual secret never does.
     #[error("the witness's privacy classifier was unavailable")]
     ClassifierUnavailable,
+    /// The prose-PII classifier's answer for some of the text could not be
+    /// verified or corrected, so the redaction did not complete. A refusal
+    /// like the others -- nothing is certified -- and, unlike them, about
+    /// the content: the classifier answers that text the same way every
+    /// time, so a client must not read it as the witness being down.
+    #[error("the witness's privacy classifier could not classify the text")]
+    TextUnclassifiable,
     /// The trace needs more classifier requests than one review can make at
     /// the configured pace, so it was refused before any was made.
     ///
@@ -366,6 +373,10 @@ pub enum RedactionUnavailable {
         windows_needed: u64,
         windows_allowed: u64,
     },
+    /// The classifier's answer for some of the text could not be verified
+    /// or corrected (`TraceContributionError::UnclassifiableText`).
+    #[error("the privacy classifier could not classify the text")]
+    TextUnclassifiable,
 }
 
 impl From<SeamUnavailable> for RedactionUnavailable {
@@ -379,6 +390,7 @@ impl From<RedactionUnavailable> for WitnessError {
         match error {
             RedactionUnavailable::Failed => WitnessError::RedactionFailed,
             RedactionUnavailable::ClassifierUnavailable => WitnessError::ClassifierUnavailable,
+            RedactionUnavailable::TextUnclassifiable => WitnessError::TextUnclassifiable,
             RedactionUnavailable::TraceTooLargeForReview {
                 windows_needed,
                 windows_allowed,
@@ -401,6 +413,9 @@ where
     match refuse_on_panic(async { Ok::<_, ()>(future.await) }).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) if error.is_transient() => Err(RedactionUnavailable::ClassifierUnavailable),
+        Ok(Err(trace_commons_protocol::trace_contribution::TraceContributionError::UnclassifiableText {
+            ..
+        })) => Err(RedactionUnavailable::TextUnclassifiable),
         Ok(Err(_)) | Err(SeamUnavailable) => Err(RedactionUnavailable::Failed),
     }
 }
@@ -2208,6 +2223,20 @@ mod tests {
         })
         .await;
         assert_eq!(permanent, Err(RedactionUnavailable::Failed));
+        let unclassifiable = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::UnclassifiableText {
+                reason: "no valid answer".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(
+            unclassifiable,
+            Err(RedactionUnavailable::TextUnclassifiable)
+        );
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::TextUnclassifiable),
+            WitnessError::TextUnclassifiable
+        );
         let panicked = redaction_outcome(async {
             if std::hint::black_box(true) {
                 panic!("synthetic panic inside the pass");
