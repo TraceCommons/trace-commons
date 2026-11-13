@@ -51,7 +51,7 @@ struct SettingsModal: View {
             columns
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(GlassTokens.Color.paneOpaque.color)
+        .background(GlassTokens.Color.settingsGround.color)
         .environment(\.glassPaneIsContent, true)
         .focusSection()
         .onExitCommand(perform: onClose)

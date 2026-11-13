@@ -433,19 +433,32 @@ def insights_palette(tokens: dict, scheme: str) -> dict[str, str]:
 
     ground = opaque_over(fill("paneFill"), color("paneOpaque")["hex"])
     card = opaque_over(fill("cardFill"), ground)
+    control = opaque_over(fill("controlFill"), ground)
+    # White hover on Linux's already-white solid surfaces is imperceptible.
+    # Use the flat Light card-control slate on each actual backing; Dark
+    # retains its card hover and uses the raised menu-control hover on
+    # the equally dark switcher track (the black control hover disappears).
+    card_hover = (opaque_over(color("controlOnCardHover"), card) if scheme == "light"
+                  else opaque_over(color("cardHover"), ground))
+    control_hover = opaque_over(color("controlOnCardHover" if scheme == "light"
+                                      else "controlOnMenuHover"), control)
     palette = {"ground": ground, "card": card,
-               "hover": opaque_over(color("cardHover"), ground),
-               "control": opaque_over(fill("controlFill"), ground),
+               "hover": card_hover,
+               "control": control,
+               "control_hover": control_hover,
                "selected": opaque_over(color("controlSelected"), ground),
                "selected_ink": opaque_over(color("textOnSelected"), ground),
                "ink": opaque_over(color("textPrimary"), ground),
                "secondary": opaque_over(color("textSecondary"), ground)}
     for ink in ("ink", "secondary"):
-        for surface in ("ground", "card", "hover", "control"):
+        for surface in ("ground", "card", "hover", "control", "control_hover"):
             if contrast(palette[ink], palette[surface]) < 4.5:
                 raise TokenError(f"Insights {scheme}: {ink} on {surface} under 4.5:1")
     if contrast(palette["selected_ink"], palette["selected"]) < 4.5:
         raise TokenError(f"Insights {scheme}: selection text under 4.5:1")
+    for hover, surface in (("hover", "card"), ("control_hover", "control")):
+        if contrast(palette[hover], palette[surface]) < 1.15:
+            raise TokenError(f"Insights {scheme}: {hover} on {surface} under 1.15:1")
     return palette
 
 
@@ -464,7 +477,7 @@ def render_insights_css(tokens: dict, scheme: str) -> str:
            f".tc-insights button:focus-visible, .tc-insights dropdown:focus-visible {{ outline: 2px solid {p['selected']}; outline-offset: 2px; }}",
            f".tc-insights stackswitcher {{ background: {p['control']}; border-radius: {radius['control']}px; padding: {space['s2']}px; }}",
            f".tc-insights stackswitcher button {{ background: transparent; color: {p['ink']}; border: none; box-shadow: none; border-radius: {radius['control']}px; }}",
-           f".tc-insights stackswitcher button:hover {{ background: {p['hover']}; }}",
+           f".tc-insights stackswitcher button:hover {{ background: {p['control_hover']}; }}",
            f".tc-insights stackswitcher button:checked {{ background: {p['selected']}; color: {p['selected_ink']}; }}",
            f".tc-insights .caption, .tc-insights .dim-label {{ color: {p['secondary']}; opacity: 1; }}"]
     for selector, role in [("", "body"), (" .title-2", "title"),
