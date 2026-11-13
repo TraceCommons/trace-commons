@@ -161,6 +161,17 @@ is:
 | `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | `4194304` | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 1 GiB at most. |
 | `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
 
+A job whose prose classifier stayed unavailable through the adapter's
+retries (transport errors, timeouts, 5xx, rate limits), or whose classify
+budget ran out before a classifier call could start (possible while waiting
+in the classify queue, with no classifier call counted in
+`/v1/diagnostics`), finishes as
+`503 {"error":"witness_classifier_unavailable"}` with `Retry-After: 60`,
+apart from `witness_redaction_failed`, which stays the answer for a pass
+that refused the trace. Both refuse and certify nothing; clients read both
+as the witness being unavailable and retry the session on their own
+backoff. A malformed classifier answer is never applied or cached.
+
 The saturation response is exactly `503 {"error":"witness_saturated"}` with
 `Retry-After: 30` seconds and no certificate or signature. The witness does
 not keep an internal queue. A missing workload header retains the ordinary
@@ -799,6 +810,13 @@ when the witness is saturated. It serves:
   - requests by outcome since start, every retry counted: `ok`, `timeout`,
     `transport`, `auth_401_403`, `quota_402_429`, `server_5xx`,
     `too_large_413`, `other_4xx`, `body_shape`;
+  - `body_shapes`: the `body_shape` count split by which check the 200
+    answer failed, every retry counted: `parse_error` (the body arrived and
+    was not the expected JSON), `empty_data`, `entry_count_mismatch` (a
+    batch answered with the wrong number of entries), `span_text_mismatch`
+    (a span's text is not the input at its offsets, or is missing),
+    `span_out_of_range`. They sum to `outcomes.body_shape`. A malformed
+    answer is never applied or cached;
   - requests on the wire now;
   - p50/p90/p99/max latency of the last 256 successful requests in each
     body-size bucket.

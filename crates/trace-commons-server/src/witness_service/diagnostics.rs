@@ -24,8 +24,11 @@
 //! - witness jobs by state: pending, running, finished and unfetched, and
 //!   results that expired unfetched (counts only, never a job id);
 //! - for the NEAR AI classifier: requests by outcome kind (ok, timeout,
-//!   transport, 401/403, 402/429, 5xx, 413, other 4xx, body shape), requests
-//!   on the wire now, and recent successful latencies by body-size bucket.
+//!   transport, 401/403, 402/429, 5xx, 413, other 4xx, body shape), the
+//!   body-shape total split by which check the answer failed (parse error,
+//!   empty data, entry-count mismatch, span-text mismatch, span out of
+//!   range), requests on the wire now, and recent successful latencies by
+//!   body-size bucket.
 //!
 //! Never: request bodies or any part of them, request or trace identifiers,
 //! keys, classifier hostnames, peer addresses, or per-request records. Every
@@ -316,7 +319,13 @@ mod tests {
         let classifier = sorted(&json["classifier"]);
         assert_eq!(
             classifier,
-            ["backend", "in_flight", "latency_ms", "outcomes"]
+            [
+                "backend",
+                "body_shapes",
+                "in_flight",
+                "latency_ms",
+                "outcomes"
+            ]
         );
         let outcomes = sorted(&json["classifier"]["outcomes"]);
         assert_eq!(
@@ -333,6 +342,24 @@ mod tests {
                 "transport",
             ]
         );
+        // Which check a malformed answer failed: labels and counts only.
+        let body_shapes = sorted(&json["classifier"]["body_shapes"]);
+        assert_eq!(
+            body_shapes,
+            [
+                "empty_data",
+                "entry_count_mismatch",
+                "parse_error",
+                "span_out_of_range",
+                "span_text_mismatch",
+            ]
+        );
+        for kind in body_shapes {
+            assert!(
+                json["classifier"]["body_shapes"][&kind].is_u64(),
+                "{kind} is a count"
+            );
+        }
         let job_keys = sorted(&json["jobs"]);
         assert_eq!(
             job_keys,

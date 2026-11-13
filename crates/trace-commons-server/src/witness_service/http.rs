@@ -80,7 +80,8 @@ use trace_commons_protocol::witness_pacing::{
     WITNESS_WORKLOAD_HEADER,
 };
 use trace_commons_protocol::witness_refusal::{
-    WITNESS_ARTIFACT_BINDING_FAILED, WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
+    WITNESS_ARTIFACT_BINDING_FAILED, WITNESS_CLASSIFIER_UNAVAILABLE,
+    WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS, WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
     WITNESS_INFERENCE_ATTESTATION_MISSING, WITNESS_INFERENCE_ATTESTATION_UNAVAILABLE,
     WITNESS_INFERENCE_BODY_NOT_IN_SESSION, WITNESS_INFERENCE_BODY_TOO_LARGE,
     WITNESS_INFERENCE_CALL_ABSENT, WITNESS_INFERENCE_CALL_UNATTESTABLE,
@@ -678,15 +679,23 @@ impl IntoResponse for Refusal {
 ///
 /// A `match` rather than a catch-all, so a new [`WitnessError`] variant is a
 /// compile error here and gets a deliberate status instead of inheriting one.
-/// All four are 503: every one of them is the witness failing to do its job,
-/// not the contributor sending something wrong, and a 4xx would tell a
-/// contributor to change their input when nothing about their input was the
-/// problem.
+/// The witness-failure refusals are 503: every one of them is the witness
+/// failing to do its job, not the contributor sending something wrong, and a
+/// 4xx would tell a contributor to change their input when nothing about
+/// their input was the problem.
 fn refusal_for(error: WitnessError) -> Refusal {
     match error {
         WitnessError::RedactionFailed => {
             Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_REDACTION_FAILED)
         }
+        // A classifier outage that outlived the adapter's retries. Still a
+        // refusal; named apart from `witness_redaction_failed` so neither an
+        // operator nor a client mistakes it for the pass refusing the trace.
+        WitnessError::ClassifierUnavailable => Refusal::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            WITNESS_CLASSIFIER_UNAVAILABLE,
+        )
+        .retry_after(WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS),
         WitnessError::ArtifactBindingFailed => Refusal::new(
             StatusCode::SERVICE_UNAVAILABLE,
             WITNESS_ARTIFACT_BINDING_FAILED,
@@ -2100,6 +2109,123 @@ mod tests {
                 send(structured_service(), post_witness(body.to_string())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "accepted: {grants}");
             assert_eq!(error_code(&response), "witness_request_malformed");
+        }
+    }
+
+    /// A prose classifier that refuses every text: transiently (it stayed
+    /// unavailable through its retries) or not.
+    struct FailingFilter {
+        transient: bool,
+    }
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for FailingFilter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            use trace_commons_protocol::trace_contribution::TraceContributionError;
+            let reason = "synthetic classifier failure".to_string();
+            Err(if self.transient {
+                TraceContributionError::TransientRedactionFailed { reason }
+            } else {
+                TraceContributionError::RedactionFailed { reason }
+            })
+        }
+    }
+
+    /// A structured service whose classifier fails, through the sequential
+    /// pipeline or the prefetching one the deployed witness runs.
+    fn service_with_failing_classifier(transient: bool, prefetching: bool) -> Arc<WitnessService> {
+        use trace_commons_protocol::trace_contribution::{
+            PrivacyFilterAdapter, PrivacyFilterBackendTag,
+        };
+        let adapter: Arc<dyn PrivacyFilterAdapter> = Arc::new(FailingFilter { transient });
+        let redactor: Arc<dyn super::super::ContributionRedactor> = if prefetching {
+            Arc::new(
+                super::super::prefetch::PrefetchingContributionRedaction::new(
+                    Vec::new(),
+                    adapter,
+                    PrivacyFilterBackendTag::NearAi,
+                    2,
+                ),
+            )
+        } else {
+            Arc::new(
+                super::super::PipelineContributionRedaction::with_privacy_filter(
+                    Vec::new(),
+                    adapter,
+                    PrivacyFilterBackendTag::NearAi,
+                ),
+            )
+        };
+        Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(redactor),
+        )
+    }
+
+    /// A classifier that stayed unavailable after its retries is named
+    /// apart from a redaction refusal: `witness_classifier_unavailable`, a
+    /// 503 with a `Retry-After`, through the sealed job answer. Any other
+    /// classifier failure stays `witness_redaction_failed`. Both refuse:
+    /// neither certifies anything, and neither echoes the contribution.
+    #[tokio::test]
+    async fn a_classifier_that_stayed_unavailable_is_named_apart_from_a_redaction_failure() {
+        use trace_commons_protocol::witness_refusal::{
+            WITNESS_CLASSIFIER_UNAVAILABLE, WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS,
+        };
+        let marker = "zzq-classifier-marker-zzq Alice Brannigan";
+        for prefetching in [false, true] {
+            let (status, headers, body) = send_full(
+                service_with_failing_classifier(true, prefetching),
+                post_witness(contribution_body(marker)),
+            )
+            .await;
+            let body = String::from_utf8_lossy(&body).into_owned();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{prefetching}");
+            assert_eq!(
+                error_code(&body),
+                WITNESS_CLASSIFIER_UNAVAILABLE,
+                "{prefetching}"
+            );
+            assert_eq!(
+                headers
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(
+                    WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS
+                        .to_string()
+                        .as_str()
+                ),
+                "{prefetching}"
+            );
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(!body.contains("zzq-classifier-marker-zzq"));
+
+            let (status, headers, body) = send_full(
+                service_with_failing_classifier(false, prefetching),
+                post_witness(contribution_body(marker)),
+            )
+            .await;
+            let body = String::from_utf8_lossy(&body).into_owned();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{prefetching}");
+            assert_eq!(
+                error_code(&body),
+                "witness_redaction_failed",
+                "{prefetching}"
+            );
+            assert!(headers.get(header::RETRY_AFTER).is_none(), "{prefetching}");
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(!body.contains("zzq-classifier-marker-zzq"));
         }
     }
 

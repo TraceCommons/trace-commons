@@ -689,7 +689,7 @@ const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
-) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+) -> Result<Vec<ClassifySpan>, (diagnostics::BodyShape, String)> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
     let codepoints = boundaries.len() - 1;
@@ -706,13 +706,14 @@ fn verify_span_texts(
             failure = SPAN_OUT_OF_RANGE_LABEL,
             "near-ai privacy classify failed"
         );
-        return Err(TraceContributionError::RedactionFailed {
-            reason: format!(
+        return Err((
+            diagnostics::BodyShape::SpanOutOfRange,
+            format!(
                 "near-ai privacy classifier returned out-of-range span: \
                  {SPAN_OUT_OF_RANGE_LABEL} out_of_range_spans={out_of_range} spans={} {diagnostics}",
                 spans.len()
             ),
-        });
+        ));
     }
     let mismatches = spans
         .iter()
@@ -730,13 +731,14 @@ fn verify_span_texts(
             failure = SPAN_TEXT_MISMATCH_LABEL,
             "near-ai privacy classify failed"
         );
-        return Err(TraceContributionError::RedactionFailed {
-            reason: format!(
+        return Err((
+            diagnostics::BodyShape::SpanTextMismatch,
+            format!(
                 "near-ai privacy classifier span offsets disagree with span text: \
                  {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
                 spans.len()
             ),
-        });
+        ));
     }
     Ok(spans
         .into_iter()
@@ -1216,39 +1218,14 @@ impl NearAiPrivacyFilterAdapter {
                 Ok(response) => response,
                 Err(err) => {
                     in_flight.take();
-                    self.diagnostics.record(
-                        if err.is_timeout() {
-                            diagnostics::Outcome::Timeout
-                        } else {
-                            diagnostics::Outcome::Transport
-                        },
-                        body.len(),
-                        started.elapsed(),
-                    );
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
                     let wait = Duration::from_millis(backoff_ms(attempt));
                     if may_retry(attempt, wait, full_attempt, deadline) {
                         tokio::time::sleep(wait).await;
                         continue;
                     }
-                    // Retries are spent and the request never reached the
-                    // classifier: the upstream is down, the trace is fine.
-                    // The input fingerprint rides along hash-only so a
-                    // repeatedly-failing window is identifiable in the logs.
-                    let diagnostics = classify_input_diagnostics(inputs);
-                    // The driver logs only a hash of the error, so emit the
-                    // input fingerprint here where it is provably hash-only.
-                    tracing::warn!(
-                        classify_input = %diagnostics,
-                        attempts = attempt,
-                        failure = "transport",
-                        "near-ai privacy classify failed"
-                    );
-                    return Err(TraceContributionError::TransientRedactionFailed {
-                        reason: format!(
-                            "near-ai privacy classifier transport error: {} attempts={} {}",
-                            err, attempt, diagnostics
-                        ),
-                    });
+                    return Err(transport_failure(&err, inputs, attempt));
                 }
             };
 
@@ -1318,54 +1295,131 @@ impl NearAiPrivacyFilterAdapter {
                 });
             }
 
-            let answer = async {
-                let parsed: ClassifyResponse = response.json().await.map_err(|err| {
-                    TraceContributionError::RedactionFailed {
-                        reason: format!("near-ai privacy classifier response parse error: {}", err),
-                    }
-                })?;
-                // One entry per input, in input order. A single-input request
-                // reads the first entry, as it always has; a batch must
-                // account for every input exactly, or none of it is used.
-                if parsed.data.is_empty() {
-                    return Err(TraceContributionError::RedactionFailed {
-                        reason: "near-ai privacy classifier returned empty data array".to_string(),
-                    });
-                }
-                if inputs.len() > 1 && parsed.data.len() != inputs.len() {
-                    return Err(TraceContributionError::RedactionFailed {
-                        reason: format!(
-                            "near-ai privacy classifier returned {} entries for {} inputs",
-                            parsed.data.len(),
-                            inputs.len()
-                        ),
-                    });
-                }
-                // Verified before anything is remembered: a refused response
-                // must never be served from the cache.
-                inputs
-                    .iter()
-                    .zip(parsed.data)
-                    .map(|(input, entry)| verify_span_texts(input, entry.spans))
-                    .collect::<Result<Vec<_>, _>>()
-            }
-            .await;
-            // One request, one outcome, batched or not: a malformed answer --
-            // unparseable, empty, the wrong number of entries, a span that
-            // does not match its input -- is `body_shape`.
+            // The whole body first. A body that never finished arriving is
+            // the connection failing (a timeout or transport outcome), not a
+            // malformed answer: `parse_error` means bytes arrived and were
+            // not the expected JSON.
+            let read = response.bytes().await;
             in_flight.take();
-            self.diagnostics.record(
-                if answer.is_ok() {
-                    diagnostics::Outcome::Ok
-                } else {
-                    diagnostics::Outcome::BodyShape
-                },
-                body.len(),
-                started.elapsed(),
-            );
-            return answer.map(WindowAnswer::Spans);
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
+                    let wait = Duration::from_millis(backoff_ms(attempt));
+                    if may_retry(attempt, wait, full_attempt, deadline) {
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    return Err(transport_failure(&err, inputs, attempt));
+                }
+            };
+
+            // One request, one outcome, batched or not. A malformed answer
+            // -- unparseable, empty, the wrong number of entries, a span
+            // out of range or not matching its input -- is `body_shape`,
+            // counted under which check it failed. Nothing from it is
+            // applied or cached.
+            return match parse_classify_answer(inputs, &bytes) {
+                Ok(spans) => {
+                    self.diagnostics.record(
+                        diagnostics::Outcome::Ok,
+                        body.len(),
+                        started.elapsed(),
+                    );
+                    Ok(WindowAnswer::Spans(spans))
+                }
+                Err((kind, reason)) => {
+                    self.diagnostics
+                        .record_body_shape(kind, body.len(), started.elapsed());
+                    Err(TraceContributionError::RedactionFailed {
+                        reason: format!("{reason} body_shape={}", kind.label()),
+                    })
+                }
+            };
         }
     }
+}
+
+/// The outcome kind of a request that failed on the wire.
+fn transport_outcome(err: &reqwest::Error) -> diagnostics::Outcome {
+    if err.is_timeout() {
+        diagnostics::Outcome::Timeout
+    } else {
+        diagnostics::Outcome::Transport
+    }
+}
+
+/// A request that failed on the wire after its retries: the upstream is
+/// down, the trace is fine. The input fingerprint rides along hash-only so a
+/// repeatedly-failing window is identifiable in the logs.
+fn transport_failure(
+    err: &reqwest::Error,
+    inputs: &[&str],
+    attempt: usize,
+) -> TraceContributionError {
+    let diagnostics = classify_input_diagnostics(inputs);
+    // The driver logs only a hash of the error, so emit the input
+    // fingerprint here where it is provably hash-only.
+    tracing::warn!(
+        classify_input = %diagnostics,
+        attempts = attempt,
+        failure = "transport",
+        "near-ai privacy classify failed"
+    );
+    TraceContributionError::TransientRedactionFailed {
+        reason: format!(
+            "near-ai privacy classifier transport error: {} attempts={} {}",
+            err, attempt, diagnostics
+        ),
+    }
+}
+
+/// Read a 200's body into verified spans per input, in input order, or say
+/// which way it was malformed.
+///
+/// One entry per input, in input order. A single-input request reads the
+/// first entry, as it always has; a batch must account for every input
+/// exactly, or none of it is used. Every span is verified before anything
+/// is returned, so a refused answer can never reach the cache.
+///
+/// The reasons are label-only: a JSON error's own text can quote the body,
+/// so only its category is kept.
+fn parse_classify_answer(
+    inputs: &[&str],
+    body: &[u8],
+) -> Result<Vec<Vec<ClassifySpan>>, (diagnostics::BodyShape, String)> {
+    let parsed: ClassifyResponse = serde_json::from_slice(body).map_err(|err| {
+        (
+            diagnostics::BodyShape::ParseError,
+            format!(
+                "near-ai privacy classifier response parse error: category={:?} body_len={}",
+                err.classify(),
+                body.len()
+            ),
+        )
+    })?;
+    if parsed.data.is_empty() {
+        return Err((
+            diagnostics::BodyShape::EmptyData,
+            "near-ai privacy classifier returned empty data array".to_string(),
+        ));
+    }
+    if inputs.len() > 1 && parsed.data.len() != inputs.len() {
+        return Err((
+            diagnostics::BodyShape::EntryCountMismatch,
+            format!(
+                "near-ai privacy classifier returned {} entries for {} inputs",
+                parsed.data.len(),
+                inputs.len()
+            ),
+        ));
+    }
+    inputs
+        .iter()
+        .zip(parsed.data)
+        .map(|(input, entry)| verify_span_texts(input, entry.spans))
+        .collect()
 }
 
 /// What one classify request answered.
@@ -2381,8 +2435,60 @@ pub mod diagnostics {
         /// Any other non-2xx.
         OtherClientError,
         /// 200 whose body did not parse, had no entry, or whose spans did not
-        /// match the text sent.
+        /// match the text sent. [`BodyShape`] says which; this is their total.
         BodyShape,
+    }
+
+    /// Which way a 200 answer was malformed. Each one is also counted as
+    /// [`Outcome::BodyShape`], which stays the total.
+    ///
+    /// Label-only: which check failed, never what the answer or the input
+    /// held.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum BodyShape {
+        /// The body arrived and was not the expected JSON.
+        ParseError,
+        /// The body parsed and its `data` array was empty.
+        EmptyData,
+        /// A batch was answered with a different number of entries than it
+        /// carried inputs.
+        EntryCountMismatch,
+        /// A span's reported `text` was not the input's codepoints at its
+        /// offsets, or it reported no `text`.
+        SpanTextMismatch,
+        /// A span's offsets were reversed or ran past the end of the input.
+        SpanOutOfRange,
+    }
+
+    impl BodyShape {
+        /// Every kind, in the order a snapshot lists them.
+        pub const ALL: [BodyShape; 5] = [
+            BodyShape::ParseError,
+            BodyShape::EmptyData,
+            BodyShape::EntryCountMismatch,
+            BodyShape::SpanTextMismatch,
+            BodyShape::SpanOutOfRange,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                BodyShape::ParseError => "parse_error",
+                BodyShape::EmptyData => "empty_data",
+                BodyShape::EntryCountMismatch => "entry_count_mismatch",
+                BodyShape::SpanTextMismatch => "span_text_mismatch",
+                BodyShape::SpanOutOfRange => "span_out_of_range",
+            }
+        }
+
+        fn index(self) -> usize {
+            match self {
+                BodyShape::ParseError => 0,
+                BodyShape::EmptyData => 1,
+                BodyShape::EntryCountMismatch => 2,
+                BodyShape::SpanTextMismatch => 3,
+                BodyShape::SpanOutOfRange => 4,
+            }
+        }
     }
 
     impl Outcome {
@@ -2448,6 +2554,7 @@ pub mod diagnostics {
     #[derive(Default)]
     pub struct Recorder {
         counts: [AtomicU64; 9],
+        body_shapes: [AtomicU64; 5],
         in_flight: AtomicUsize,
         latency_ms: Mutex<[VecDeque<u64>; 4]>,
     }
@@ -2489,15 +2596,31 @@ pub mod diagnostics {
             samples.push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         }
 
+        /// A request ended in a malformed answer of kind `kind`: counted as
+        /// [`Outcome::BodyShape`] and under its kind.
+        pub fn record_body_shape(&self, kind: BodyShape, body_bytes: usize, elapsed: Duration) {
+            self.body_shapes[kind.index()].fetch_add(1, Ordering::Relaxed);
+            self.record(Outcome::BodyShape, body_bytes, elapsed);
+        }
+
         /// A count of outcome `outcome` so far.
         pub fn count(&self, outcome: Outcome) -> u64 {
             self.counts[outcome.index()].load(Ordering::Relaxed)
+        }
+
+        /// A count of malformed answers of kind `kind` so far.
+        pub fn body_shape_count(&self, kind: BodyShape) -> u64 {
+            self.body_shapes[kind.index()].load(Ordering::Relaxed)
         }
 
         pub fn snapshot(&self) -> Snapshot {
             let outcomes = Outcome::ALL
                 .iter()
                 .map(|outcome| (outcome.label(), self.count(*outcome)))
+                .collect();
+            let body_shapes = BodyShape::ALL
+                .iter()
+                .map(|kind| (kind.label(), self.body_shape_count(*kind)))
                 .collect();
             let latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
             let latency_ms = BUCKETS
@@ -2507,6 +2630,7 @@ pub mod diagnostics {
                 .collect();
             Snapshot {
                 outcomes,
+                body_shapes,
                 in_flight: self.in_flight.load(Ordering::Relaxed),
                 latency_ms,
             }
@@ -2524,6 +2648,10 @@ pub mod diagnostics {
         /// Requests by outcome, since the process started. Every attempt
         /// counts, retries included.
         pub outcomes: BTreeMap<&'static str, u64>,
+        /// The `body_shape` outcomes by which check failed, every retry
+        /// counted. Sums to `outcomes.body_shape`; kept apart from
+        /// `outcomes` so a reader summing that map does not count twice.
+        pub body_shapes: BTreeMap<&'static str, u64>,
         /// Requests on the wire right now.
         pub in_flight: usize,
         /// Successful requests' latency by request-body size, over the last
@@ -2600,6 +2728,39 @@ pub mod diagnostics {
             assert_eq!(snapshot.outcomes["ok"], 301);
             assert_eq!(snapshot.outcomes["timeout"], 1);
             assert_eq!(snapshot.latency_ms["4_to_32_kib"].p50, None);
+        }
+
+        #[test]
+        fn body_shapes_are_counted_by_kind_and_in_the_total() {
+            let recorder = Recorder::default();
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                for _ in 0..=times {
+                    recorder.record_body_shape(kind, 100, Duration::from_millis(5));
+                }
+            }
+            let snapshot = recorder.snapshot();
+            assert_eq!(
+                snapshot.body_shapes.keys().copied().collect::<Vec<_>>(),
+                [
+                    "empty_data",
+                    "entry_count_mismatch",
+                    "parse_error",
+                    "span_out_of_range",
+                    "span_text_mismatch",
+                ]
+            );
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                assert_eq!(snapshot.body_shapes[kind.label()], times as u64 + 1);
+            }
+            assert_eq!(
+                snapshot.outcomes["body_shape"],
+                snapshot.body_shapes.values().sum::<u64>()
+            );
+            assert_eq!(snapshot.outcomes["ok"], 0, "a malformed answer is not ok");
+            assert_eq!(
+                snapshot.latency_ms["under_4_kib"].samples, 0,
+                "a malformed answer contributes no latency"
+            );
         }
 
         #[test]

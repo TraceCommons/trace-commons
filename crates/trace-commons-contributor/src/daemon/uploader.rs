@@ -426,7 +426,8 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
             // The privacy witness could not review the trace: unreachable,
             // past its deadline, or its own classifier failed (`503
-            // witness_redaction_failed`, read as `witness_unreachable`).
+            // witness_classifier_unavailable` or `503
+            // witness_redaction_failed`, both read as `witness_unreachable`).
             // That is the privacy scan waiting, not the upload server down,
             // so it takes the scan's line rather than the catch-all below.
             label if crate::submit::witness_failure_is_transient(label) => {

@@ -53,7 +53,10 @@ use trace_commons_protocol::trace_contribution::{
     redaction_pipeline_version,
 };
 
-use super::{ContributionRedactor, RedactedContribution, SeamUnavailable, refuse_on_panic};
+use super::{
+    ContributionRedactor, RedactedContribution, RedactionUnavailable, redaction_outcome,
+    refuse_on_panic,
+};
 
 /// Classifier calls in flight at once, across the whole process.
 ///
@@ -427,10 +430,12 @@ impl ContributionRedactor for PrefetchingContributionRedaction {
                 trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
             >,
         ),
-        SeamUnavailable,
+        RedactionUnavailable,
     > {
         let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
-        let (envelope, maps) = refuse_on_panic(
+        // The replay meets each stored classifier error where the
+        // sequential pass would have, with its transience intact.
+        let (envelope, maps) = redaction_outcome(
             self.pipeline(Arc::new(answers))
                 .redact_trace_with_edits(raw),
         )
@@ -447,10 +452,11 @@ impl ContributionRedactor for PrefetchingContributionRedaction {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable> {
+    ) -> Result<RedactedContribution, RedactionUnavailable> {
         use trace_commons_protocol::trace_contribution::TraceRedactor;
         let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
-        let envelope = refuse_on_panic(self.pipeline(Arc::new(answers)).redact_trace(raw)).await?;
+        let envelope =
+            redaction_outcome(self.pipeline(Arc::new(answers)).redact_trace(raw)).await?;
         Ok(RedactedContribution {
             envelope,
             policy_version: self.policy_version.clone(),

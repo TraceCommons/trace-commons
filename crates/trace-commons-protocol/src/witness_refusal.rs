@@ -17,9 +17,23 @@ pub const WITNESS_REQUEST_TIMED_OUT: &str = "witness_request_timed_out";
 /// `413`: the request is larger than the witness accepts.
 pub const WITNESS_REQUEST_TOO_LARGE: &str = "witness_request_too_large";
 
-/// `503`: the redaction did not complete (a classifier unavailable or
-/// erroring, or a residual secret the witness would not certify).
+/// `503`: the redaction did not complete (a classifier refusing or
+/// erroring, a residual secret the witness would not certify, or a result
+/// too large to keep).
 pub const WITNESS_REDACTION_FAILED: &str = "witness_redaction_failed";
+/// `503`: the prose-PII classifier did not classify every text in time, so
+/// the redaction did not complete: it stayed unavailable through the
+/// witness's own retries (transport errors, timeouts, 5xx, rate limits),
+/// or the request's classify budget ran out before a
+/// call could start (a long classify queue can do that with no classifier
+/// call at all). Nothing about the contribution was judged; the same
+/// request may succeed later. Sent with
+/// `Retry-After: WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS`.
+pub const WITNESS_CLASSIFIER_UNAVAILABLE: &str = "witness_classifier_unavailable";
+/// The `Retry-After` a [`WITNESS_CLASSIFIER_UNAVAILABLE`] answer carries, in
+/// seconds. A hint: a client reads the 503 as unavailable and keeps its own
+/// backoff.
+pub const WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS: u32 = 60;
 /// `503`: the witness could not bind a digest to the artifact it produced.
 pub const WITNESS_ARTIFACT_BINDING_FAILED: &str = "witness_artifact_binding_failed";
 /// `503`: the enclave could not report its measurement.
@@ -31,8 +45,9 @@ pub const WITNESS_CONTRIBUTION_PATH_UNAVAILABLE: &str = "witness_contribution_pa
 
 /// The `503` refusals that say the witness could not do its job right now.
 /// None of them is about the contributor's input being wrong.
-pub const WITNESS_UNAVAILABLE_REFUSALS: [&str; 5] = [
+pub const WITNESS_UNAVAILABLE_REFUSALS: [&str; 6] = [
     WITNESS_REDACTION_FAILED,
+    WITNESS_CLASSIFIER_UNAVAILABLE,
     WITNESS_ARTIFACT_BINDING_FAILED,
     WITNESS_MEASUREMENT_UNAVAILABLE,
     WITNESS_SIGNING_UNAVAILABLE,
@@ -123,9 +138,14 @@ mod tests {
         assert_eq!(WITNESS_REQUEST_TIMED_OUT, "witness_request_timed_out");
         assert_eq!(WITNESS_REQUEST_TOO_LARGE, "witness_request_too_large");
         assert_eq!(
+            WITNESS_CLASSIFIER_UNAVAILABLE,
+            "witness_classifier_unavailable"
+        );
+        assert_eq!(
             WITNESS_UNAVAILABLE_REFUSALS,
             [
                 "witness_redaction_failed",
+                "witness_classifier_unavailable",
                 "witness_artifact_binding_failed",
                 "witness_measurement_unavailable",
                 "witness_signing_unavailable",
@@ -175,6 +195,7 @@ mod tests {
             (403, None, Unrecognised),
             // A label never moves a 4xx on its own.
             (404, Some(WITNESS_REDACTION_FAILED), Unrecognised),
+            (404, Some(WITNESS_CLASSIFIER_UNAVAILABLE), Unrecognised),
             (429, Some("witness_saturated"), Unrecognised),
             (413, Some("something_else"), Unrecognised),
             (

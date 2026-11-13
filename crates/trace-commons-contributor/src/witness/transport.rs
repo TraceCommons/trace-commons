@@ -2735,6 +2735,13 @@ mod tests {
             (413, None, WitnessPayloadTooLarge),
             // A crashed or oversized job's sealed answer.
             (503, Some("witness_redaction_failed"), WitnessUnreachable),
+            // The witness's classifier stayed unavailable through its
+            // retries: retried exactly as a redaction failure is.
+            (
+                503,
+                Some("witness_classifier_unavailable"),
+                WitnessUnreachable,
+            ),
             // Gateway answers while the witness VM is down.
             (404, None, WitnessUnreachable),
             (502, None, WitnessUnreachable),
@@ -2758,6 +2765,11 @@ mod tests {
             (
                 404,
                 Some("witness_redaction_failed"),
+                WitnessResponseMalformed,
+            ),
+            (
+                404,
+                Some("witness_classifier_unavailable"),
                 WitnessResponseMalformed,
             ),
         ];
@@ -2784,6 +2796,8 @@ mod tests {
         for (status, label) in [
             (503, Some("witness_signing_unavailable")),
             (503, Some("witness_contribution_path_unavailable")),
+            (503, Some("witness_redaction_failed")),
+            (503, Some("witness_classifier_unavailable")),
             (502, None),
             (404, None),
             (504, None),
@@ -4612,6 +4626,10 @@ mod tests {
         DropsConnectionOnce,
         /// `pending` forever.
         NeverDone,
+        /// The job's sealed answer: the witness's classifier stayed
+        /// unavailable, `503 witness_classifier_unavailable` with a
+        /// `Retry-After`.
+        ClassifierUnavailable,
     }
 
     #[derive(Default)]
@@ -4713,6 +4731,14 @@ mod tests {
                                     panic!("test double: drop the connection");
                                 }
                                 PollScript::NeverDone => pending,
+                                PollScript::ClassifierUnavailable => (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [(axum::http::header::RETRY_AFTER, "60")],
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_classifier_unavailable"
+                                    })),
+                                )
+                                    .into_response(),
                                 _ => witness_answer(Some((
                                     answer.certificate_json.clone(),
                                     answer.signature_hex.clone(),
@@ -4798,6 +4824,24 @@ mod tests {
         let (result, log) = review_against(PollScript::AlwaysGone, Duration::from_secs(5)).await;
         assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessUnreachable);
         assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    /// A job the witness finished as `witness_classifier_unavailable` is the
+    /// witness's own answer: final for this review, not resubmitted, and read
+    /// as unreachable -- which the daemon retries on its own backoff -- not
+    /// as saturation, whatever its `Retry-After` says.
+    #[tokio::test]
+    async fn a_job_finished_as_classifier_unavailable_is_unreachable_and_not_resubmitted() {
+        let (result, log) =
+            review_against(PollScript::ClassifierUnavailable, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(err, WitnessTrustError::WitnessUnreachable);
+        assert!(crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
     }
 
     #[tokio::test]

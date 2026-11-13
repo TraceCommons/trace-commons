@@ -1369,7 +1369,9 @@ async fn a_batched_request_is_counted_in_diagnostics() {
 #[tokio::test]
 async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
     use std::sync::Arc;
-    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{
+        BodyShape, Outcome, Recorder,
+    };
 
     let recorder = Arc::new(Recorder::default());
     let server = server_with(per_input_emails(usize::MAX, true)).await;
@@ -1378,6 +1380,7 @@ async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
     let answers = answers_of(&adapter, &texts).await;
     assert!(answers.iter().all(Result::is_err), "{answers:?}");
     assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    assert_eq!(recorder.body_shape_count(BodyShape::EntryCountMismatch), 1);
     assert_eq!(recorder.count(Outcome::Ok), 0);
     assert_eq!(recorder.snapshot().in_flight, 0);
 }
@@ -1440,4 +1443,79 @@ async fn an_out_of_range_span_is_refused_counted_and_never_cached() {
         2 * sent,
         "the second pass asked again"
     );
+}
+
+/// A 200 that is malformed in the way `kind` names, for [`ALICE_TEXT`].
+fn malformed_alice_answer(
+    kind: trace_commons_protocol::privacy_filter_near_ai::diagnostics::BodyShape,
+) -> ResponseTemplate {
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::BodyShape;
+    match kind {
+        BodyShape::ParseError => ResponseTemplate::new(200)
+            .set_body_string("{not valid json")
+            .insert_header("content-type", "application/json"),
+        BodyShape::EmptyData => ResponseTemplate::new(200).set_body_json(json!({ "data": [] })),
+        // Right offsets, wrong text: the answer disagrees with itself.
+        BodyShape::SpanTextMismatch => ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.org"}
+            ]}]
+        })),
+        BodyShape::SpanOutOfRange => out_of_range_answer(1),
+        BodyShape::EntryCountMismatch => ResponseTemplate::new(200)
+            .set_body_json(json!({ "data": [{"spans": []}, {"spans": []}] })),
+    }
+}
+
+/// Each kind of malformed answer on a single window is counted once under
+/// its own label and in the `body_shape` total, never as `ok`, and refused
+/// without leaking content. (Entry-count mismatch exists only for a batch;
+/// see `a_batch_count_mismatch_is_recorded_as_body_shape`.)
+#[tokio::test]
+async fn each_malformed_answer_is_counted_by_its_kind() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{
+        BodyShape, Outcome, Recorder,
+    };
+    let single_window = [
+        BodyShape::ParseError,
+        BodyShape::EmptyData,
+        BodyShape::SpanTextMismatch,
+        BodyShape::SpanOutOfRange,
+    ];
+    for kind in single_window {
+        let server = server_with(move |_: &wiremock::Request| malformed_alice_answer(kind)).await;
+        let recorder = Arc::new(Recorder::default());
+        let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+        let error = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("body_shape={}", kind.label())),
+            "{kind:?}: {message}"
+        );
+        assert!(!message.contains("alice"), "no content: {message}");
+        assert_eq!(recorder.count(Outcome::BodyShape), 1, "{kind:?}");
+        assert_eq!(recorder.count(Outcome::Ok), 0, "{kind:?}");
+        for other in BodyShape::ALL {
+            let expected = u64::from(other == kind);
+            assert_eq!(
+                recorder.body_shape_count(other),
+                expected,
+                "{kind:?}/{other:?}"
+            );
+        }
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.body_shapes[kind.label()], 1);
+        assert_eq!(
+            snapshot.outcomes["body_shape"],
+            snapshot.body_shapes.values().sum::<u64>()
+        );
+        // Never cached: the same window is asked about again.
+        let _ = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "{kind:?}"
+        );
+    }
 }
