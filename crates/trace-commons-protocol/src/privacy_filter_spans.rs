@@ -34,6 +34,24 @@ pub(crate) struct ClassifySpan {
     #[serde(default)]
     pub(crate) score: f64,
 }
+/// Whether a span's codepoint offsets `[start, end)` lie inside a text of
+/// `codepoints` codepoints.
+///
+/// The one range rule. `apply_spans` refuses a span that breaks it, and the
+/// NEAR AI adapter refuses an answer that breaks it before the answer can be
+/// cached, so nothing a cache holds can be refused when it is applied.
+pub(crate) fn span_fits(start: usize, end: usize, codepoints: usize) -> bool {
+    start <= end && end <= codepoints
+}
+
+/// Whether every span fits `text` by [`span_fits`].
+pub(crate) fn spans_fit(text: &str, spans: &[ClassifySpan]) -> bool {
+    let codepoints = text.chars().count();
+    spans
+        .iter()
+        .all(|span| span_fits(span.start, span.end, codepoints))
+}
+
 pub(crate) fn apply_spans(
     backend: &'static str,
     text: &str,
@@ -56,7 +74,9 @@ pub(crate) fn apply_spans(
     // codepoint indices to byte offsets here.
     let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.start > span.end || span.end >= boundaries.len() {
+        // Defense in depth: an answer from the NEAR AI cache has already
+        // passed this rule, but every backend's spans meet it here too.
+        if !span_fits(span.start, span.end, boundaries.len() - 1) {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!("{backend} privacy classifier returned out-of-range span"),
             });

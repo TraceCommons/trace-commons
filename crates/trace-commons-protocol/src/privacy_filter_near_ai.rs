@@ -663,9 +663,12 @@ fn split_point(text: &str) -> Option<usize> {
 }
 
 const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 
-/// Fail closed unless every span's reported `text` is exactly the request
-/// input's codepoints `[start, end)`, then return the spans without it.
+/// Fail closed unless every span lies inside the input (the range rule
+/// `apply_spans` applies, [`crate::privacy_filter_spans::span_fits`]) and its
+/// reported `text` is exactly the input's codepoints `[start, end)`, then
+/// return the spans without it.
 ///
 /// The endpoint reports, with each span, the text it covers (probed live on
 /// 2026-10-11 with ZWJ emoji, accented and CJK text, CRLF and blank lines:
@@ -677,22 +680,43 @@ const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
 /// success. This check turns that into a refusal. A span with no `text`
 /// cannot be checked, so it refuses too.
 ///
-/// Spans whose offsets are out of range are passed through for
-/// `apply_spans`, which refuses them with its own error. Neither the span
-/// text nor the input is ever logged: the failure carries the label and the
-/// input's hash-only fingerprint.
+/// A span out of range is refused here, not left for `apply_spans`: an
+/// answer this accepts is cached, and an out-of-range span that reached the
+/// cache was refused on every later request for its window without the
+/// classifier being asked again (a real session, 2026-11-12). Neither the
+/// span text nor the input is ever logged: the failure carries the label and
+/// the input's hash-only fingerprint.
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
 ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
+    let codepoints = boundaries.len() - 1;
+    let out_of_range = spans
+        .iter()
+        .filter(|span| !crate::privacy_filter_spans::span_fits(span.start, span.end, codepoints))
+        .count();
+    if out_of_range > 0 {
+        let diagnostics = classify_input_diagnostics(&[input]);
+        tracing::warn!(
+            classify_input = %diagnostics,
+            out_of_range_spans = out_of_range,
+            spans = spans.len(),
+            failure = SPAN_OUT_OF_RANGE_LABEL,
+            "near-ai privacy classify failed"
+        );
+        return Err(TraceContributionError::RedactionFailed {
+            reason: format!(
+                "near-ai privacy classifier returned out-of-range span: \
+                 {SPAN_OUT_OF_RANGE_LABEL} out_of_range_spans={out_of_range} spans={} {diagnostics}",
+                spans.len()
+            ),
+        });
+    }
     let mismatches = spans
         .iter()
         .filter(|span| {
-            if span.start > span.end || span.end >= boundaries.len() {
-                return false;
-            }
             let covered = &input[boundaries[span.start]..boundaries[span.end]];
             span.text.as_deref() != Some(covered)
         })
@@ -928,7 +952,7 @@ impl NearAiPrivacyFilterAdapter {
                 Ok(WindowAnswer::Spans(all)) => {
                     for (&index, spans) in batch.iter().zip(all) {
                         let text = texts[index];
-                        self.remember_window(window_key(text), &spans);
+                        self.remember_window(text, &spans);
                         answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]));
                     }
                 }
@@ -992,7 +1016,20 @@ impl NearAiPrivacyFilterAdapter {
     }
 
     /// Record a successful classification for reuse within this tick.
-    fn remember_window(&self, key: [u8; 32], spans: &[ClassifySpan]) {
+    /// Cache `spans` as `window`'s verified answer. Spans that do not fit
+    /// the window are never stored: verification refuses them first, and
+    /// this guard keeps any later path from caching what `apply_spans` would
+    /// refuse.
+    fn remember_window(&self, window: &str, spans: &[ClassifySpan]) {
+        if !crate::privacy_filter_spans::spans_fit(window, spans) {
+            tracing::warn!(
+                classify_input = %classify_input_diagnostics(&[window]),
+                failure = SPAN_OUT_OF_RANGE_LABEL,
+                "near-ai privacy classify answer not cached"
+            );
+            return;
+        }
+        let key = window_key(window);
         let mut cache = match self.window_cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
@@ -1076,7 +1113,7 @@ impl NearAiPrivacyFilterAdapter {
             };
             // Verified before it is remembered (in `send_window`, per
             // half): a refused response is never served from the cache.
-            self.remember_window(key, &spans);
+            self.remember_window(text, &spans);
             Ok(spans)
         })
     }
@@ -1509,6 +1546,96 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    // ---- What may be cached. An answer that verification accepts is cached
+    // and later applied without asking again, so anything `apply_spans`
+    // would refuse must be refused here first.
+
+    fn near_span(start: usize, end: usize, text: Option<&str>) -> NearAiSpan {
+        NearAiSpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+            text: text.map(str::to_string),
+        }
+    }
+
+    /// Every single-span answer over every offset pair around each text's
+    /// end, reporting either the true covered text or a wrong one: whatever
+    /// verification accepts, `apply_spans` applies. Two-span answers with
+    /// one bad span are refused whole.
+    #[test]
+    fn every_answer_verification_accepts_applies_cleanly() {
+        let texts = [
+            "",
+            "a",
+            "hi Zo\u{eb} \u{1f600} \u{674e}\r\n ok",
+            "plain ascii text",
+        ];
+        let (mut accepted, mut refused) = (0usize, 0usize);
+        for text in texts {
+            let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            boundaries.push(text.len());
+            let codepoints = boundaries.len() - 1;
+            for start in 0..=codepoints + 2 {
+                for end in 0..=codepoints + 2 {
+                    let covered = (start <= end && end <= codepoints)
+                        .then(|| &text[boundaries[start]..boundaries[end]]);
+                    for reported in [covered, Some("not the text"), None] {
+                        match verify_span_texts(text, vec![near_span(start, end, reported)]) {
+                            Ok(spans) => {
+                                accepted += 1;
+                                assert!(
+                                    crate::privacy_filter_spans::apply_spans(
+                                        "near-ai", text, &spans
+                                    )
+                                    .is_ok(),
+                                    "accepted but not applicable: {start}..{end} in {:?}",
+                                    text.len()
+                                );
+                            }
+                            Err(_) => refused += 1,
+                        }
+                    }
+                    if let Some(covered) = covered {
+                        let bad = near_span(start, codepoints + 1, Some(covered));
+                        let pair = vec![near_span(start, end, Some(covered)), bad];
+                        assert!(verify_span_texts(text, pair).is_err());
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && refused > 0, "{accepted} {refused}");
+    }
+
+    /// The cache's own guard: spans that do not fit the window they would be
+    /// cached under are never stored, whoever asks.
+    #[test]
+    fn the_window_cache_never_holds_spans_that_do_not_fit_their_window() {
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            "http://127.0.0.1:1",
+            DEFAULT_MODEL,
+            "stub-not-a-key",
+            Duration::from_secs(1),
+            1_000_000,
+        )
+        .unwrap();
+        let window = "say hi to Zo\u{eb}";
+        let codepoints = window.chars().count();
+        let span = |start, end| ClassifySpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+        };
+        adapter.remember_window(window, &[span(10, codepoints + 1)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(12, 10)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(10, codepoints)]);
+        assert!(adapter.cached_window(&window_key(window)).is_some());
     }
 
     // ---- Pacing (owner, 2026-11-12: NEAR AI allows 30 classify requests a

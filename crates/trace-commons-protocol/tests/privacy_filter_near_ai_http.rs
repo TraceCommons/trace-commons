@@ -1381,3 +1381,63 @@ async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
     assert_eq!(recorder.count(Outcome::Ok), 0);
     assert_eq!(recorder.snapshot().in_flight, 0);
 }
+
+const ALICE_TEXT: &str = "email me at alice@example.com please";
+
+/// A span whose offsets run past its input: NEAR AI answered one for a real
+/// session on every request (2026-11-12). It used to pass verification, be
+/// cached and counted `ok`, and then be refused when applied -- so every
+/// later request for that window was refused from the cache with no
+/// classifier call at all.
+fn out_of_range_answer(inputs: usize) -> ResponseTemplate {
+    let entry = json!({ "spans": [
+        {"category": "private_email", "start": 12, "end": 900, "score": 0.99, "text": "alice@example.com"}
+    ]});
+    ResponseTemplate::new(200).set_body_json(json!({ "data": vec![entry; inputs] }))
+}
+
+#[tokio::test]
+async fn an_out_of_range_span_is_refused_counted_and_never_cached() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let server = server_with(|_: &wiremock::Request| out_of_range_answer(1)).await;
+    let recorder = Arc::new(Recorder::default());
+    let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+    let error = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("privacy_filter_span_out_of_range"),
+        "{message}"
+    );
+    assert!(!message.contains("alice"), "no content: {message}");
+    assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    assert_eq!(recorder.count(Outcome::Ok), 0, "a refused answer is not ok");
+    let requests = server.received_requests().await.unwrap().len();
+
+    // The same window again: a fresh request, not a refusal from the cache.
+    adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2 * requests
+    );
+
+    // Batched: the entry refuses the whole batch, and nothing is cached.
+    let batch_server = server_with(|req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        out_of_range_answer(body["input"].as_array().map_or(1, Vec::len))
+    })
+    .await;
+    let batching = batching_adapter(batch_server.uri(), 8);
+    let texts: Vec<String> = (0..3).map(|i| format!("{ALICE_TEXT} {i}")).collect();
+    let first = answers_of(&batching, &texts).await;
+    assert!(first.iter().all(Result::is_err), "{first:?}");
+    let sent = batch_server.received_requests().await.unwrap().len();
+    let second = answers_of(&batching, &texts).await;
+    assert!(second.iter().all(Result::is_err), "{second:?}");
+    assert_eq!(
+        batch_server.received_requests().await.unwrap().len(),
+        2 * sent,
+        "the second pass asked again"
+    );
+}
