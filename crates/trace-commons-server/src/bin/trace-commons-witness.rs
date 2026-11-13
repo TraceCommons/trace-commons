@@ -145,6 +145,36 @@ const DEFAULT_MAX_STORED_RESULTS: usize = 256;
 /// session it came from.
 const DEFAULT_MAX_RESULT_BYTES: usize = 4 * DEFAULT_MAX_REQUEST_BYTES;
 
+/// The highest request-body bound this binary starts with. The deployed value
+/// is a sealed deploy-time setting (owner, 2026-11-13), so it is not in the
+/// measurement; this ceiling is, being compiled in. 32 MiB is the largest
+/// witness request the contributor client sends, so a higher bound could
+/// only admit requests no client makes.
+const MAX_REQUEST_BYTES_CEILING: usize = 32 * 1024 * 1024;
+
+/// The highest sealed-result bound this binary starts with, for the same
+/// reason. 256 stored results at 40 MiB is 10 GiB of the CVM's 20 GiB data
+/// disk at worst.
+const MAX_RESULT_BYTES_CEILING: usize = 40 * 1024 * 1024;
+
+/// Refuse a request or result bound of zero, or above its compiled ceiling.
+/// Zero is refused rather than read as "unbounded" or "serve nothing"; a
+/// value above the ceiling is refused so the measured binary, not the
+/// unmeasured setting, decides how far the bound can go.
+fn check_size_caps(max_request_bytes: usize, max_result_bytes: usize) -> Result<(), String> {
+    if max_request_bytes == 0 || max_request_bytes > MAX_REQUEST_BYTES_CEILING {
+        return Err(format!(
+            "TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES must be between 1 and {MAX_REQUEST_BYTES_CEILING}"
+        ));
+    }
+    if max_result_bytes == 0 || max_result_bytes > MAX_RESULT_BYTES_CEILING {
+        return Err(format!(
+            "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES must be between 1 and {MAX_RESULT_BYTES_CEILING}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "trace-commons-witness",
@@ -415,9 +445,7 @@ async fn main() -> Result<()> {
              `{FULL_PIPELINE}`"
         );
     }
-    if args.max_request_bytes == 0 {
-        bail!("TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES must be greater than zero");
-    }
+    check_size_caps(args.max_request_bytes, args.max_result_bytes).map_err(anyhow::Error::msg)?;
     // Zero is refused rather than read as "unbounded" in one case and "serve
     // nothing" in the other. Both readings are guesses about what an operator
     // who typed 0 meant, and one of them silently removes the bound.
@@ -437,9 +465,6 @@ async fn main() -> Result<()> {
     }
     if args.max_stored_results == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS must be greater than zero");
-    }
-    if args.max_result_bytes == 0 {
-        bail!("TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES must be greater than zero");
     }
 
     // The retired gateway pin. It is no longer read, and a witness that
@@ -833,6 +858,33 @@ fn classify_budget(request_timeout_secs: u64) -> Duration {
 /// own work on a 900 KB contribution measured 0.41 s; 20 s covers a slow
 /// body upload too.
 const CLASSIFY_BUDGET_MARGIN_SECS: u64 = 20;
+
+#[cfg(test)]
+mod size_cap_ceiling_tests {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    /// The deploy-time size caps are sealed values, not measured, so the
+    /// binary -- which is measured -- holds the ceiling a contributor can
+    /// verify: zero and anything above the ceiling refuse to start.
+    #[test]
+    fn size_caps_are_bounded_by_the_measured_ceiling() {
+        assert_eq!(check_size_caps(16 * MIB, 20 * MIB), Ok(()));
+        assert_eq!(
+            check_size_caps(MAX_REQUEST_BYTES_CEILING, MAX_RESULT_BYTES_CEILING),
+            Ok(())
+        );
+        assert!(check_size_caps(0, 20 * MIB).is_err());
+        assert!(check_size_caps(16 * MIB, 0).is_err());
+        assert!(check_size_caps(MAX_REQUEST_BYTES_CEILING + 1, 20 * MIB).is_err());
+        assert!(check_size_caps(16 * MIB, MAX_RESULT_BYTES_CEILING + 1).is_err());
+        // The ceilings themselves: the client's own largest witness request,
+        // and a disk bound of 256 stored results within 10 GiB.
+        assert_eq!(MAX_REQUEST_BYTES_CEILING, 32 * MIB);
+        assert!(DEFAULT_MAX_STORED_RESULTS * MAX_RESULT_BYTES_CEILING <= 10 * 1024 * MIB);
+    }
+}
 
 #[cfg(test)]
 mod classify_deadline_tests {

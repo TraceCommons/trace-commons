@@ -84,6 +84,7 @@ the link.
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Load-testing the redaction witness locally | [`./witness-load-testing.md`](./witness-load-testing.md) |
 | Seeing when the redaction witness is overloaded and blocking uploads | [`./witness-monitor.md`](./witness-monitor.md) |
+| Retiring old witness measurements after an upgrade's rollback window | [`./witness-measurement-retirement.md`](./witness-measurement-retirement.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
