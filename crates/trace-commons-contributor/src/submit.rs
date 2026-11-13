@@ -2473,6 +2473,11 @@ impl<'a> SubmitContext<'a> {
                         uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
+                    crate::daemon::first_trace::observe_for_config(
+                        self.store,
+                        self.cfg,
+                        std::iter::once(receipt.submitted_at),
+                    );
                     self.receipts.push(receipt);
                     return Ok(SubmitOutcome::Submitted {
                         submission_id: envelope.submission_id,
@@ -2534,6 +2539,11 @@ impl<'a> SubmitContext<'a> {
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
+                        crate::daemon::first_trace::observe_for_config(
+                            self.store,
+                            self.cfg,
+                            std::iter::once(r.submitted_at),
+                        );
                         self.receipts.push(r);
                         Ok(SubmitOutcome::Submitted {
                             submission_id: envelope.submission_id,

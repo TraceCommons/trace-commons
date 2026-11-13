@@ -710,8 +710,8 @@ struct MenuBarStripLabel: View {
 }
 
 /// Everything the menu-bar strip draws. Equal inputs draw the same bitmap.
-/// The clock reaches it only through the day columns, so a read that moves
-/// the clock without moving a column changes nothing here.
+/// The clock can change both the day columns and whether the enrollment
+/// has reached the graph's age threshold; either invalidates the bitmap.
 struct MenuBarStripInputs: Equatable {
     let traces: [GlassDayColumn]
     let privateAI: [GlassDayColumn]?
@@ -720,7 +720,7 @@ struct MenuBarStripInputs: Equatable {
     let mark: GlassMenuBarStrip.Mark
     let scale: CGFloat
     /// Whether the graph is drawn: only after a few days of trace data.
-    var graph = true
+    let graph: Bool
 
     @MainActor
     static func of(model: AppModel, store: MenuPanelStore, scale: CGFloat) -> MenuBarStripInputs {

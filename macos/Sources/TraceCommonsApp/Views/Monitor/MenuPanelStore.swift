@@ -56,14 +56,15 @@ final class MenuPanelStore {
     /// How often an open popover re-reads the glance: the ledger can stop
     /// refreshing with no event, and only a re-read sees it go stale.
     static let glanceRefresh: Duration = .seconds(60)
-    /// Where `firstTraceAt` is kept between launches.
-    @ObservationIgnored private let defaults: UserDefaults
-    /// The oldest trace this Mac's menu-bar item has seen: a contribution's
-    /// or a waiting session's date. Only ever moves earlier, and is kept
-    /// between launches, so the graph never goes away again once shown,
-    /// whatever later reads hold (a waiting session contributed today
-    /// leaves only today's date behind, and the history read is capped).
+    /// Authoritative enrollment-scoped age from `status`. No app defaults or
+    /// capped history page can establish the first trace for this account.
     private(set) var firstTraceAt: Date?
+    private var traceAgeRead = false
+    /// Fences replies still in flight when a different daemon is attached.
+    private var clientGeneration = 0
+    /// Menu opening and event refreshes can overlap on one connection. Only
+    /// the newest request may publish, including after an account switch.
+    private var loadGeneration = 0
 
     private(set) var client: (any DaemonDataClient)?
 
@@ -80,10 +81,8 @@ final class MenuPanelStore {
     /// An override write is in flight.
     private(set) var writingOverride = false
 
-    init(client: (any DaemonDataClient)?, defaults: UserDefaults = .standard) {
+    init(client: (any DaemonDataClient)?) {
         self.client = client
-        self.defaults = defaults
-        firstTraceAt = defaults.object(forKey: MenuPanelData.firstTraceKey) as? Date
     }
 
     // MARK: The nudge row
@@ -114,8 +113,20 @@ final class MenuPanelStore {
     /// Follows a new client (or none): the old data is stale until the
     /// new one has been read.
     func attach(_ client: (any DaemonDataClient)?, configDirectory: String? = nil) {
+        clientGeneration += 1
         self.client = client
-        if let configDirectory { self.configDirectory = configDirectory }
+        self.configDirectory = configDirectory
+        projects = nil
+        status = nil
+        pending = []
+        history = []
+        calls = []
+        activity = nil
+        firstTraceAt = nil
+        traceAgeRead = false
+        unreadable = []
+        confirming = nil
+        overrideRefusal = nil
         stale = true
         glance = .notRead
     }
@@ -260,16 +271,21 @@ final class MenuPanelStore {
     /// it unknown, a method the daemon does not have yet is not a failure.
     /// Moves `stripNow` on whatever the read answers.
     func loadActivity() async {
-        defer { stripNow = clock() }
         guard let client else { return }
+        let generation = clientGeneration
         do {
-            activity = try await client.inferenceActivity()
+            let value = try await client.inferenceActivity()
+            guard generation == clientGeneration else { return }
+            activity = value
             unreadable.remove(.activity)
         } catch DaemonDataError.notAvailableYet {
-            return
+            // An older daemon still advances the threshold's clock.
         } catch {
+            guard generation == clientGeneration else { return }
             unreadable.insert(.activity)
         }
+        guard generation == clientGeneration else { return }
+        stripNow = clock()
     }
 
     /// Re-reads on each event until the client's stream ends.
@@ -292,11 +308,14 @@ final class MenuPanelStore {
     /// `status` read makes the whole panel stale. A method the daemon does
     /// not have yet is not a failure.
     func load() async {
+        loadGeneration += 1
+        let requestGeneration = loadGeneration
         guard let client else {
             stale = true
             glance = .unavailable
             return
         }
+        let generation = clientGeneration
         var failed: Set<MenuPanelData.Read> = []
         func read<T>(_ which: MenuPanelData.Read, _ call: () async throws -> T) async -> T? {
             do { return try await call() } catch DaemonDataError.notAvailableYet {
@@ -306,38 +325,36 @@ final class MenuPanelStore {
                 return nil
             }
         }
-        if let value = await read(.status, { try await client.status() }) { status = value }
-        if let value = await read(.projects, { try await client.listProjects() }) { projects = value.projects }
-        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) {
+        let newStatus = await read(.status, { try await client.status() })
+        let newProjects = await read(.projects, { try await client.listProjects() })
+        let newPending = await read(.pending, { try await client.listPending(projectId: nil) })
+        let newHistory = await read(.history, { try await client.listHistory(limit: HomeStore.historyLimit) })
+        let newCalls = await read(.calls, { try await client.inferenceCalls(limit: 20, cursor: nil) })
+        let newActivity = await read(.activity, { try await client.inferenceActivity() })
+        // Commit this client's snapshot together. An old read must not seed
+        // the new account's graph or resurrect its previous lists.
+        guard generation == clientGeneration, requestGeneration == loadGeneration else { return }
+        if let value = newStatus {
+            status = value
+            firstTraceAt = value.firstTraceAt
+            traceAgeRead = true
+        } else {
+            failed.insert(.status)
+        }
+        if let value = newProjects { projects = value.projects }
+        if let value = newPending {
             pending = value
         } else {
             // Even an unsupported read is unknown, never a fresh empty queue.
             failed.insert(.pending)
         }
-        if let value = await read(.history, { try await client.listHistory(limit: HomeStore.historyLimit) }) {
-            history = value
-        }
-        if let value = await read(.calls, { try await client.inferenceCalls(limit: 20, cursor: nil) }) {
-            calls = value.readable ? value.calls : []
-        }
-        if let value = await read(.activity, { try await client.inferenceActivity() }) { activity = value }
+        if let value = newHistory { history = value }
+        if let value = newCalls { calls = value.readable ? value.calls : [] }
+        if let value = newActivity { activity = value }
         unreadable = failed
         stale = failed.contains(.status)
         stripNow = clock()
-        noteFirstTrace()
         await loadGlance()
-    }
-
-    /// Moves `firstTraceAt` back to the oldest trace the reads hold, and
-    /// keeps it. The reads keep their last answers when one fails, so what
-    /// they hold was read, never made up.
-    private func noteFirstTrace() {
-        let oldest = MenuPanelData.oldestTrace(
-            shared: history.compactMap(\.submittedAt),
-            kept: TracesGraphModel.keptTimes(pending, tool: nil))
-        guard let oldest, firstTraceAt.map({ oldest < $0 }) ?? true else { return }
-        firstTraceAt = oldest
-        defaults.set(oldest, forKey: MenuPanelData.firstTraceKey)
     }
 
     /// Reads the glance alone. Any failure, an older daemon's
@@ -348,12 +365,14 @@ final class MenuPanelStore {
             glance = .unavailable
             return
         }
+        let generation = clientGeneration
         let result: Result<DaemonData.InsightsGlance, any Error>
         do {
             result = .success(try await client.insightsGlance(tzSeconds: TimeZone.current.secondsFromGMT()))
         } catch {
             result = .failure(error)
         }
+        guard generation == clientGeneration else { return }
         glance = MenuPanelData.glance(result)
     }
 
@@ -435,10 +454,12 @@ final class MenuPanelStore {
         return span ?? MenuPanelData.Span(end: stripNow)
     }
 
-    /// Whether the menu-bar item draws its graph: only once this Mac has a
-    /// few days of trace data (`MenuPanelData.showsGraph`).
+    /// Keep the established wide loading layout until the daemon answers,
+    /// avoiding a narrow flash for an existing account. Once read, only the
+    /// enrollment's authoritative age controls the graph; failed refreshes
+    /// retain its last known width while the strip draws as unavailable.
     var stripShowsGraph: Bool {
-        MenuPanelData.showsGraph(firstTraceAt: firstTraceAt, now: stripNow)
+        !traceAgeRead || MenuPanelData.showsGraph(firstTraceAt: firstTraceAt, now: stripNow)
     }
 }
 
@@ -589,20 +610,12 @@ enum MenuPanelData {
     /// How old the oldest trace must be before the menu-bar item draws its
     /// graph (owner, 2026-11-12: no graph without a few days of data).
     static let graphAfter: TimeInterval = 3 * 24 * 3600
-    /// The defaults key `MenuPanelStore.firstTraceAt` is kept under.
-    static let firstTraceKey = "menuBar.firstTraceAt"
 
     /// Whether the menu-bar item draws its graph: the oldest trace seen is
     /// at least `graphAfter` old. No trace seen yet draws none.
     static func showsGraph(firstTraceAt: Date?, now: Date) -> Bool {
         guard let firstTraceAt else { return false }
         return now.timeIntervalSince(firstTraceAt) >= graphAfter
-    }
-
-    /// The oldest of the contributions' and the waiting sessions' dates, or
-    /// nil when there are none.
-    static func oldestTrace(shared: [Date], kept: [Date]) -> Date? {
-        (shared + kept).min()
     }
 
     /// The menu-bar item's span: `count` steps of `stepHours`, the last

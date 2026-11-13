@@ -128,8 +128,9 @@ pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), and the NEAR AI notice marker.
-pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
     CONFIG_FILE,
+    crate::daemon::first_trace::FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     DAEMON_PAYOUT_LINK_FILE,

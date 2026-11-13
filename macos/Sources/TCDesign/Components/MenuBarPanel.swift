@@ -529,7 +529,7 @@ public struct GlassMenuBarStrip: View {
         // halo moves it out by its own reach either way.
         let gap = graph ? (halo ? Self.haloReach : -Self.badgeOverlap) : Self.markOnlyGap + (halo ? Self.haloReach : 0)
         HStack(alignment: .bottom, spacing: gap) {
-            Canvas { [graph] context, size in
+            Canvas { context, size in
                 if let logo = GlassBrandMark.path(
                     at: CGPoint(x: 0, y: (size.height - Self.markSize) / 2), size: Self.markSize)
                 {

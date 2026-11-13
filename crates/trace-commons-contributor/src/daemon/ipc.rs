@@ -1555,6 +1555,7 @@ impl DaemonShared {
         if store.remove_retired_files().is_err() {
             tracing::warn!("could not remove a retired daemon file");
         }
+        super::first_trace::observe(&store, std::iter::empty());
         let mut queue = Queue::load(&store)?;
         // `Uploading` is a transient, in-pass claim. A daemon that died
         // mid-upload leaves entries in it, and nothing else would ever move
@@ -2823,6 +2824,7 @@ impl DaemonShared {
             .as_ref()
             .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
         let cfg = self.store.load_config().ok().flatten();
+        let first_trace_at = super::first_trace::read(&self.store, cfg.as_ref());
         // No credential-store read and no write (`account_attention`'s doc).
         // `holds_near_ai_key` takes the settings lock, before the locks below.
         let account_attention = super::account_attention::account_attention(
@@ -3067,6 +3069,8 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Enrollment-owned observation date, independent of history pages.
+            "first_trace_at": first_trace_at,
             // Additive (#1836 F1). `ok`, or `needs_attention` while this
             // app's account is locally broken in a way signing in again does
             // not fix; then `account_state_reason` is
