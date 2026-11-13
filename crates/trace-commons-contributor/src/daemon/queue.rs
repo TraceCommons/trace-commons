@@ -1321,7 +1321,12 @@ impl Queue {
             body.push_str(&serde_json::to_string(e).context("serializing queue entry")?);
             body.push('\n');
         }
-        store.write_daemon_file(DAEMON_QUEUE_FILE, body.as_bytes())
+        store.write_daemon_file(DAEMON_QUEUE_FILE, body.as_bytes())?;
+        // The enrollment observation takes the credential commit lock:
+        // policy -> queue -> commit, the same order as unenroll. Callers
+        // must not already hold commit (which is not reentrant).
+        super::first_trace::observe(store, self.entries.iter().map(|e| e.discovered_at));
+        Ok(())
     }
 
     pub fn all(&self) -> &[QueueEntry] {

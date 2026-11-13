@@ -15,7 +15,7 @@ final class MenuBarStripRenderTests: XCTestCase {
     private func inputs(badge: Int? = nil) -> MenuBarStripInputs {
         MenuBarStripInputs(
             traces: [GlassDayColumn(id: "a", up: 1, down: 2)], privateAI: nil,
-            condition: .live, badge: badge, mark: .none, scale: 2)
+            condition: .live, badge: badge, mark: .none, scale: 2, graph: true)
     }
 
     /// Equal inputs draw once and return the same image; a change to what is
