@@ -1088,6 +1088,37 @@ mod tests {
         }
     }
 
+    /// Text the witness's classifier could not classify is a refusal of
+    /// that session, never the privacy scan waiting: the pass moves on.
+    #[test]
+    fn unclassifiable_text_is_a_refusal_not_the_privacy_scan_waiting() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE;
+        let decision = super::decision_for(
+            crate::submit::SubmitOutcome::Refused {
+                reason_label: label.to_string(),
+                session_ref: "hash".to_string(),
+                size_bytes: None,
+                limit_bytes: None,
+                review_limits: None,
+            },
+            crate::submit::ReceiptShipped::NoCall,
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: label.to_string(),
+                review_limits: None,
+            }
+        );
+        assert_ne!(
+            health_label_for(&decision),
+            Some(LABEL_PII_FILTER_UNAVAILABLE)
+        );
+        assert!(!crate::submit::witness_failure_is_transient(label));
+    }
+
     /// A session the witness refused as too large to review is a refusal
     /// that keeps its two counts for the entry, and is neither the privacy
     /// scan waiting (`pii-filter-unavailable`) nor anything retried.

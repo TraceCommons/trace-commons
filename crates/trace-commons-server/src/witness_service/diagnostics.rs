@@ -338,7 +338,8 @@ mod tests {
                 "body_shapes",
                 "in_flight",
                 "latency_ms",
-                "outcomes"
+                "outcomes",
+                "spans_reanchored"
             ]
         );
         let outcomes = sorted(&json["classifier"]["outcomes"]);

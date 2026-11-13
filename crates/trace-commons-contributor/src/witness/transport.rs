@@ -943,6 +943,10 @@ fn refusal_from_parts_with(
             }
             None => WitnessTrustError::WitnessResponseMalformed,
         },
+        // About this session's content, not the witness being down: a final
+        // refusal of the session, so the upload pass goes on to the next
+        // one instead of stopping as it does for an outage.
+        WitnessRefusalClass::TextUnclassifiable => WitnessTrustError::WitnessTextUnclassifiable,
         // A client error this build does not recognise. Terminal, as before.
         WitnessRefusalClass::Unrecognised => WitnessTrustError::WitnessResponseMalformed,
     }
@@ -2864,6 +2868,7 @@ mod tests {
             );
         }
         for (status, label) in [
+            (422, Some("witness_text_unclassifiable")),
             (413, Some("witness_request_too_large")),
             (403, Some("witness_inference_receipt_unverified")),
             (400, Some("witness_request_malformed")),
@@ -4683,6 +4688,8 @@ mod tests {
         NeverDone,
         /// The job's sealed answer: too large to review, with its counts.
         TooLargeForReview,
+        /// The job's sealed answer: text the classifier could not classify.
+        TextUnclassifiable,
         /// The job's sealed answer: the witness's classifier stayed
         /// unavailable, `503 witness_classifier_unavailable` with a
         /// `Retry-After`.
@@ -4788,6 +4795,13 @@ mod tests {
                                     panic!("test double: drop the connection");
                                 }
                                 PollScript::NeverDone => pending,
+                                PollScript::TextUnclassifiable => (
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_text_unclassifiable"
+                                    })),
+                                )
+                                    .into_response(),
                                 PollScript::TooLargeForReview => (
                                     StatusCode::UNPROCESSABLE_ENTITY,
                                     axum::Json(serde_json::json!({
@@ -4932,6 +4946,47 @@ mod tests {
         let log = log.lock().unwrap();
         assert_eq!(log.submits, 1);
         assert_eq!(log.polls, 1);
+    }
+
+    /// A job the witness finished as `witness_text_unclassifiable` is a final
+    /// refusal of this session -- not the witness being down -- so the
+    /// upload pass goes on to the next session instead of stopping.
+    #[tokio::test]
+    async fn a_job_finished_as_text_unclassifiable_is_a_final_refusal() {
+        let (result, log) =
+            review_against(PollScript::TextUnclassifiable, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(err, WitnessTrustError::WitnessTextUnclassifiable);
+        assert_eq!(err.refusal_label(), "witness_text_unclassifiable");
+        assert!(!crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// What a build from before this label reads the same answer as: an
+    /// unknown `422` label is `witness_response_malformed` -- terminal too,
+    /// and offered again on a newer build when it was approved. Documented
+    /// here so the fallback cannot change unnoticed.
+    #[test]
+    fn an_unknown_422_label_reads_as_a_malformed_answer() {
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("a_label_from_a_newer_witness")),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert!(!crate::submit::witness_failure_is_transient(
+            "witness_response_malformed"
+        ));
+        assert!(
+            crate::daemon::queue::REOFFERED_ON_A_NEWER_BUILD
+                .contains(&"witness_response_malformed")
+        );
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("witness_text_unclassifiable")),
+            WitnessTrustError::WitnessTextUnclassifiable
+        );
     }
 
     /// The exact pair with both counts is the refusal; without them, or on

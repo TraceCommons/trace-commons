@@ -2637,6 +2637,17 @@ pub enum TraceContributionError {
     /// by inspecting `reason`.
     #[error("trace contribution redaction failed (transient upstream): {reason}")]
     TransientRedactionFailed { reason: String },
+    /// The privacy classifier's answer for some of the text could not be
+    /// verified or corrected: a span whose text does not match its offsets
+    /// and occurs zero or several times in the window, a span with no text,
+    /// or a span out of range. NEAR AI answers such text the same way every
+    /// time, so it is about the content, not the classifier being down.
+    /// Permanent: nothing was treated as classified, and retrying costs the
+    /// caller its attempt budget for nothing.
+    #[error(
+        "trace contribution redaction failed (text the classifier could not classify): {reason}"
+    )]
+    UnclassifiableText { reason: String },
 }
 
 impl TraceContributionError {

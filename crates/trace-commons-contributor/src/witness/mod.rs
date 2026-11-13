@@ -272,6 +272,13 @@ pub enum WitnessTrustError {
         windows_needed: u64,
         windows_allowed: u64,
     },
+    /// The witness answered `422 witness_text_unclassifiable`: its privacy
+    /// classifier could not classify some of this session's text, so
+    /// nothing was certified. About this session's content, not the witness
+    /// being down: the session is refused and the pass goes on to the next.
+    /// A newer build offers it again, since a witness improvement may fix it.
+    #[error("the witness's privacy classifier could not classify this session")]
+    WitnessTextUnclassifiable,
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -315,6 +322,9 @@ impl WitnessTrustError {
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
             Self::WitnessTimeout => "witness_timeout",
             Self::WitnessUnreachable => "witness_unreachable",
+            Self::WitnessTextUnclassifiable => {
+                trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE
+            }
             Self::WitnessTraceTooLargeForReview { .. } => {
                 trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
             }
@@ -337,7 +347,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 18] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 19] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -356,6 +366,7 @@ impl WitnessTrustError {
         "witness_timeout",
         "witness_unreachable",
         trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+        trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
     ];
 
     /// Recognise a refusal label that has been through a `String`.
