@@ -882,7 +882,7 @@ mod size_cap_ceiling_tests {
         // The ceilings themselves: the client's own largest witness request,
         // and a disk bound of 256 stored results within 10 GiB.
         assert_eq!(MAX_REQUEST_BYTES_CEILING, 32 * MIB);
-        assert!(DEFAULT_MAX_STORED_RESULTS * MAX_RESULT_BYTES_CEILING <= 10 * 1024 * MIB);
+        const { assert!(DEFAULT_MAX_STORED_RESULTS * MAX_RESULT_BYTES_CEILING <= 10 * 1024 * MIB) };
     }
 }
 
