@@ -764,13 +764,17 @@ async fn a_span_whose_text_matches_its_offsets_is_applied() {
 
 /// An offset slip -- the right entity reported one codepoint late -- passes
 /// every range check and would redact the wrong characters, leaving the name
-/// in place and reporting success. The span's own `text` exposes it, so the
-/// call fails closed, non-transient, hash-only.
+/// in place and reporting success. The span's own `text` exposes it. Here
+/// the name occurs twice, so the slipped span cannot be moved to one true
+/// place, and the call fails closed, non-transient, hash-only.
 #[tokio::test]
 async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
     let server = server_with(shifted_name_spans(1, Some("Zoë"))).await;
     let adapter = adapter(server.uri());
-    let error = adapter.redact_text("say hi to Zoë now").await.unwrap_err();
+    let error = adapter
+        .redact_text("say hi to Zoë and Zoë now")
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, TraceContributionError::RedactionFailed { .. }),
         "permanent, not transient: {error}"
@@ -786,7 +790,10 @@ async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
     );
 
     // A refused response is not cached: the same text is refused again.
-    let again = adapter.redact_text("say hi to Zoë now").await.unwrap_err();
+    let again = adapter
+        .redact_text("say hi to Zoë and Zoë now")
+        .await
+        .unwrap_err();
     assert!(
         again
             .to_string()
@@ -1583,4 +1590,157 @@ async fn the_request_interval_is_the_configured_pace() {
     assert_eq!(unpaced.request_interval(), None);
     let paced = adapter("http://127.0.0.1:1".to_string()).with_requests_per_minute(30);
     assert_eq!(paced.request_interval(), Some(Duration::from_secs(2)));
+}
+
+// ---- Re-anchoring. NEAR AI answered one real session's window with a span
+// whose text is right and whose offsets are not, the same way every time
+// (2026-11-13). When that text occurs exactly once in the window, the span
+// is moved to it, with no further request; otherwise the answer stays
+// invalid. Nothing else about the span changes.
+
+/// A responder that reports `name` at `start..end` (codepoints) with
+/// `text`, plus any extra spans given, for every input.
+fn reported_spans(
+    spans: Vec<serde_json::Value>,
+) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static {
+    move |_: &wiremock::Request| {
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans.clone() }] }))
+    }
+}
+
+fn span_at(start: usize, end: usize, text: &str) -> serde_json::Value {
+    json!({"category": "private_person", "start": start, "end": end, "score": 0.9, "text": text})
+}
+
+/// The name is reported two codepoints early; it occurs once, so the span
+/// is moved onto it: redacted at its true place, counted as re-anchored and
+/// not as a mismatch, and cached, so asking again sends nothing.
+#[tokio::test]
+async fn a_slipped_span_whose_text_occurs_once_is_moved_onto_it() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{
+        BodyShape, Outcome, Recorder,
+    };
+    let text = "please call Alice Brannigan today";
+    // "Alice Brannigan" is at 12..27; reported at 10..25.
+    let server = server_with(reported_spans(vec![span_at(10, 25, "Alice Brannigan")])).await;
+    let recorder = Arc::new(Recorder::default());
+    let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+    let result = adapter.redact_text(text).await.unwrap().unwrap();
+    assert_eq!(
+        result.redacted_text,
+        "please call [REDACTED:private_person] today"
+    );
+    assert_eq!(recorder.spans_reanchored(), 1);
+    assert_eq!(recorder.count(Outcome::Ok), 1);
+    assert_eq!(recorder.body_shape_count(BodyShape::SpanTextMismatch), 0);
+
+    let again = adapter.redact_text(text).await.unwrap().unwrap();
+    assert_eq!(again.redacted_text, result.redacted_text);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1, "cached");
+}
+
+/// Twice in the window -- anywhere in it, not only near the reported
+/// place -- is ambiguous: the answer is invalid, counted as a mismatch, and
+/// not cached.
+#[tokio::test]
+async fn a_slipped_span_whose_text_occurs_twice_is_invalid() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{BodyShape, Recorder};
+    let text = "Alice Brannigan called; much later, Alice Brannigan left";
+    let server = server_with(reported_spans(vec![span_at(1, 16, "Alice Brannigan")])).await;
+    let recorder = Arc::new(Recorder::default());
+    let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+    let error = adapter.redact_text(text).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("privacy_filter_span_text_mismatch"),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("Alice"), "no content: {error}");
+    assert_eq!(recorder.spans_reanchored(), 0);
+    assert_eq!(recorder.body_shape_count(BodyShape::SpanTextMismatch), 1);
+    let _ = adapter.redact_text(text).await.unwrap_err();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "never cached"
+    );
+}
+
+/// Overlapping occurrences count too: "aa" in "aaa" is twice, so it is
+/// ambiguous.
+#[tokio::test]
+async fn overlapping_occurrences_are_ambiguous() {
+    let server = server_with(reported_spans(vec![span_at(0, 1, "aa")])).await;
+    assert!(
+        adapter(server.uri())
+            .redact_text("xx aaa yy")
+            .await
+            .is_err()
+    );
+}
+
+/// Text that does not occur in the window at all cannot be re-anchored,
+/// and a span with empty text cannot either.
+#[tokio::test]
+async fn a_span_whose_text_is_absent_or_empty_is_invalid() {
+    for reported in ["Bob Smith", ""] {
+        let server = server_with(reported_spans(vec![span_at(0, 3, reported)])).await;
+        let error = adapter(server.uri())
+            .redact_text("please call Alice Brannigan today")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("privacy_filter_span_text_mismatch"),
+            "{reported:?}: {error}"
+        );
+    }
+}
+
+/// Offsets are codepoints: the corrected span lands on the name after
+/// emoji, a ZWJ family, CJK and accented text, never on a byte offset.
+#[tokio::test]
+async fn a_re_anchored_span_uses_codepoint_offsets() {
+    let text =
+        "\u{1f600} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} \u{674e} caf\u{e9} Zo\u{eb} Ng ok";
+    let server = server_with(reported_spans(vec![span_at(0, 6, "Zo\u{eb} Ng")])).await;
+    let result = adapter(server.uri())
+        .redact_text(text)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.redacted_text,
+        "\u{1f600} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} \u{674e} caf\u{e9} [REDACTED:private_person] ok"
+    );
+}
+
+/// An answer mixing a correct span and a re-anchorable one applies both,
+/// each where it belongs.
+#[tokio::test]
+async fn good_and_re_anchorable_spans_are_both_applied() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::Recorder;
+    let text = "bob@example.com wrote to Alice Brannigan";
+    let server = server_with(reported_spans(vec![
+        json!({"category": "private_email", "start": 0, "end": 15, "score": 0.99, "text": "bob@example.com"}),
+        span_at(20, 35, "Alice Brannigan"),
+    ]))
+    .await;
+    let recorder = Arc::new(Recorder::default());
+    let result = adapter(server.uri())
+        .with_diagnostics(recorder.clone())
+        .redact_text(text)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.redacted_text,
+        "[REDACTED:private_email] wrote to [REDACTED:private_person]"
+    );
+    assert_eq!(recorder.spans_reanchored(), 1);
 }

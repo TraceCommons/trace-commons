@@ -668,7 +668,7 @@ const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 /// Fail closed unless every span lies inside the input (the range rule
 /// `apply_spans` applies, [`crate::privacy_filter_spans::span_fits`]) and its
 /// reported `text` is exactly the input's codepoints `[start, end)`, then
-/// return the spans without it.
+/// return the spans without it, and how many were re-anchored.
 ///
 /// The endpoint reports, with each span, the text it covers (probed live on
 /// 2026-10-11 with ZWJ emoji, accented and CJK text, CRLF and blank lines:
@@ -680,6 +680,15 @@ const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 /// success. This check turns that into a refusal. A span with no `text`
 /// cannot be checked, so it refuses too.
 ///
+/// Re-anchoring (owner, 2026-11-13): NEAR AI answered one real session's
+/// window that way on every request, so refusing alone refused it for good.
+/// A slipped span whose `text` occurs exactly once in the whole window --
+/// overlapping occurrences counted -- is moved onto that occurrence, in
+/// codepoints, keeping its category and score, and must still fit. No
+/// further request is made. Zero or several occurrences, empty text or no
+/// text leave the answer refused. Only an answer every span of which then
+/// verifies is returned, so only that can be cached.
+///
 /// A span out of range is refused here, not left for `apply_spans`: an
 /// answer this accepts is cached, and an out-of-range span that reached the
 /// cache was refused on every later request for its window without the
@@ -689,7 +698,7 @@ const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
-) -> Result<Vec<ClassifySpan>, (diagnostics::BodyShape, String)> {
+) -> Result<(Vec<ClassifySpan>, usize), (diagnostics::BodyShape, String)> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
     let codepoints = boundaries.len() - 1;
@@ -715,13 +724,34 @@ fn verify_span_texts(
             ),
         ));
     }
-    let mismatches = spans
-        .iter()
-        .filter(|span| {
-            let covered = &input[boundaries[span.start]..boundaries[span.end]];
-            span.text.as_deref() != Some(covered)
-        })
-        .count();
+    // A span whose text is right and whose offsets are not is moved onto
+    // its text when that text occurs exactly once in the window -- anywhere
+    // in it, overlapping occurrences counted. The answer is otherwise
+    // unchanged, so no further request is made. Zero or several
+    // occurrences, or no text to look for, leave it a mismatch.
+    let mut spans = spans;
+    let mut reanchored = 0usize;
+    let mut mismatches = 0usize;
+    for span in &mut spans {
+        let covered = &input[boundaries[span.start]..boundaries[span.end]];
+        if span.text.as_deref() == Some(covered) {
+            continue;
+        }
+        match span
+            .text
+            .as_deref()
+            .and_then(|text| sole_occurrence(input, text))
+        {
+            Some((start, end))
+                if crate::privacy_filter_spans::span_fits(start, end, codepoints) =>
+            {
+                span.start = start;
+                span.end = end;
+                reanchored += 1;
+            }
+            _ => mismatches += 1,
+        }
+    }
     if mismatches > 0 {
         let diagnostics = classify_input_diagnostics(&[input]);
         tracing::warn!(
@@ -740,15 +770,44 @@ fn verify_span_texts(
             ),
         ));
     }
-    Ok(spans
-        .into_iter()
-        .map(|span| ClassifySpan {
-            category: span.category,
-            start: span.start,
-            end: span.end,
-            score: span.score,
-        })
-        .collect())
+    Ok((
+        spans
+            .into_iter()
+            .map(|span| ClassifySpan {
+                category: span.category,
+                start: span.start,
+                end: span.end,
+                score: span.score,
+            })
+            .collect(),
+        reanchored,
+    ))
+}
+
+/// The codepoint range of `text` in `input` when it occurs there exactly
+/// once, overlapping occurrences counted; `None` for empty text, or for
+/// zero or several occurrences.
+fn sole_occurrence(input: &str, text: &str) -> Option<(usize, usize)> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    let mut from = 0usize;
+    while let Some(offset) = input[from..].find(text) {
+        let at = from + offset;
+        if found.replace(at).is_some() {
+            return None;
+        }
+        // Step one character, not the match, so an overlapping second
+        // occurrence is seen.
+        from = at + input[at..].chars().next().map_or(1, char::len_utf8);
+        if from > input.len() {
+            break;
+        }
+    }
+    let at = found?;
+    let start = input[..at].chars().count();
+    Some((start, start + text.chars().count()))
 }
 
 #[async_trait]
@@ -1359,7 +1418,8 @@ impl NearAiPrivacyFilterAdapter {
             // counted under which check it failed. Nothing from it is
             // applied or cached.
             return match parse_classify_answer(inputs, &bytes) {
-                Ok(spans) => {
+                Ok((spans, reanchored)) => {
+                    self.diagnostics.record_reanchored(reanchored);
                     self.diagnostics.record(
                         diagnostics::Outcome::Ok,
                         body.len(),
@@ -1426,7 +1486,7 @@ fn transport_failure(
 fn parse_classify_answer(
     inputs: &[&str],
     body: &[u8],
-) -> Result<Vec<Vec<ClassifySpan>>, (diagnostics::BodyShape, String)> {
+) -> Result<(Vec<Vec<ClassifySpan>>, usize), (diagnostics::BodyShape, String)> {
     let parsed: ClassifyResponse = serde_json::from_slice(body).map_err(|err| {
         (
             diagnostics::BodyShape::ParseError,
@@ -1453,11 +1513,14 @@ fn parse_classify_answer(
             ),
         ));
     }
-    inputs
-        .iter()
-        .zip(parsed.data)
-        .map(|(input, entry)| verify_span_texts(input, entry.spans))
-        .collect()
+    let mut reanchored = 0usize;
+    let mut answers = Vec::with_capacity(inputs.len());
+    for (input, entry) in inputs.iter().zip(parsed.data) {
+        let (spans, moved) = verify_span_texts(input, entry.spans)?;
+        reanchored += moved;
+        answers.push(spans);
+    }
+    Ok((answers, reanchored))
 }
 
 /// What one classify request answered.
@@ -1677,7 +1740,7 @@ mod tests {
                         .then(|| &text[boundaries[start]..boundaries[end]]);
                     for reported in [covered, Some("not the text"), None] {
                         match verify_span_texts(text, vec![near_span(start, end, reported)]) {
-                            Ok(spans) => {
+                            Ok((spans, _)) => {
                                 accepted += 1;
                                 assert!(
                                     crate::privacy_filter_spans::apply_spans(
@@ -1943,6 +2006,8 @@ mod tests {
                 let input = body["input"].as_str().unwrap();
                 // Every "Ada" found, reported one codepoint late with the
                 // right text: an offset slip the range check cannot see.
+                // "Ada" occurs twice in its event, so the slip cannot be
+                // re-anchored to one place and the answer stays invalid.
                 let spans: Vec<serde_json::Value> = input
                     .match_indices("Ada")
                     .map(|(byte, _)| {
@@ -2000,7 +2065,7 @@ mod tests {
             },
             "events": [
                 event("nothing here"),
-                event("Ada reviewed the change"),
+                event("Ada reviewed Ada's change"),
                 event("ran the tests"),
             ],
             "outcome": {"task_success": "unknown", "user_feedback": "none"},
@@ -2593,6 +2658,7 @@ pub mod diagnostics {
     pub struct Recorder {
         counts: [AtomicU64; 9],
         body_shapes: [AtomicU64; 5],
+        spans_reanchored: AtomicU64,
         in_flight: AtomicUsize,
         latency_ms: Mutex<[VecDeque<u64>; 4]>,
     }
@@ -2646,6 +2712,18 @@ pub mod diagnostics {
             self.counts[outcome.index()].load(Ordering::Relaxed)
         }
 
+        /// `spans` spans were moved onto the one place their reported text
+        /// occurs, in an answer that was then accepted.
+        pub fn record_reanchored(&self, spans: usize) {
+            self.spans_reanchored
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans re-anchored so far.
+        pub fn spans_reanchored(&self) -> u64 {
+            self.spans_reanchored.load(Ordering::Relaxed)
+        }
+
         /// A count of malformed answers of kind `kind` so far.
         pub fn body_shape_count(&self, kind: BodyShape) -> u64 {
             self.body_shapes[kind.index()].load(Ordering::Relaxed)
@@ -2669,6 +2747,7 @@ pub mod diagnostics {
             Snapshot {
                 outcomes,
                 body_shapes,
+                spans_reanchored: self.spans_reanchored(),
                 in_flight: self.in_flight.load(Ordering::Relaxed),
                 latency_ms,
             }
@@ -2690,6 +2769,11 @@ pub mod diagnostics {
         /// counted. Sums to `outcomes.body_shape`; kept apart from
         /// `outcomes` so a reader summing that map does not count twice.
         pub body_shapes: BTreeMap<&'static str, u64>,
+        /// Spans whose offsets disagreed with their text and were moved onto
+        /// the one place in the window that text occurs, in answers then
+        /// accepted. Counted apart from `span_text_mismatch`, which counts
+        /// only answers that could not be corrected.
+        pub spans_reanchored: u64,
         /// Requests on the wire right now.
         pub in_flight: usize,
         /// Successful requests' latency by request-body size, over the last

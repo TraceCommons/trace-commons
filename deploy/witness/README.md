@@ -843,6 +843,11 @@ when the witness is saturated. It serves:
     (a span's text is not the input at its offsets, or is missing),
     `span_out_of_range`. They sum to `outcomes.body_shape`. A malformed
     answer is never applied or cached;
+  - `spans_reanchored`: spans whose offsets disagreed with their text and
+    were moved onto the one place in the window that text occurs, in
+    answers then accepted (no extra request). Not counted in
+    `span_text_mismatch`, which counts only answers that could not be
+    corrected;
   - requests on the wire now;
   - p50/p90/p99/max latency of the last 256 successful requests in each
     body-size bucket.
