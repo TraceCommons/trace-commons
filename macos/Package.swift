@@ -21,6 +21,17 @@ let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
 let package = Package(
     name: "TraceCommons",
     platforms: [.macOS(.v14)],
+    // Explicit products let the checked-in native Xcode app reuse these
+    // modules while preserving every existing SwiftPM executable product.
+    products: [
+        .library(name: "TCBridge", targets: ["TCBridge"]),
+        .library(name: "TCDesign", targets: ["TCDesign"]),
+        .library(name: "TCShellCore", targets: ["TCShellCore"]),
+        .library(name: "TCUpdates", targets: ["TCUpdates"]),
+        .executable(name: "TraceCommonsApp", targets: ["TraceCommonsApp"]),
+        .executable(name: "TCDesignGallery", targets: ["TCDesignGallery"]),
+        .executable(name: "tc-ffi-demo", targets: ["tc-ffi-demo"]),
+    ],
     dependencies: [
         // Pinned exactly, not by range. This dependency decides which bytes
         // replace the running app, so "whatever resolves today" is not an

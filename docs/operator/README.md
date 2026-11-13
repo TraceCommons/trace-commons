@@ -40,6 +40,7 @@ the link.
 | Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
+| Qualifying a private native macOS Xcode Cloud archive | [`./xcode-cloud-pilot.md`](./xcode-cloud-pilot.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
