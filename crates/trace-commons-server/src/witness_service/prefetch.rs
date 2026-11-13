@@ -34,9 +34,11 @@
 //! 3. **Replay.** The pipeline runs again with an adapter that answers each
 //!    text from those results. This is the pass whose output is returned, and
 //!    it is the same call the sequential witness makes; only where each answer
-//!    came from differs. A text with no answer is a refusal. The replay can
-//!    only meet one if classification stopped abnormally, because the record
-//!    pass saw every text the replay reaches before its first refusal.
+//!    came from differs. A text the record pass never saw is classified
+//!    then, by the real adapter under the same permits and deadline: a
+//!    classified field can change the text of a later one (a tool name picks
+//!    its payload's profile), so the record pass, which finds nothing, does
+//!    not see every text the real pass asks about.
 //!
 //! A classifier failure stays a failure: the first failing text in pipeline
 //! order is answered with its error in the replay, which then fails exactly
@@ -72,12 +74,6 @@ use super::{
 pub const DEFAULT_MAX_CLASSIFY_IN_FLIGHT: usize = 2;
 
 type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
-
-fn answer_missing() -> TraceContributionError {
-    TraceContributionError::RedactionFailed {
-        reason: "witness_classify_answer_missing".to_string(),
-    }
-}
 
 fn permits_closed() -> TraceContributionError {
     TraceContributionError::RedactionFailed {
@@ -127,22 +123,42 @@ impl PrivacyFilterAdapter for RecordingAdapter {
 }
 
 /// Answers from the classify pass, falling back to the real adapter (under
-/// the shared permits) for any text that pass did not reach.
+/// the shared permits and the request's classify deadline) for any text that
+/// pass did not reach.
+///
+/// The record pass finds nothing, so it records the texts the pipeline asks
+/// about when no classifier redacts anything. A classified field can change
+/// the text of a later one -- an event's tool name goes to the classifier,
+/// and its payload's profile is chosen from the classified name -- so the
+/// replay can ask about a text the record pass never saw. That text is
+/// classified here, exactly as the sequential pipeline would classify it.
+/// Refusing it instead refused, deterministically and for good, sessions
+/// the sequential pipeline redacts (2026-11-12).
+///
+/// Fail closed: the fallback call's error is the answer, never a pass.
 struct AnsweringAdapter {
     answers: HashMap<String, Answer>,
+    fallback: Arc<dyn PrivacyFilterAdapter>,
+    permits: Arc<Semaphore>,
+    deadline: Option<std::time::Instant>,
+    queue: Arc<ClassifyQueue>,
 }
 
 #[async_trait]
 impl PrivacyFilterAdapter for AnsweringAdapter {
     async fn redact_text(&self, text: &str) -> Answer {
-        // A text with no answer is a refusal, never a fresh classifier call
-        // and never a pass. The record pass saw every text the replay can
-        // reach before its first refusal, so this is reached only when
-        // classification stopped abnormally.
-        self.answers
-            .get(text)
-            .cloned()
-            .unwrap_or_else(|| Err(answer_missing()))
+        if let Some(answer) = self.answers.get(text) {
+            return answer.clone();
+        }
+        // Counted, never described: the text is contributor content.
+        self.queue.record_replay_miss();
+        let Ok(_permit) = self.permits.clone().acquire_owned().await else {
+            return Err(permits_closed());
+        };
+        match self.deadline {
+            Some(deadline) => self.fallback.redact_text_before(text, deadline).await,
+            None => self.fallback.redact_text(text).await,
+        }
     }
 }
 
@@ -184,6 +200,9 @@ pub struct ClassifyQueue {
     /// Exponentially weighted mean of a request's turn, in milliseconds; 0
     /// until a request has finished one.
     mean_turn_ms: std::sync::atomic::AtomicU64,
+    /// Texts the replay asked about that the record pass never saw, each
+    /// classified then and there. See [`AnsweringAdapter`].
+    replay_misses: std::sync::atomic::AtomicU64,
 }
 
 impl Default for ClassifyQueue {
@@ -199,12 +218,25 @@ impl ClassifyQueue {
             waiting: std::sync::atomic::AtomicUsize::new(0),
             joined: std::sync::atomic::AtomicU64::new(0),
             mean_turn_ms: std::sync::atomic::AtomicU64::new(0),
+            replay_misses: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Requests waiting for their turn right now.
     pub fn waiting(&self) -> usize {
         self.waiting.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Texts the replay classified because the record pass never saw them,
+    /// since the process started.
+    pub fn replay_misses(&self) -> u64 {
+        self.replay_misses
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn record_replay_miss(&self) {
+        self.replay_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Requests that have joined the queue since the process started.
@@ -413,7 +445,13 @@ impl PrefetchingContributionRedaction {
             }
         }
         self.queue.record_turn(turn_started.elapsed());
-        AnsweringAdapter { answers }
+        AnsweringAdapter {
+            answers,
+            fallback: self.adapter.clone(),
+            permits: self.permits.clone(),
+            deadline,
+            queue: self.queue.clone(),
+        }
     }
 }
 
@@ -478,8 +516,16 @@ mod tests {
     use crate::witness_service::PipelineContributionRedaction;
     use trace_commons_protocol::trace_contribution::TraceRedactor;
 
-    /// What the stand-in classifier reports, wherever it appears.
-    const NAMES: &[&str] = &["Alice Brannigan", "Zo\u{eb} Ng", "bob@example.com"];
+    /// What the stand-in classifier reports, wherever it appears. The last
+    /// is a person's name that happens to contain the tool-profile keywords
+    /// "web" and "fetch"; see
+    /// `a_text_the_record_pass_never_saw_is_classified_as_the_sequential_pass_does`.
+    const NAMES: &[&str] = &[
+        "Alice Brannigan",
+        "Zo\u{eb} Ng",
+        "bob@example.com",
+        "Webster Fetchley",
+    ];
 
     /// A contribution with what the pipeline treats differently: message
     /// text, tool output with names and a credential, multibyte text,
@@ -687,6 +733,75 @@ mod tests {
         }
     }
 
+    /// A classified field can change the text of a later one. An event's
+    /// tool name goes to the classifier, and the payload profile is then
+    /// chosen from the CLASSIFIED name: "Webster Fetchley" reads as a
+    /// browser tool (its `text` field becomes `[REDACTED:browser_content]`),
+    /// while its redaction, `[REDACTED:private_person]`, is an unrecognised
+    /// tool (`text` becomes `[REDACTED:unrecognized_tool_content]`). The
+    /// record pass, which finds nothing, records the first; the real pass
+    /// asks about the second. The replay must answer it as the sequential
+    /// pipeline does -- by asking the classifier -- not refuse the trace.
+    #[tokio::test]
+    async fn a_text_the_record_pass_never_saw_is_classified_as_the_sequential_pass_does() {
+        let server = classifier().await;
+        let mut raw = rich_contribution(1);
+        raw.events.push(
+            serde_json::from_value(json!({
+                "cost_usd": null, "latency_ms": null, "token_counts": null, "content": null,
+                "event_id": uuid::Uuid::from_u128(3000), "event_type": "tool_call",
+                "structured_payload": {
+                    "text": "notes for Alice Brannigan",
+                    "url": "https://example.com/notes",
+                },
+                "success": true, "timestamp": "2026-11-05T00:00:03Z",
+                "tool_call_id": "call_webster", "tool_name": "Webster Fetchley",
+            }))
+            .expect("a raw event"),
+        );
+        let sequential = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            near_ai(&server),
+            PrivacyFilterBackendTag::NearAi,
+        );
+        let prefetching = PrefetchingContributionRedaction::new(
+            Vec::new(),
+            near_ai(&server),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        );
+        let (expected, expected_maps) = sequential
+            .redact_with_edits(raw.clone())
+            .await
+            .expect("the sequential pipeline redacts it");
+        let expected_bytes = serde_json::to_vec(&expected.envelope).unwrap();
+        let text = String::from_utf8(expected_bytes.clone()).unwrap();
+        // Controls: the tool name was classified, and that changed the
+        // payload's profile.
+        assert!(
+            !text.contains("Webster"),
+            "the tool name was not classified"
+        );
+        assert!(text.contains("[REDACTED:unrecognized_tool_content]"));
+        assert!(!text.contains("[REDACTED:browser_content]"));
+
+        let (actual, actual_maps) = prefetching
+            .redact_with_edits(raw.clone())
+            .await
+            .expect("prefetching redacts what the sequential pipeline redacts");
+        assert_eq!(
+            serde_json::to_vec(&actual.envelope).unwrap(),
+            expected_bytes
+        );
+        assert!(actual_maps == expected_maps, "edit maps differ");
+        let plain = prefetching.redact(raw).await.expect("redacts");
+        assert_eq!(serde_json::to_vec(&plain.envelope).unwrap(), expected_bytes);
+        assert!(
+            prefetching.classify_queue().replay_misses() >= 2,
+            "both replays met the text the record pass never saw"
+        );
+    }
+
     /// A stand-in classifier that measures overlap.
     struct Overlap {
         now: AtomicUsize,
@@ -817,20 +932,45 @@ mod tests {
         );
     }
 
-    /// A text the classify pass left unanswered is a refusal in the replay,
-    /// not a fresh call and not a pass.
+    /// A text the classify pass left unanswered is classified in the
+    /// replay by the real adapter, and counted. The real adapter's error is
+    /// the answer, never a pass; closed permits refuse too.
     #[tokio::test]
-    async fn an_unanswered_text_is_a_refusal() {
+    async fn an_unanswered_text_is_classified_and_its_failure_is_the_answer() {
+        let fallback = Overlap::new(Some("fails"));
+        let queue = Arc::new(ClassifyQueue::new());
         let answering = AnsweringAdapter {
             answers: HashMap::from([("known".to_string(), Ok(None))]),
+            fallback: fallback.clone(),
+            permits: Arc::new(Semaphore::new(1)),
+            deadline: None,
+            queue: queue.clone(),
         };
         assert!(answering.redact_text("known").await.is_ok());
-        let error = answering.redact_text("never classified").await.unwrap_err();
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.replay_misses(), 0);
+
+        assert!(answering.redact_text("never recorded").await.is_ok());
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
+        let error = answering
+            .redact_text("never recorded and fails")
+            .await
+            .expect_err("the classifier's failure is the answer");
+        assert!(error.is_transient(), "{error}");
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(queue.replay_misses(), 2);
+
+        answering.permits.close();
+        let error = answering
+            .redact_text("never recorded either")
+            .await
+            .expect_err("no permit, no classification, no pass");
         assert!(
             error
                 .to_string()
-                .contains("witness_classify_answer_missing")
+                .contains("witness_classify_permits_closed")
         );
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 2);
     }
 
     /// With a batching adapter, the permits count requests: a contribution

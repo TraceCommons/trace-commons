@@ -299,6 +299,7 @@ impl WitnessLoadBound {
             snapshot.classify_queue_mean_turn_ms = queue
                 .mean_turn()
                 .map(|turn| u64::try_from(turn.as_millis()).unwrap_or(u64::MAX));
+            snapshot.prefetch_replay_misses = Some(queue.replay_misses());
         }
         snapshot
     }

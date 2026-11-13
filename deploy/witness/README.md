@@ -805,7 +805,11 @@ when the witness is saturated. It serves:
   are already public through `/v1/attestation` or every certificate.
 - **Uptime.**
 - **Request slots:** `max_concurrent`, `in_use`, completed by status class,
-  `saturated_refusals`, `timed_out`.
+  `saturated_refusals`, `timed_out`; with the classify queue, also
+  `classify_queue_waiting`, `classify_queue_mean_turn_ms` and
+  `prefetch_replay_misses` (texts a contribution's replay classified because
+  its record pass never saw them -- a classified tool name can change its
+  payload's text; a count only).
 - **NEAR AI classifier** (`classifier`, `null` for any other backend):
   - requests by outcome since start, every retry counted: `ok`, `timeout`,
     `transport`, `auth_401_403`, `quota_402_429`, `server_5xx`,

@@ -124,6 +124,7 @@ impl LoadCounters {
             timed_out: self.timed_out.load(Ordering::Relaxed),
             classify_queue_waiting: None,
             classify_queue_mean_turn_ms: None,
+            prefetch_replay_misses: None,
         }
     }
 }
@@ -148,6 +149,9 @@ pub struct LoadSnapshot {
     pub classify_queue_waiting: Option<usize>,
     /// The recent time a request spends classifying, once one has.
     pub classify_queue_mean_turn_ms: Option<u64>,
+    /// Texts a contribution's replay asked about that its record pass never
+    /// saw, each classified then. A count only.
+    pub prefetch_replay_misses: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -312,6 +316,7 @@ mod tests {
                 "early_busy",
                 "in_use",
                 "max_concurrent",
+                "prefetch_replay_misses",
                 "saturated_refusals",
                 "timed_out",
             ]
