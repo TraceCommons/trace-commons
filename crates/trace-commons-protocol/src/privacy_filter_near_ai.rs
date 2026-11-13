@@ -695,10 +695,61 @@ const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 /// classifier being asked again (a real session, 2026-11-12). Neither the
 /// span text nor the input is ever logged: the failure carries the label and
 /// the input's hash-only fingerprint.
+/// How many spans verification corrected rather than accepted as reported.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpanCorrections {
+    /// Moved onto the one place their reported text occurs.
+    pub(crate) reanchored: usize,
+    /// Left where they were: the offsets were right and only the reported
+    /// text had characters replaced (see
+    /// [`matches_but_for_replacement_characters`]).
+    pub(crate) text_repaired: usize,
+}
+
+impl std::ops::AddAssign for SpanCorrections {
+    fn add_assign(&mut self, other: Self) {
+        self.reanchored += other.reanchored;
+        self.text_repaired += other.text_repaired;
+    }
+}
+
+/// NEAR AI has been seen to report a span's `text` with a character it
+/// could not decode replaced by U+FFFD, one per undecodable piece: a
+/// Private Use Area character such as U+E202 (three UTF-8 bytes) comes
+/// back as two. The offsets are right; only the reported copy is lossy.
+/// True when `text` equals `covered` except that each run of U+FFFD in
+/// `text` stands for exactly one non-ASCII character of `covered` whose
+/// UTF-8 encoding is at least as long as the run. `text` must contain at
+/// least one U+FFFD; every other character must match exactly.
+fn matches_but_for_replacement_characters(text: &str, covered: &str) -> bool {
+    const REPLACEMENT: char = '\u{fffd}';
+    if !text.contains(REPLACEMENT) {
+        return false;
+    }
+    let mut want = covered.chars().peekable();
+    let mut got = text.chars().peekable();
+    while let Some(c) = got.next() {
+        if c == REPLACEMENT {
+            let mut run = 1usize;
+            while got.peek() == Some(&REPLACEMENT) {
+                got.next();
+                run += 1;
+            }
+            match want.next() {
+                Some(original) if !original.is_ascii() && original.len_utf8() >= run => {}
+                _ => return false,
+            }
+        } else if want.next() != Some(c) {
+            return false;
+        }
+    }
+    want.next().is_none()
+}
+
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
-) -> Result<(Vec<ClassifySpan>, usize), (diagnostics::BodyShape, String)> {
+) -> Result<(Vec<ClassifySpan>, SpanCorrections), (diagnostics::BodyShape, String)> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
     let codepoints = boundaries.len() - 1;
@@ -730,11 +781,22 @@ fn verify_span_texts(
     // unchanged, so no further request is made. Zero or several
     // occurrences, or no text to look for, leave it a mismatch.
     let mut spans = spans;
-    let mut reanchored = 0usize;
+    let mut corrections = SpanCorrections::default();
     let mut mismatches = 0usize;
     for span in &mut spans {
         let covered = &input[boundaries[span.start]..boundaries[span.end]];
         if span.text.as_deref() == Some(covered) {
+            continue;
+        }
+        // Right offsets, lossy reported text: everything but the replaced
+        // characters must equal what the offsets cover, and the span stays
+        // where it is.
+        if span
+            .text
+            .as_deref()
+            .is_some_and(|text| matches_but_for_replacement_characters(text, covered))
+        {
+            corrections.text_repaired += 1;
             continue;
         }
         match span
@@ -747,7 +809,7 @@ fn verify_span_texts(
             {
                 span.start = start;
                 span.end = end;
-                reanchored += 1;
+                corrections.reanchored += 1;
             }
             _ => mismatches += 1,
         }
@@ -780,7 +842,7 @@ fn verify_span_texts(
                 score: span.score,
             })
             .collect(),
-        reanchored,
+        corrections,
     ))
 }
 
@@ -1418,8 +1480,10 @@ impl NearAiPrivacyFilterAdapter {
             // counted under which check it failed. Nothing from it is
             // applied or cached.
             return match parse_classify_answer(inputs, &bytes) {
-                Ok((spans, reanchored)) => {
-                    self.diagnostics.record_reanchored(reanchored);
+                Ok((spans, corrections)) => {
+                    self.diagnostics.record_reanchored(corrections.reanchored);
+                    self.diagnostics
+                        .record_text_repaired(corrections.text_repaired);
                     self.diagnostics.record(
                         diagnostics::Outcome::Ok,
                         body.len(),
@@ -1500,7 +1564,7 @@ fn transport_failure(
 fn parse_classify_answer(
     inputs: &[&str],
     body: &[u8],
-) -> Result<(Vec<Vec<ClassifySpan>>, usize), (diagnostics::BodyShape, String)> {
+) -> Result<(Vec<Vec<ClassifySpan>>, SpanCorrections), (diagnostics::BodyShape, String)> {
     let parsed: ClassifyResponse = serde_json::from_slice(body).map_err(|err| {
         (
             diagnostics::BodyShape::ParseError,
@@ -1527,14 +1591,14 @@ fn parse_classify_answer(
             ),
         ));
     }
-    let mut reanchored = 0usize;
+    let mut corrections = SpanCorrections::default();
     let mut answers = Vec::with_capacity(inputs.len());
     for (input, entry) in inputs.iter().zip(parsed.data) {
-        let (spans, moved) = verify_span_texts(input, entry.spans)?;
-        reanchored += moved;
+        let (spans, corrected) = verify_span_texts(input, entry.spans)?;
+        corrections += corrected;
         answers.push(spans);
     }
-    Ok((answers, reanchored))
+    Ok((answers, corrections))
 }
 
 /// What one classify request answered.
@@ -1777,6 +1841,63 @@ mod tests {
             }
         }
         assert!(accepted > 0 && refused > 0, "{accepted} {refused}");
+    }
+
+    /// NEAR AI reports a Private Use Area character it could not decode as
+    /// two U+FFFD (seen 2026-11-13 on Codex transcripts carrying U+E202).
+    /// The offsets are right: the span is accepted where it is, counted as
+    /// repaired, and not moved.
+    #[test]
+    fn a_span_whose_text_replaced_a_private_use_character_is_accepted_in_place() {
+        let input = "see \u{e202}turn0 for Zoe now";
+        // "\u{e202}turn0" is codepoints 4..10.
+        let reported = "\u{fffd}\u{fffd}turn0";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(4, 10, Some(reported))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (4, 10));
+        assert_eq!(corrections.text_repaired, 1);
+        assert_eq!(corrections.reanchored, 0);
+    }
+
+    /// One U+FFFD for one non-ASCII character, lengths equal.
+    #[test]
+    fn a_single_replacement_character_for_one_non_ascii_character_is_accepted() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(8, 11, Some("Zo\u{fffd}"))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (8, 11));
+        assert_eq!(corrections.text_repaired, 1);
+    }
+
+    /// Accepted only when everything but the replaced characters matches
+    /// exactly, each run stands for one non-ASCII character, and the run is
+    /// no longer than that character's UTF-8 encoding.
+    #[test]
+    fn replacement_characters_never_stand_for_ascii_or_hide_other_differences() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let reject = |reported: &str| {
+            assert!(
+                verify_span_texts(input, vec![near_span(8, 11, Some(reported))]).is_err(),
+                "{reported:?}"
+            )
+        };
+        reject("Z\u{fffd}\u{fffd}"); // a run standing for ASCII "o" then more
+        reject("\u{fffd}o\u{eb}"); // stands for ASCII "Z"
+        reject("Zo\u{fffd}\u{fffd}\u{fffd}"); // longer than U+00EB's two bytes
+        reject("Za\u{fffd}"); // another character differs
+        reject("Zo\u{fffd}x"); // trailing extra character
+        reject("Zq"); // no replacement character, not the text, not in the window
+    }
+
+    /// Plain ASCII mismatches are untouched: no replacement character, so
+    /// the answer stays a mismatch (or re-anchors as before).
+    #[test]
+    fn an_ascii_mismatch_is_not_repaired() {
+        let input = "Contact Zoe Smith now and Zoe again";
+        assert!(verify_span_texts(input, vec![near_span(0, 3, Some("Bob"))]).is_err());
+        let (_, corrections) =
+            verify_span_texts(input, vec![near_span(0, 3, Some("Con"))]).unwrap();
+        assert_eq!(corrections.text_repaired, 0);
     }
 
     /// The cache's own guard: spans that do not fit the window they would be
@@ -2673,6 +2794,7 @@ pub mod diagnostics {
         counts: [AtomicU64; 9],
         body_shapes: [AtomicU64; 5],
         spans_reanchored: AtomicU64,
+        spans_text_repaired: AtomicU64,
         in_flight: AtomicUsize,
         latency_ms: Mutex<[VecDeque<u64>; 4]>,
     }
@@ -2738,6 +2860,19 @@ pub mod diagnostics {
             self.spans_reanchored.load(Ordering::Relaxed)
         }
 
+        /// `spans` spans were accepted where they were although their
+        /// reported text had characters replaced, in an answer that was
+        /// then accepted.
+        pub fn record_text_repaired(&self, spans: usize) {
+            self.spans_text_repaired
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans whose reported text was repaired so far.
+        pub fn spans_text_repaired(&self) -> u64 {
+            self.spans_text_repaired.load(Ordering::Relaxed)
+        }
+
         /// A count of malformed answers of kind `kind` so far.
         pub fn body_shape_count(&self, kind: BodyShape) -> u64 {
             self.body_shapes[kind.index()].load(Ordering::Relaxed)
@@ -2762,6 +2897,7 @@ pub mod diagnostics {
                 outcomes,
                 body_shapes,
                 spans_reanchored: self.spans_reanchored(),
+                spans_text_repaired: self.spans_text_repaired(),
                 in_flight: self.in_flight.load(Ordering::Relaxed),
                 latency_ms,
             }
@@ -2788,6 +2924,10 @@ pub mod diagnostics {
         /// accepted. Counted apart from `span_text_mismatch`, which counts
         /// only answers that could not be corrected.
         pub spans_reanchored: u64,
+        /// Spans whose offsets were right but whose reported text had
+        /// non-ASCII characters replaced by U+FFFD; accepted where they
+        /// were. Also apart from `span_text_mismatch`.
+        pub spans_text_repaired: u64,
         /// Requests on the wire right now.
         pub in_flight: usize,
         /// Successful requests' latency by request-body size, over the last
