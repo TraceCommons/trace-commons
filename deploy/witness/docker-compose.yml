@@ -248,7 +248,8 @@ services:
       # and 16 MiB roughly matches what one review can classify (the up-front
       # too-large-to-review refusal covers the rest). Sixteen slots at 16 MiB
       # are on the order of 256 MiB of request bodies. Required: a deploy
-      # that forgets it fails to start.
+      # that forgets it fails to start, and so does one above the binary's
+      # compiled ceiling of 32 MiB, which the measurement does cover.
       TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: ${TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES:?set at deploy time}
 
       # THE BOUND ON UNAUTHENTICATED WORK. The routes are unauthenticated, so
@@ -295,7 +296,8 @@ services:
       # result of a maximal request still fits. Set to 20 MiB (20971520) on
       # 2026-11-13: 256 results at that size is 5 GiB worst case on the
       # CVM's encrypted data disk. Required: a deploy that forgets it fails
-      # to start.
+      # to start, and so does one above the binary's compiled ceiling of
+      # 40 MiB.
       TRACE_COMMONS_WITNESS_RESULTS_DIR: "/var/lib/trace-commons-witness/results"
       TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS: "256"
       TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES: ${TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES:?set at deploy time}

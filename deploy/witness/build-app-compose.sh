@@ -157,11 +157,11 @@ jq -S -n --rawfile compose "${compose}" '{
   # measurement. The argument: neither changes what is redacted, where text
   # goes, or which model reads it. A value set too low refuses traces as too
   # large (final for that session until a newer client offers it again); a
-  # value set too high costs availability, not privacy -- the binary only
-  # refuses zero, so a very large request bound lets unauthenticated requests
-  # spend CVM memory. The trade-off accepted: a contributor can no
-  # longer read these two values from the measurement. A ceiling enforced by
-  # the binary would restore a verifiable upper bound and is the follow-up.
+  # value set too high costs availability, not privacy. The trade-off
+  # accepted: a contributor can no longer read these two values from the
+  # measurement. The binary, which is measured, refuses to start above a
+  # compiled ceiling (32 MiB request, 40 MiB result), so a contributor can
+  # still verify an upper bound.
   allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE", "TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES", "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES"],
 
   # Leaving the per-deployment random instance-id in place. It is what makes
