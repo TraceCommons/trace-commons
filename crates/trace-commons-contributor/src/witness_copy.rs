@@ -460,8 +460,7 @@ pub struct WitnessReviewCopy {
     /// The witness's classifier could not classify some of this trace's
     /// text (`witness_text_unclassifiable`). Final for this trace.
     ///
-    /// PENDING owner wording 2026-11-13: a placeholder until the owner
-    /// chooses the sentence.
+    /// Approved by the owner 2026-11-13, exact wording.
     pub failed_unclassifiable: &'static str,
     /// The reviewer declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
@@ -848,7 +847,7 @@ pub fn witness_copy() -> WitnessCopy {
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
             too_long_to_scan: "Too long to scan (needs {needed}, limit {allowed}).",
             failed_too_long: "Too long to scan.",
-            failed_unclassifiable: "Couldn't scan this trace.",
+            failed_unclassifiable: "Privacy scan failed on this trace.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this trace's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
             failed_busy: "The privacy scan is busy.",
             busy_retry_at: "Try again after",
