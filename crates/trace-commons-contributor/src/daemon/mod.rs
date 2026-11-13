@@ -59,6 +59,7 @@ pub(crate) mod credential_store {
 }
 pub mod eligibility;
 pub mod enroll;
+pub(crate) mod first_trace;
 pub mod grant_terms;
 pub mod harness;
 pub mod health;

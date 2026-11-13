@@ -6,6 +6,16 @@ import XCTest
 final class DaemonDataContractWireTests: XCTestCase {
     private func frame(_ result: String) -> String { #"{"id":0,"result":\#(result)}"# }
 
+    func testStatusDecodesAuthoritativeFirstTraceAge() async throws {
+        let transport = FakeTransport(response: frame(#"{"first_trace_at":"2027-01-11T08:00:00Z"}"#))
+        let status = try await LiveDaemonClient(transport: transport).status()
+        XCTAssertEqual(status.firstTraceAt, Date(timeIntervalSince1970: 1_799_654_400))
+        for result in ["{}", #"{"first_trace_at":null}"#] {
+            let missing = try await LiveDaemonClient(transport: FakeTransport(response: frame(result))).status()
+            XCTAssertNil(missing.firstTraceAt, "older or unreadable state cannot supply an age")
+        }
+    }
+
     func testToolDestinationsPreservesObservedRoutesAndConfiguredHubEvidence() async throws {
         let transport = FakeTransport(response: frame(#"{"tools":[],"ledger_readable":true,"observed_destinations":[{"route":"outside","to":"unknown","via":"local_proxy","basis":"observed"}],"hub":{"kind":"owned_loopback","state":"running_answered_elsewhere","port":43127,"owned":true,"basis":"configured"}}"#))
         let result = try await LiveDaemonClient(transport: transport).toolDestinations()
