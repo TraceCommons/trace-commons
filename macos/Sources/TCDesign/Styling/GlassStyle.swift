@@ -221,6 +221,8 @@ public enum GlassTier: Sendable, Equatable {
             shape.fill(GlassTokens.Color.controlOnMenu.color)
         case .control where ground == .selection:
             shape.fill(GlassTokens.Color.controlOnSelection.color)
+        case .control where ground == .card:
+            shape.fill(GlassTokens.Color.controlOnCard.color)
         case .control:
             shape.fill(GlassTokens.Gradient.controlFill.linear)
         case .controlSelected:
@@ -261,7 +263,8 @@ public enum GlassGround: Sendable, Equatable {
         switch self {
         case .menu: return GlassTokens.Color.controlOnMenuHover
         case .selection: return GlassTokens.Color.controlOnSelectionHover
-        case .pane, .card: return hover
+        case .card: return GlassTokens.Color.controlOnCardHover
+        case .pane: return hover
         }
     }
 }
