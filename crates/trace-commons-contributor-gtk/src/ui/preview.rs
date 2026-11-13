@@ -2716,7 +2716,5 @@ fn too_long_sentence(label: &str, result: Option<&serde_json::Value>) -> Option<
     let view = result?.get("view")?;
     let needed = view.get("windows_needed")?.as_u64()?;
     let allowed = view.get("windows_allowed")?.as_u64()?;
-    Some(trace_commons_contributor::witness_copy::witness_too_long_line(
-        needed, allowed,
-    ))
+    Some(trace_commons_contributor::witness_copy::witness_too_long_line(needed, allowed))
 }
