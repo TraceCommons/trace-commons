@@ -167,9 +167,10 @@ queue: `422 {"error":"witness_trace_too_large_for_review",
 "windows_needed":N,"windows_allowed":M}`. `N` is the distinct classifier
 windows its text needs that are not already cached, counted as the NEAR AI
 adapter windows them; `M` is 80% of the paced request slots in the classify
-budget, `floor(budget / pace interval) * 0.8`. With this deployment's
-defaults (540 s request timeout less a 20 s margin, 30 requests a minute)
-that is `floor(520 / 2) * 0.8 = 208`. With no pace configured, or a
+budget, `floor(budget / pace interval) * 0.8`, rounded down. The budget is
+the 540 s request timeout less a 20 s margin; the pace is the deploy-time
+`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`. At 100 a minute (600 ms)
+that is `floor(866 * 0.8) = 692`; at 30 a minute, 208. With no pace configured, or a
 batching adapter, there is no up-front refusal. Not a `413`, which stays
 the request-bytes bound. Clients treat it as final for that session.
 

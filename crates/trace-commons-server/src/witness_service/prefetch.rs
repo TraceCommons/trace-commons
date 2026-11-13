@@ -906,14 +906,22 @@ mod tests {
 
     // ---- A trace too large to review in time is refused up front.
 
-    /// The deployed shape: a 520 s classify budget at 30 requests a minute
-    /// allows 260 requests, of which the check offers 80%.
+    /// A 520 s classify budget (the deployed request timeout less its
+    /// margin) at 30 requests a minute holds 260 paced slots, of which the
+    /// check offers 80%; at the production pace, 100 a minute, 692.
     #[test]
     fn review_capacity_is_a_share_of_the_paced_slots_in_the_budget() {
         let two_secs = Duration::from_secs(2);
         assert_eq!(
             review_capacity(Duration::from_secs(520), two_secs),
             Some(208)
+        );
+        // The production witness's sealed pace since 2026-11-12, 100 a
+        // minute: 520 000 / 600 = 866 whole slots, 80% of which is 692.8,
+        // kept as 692.
+        assert_eq!(
+            review_capacity(Duration::from_secs(520), Duration::from_millis(600)),
+            Some(692)
         );
         assert_eq!(review_capacity(Duration::from_secs(5), two_secs), Some(1));
         // Less than one slot: nothing fits, so everything is refused.

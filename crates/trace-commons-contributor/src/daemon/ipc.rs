@@ -11402,6 +11402,9 @@ mod tests {
             ("witness_body_not_stripped", review.failed_bodies_returned),
             ("witness_quote_replayed", review.failed_unproven),
             ("witness_attestation_unavailable", review.failed_unreachable),
+            // By label alone, with no counts: the number-less sentence. The
+            // handler writes the filled one when it has them.
+            ("witness_trace_too_large_for_review", review.failed_too_long),
         ] {
             let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
             assert_eq!(
@@ -11423,13 +11426,6 @@ mod tests {
         // Every refusal the client can raise is classified, so none of them
         // reaches a contributor as the sentence for an unclassified one.
         for label in WitnessTrustError::ALL_REFUSAL_LABELS {
-            // Its sentence needs the witness's counts, which a bare label
-            // does not carry: the handler writes that view itself (see
-            // `a_too_large_review_carries_its_counts_in_the_sentence`).
-            if label == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
-            {
-                continue;
-            }
             let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
             let message = response
                 .result

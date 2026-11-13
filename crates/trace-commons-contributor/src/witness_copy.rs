@@ -452,6 +452,11 @@ pub struct WitnessReviewCopy {
     ///
     /// Approved by the owner 2026-11-13, exact wording.
     pub too_long_to_scan: &'static str,
+    /// The same refusal reached by its label alone, with no counts to fill
+    /// [`Self::too_long_to_scan`] with.
+    ///
+    /// Approved by the owner 2026-11-13, exact wording.
+    pub failed_too_long: &'static str,
     /// The reviewer declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
     /// what that deployment accepts.
@@ -746,6 +751,9 @@ pub fn witness_refusal_line(label: Option<&str>) -> &'static str {
         Some("witness_claim_unavailable") => copy.failed_not_connected,
         Some("admission_evidence_refused") => copy.failed_receipt_declined,
         Some(trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR) => copy.failed_busy,
+        Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW) => {
+            copy.failed_too_long
+        }
         _ => copy.failed,
     }
 }
@@ -830,6 +838,7 @@ pub fn witness_copy() -> WitnessCopy {
             failed_too_large: "This trace is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
             too_long_to_scan: "Too long to scan (needs {needed}, limit {allowed}).",
+            failed_too_long: "Too long to scan.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this trace's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
             failed_busy: "The privacy scan is busy.",
             busy_retry_at: "Try again after",
@@ -1236,7 +1245,7 @@ pub(crate) mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            19,
+            20,
             "a field added to WitnessReviewCopy must be counted here"
         );
 
@@ -1247,7 +1256,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             sentences.len(),
-            9,
+            10,
             "every refusal sentence is a failed_* field"
         );
         for sentence in &sentences {
@@ -1281,17 +1290,6 @@ pub(crate) mod tests {
             let line = witness_refusal_line(Some(label));
             // A template is never a sentence a person sees.
             assert!(!line.contains('{'), "{label} renders a template: {line}");
-            // The one refusal whose approved sentence needs numbers: every
-            // path that has them renders `witness_too_long_line` (the
-            // daemon's review view, and GTK from the same counts). Reached
-            // by label alone it has no numbers, and no number-less sentence
-            // is approved (owner, 2026-11-13: no other new copy), so it
-            // falls back to the generic sentence.
-            if label == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
-            {
-                assert_eq!(line, generic);
-                continue;
-            }
             assert_ne!(
                 line, generic,
                 "{label} falls through to the sentence for a refusal nobody classified"
