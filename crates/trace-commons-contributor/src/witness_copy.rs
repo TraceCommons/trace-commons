@@ -68,7 +68,11 @@ pub const WITNESS_OPERATOR_LABEL: &str = "Operator label: {label}";
 /// The fields of [`WitnessCopy`] that are templates, and the holes each
 /// carries. Every other field is a finished sentence, and a test holds the
 /// table to that, so a hole cannot reach a shell that renders as-is.
-pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[("operator_label", &["label"])];
+pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[
+    ("operator_label", &["label"]),
+    // Filled by `witness_too_long_line`; never rendered as is.
+    ("review.too_long_to_scan", &["needed", "allowed"]),
+];
 
 /// Actions (#1146).
 pub const WITNESS_CONFIGURE: &str = "Save witness";
@@ -440,6 +444,24 @@ pub struct WitnessReviewCopy {
     pub failed_too_large: &'static str,
     /// No usable enrollment, so there is nothing to review under.
     pub failed_not_connected: &'static str,
+    /// The witness refused the session as too large to review
+    /// (`witness_trace_too_large_for_review`). A template, not a sentence:
+    /// `{needed}` is the classifier requests the session needs and
+    /// `{allowed}` the most one review allows, filled by
+    /// [`witness_too_long_line`] from the witness's own counts, needed first.
+    ///
+    /// Approved by the owner 2026-11-13, exact wording.
+    pub too_long_to_scan: &'static str,
+    /// The same refusal reached by its label alone, with no counts to fill
+    /// [`Self::too_long_to_scan`] with.
+    ///
+    /// Approved by the owner 2026-11-13, exact wording.
+    pub failed_too_long: &'static str,
+    /// The witness's classifier could not classify some of this trace's
+    /// text (`witness_text_unclassifiable`). Final for this trace.
+    ///
+    /// Approved by the owner 2026-11-13, exact wording.
+    pub failed_unclassifiable: &'static str,
     /// The reviewer declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
     /// what that deployment accepts.
@@ -734,8 +756,25 @@ pub fn witness_refusal_line(label: Option<&str>) -> &'static str {
         Some("witness_claim_unavailable") => copy.failed_not_connected,
         Some("admission_evidence_refused") => copy.failed_receipt_declined,
         Some(trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR) => copy.failed_busy,
+        Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW) => {
+            copy.failed_too_long
+        }
+        Some(trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE) => {
+            copy.failed_unclassifiable
+        }
         _ => copy.failed,
     }
+}
+
+/// [`WitnessReviewCopy::too_long_to_scan`] with the witness's counts filled
+/// in: `windows_needed`, then `windows_allowed`.
+#[must_use]
+pub fn witness_too_long_line(windows_needed: u64, windows_allowed: u64) -> String {
+    witness_copy()
+        .review
+        .too_long_to_scan
+        .replace("{needed}", &windows_needed.to_string())
+        .replace("{allowed}", &windows_allowed.to_string())
 }
 
 /// The witness surface's fixed words.
@@ -806,6 +845,9 @@ pub fn witness_copy() -> WitnessCopy {
             failed_bodies_returned: "The review was refused, because what came back still held the model text it was given, which a finished review never does. That trace has not been approved and will not be sent. Ask whoever runs your commons about it before reviewing anything else.",
             failed_too_large: "This trace is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
+            too_long_to_scan: "Too long to scan (needs {needed}, limit {allowed}).",
+            failed_too_long: "Too long to scan.",
+            failed_unclassifiable: "Privacy scan failed on this trace.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this trace's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
             failed_busy: "The privacy scan is busy.",
             busy_retry_at: "Try again after",
@@ -1195,13 +1237,24 @@ pub(crate) mod tests {
     /// The label list is `WitnessTrustError::ALL_REFUSAL_LABELS` rather than
     /// literals, so a refusal added to the enum without a sentence here fails
     /// rather than quietly taking the generic one.
+    /// The too-large sentence, filled in: the approved wording exactly,
+    /// needed first, and nothing of the template left.
+    #[test]
+    fn the_too_long_sentence_reads_needed_then_limit() {
+        assert_eq!(
+            witness_too_long_line(1800, 720),
+            "Too long to scan (needs 1800, limit 720)."
+        );
+        assert!(!witness_too_long_line(0, 0).contains('{'));
+    }
+
     #[test]
     fn every_witness_refusal_has_its_own_sentence() {
         let json = serde_json::to_value(witness_copy().review).unwrap();
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            18,
+            21,
             "a field added to WitnessReviewCopy must be counted here"
         );
 
@@ -1212,7 +1265,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             sentences.len(),
-            9,
+            11,
             "every refusal sentence is a failed_* field"
         );
         for sentence in &sentences {
@@ -1244,6 +1297,8 @@ pub(crate) mod tests {
         let mut selected: Vec<&str> = Vec::new();
         for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
             let line = witness_refusal_line(Some(label));
+            // A template is never a sentence a person sees.
+            assert!(!line.contains('{'), "{label} renders a template: {line}");
             assert_ne!(
                 line, generic,
                 "{label} falls through to the sentence for a refusal nobody classified"

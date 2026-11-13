@@ -197,6 +197,39 @@ pub enum WitnessError {
     /// partial redaction, which is worse than signing nothing.
     #[error("the witness could not complete the redaction")]
     RedactionFailed,
+    /// The redaction did not complete because the prose-PII classifier
+    /// stayed unavailable through the adapter's retries (a transport error,
+    /// a timeout, a 5xx or rate limit), or
+    /// because the request's classify budget ran out before a call could
+    /// start -- which can happen in the classify queue with no call made.
+    ///
+    /// A refusal exactly as [`Self::RedactionFailed`] is -- nothing is
+    /// certified -- named apart so an operator and a client can tell a
+    /// classifier outage from a pass that refused the trace. Only a failure
+    /// the classifier adapter itself typed as transient lands here; a panic,
+    /// a permanent classifier refusal or a residual secret never does.
+    #[error("the witness's privacy classifier was unavailable")]
+    ClassifierUnavailable,
+    /// The prose-PII classifier's answer for some of the text could not be
+    /// verified or corrected, so the redaction did not complete. A refusal
+    /// like the others -- nothing is certified -- and, unlike them, about
+    /// the content: the classifier answers that text the same way every
+    /// time, so a client must not read it as the witness being down.
+    #[error("the witness's privacy classifier could not classify the text")]
+    TextUnclassifiable,
+    /// The trace needs more classifier requests than one review can make at
+    /// the configured pace, so it was refused before any was made.
+    ///
+    /// The one variant that carries numbers, by owner decision (2026-11-13):
+    /// the two counts go back to the submitting client in the refusal body
+    /// so a person can be told how far over the trace is. They are counts
+    /// of classifier requests, not content, and they never reach a log --
+    /// `Display` (and so `Debug`) is the label alone.
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
     /// The witness could not bind a digest to the artifact it produced.
     #[error("the witness could not bind a digest to the artifact it produced")]
     ArtifactBindingFailed,
@@ -312,6 +345,78 @@ impl<T, E, F: std::future::Future<Output = Result<T, E>>> std::future::Future fo
             Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
             Err(_) => std::task::Poll::Ready(Err(SeamUnavailable)),
         }
+    }
+}
+
+/// Why a contribution's redaction did not complete: the structured seam's
+/// error.
+///
+/// Two answers where the other seams have one. [`SeamUnavailable`] carries
+/// nothing so no seam can pick its own refusal; this one may say only
+/// whether the prose classifier was unavailable, which it learns from the
+/// adapter's own typed transience
+/// ([`trace_commons_protocol::trace_contribution::TraceContributionError::is_transient`]), never from a message. Both
+/// are refusals: there is no variant that certifies anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RedactionUnavailable {
+    /// The pass refused or broke: a permanent classifier refusal, a
+    /// deterministic refusal, a panic.
+    #[error("the redaction did not complete")]
+    Failed,
+    /// The prose classifier stayed unavailable through its retries.
+    #[error("the privacy classifier was unavailable")]
+    ClassifierUnavailable,
+    /// The trace needs more classifier requests than one review allows; see
+    /// [`WitnessError::TraceTooLargeForReview`].
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
+    /// The classifier's answer for some of the text could not be verified
+    /// or corrected (`TraceContributionError::UnclassifiableText`).
+    #[error("the privacy classifier could not classify the text")]
+    TextUnclassifiable,
+}
+
+impl From<SeamUnavailable> for RedactionUnavailable {
+    fn from(SeamUnavailable: SeamUnavailable) -> Self {
+        Self::Failed
+    }
+}
+
+impl From<RedactionUnavailable> for WitnessError {
+    fn from(error: RedactionUnavailable) -> Self {
+        match error {
+            RedactionUnavailable::Failed => WitnessError::RedactionFailed,
+            RedactionUnavailable::ClassifierUnavailable => WitnessError::ClassifierUnavailable,
+            RedactionUnavailable::TextUnclassifiable => WitnessError::TextUnclassifiable,
+            RedactionUnavailable::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } => WitnessError::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            },
+        }
+    }
+}
+
+/// Run a redaction pass, refusing on a panic as [`refuse_on_panic`] does,
+/// and keep only whether a failure was the classifier being unavailable.
+pub(crate) async fn redaction_outcome<T, F>(future: F) -> Result<T, RedactionUnavailable>
+where
+    F: std::future::Future<
+            Output = Result<T, trace_commons_protocol::trace_contribution::TraceContributionError>,
+        >,
+{
+    match refuse_on_panic(async { Ok::<_, ()>(future.await) }).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) if error.is_transient() => Err(RedactionUnavailable::ClassifierUnavailable),
+        Ok(Err(trace_commons_protocol::trace_contribution::TraceContributionError::UnclassifiableText {
+            ..
+        })) => Err(RedactionUnavailable::TextUnclassifiable),
+        Ok(Err(_)) | Err(SeamUnavailable) => Err(RedactionUnavailable::Failed),
     }
 }
 
@@ -831,7 +936,7 @@ pub trait ContributionRedactor: Send + Sync {
                 trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
             >,
         ),
-        SeamUnavailable,
+        RedactionUnavailable,
     > {
         Ok((self.redact(raw).await?, std::collections::BTreeMap::new()))
     }
@@ -840,7 +945,7 @@ pub trait ContributionRedactor: Send + Sync {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable>;
+    ) -> Result<RedactedContribution, RedactionUnavailable>;
 }
 
 /// The structured pipeline, over a [`DeterministicTraceRedactor`].
@@ -871,7 +976,7 @@ impl PipelineContributionRedaction {
     }
 
     /// Both stages: the deterministic pass, then the prose-PII classifier,
-    /// per event. A backend failure surfaces as [`SeamUnavailable`] and
+    /// per event. A backend failure surfaces as [`RedactionUnavailable`] and
     /// becomes a refusal; it is never downgraded to the deterministic result,
     /// which would be a certificate claiming coverage the pass did not have.
     pub fn with_privacy_filter(
@@ -900,9 +1005,10 @@ impl ContributionRedactor for PipelineContributionRedaction {
                 trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
             >,
         ),
-        SeamUnavailable,
+        RedactionUnavailable,
     > {
-        let (envelope, maps) = refuse_on_panic(self.redactor.redact_trace_with_edits(raw)).await?;
+        let (envelope, maps) =
+            redaction_outcome(self.redactor.redact_trace_with_edits(raw)).await?;
         Ok((
             RedactedContribution {
                 envelope,
@@ -914,8 +1020,8 @@ impl ContributionRedactor for PipelineContributionRedaction {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable> {
-        let envelope = refuse_on_panic(self.redactor.redact_trace(raw)).await?;
+    ) -> Result<RedactedContribution, RedactionUnavailable> {
+        let envelope = redaction_outcome(self.redactor.redact_trace(raw)).await?;
         Ok(RedactedContribution {
             envelope,
             policy_version: self.policy_version.clone(),
@@ -993,7 +1099,7 @@ pub(crate) async fn witness_contribution_with_issuance(
     } = redactor
         .redact(request.raw_contribution)
         .await
-        .map_err(|SeamUnavailable| WitnessError::RedactionFailed)?;
+        .map_err(WitnessError::from)?;
 
     // Inside the certified bytes. A client that had to stamp these after
     // certification would be making a byte change the certificate does not
@@ -2094,6 +2200,66 @@ mod tests {
         .await
         .expect_err("a credential in a correction is refused, not masked");
         assert_eq!(err, WitnessError::RedactionFailed);
+    }
+
+    /// Only a classifier that stayed unavailable through its retries reads
+    /// as `ClassifierUnavailable`. Every other way the pass can stop -- a
+    /// permanent refusal, a panic -- is `Failed`, and each maps to its own
+    /// witness refusal.
+    #[tokio::test]
+    async fn only_a_transient_classifier_failure_is_classifier_unavailable() {
+        use trace_commons_protocol::trace_contribution::TraceContributionError;
+        let transient = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::TransientRedactionFailed {
+                reason: "classifier down".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(transient, Err(RedactionUnavailable::ClassifierUnavailable));
+        let permanent = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::RedactionFailed {
+                reason: "refused".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(permanent, Err(RedactionUnavailable::Failed));
+        let unclassifiable = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::UnclassifiableText {
+                reason: "no valid answer".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(
+            unclassifiable,
+            Err(RedactionUnavailable::TextUnclassifiable)
+        );
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::TextUnclassifiable),
+            WitnessError::TextUnclassifiable
+        );
+        let panicked = redaction_outcome(async {
+            if std::hint::black_box(true) {
+                panic!("synthetic panic inside the pass");
+            }
+            Ok::<(), TraceContributionError>(())
+        })
+        .await;
+        assert_eq!(panicked, Err(RedactionUnavailable::Failed));
+        let done = redaction_outcome(async { Ok::<_, TraceContributionError>(7) }).await;
+        assert_eq!(done, Ok(7));
+
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::ClassifierUnavailable),
+            WitnessError::ClassifierUnavailable
+        );
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::Failed),
+            WitnessError::RedactionFailed
+        );
+        assert_eq!(
+            RedactionUnavailable::from(SeamUnavailable),
+            RedactionUnavailable::Failed
+        );
     }
 
     #[tokio::test]

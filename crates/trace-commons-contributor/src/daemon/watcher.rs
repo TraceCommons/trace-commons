@@ -2248,6 +2248,8 @@ fn new_entry(
         },
         reason_label: returned_from_keep
             .then(|| super::queue::REASON_RETURNED_FROM_KEEP.to_string()),
+        review_windows_needed: None,
+        review_windows_allowed: None,
         refused_on_version: None,
         attempts: 0,
         retry_after: None,

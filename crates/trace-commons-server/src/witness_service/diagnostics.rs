@@ -24,8 +24,11 @@
 //! - witness jobs by state: pending, running, finished and unfetched, and
 //!   results that expired unfetched (counts only, never a job id);
 //! - for the NEAR AI classifier: requests by outcome kind (ok, timeout,
-//!   transport, 401/403, 402/429, 5xx, 413, other 4xx, body shape), requests
-//!   on the wire now, and recent successful latencies by body-size bucket.
+//!   transport, 401/403, 402/429, 5xx, 413, other 4xx, body shape), the
+//!   body-shape total split by which check the answer failed (parse error,
+//!   empty data, entry-count mismatch, span-text mismatch, span out of
+//!   range), requests on the wire now, and recent successful latencies by
+//!   body-size bucket.
 //!
 //! Never: request bodies or any part of them, request or trace identifiers,
 //! keys, classifier hostnames, peer addresses, or per-request records. Every
@@ -121,6 +124,9 @@ impl LoadCounters {
             timed_out: self.timed_out.load(Ordering::Relaxed),
             classify_queue_waiting: None,
             classify_queue_mean_turn_ms: None,
+            prefetch_replay_misses: None,
+            oversized_refusals: None,
+            oversized_windows_needed: None,
         }
     }
 }
@@ -145,6 +151,14 @@ pub struct LoadSnapshot {
     pub classify_queue_waiting: Option<usize>,
     /// The recent time a request spends classifying, once one has.
     pub classify_queue_mean_turn_ms: Option<u64>,
+    /// Texts a contribution's replay asked about that its record pass never
+    /// saw, each classified then. A count only.
+    pub prefetch_replay_misses: Option<u64>,
+    /// Traces refused up front as too large to review.
+    pub oversized_refusals: Option<u64>,
+    /// Those refusals by how many classifier requests the trace needed:
+    /// `le_1500`, `le_3000`, `le_6000`, `gt_6000`. Counts only.
+    pub oversized_windows_needed: Option<std::collections::BTreeMap<&'static str, u64>>,
 }
 
 #[derive(Serialize)]
@@ -309,6 +323,9 @@ mod tests {
                 "early_busy",
                 "in_use",
                 "max_concurrent",
+                "oversized_refusals",
+                "oversized_windows_needed",
+                "prefetch_replay_misses",
                 "saturated_refusals",
                 "timed_out",
             ]
@@ -316,7 +333,15 @@ mod tests {
         let classifier = sorted(&json["classifier"]);
         assert_eq!(
             classifier,
-            ["backend", "in_flight", "latency_ms", "outcomes"]
+            [
+                "backend",
+                "body_shapes",
+                "in_flight",
+                "latency_ms",
+                "outcomes",
+                "spans_reanchored",
+                "spans_text_repaired"
+            ]
         );
         let outcomes = sorted(&json["classifier"]["outcomes"]);
         assert_eq!(
@@ -333,6 +358,24 @@ mod tests {
                 "transport",
             ]
         );
+        // Which check a malformed answer failed: labels and counts only.
+        let body_shapes = sorted(&json["classifier"]["body_shapes"]);
+        assert_eq!(
+            body_shapes,
+            [
+                "empty_data",
+                "entry_count_mismatch",
+                "parse_error",
+                "span_out_of_range",
+                "span_text_mismatch",
+            ]
+        );
+        for kind in body_shapes {
+            assert!(
+                json["classifier"]["body_shapes"][&kind].is_u64(),
+                "{kind} is a count"
+            );
+        }
         let job_keys = sorted(&json["jobs"]);
         assert_eq!(
             job_keys,

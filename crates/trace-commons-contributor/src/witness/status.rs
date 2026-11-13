@@ -895,6 +895,11 @@ mod refusal_label_set_tests {
             },
             WitnessTrustError::WitnessTimeout,
             WitnessTrustError::WitnessUnreachable,
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            },
+            WitnessTrustError::WitnessTextUnclassifiable,
         ];
         assert_eq!(
             every.len(),

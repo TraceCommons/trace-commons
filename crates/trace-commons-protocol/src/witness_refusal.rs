@@ -17,9 +17,23 @@ pub const WITNESS_REQUEST_TIMED_OUT: &str = "witness_request_timed_out";
 /// `413`: the request is larger than the witness accepts.
 pub const WITNESS_REQUEST_TOO_LARGE: &str = "witness_request_too_large";
 
-/// `503`: the redaction did not complete (a classifier unavailable or
-/// erroring, or a residual secret the witness would not certify).
+/// `503`: the redaction did not complete (a classifier refusing or
+/// erroring, a residual secret the witness would not certify, or a result
+/// too large to keep).
 pub const WITNESS_REDACTION_FAILED: &str = "witness_redaction_failed";
+/// `503`: the prose-PII classifier did not classify every text in time, so
+/// the redaction did not complete: it stayed unavailable through the
+/// witness's own retries (transport errors, timeouts, 5xx, rate limits),
+/// or the request's classify budget ran out before a
+/// call could start (a long classify queue can do that with no classifier
+/// call at all). Nothing about the contribution was judged; the same
+/// request may succeed later. Sent with
+/// `Retry-After: WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS`.
+pub const WITNESS_CLASSIFIER_UNAVAILABLE: &str = "witness_classifier_unavailable";
+/// The `Retry-After` a [`WITNESS_CLASSIFIER_UNAVAILABLE`] answer carries, in
+/// seconds. A hint: a client reads the 503 as unavailable and keeps its own
+/// backoff.
+pub const WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS: u32 = 60;
 /// `503`: the witness could not bind a digest to the artifact it produced.
 pub const WITNESS_ARTIFACT_BINDING_FAILED: &str = "witness_artifact_binding_failed";
 /// `503`: the enclave could not report its measurement.
@@ -29,10 +43,44 @@ pub const WITNESS_SIGNING_UNAVAILABLE: &str = "witness_signing_unavailable";
 /// `503`: this deployment has no structured contribution path configured.
 pub const WITNESS_CONTRIBUTION_PATH_UNAVAILABLE: &str = "witness_contribution_path_unavailable";
 
+/// `422`: the trace needs more classifier requests than the witness can
+/// make within one review at its configured pace, so it was refused before
+/// any was made. Final for this submission: the same trace needs the same
+/// requests next time. Not `413`, which stays the request-bytes bound
+/// ([`WITNESS_REQUEST_TOO_LARGE`]) a gateway can also send; this request was
+/// received whole and understood, and cannot be processed in a review.
+///
+/// The body carries [`WITNESS_WINDOWS_NEEDED_FIELD`] and
+/// [`WITNESS_WINDOWS_ALLOWED_FIELD`], two whole numbers and nothing else
+/// about the trace.
+pub const WITNESS_TRACE_TOO_LARGE_FOR_REVIEW: &str = "witness_trace_too_large_for_review";
+/// The classifier requests the refused trace needed.
+pub const WITNESS_WINDOWS_NEEDED_FIELD: &str = "windows_needed";
+/// The classifier requests one review allows.
+pub const WITNESS_WINDOWS_ALLOWED_FIELD: &str = "windows_allowed";
+
+/// Read `(windows_needed, windows_allowed)` from a
+/// [`WITNESS_TRACE_TOO_LARGE_FOR_REVIEW`] body. `None` unless both are whole
+/// non-negative numbers.
+#[must_use]
+pub fn review_limits(body: &serde_json::Value) -> Option<(u64, u64)> {
+    let needed = body.get(WITNESS_WINDOWS_NEEDED_FIELD)?.as_u64()?;
+    let allowed = body.get(WITNESS_WINDOWS_ALLOWED_FIELD)?.as_u64()?;
+    Some((needed, allowed))
+}
+
+/// `422`: the witness's prose-PII classifier could not classify some of
+/// this contribution's text -- its answer could not be verified or
+/// corrected -- so nothing was certified. The classifier answers that text
+/// the same way every time: about the content, not the witness being down.
+/// Final for this submission; a newer client build may offer it again.
+pub const WITNESS_TEXT_UNCLASSIFIABLE: &str = "witness_text_unclassifiable";
+
 /// The `503` refusals that say the witness could not do its job right now.
 /// None of them is about the contributor's input being wrong.
-pub const WITNESS_UNAVAILABLE_REFUSALS: [&str; 5] = [
+pub const WITNESS_UNAVAILABLE_REFUSALS: [&str; 6] = [
     WITNESS_REDACTION_FAILED,
+    WITNESS_CLASSIFIER_UNAVAILABLE,
     WITNESS_ARTIFACT_BINDING_FAILED,
     WITNESS_MEASUREMENT_UNAVAILABLE,
     WITNESS_SIGNING_UNAVAILABLE,
@@ -85,6 +133,11 @@ pub enum WitnessRefusalClass {
     TooLarge,
     /// `403` with one of [`WITNESS_INFERENCE_REFUSALS`].
     InferenceDeclined,
+    /// `422` [`WITNESS_TRACE_TOO_LARGE_FOR_REVIEW`]: final for this
+    /// submission.
+    TraceTooLargeForReview,
+    /// `422` [`WITNESS_TEXT_UNCLASSIFIABLE`]: final for this submission.
+    TextUnclassifiable,
     /// Anything else: a client error this module does not name, or a label
     /// that does not agree with its status.
     Unrecognised,
@@ -108,6 +161,10 @@ pub fn classify_witness_refusal(status: u16, label: Option<&str>) -> WitnessRefu
         (403, Some(label)) if WITNESS_INFERENCE_REFUSALS.contains(&label) => {
             WitnessRefusalClass::InferenceDeclined
         }
+        (422, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW)) => {
+            WitnessRefusalClass::TraceTooLargeForReview
+        }
+        (422, Some(WITNESS_TEXT_UNCLASSIFIABLE)) => WitnessRefusalClass::TextUnclassifiable,
         (500..=599, _) => WitnessRefusalClass::Unavailable,
         (404 | 408 | 429, None) => WitnessRefusalClass::Unavailable,
         _ => WitnessRefusalClass::Unrecognised,
@@ -123,9 +180,21 @@ mod tests {
         assert_eq!(WITNESS_REQUEST_TIMED_OUT, "witness_request_timed_out");
         assert_eq!(WITNESS_REQUEST_TOO_LARGE, "witness_request_too_large");
         assert_eq!(
+            WITNESS_CLASSIFIER_UNAVAILABLE,
+            "witness_classifier_unavailable"
+        );
+        assert_eq!(
+            WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+            "witness_trace_too_large_for_review"
+        );
+        assert_eq!(WITNESS_TEXT_UNCLASSIFIABLE, "witness_text_unclassifiable");
+        assert_eq!(WITNESS_WINDOWS_NEEDED_FIELD, "windows_needed");
+        assert_eq!(WITNESS_WINDOWS_ALLOWED_FIELD, "windows_allowed");
+        assert_eq!(
             WITNESS_UNAVAILABLE_REFUSALS,
             [
                 "witness_redaction_failed",
+                "witness_classifier_unavailable",
                 "witness_artifact_binding_failed",
                 "witness_measurement_unavailable",
                 "witness_signing_unavailable",
@@ -144,6 +213,30 @@ mod tests {
                 "witness_inference_body_too_large",
             ]
         );
+    }
+
+    /// The two counts come back as written, and anything that is not two
+    /// whole non-negative numbers is no answer at all.
+    #[test]
+    fn the_review_limits_are_read_only_when_both_are_whole_numbers() {
+        let read = |body: serde_json::Value| review_limits(&body);
+        assert_eq!(
+            read(serde_json::json!({
+                "error": WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+                "windows_needed": 1800, "windows_allowed": 208
+            })),
+            Some((1800, 208))
+        );
+        for bad in [
+            serde_json::json!({"windows_needed": 1800}),
+            serde_json::json!({"windows_allowed": 208}),
+            serde_json::json!({"windows_needed": "1800", "windows_allowed": 208}),
+            serde_json::json!({"windows_needed": -1, "windows_allowed": 208}),
+            serde_json::json!({"windows_needed": 1.5, "windows_allowed": 208}),
+            serde_json::json!([1800, 208]),
+        ] {
+            assert_eq!(read(bad.clone()), None, "{bad}");
+        }
     }
 
     #[test]
@@ -173,8 +266,26 @@ mod tests {
             (400, None, Unrecognised),
             (401, None, Unrecognised),
             (403, None, Unrecognised),
+            // A trace too large to review in time: final for this
+            // submission, on the exact pair only. Never a 413, which stays
+            // the request-bytes bound.
+            (
+                422,
+                Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW),
+                TraceTooLargeForReview,
+            ),
+            (422, None, Unrecognised),
+            (422, Some("something_else"), Unrecognised),
+            (413, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW), Unrecognised),
+            (503, Some(WITNESS_TRACE_TOO_LARGE_FOR_REVIEW), Unavailable),
+            // Text the classifier could not classify: final for this
+            // submission, on the exact pair only.
+            (422, Some(WITNESS_TEXT_UNCLASSIFIABLE), TextUnclassifiable),
+            (400, Some(WITNESS_TEXT_UNCLASSIFIABLE), Unrecognised),
+            (503, Some(WITNESS_TEXT_UNCLASSIFIABLE), Unavailable),
             // A label never moves a 4xx on its own.
             (404, Some(WITNESS_REDACTION_FAILED), Unrecognised),
+            (404, Some(WITNESS_CLASSIFIER_UNAVAILABLE), Unrecognised),
             (429, Some("witness_saturated"), Unrecognised),
             (413, Some("something_else"), Unrecognised),
             (

@@ -243,6 +243,9 @@ pub enum SubmitOutcome {
         session_ref: String,
         size_bytes: Option<usize>,
         limit_bytes: Option<usize>,
+        /// `(windows_needed, windows_allowed)` when the witness refused the
+        /// session as too large to review; `None` for every other refusal.
+        review_limits: Option<(u64, u64)>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -455,6 +458,7 @@ fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
         session_ref: session_ref.to_string(),
         size_bytes: None,
         limit_bytes: None,
+        review_limits: None,
     }
 }
 
@@ -467,6 +471,7 @@ fn refused_for_size(session_ref: &str, size_bytes: usize, limit_bytes: usize) ->
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
         limit_bytes: Some(crate::envelope::clamp_envelope_limit(limit_bytes)),
+        review_limits: None,
     }
 }
 
@@ -991,6 +996,10 @@ pub struct SubmitContext<'a> {
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
     /// borrows the context immutably; there is no concurrency here.
     last_witness_retry_after: std::sync::atomic::AtomicU32,
+    /// The counts a witness gave when it refused the last submission as too
+    /// large to review, `(windows_needed, windows_allowed)`; `None`
+    /// otherwise. Reset like `last_witness_retry_after`.
+    last_witness_review_limits: std::sync::Mutex<Option<(u64, u64)>>,
     /// The wait ingest's rate limit asked for on the last submission, in
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
@@ -1097,6 +1106,7 @@ impl<'a> SubmitContext<'a> {
             background_witness: false,
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_witness_review_limits: std::sync::Mutex::new(None),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_account_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
@@ -1721,6 +1731,16 @@ impl<'a> SubmitContext<'a> {
                 self.last_witness_retry_after
                     .store(retry_after_secs, std::sync::atomic::Ordering::Relaxed);
             }
+            if let crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } = e
+            {
+                *self
+                    .last_witness_review_limits
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some((windows_needed, windows_allowed));
+            }
             e.refusal_label()
         })?;
 
@@ -1854,7 +1874,14 @@ impl<'a> SubmitContext<'a> {
                         reason_label: label.to_string(),
                     }));
                 }
-                Ok(Err(refused(label, &transcript.session_hash)))
+                let mut outcome = refused(label, &transcript.session_hash);
+                if label
+                    == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+                    && let SubmitOutcome::Refused { review_limits, .. } = &mut outcome
+                {
+                    *review_limits = self.last_witness_review_limits();
+                }
+                Ok(Err(outcome))
             }
         }
     }
@@ -1879,6 +1906,10 @@ impl<'a> SubmitContext<'a> {
         self.last_receipt_shipped = ReceiptShipped::NoCall;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         let Some(settings) = self.cfg.witness.clone() else {
             return Ok(WitnessForPin::Outcome(refused(
                 "witness-not-configured",
@@ -1999,6 +2030,17 @@ impl<'a> SubmitContext<'a> {
         self.upload_provenance = Some((approved_unattended, approved_verdict));
     }
 
+    /// The counts the witness gave when it refused the most recent
+    /// submission as too large to review, `(windows_needed,
+    /// windows_allowed)`, or `None` if it did not.
+    #[must_use]
+    pub fn last_witness_review_limits(&self) -> Option<(u64, u64)> {
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -2101,6 +2143,10 @@ impl<'a> SubmitContext<'a> {
         self.last_sent_witness = None;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_unavailable_retry_after
@@ -5211,7 +5257,9 @@ mod tests {
                 session_ref,
                 size_bytes,
                 limit_bytes,
+                review_limits,
             } => {
+                assert_eq!(review_limits, None);
                 assert_eq!(reason_label, "session-too-large");
                 assert_eq!(session_ref, "sha256:abc");
                 assert_eq!(size_bytes, Some(MAX_ENVELOPE_BYTES + 1));
@@ -8925,6 +8973,7 @@ pub fn outcomes_to_json(
                     session_ref,
                     size_bytes,
                     limit_bytes,
+                    ..
                 } => serde_json::json!({
                     "outcome": "refused",
                     "reason": reason_label,
