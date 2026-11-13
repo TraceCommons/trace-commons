@@ -1369,7 +1369,9 @@ async fn a_batched_request_is_counted_in_diagnostics() {
 #[tokio::test]
 async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
     use std::sync::Arc;
-    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{
+        BodyShape, Outcome, Recorder,
+    };
 
     let recorder = Arc::new(Recorder::default());
     let server = server_with(per_input_emails(usize::MAX, true)).await;
@@ -1378,6 +1380,207 @@ async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
     let answers = answers_of(&adapter, &texts).await;
     assert!(answers.iter().all(Result::is_err), "{answers:?}");
     assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    assert_eq!(recorder.body_shape_count(BodyShape::EntryCountMismatch), 1);
     assert_eq!(recorder.count(Outcome::Ok), 0);
     assert_eq!(recorder.snapshot().in_flight, 0);
+}
+
+const ALICE_TEXT: &str = "email me at alice@example.com please";
+
+/// A span whose offsets run past its input: NEAR AI answered one for a real
+/// session on every request (2026-11-12). It used to pass verification, be
+/// cached and counted `ok`, and then be refused when applied -- so every
+/// later request for that window was refused from the cache with no
+/// classifier call at all.
+fn out_of_range_answer(inputs: usize) -> ResponseTemplate {
+    let entry = json!({ "spans": [
+        {"category": "private_email", "start": 12, "end": 900, "score": 0.99, "text": "alice@example.com"}
+    ]});
+    ResponseTemplate::new(200).set_body_json(json!({ "data": vec![entry; inputs] }))
+}
+
+#[tokio::test]
+async fn an_out_of_range_span_is_refused_counted_and_never_cached() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let server = server_with(|_: &wiremock::Request| out_of_range_answer(1)).await;
+    let recorder = Arc::new(Recorder::default());
+    let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+    let error = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("privacy_filter_span_out_of_range"),
+        "{message}"
+    );
+    assert!(!message.contains("alice"), "no content: {message}");
+    assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    assert_eq!(recorder.count(Outcome::Ok), 0, "a refused answer is not ok");
+    let requests = server.received_requests().await.unwrap().len();
+
+    // The same window again: a fresh request, not a refusal from the cache.
+    adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2 * requests
+    );
+
+    // Batched: the entry refuses the whole batch, and nothing is cached.
+    let batch_server = server_with(|req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        out_of_range_answer(body["input"].as_array().map_or(1, Vec::len))
+    })
+    .await;
+    let batching = batching_adapter(batch_server.uri(), 8);
+    let texts: Vec<String> = (0..3).map(|i| format!("{ALICE_TEXT} {i}")).collect();
+    let first = answers_of(&batching, &texts).await;
+    assert!(first.iter().all(Result::is_err), "{first:?}");
+    let sent = batch_server.received_requests().await.unwrap().len();
+    let second = answers_of(&batching, &texts).await;
+    assert!(second.iter().all(Result::is_err), "{second:?}");
+    assert_eq!(
+        batch_server.received_requests().await.unwrap().len(),
+        2 * sent,
+        "the second pass asked again"
+    );
+}
+
+/// A 200 that is malformed in the way `kind` names, for [`ALICE_TEXT`].
+fn malformed_alice_answer(
+    kind: trace_commons_protocol::privacy_filter_near_ai::diagnostics::BodyShape,
+) -> ResponseTemplate {
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::BodyShape;
+    match kind {
+        BodyShape::ParseError => ResponseTemplate::new(200)
+            .set_body_string("{not valid json")
+            .insert_header("content-type", "application/json"),
+        BodyShape::EmptyData => ResponseTemplate::new(200).set_body_json(json!({ "data": [] })),
+        // Right offsets, wrong text: the answer disagrees with itself.
+        BodyShape::SpanTextMismatch => ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.org"}
+            ]}]
+        })),
+        BodyShape::SpanOutOfRange => out_of_range_answer(1),
+        BodyShape::EntryCountMismatch => ResponseTemplate::new(200)
+            .set_body_json(json!({ "data": [{"spans": []}, {"spans": []}] })),
+    }
+}
+
+/// Each kind of malformed answer on a single window is counted once under
+/// its own label and in the `body_shape` total, never as `ok`, and refused
+/// without leaking content. (Entry-count mismatch exists only for a batch;
+/// see `a_batch_count_mismatch_is_recorded_as_body_shape`.)
+#[tokio::test]
+async fn each_malformed_answer_is_counted_by_its_kind() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{
+        BodyShape, Outcome, Recorder,
+    };
+    let single_window = [
+        BodyShape::ParseError,
+        BodyShape::EmptyData,
+        BodyShape::SpanTextMismatch,
+        BodyShape::SpanOutOfRange,
+    ];
+    for kind in single_window {
+        let server = server_with(move |_: &wiremock::Request| malformed_alice_answer(kind)).await;
+        let recorder = Arc::new(Recorder::default());
+        let adapter = adapter(server.uri()).with_diagnostics(recorder.clone());
+        let error = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("body_shape={}", kind.label())),
+            "{kind:?}: {message}"
+        );
+        assert!(!message.contains("alice"), "no content: {message}");
+        assert_eq!(recorder.count(Outcome::BodyShape), 1, "{kind:?}");
+        assert_eq!(recorder.count(Outcome::Ok), 0, "{kind:?}");
+        for other in BodyShape::ALL {
+            let expected = u64::from(other == kind);
+            assert_eq!(
+                recorder.body_shape_count(other),
+                expected,
+                "{kind:?}/{other:?}"
+            );
+        }
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.body_shapes[kind.label()], 1);
+        assert_eq!(
+            snapshot.outcomes["body_shape"],
+            snapshot.body_shapes.values().sum::<u64>()
+        );
+        // Never cached: the same window is asked about again.
+        let _ = adapter.redact_text(ALICE_TEXT).await.unwrap_err();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "{kind:?}"
+        );
+    }
+}
+
+// ---- How many requests a set of texts will cost, before any is sent. The
+// witness refuses a trace up front when the count cannot fit its review
+// budget at the configured pace, so the count must never be HIGHER than what
+// is actually sent: an over-count would refuse a trace that fits.
+
+/// The prediction equals the requests an unpaced, cold-cache run sends:
+/// blank text and text over the input limit send nothing, a long field sends
+/// one per window, and a window repeated across texts is counted once. On a
+/// warm cache it is zero.
+#[tokio::test]
+async fn requests_needed_matches_what_a_cold_cache_sends() {
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        // Room for the long field below, and a limit the last text is over.
+        8 * APPROX_BYTES_PER_WINDOW,
+    )
+    .expect("adapter builds");
+    let long_field = format!(
+        "{}tail bob@example.com",
+        "clean line\n".repeat(APPROX_BYTES_PER_WINDOW * 3 / 11)
+    );
+    let over_limit = "x".repeat(9 * APPROX_BYTES_PER_WINDOW);
+    let texts: Vec<String> = vec![
+        String::new(),
+        "   ".to_string(),
+        "mail bob@example.com".to_string(),
+        "mail bob@example.com".to_string(),
+        long_field.clone(),
+        format!("{long_field} and more"),
+        over_limit,
+    ];
+    let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let predicted = adapter
+        .requests_needed(&borrowed)
+        .expect("an unbatched NEAR AI adapter can count");
+    assert!(predicted >= 4, "{predicted}");
+
+    for text in &borrowed {
+        let _ = adapter.redact_text(text).await;
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), predicted);
+    assert_eq!(adapter.requests_needed(&borrowed), Some(0), "warm cache");
+}
+
+/// A batching adapter packs several texts into a request, which this count
+/// does not model, so it declines to count rather than over-count.
+#[tokio::test]
+async fn a_batching_adapter_does_not_count_requests() {
+    let adapter = batching_adapter("http://127.0.0.1:1".to_string(), 8);
+    assert_eq!(adapter.requests_needed(&["one", "two"]), None);
+}
+
+/// The pace is the adapter's own: unpaced has none.
+#[tokio::test]
+async fn the_request_interval_is_the_configured_pace() {
+    let unpaced = adapter("http://127.0.0.1:1".to_string());
+    assert_eq!(unpaced.request_interval(), None);
+    let paced = adapter("http://127.0.0.1:1".to_string()).with_requests_per_minute(30);
+    assert_eq!(paced.request_interval(), Some(Duration::from_secs(2)));
 }

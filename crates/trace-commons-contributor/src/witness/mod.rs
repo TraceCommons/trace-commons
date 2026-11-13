@@ -262,6 +262,16 @@ pub enum WitnessTrustError {
     /// later.
     #[error("the witness could not be reached")]
     WitnessUnreachable,
+    /// The witness answered `422 witness_trace_too_large_for_review`: the
+    /// session needs more classifier requests than one review can make, so
+    /// it was refused before any was made. Final for this session; the same
+    /// session needs the same requests next time. The two counts are the
+    /// witness's, kept so a person can be told how far over it is.
+    #[error("the session is too large for the witness to review")]
+    WitnessTraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -305,6 +315,9 @@ impl WitnessTrustError {
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
             Self::WitnessTimeout => "witness_timeout",
             Self::WitnessUnreachable => "witness_unreachable",
+            Self::WitnessTraceTooLargeForReview { .. } => {
+                trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+            }
             // The wire label itself, like the admission refusal below.
             Self::WitnessSaturated { .. } => {
                 trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
@@ -324,7 +337,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 17] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 18] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -342,6 +355,7 @@ impl WitnessTrustError {
         trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
         "witness_timeout",
         "witness_unreachable",
+        trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
     ];
 
     /// Recognise a refusal label that has been through a `String`.

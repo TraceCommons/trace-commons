@@ -80,13 +80,15 @@ use trace_commons_protocol::witness_pacing::{
     WITNESS_WORKLOAD_HEADER,
 };
 use trace_commons_protocol::witness_refusal::{
-    WITNESS_ARTIFACT_BINDING_FAILED, WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
+    WITNESS_ARTIFACT_BINDING_FAILED, WITNESS_CLASSIFIER_UNAVAILABLE,
+    WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS, WITNESS_CONTRIBUTION_PATH_UNAVAILABLE,
     WITNESS_INFERENCE_ATTESTATION_MISSING, WITNESS_INFERENCE_ATTESTATION_UNAVAILABLE,
     WITNESS_INFERENCE_BODY_NOT_IN_SESSION, WITNESS_INFERENCE_BODY_TOO_LARGE,
     WITNESS_INFERENCE_CALL_ABSENT, WITNESS_INFERENCE_CALL_UNATTESTABLE,
     WITNESS_INFERENCE_RECEIPT_UNVERIFIED, WITNESS_MEASUREMENT_UNAVAILABLE,
     WITNESS_REDACTION_FAILED, WITNESS_REQUEST_TIMED_OUT, WITNESS_REQUEST_TOO_LARGE,
-    WITNESS_SIGNING_UNAVAILABLE,
+    WITNESS_SIGNING_UNAVAILABLE, WITNESS_TRACE_TOO_LARGE_FOR_REVIEW, WITNESS_WINDOWS_ALLOWED_FIELD,
+    WITNESS_WINDOWS_NEEDED_FIELD,
 };
 
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
@@ -298,6 +300,9 @@ impl WitnessLoadBound {
             snapshot.classify_queue_mean_turn_ms = queue
                 .mean_turn()
                 .map(|turn| u64::try_from(turn.as_millis()).unwrap_or(u64::MAX));
+            snapshot.prefetch_replay_misses = Some(queue.replay_misses());
+            snapshot.oversized_refusals = Some(queue.oversized_refusals());
+            snapshot.oversized_windows_needed = Some(queue.oversized_windows_needed());
         }
         snapshot
     }
@@ -638,6 +643,9 @@ struct Refusal {
     /// the right answer. `None` everywhere else: telling a caller to retry a
     /// malformed body would be advice to send it again.
     retry_after_secs: Option<u32>,
+    /// `(windows_needed, windows_allowed)` for a trace too large to review:
+    /// two counts, written beside the label and nothing else.
+    review_limits: Option<(u64, u64)>,
 }
 
 impl Refusal {
@@ -646,6 +654,7 @@ impl Refusal {
             status,
             code,
             retry_after_secs: None,
+            review_limits: None,
         }
     }
 
@@ -657,11 +666,12 @@ impl Refusal {
 
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        let mut response = (
-            self.status,
-            axum::Json(serde_json::json!({ "error": self.code })),
-        )
-            .into_response();
+        let mut body = serde_json::json!({ "error": self.code });
+        if let Some((needed, allowed)) = self.review_limits {
+            body[WITNESS_WINDOWS_NEEDED_FIELD] = needed.into();
+            body[WITNESS_WINDOWS_ALLOWED_FIELD] = allowed.into();
+        }
+        let mut response = (self.status, axum::Json(body)).into_response();
         if let Some(seconds) = self.retry_after_secs {
             // An integer renders as a valid header value; a hypothetical
             // failure here loses the hint and keeps the refusal, which is the
@@ -678,15 +688,36 @@ impl IntoResponse for Refusal {
 ///
 /// A `match` rather than a catch-all, so a new [`WitnessError`] variant is a
 /// compile error here and gets a deliberate status instead of inheriting one.
-/// All four are 503: every one of them is the witness failing to do its job,
-/// not the contributor sending something wrong, and a 4xx would tell a
-/// contributor to change their input when nothing about their input was the
-/// problem.
+/// The witness-failure refusals are 503: every one of them is the witness
+/// failing to do its job, not the contributor sending something wrong, and a
+/// 4xx would tell a contributor to change their input when nothing about
+/// their input was the problem.
 fn refusal_for(error: WitnessError) -> Refusal {
     match error {
         WitnessError::RedactionFailed => {
             Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_REDACTION_FAILED)
         }
+        // A classifier outage that outlived the adapter's retries. Still a
+        // refusal; named apart from `witness_redaction_failed` so neither an
+        // operator nor a client mistakes it for the pass refusing the trace.
+        WitnessError::ClassifierUnavailable => Refusal::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            WITNESS_CLASSIFIER_UNAVAILABLE,
+        )
+        .retry_after(WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS),
+        // 422, not 503: retrying the same trace needs the same requests, so
+        // a client must not keep resubmitting it. Not 413 either, which is
+        // the request-bytes bound. The two counts go in the body.
+        WitnessError::TraceTooLargeForReview {
+            windows_needed,
+            windows_allowed,
+        } => Refusal {
+            review_limits: Some((windows_needed, windows_allowed)),
+            ..Refusal::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+            )
+        },
         WitnessError::ArtifactBindingFailed => Refusal::new(
             StatusCode::SERVICE_UNAVAILABLE,
             WITNESS_ARTIFACT_BINDING_FAILED,
@@ -2101,6 +2132,194 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "accepted: {grants}");
             assert_eq!(error_code(&response), "witness_request_malformed");
         }
+    }
+
+    /// A prose classifier that refuses every text: transiently (it stayed
+    /// unavailable through its retries) or not.
+    struct FailingFilter {
+        transient: bool,
+    }
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for FailingFilter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            use trace_commons_protocol::trace_contribution::TraceContributionError;
+            let reason = "synthetic classifier failure".to_string();
+            Err(if self.transient {
+                TraceContributionError::TransientRedactionFailed { reason }
+            } else {
+                TraceContributionError::RedactionFailed { reason }
+            })
+        }
+    }
+
+    /// A structured service whose classifier fails, through the sequential
+    /// pipeline or the prefetching one the deployed witness runs.
+    fn service_with_failing_classifier(transient: bool, prefetching: bool) -> Arc<WitnessService> {
+        use trace_commons_protocol::trace_contribution::{
+            PrivacyFilterAdapter, PrivacyFilterBackendTag,
+        };
+        let adapter: Arc<dyn PrivacyFilterAdapter> = Arc::new(FailingFilter { transient });
+        let redactor: Arc<dyn super::super::ContributionRedactor> = if prefetching {
+            Arc::new(
+                super::super::prefetch::PrefetchingContributionRedaction::new(
+                    Vec::new(),
+                    adapter,
+                    PrivacyFilterBackendTag::NearAi,
+                    2,
+                ),
+            )
+        } else {
+            Arc::new(
+                super::super::PipelineContributionRedaction::with_privacy_filter(
+                    Vec::new(),
+                    adapter,
+                    PrivacyFilterBackendTag::NearAi,
+                ),
+            )
+        };
+        Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(redactor),
+        )
+    }
+
+    /// A classifier that stayed unavailable after its retries is named
+    /// apart from a redaction refusal: `witness_classifier_unavailable`, a
+    /// 503 with a `Retry-After`, through the sealed job answer. Any other
+    /// classifier failure stays `witness_redaction_failed`. Both refuse:
+    /// neither certifies anything, and neither echoes the contribution.
+    #[tokio::test]
+    async fn a_classifier_that_stayed_unavailable_is_named_apart_from_a_redaction_failure() {
+        use trace_commons_protocol::witness_refusal::{
+            WITNESS_CLASSIFIER_UNAVAILABLE, WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS,
+        };
+        let marker = "zzq-classifier-marker-zzq Alice Brannigan";
+        for prefetching in [false, true] {
+            let (status, headers, body) = send_full(
+                service_with_failing_classifier(true, prefetching),
+                post_witness(contribution_body(marker)),
+            )
+            .await;
+            let body = String::from_utf8_lossy(&body).into_owned();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{prefetching}");
+            assert_eq!(
+                error_code(&body),
+                WITNESS_CLASSIFIER_UNAVAILABLE,
+                "{prefetching}"
+            );
+            assert_eq!(
+                headers
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(
+                    WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS
+                        .to_string()
+                        .as_str()
+                ),
+                "{prefetching}"
+            );
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(!body.contains("zzq-classifier-marker-zzq"));
+
+            let (status, headers, body) = send_full(
+                service_with_failing_classifier(false, prefetching),
+                post_witness(contribution_body(marker)),
+            )
+            .await;
+            let body = String::from_utf8_lossy(&body).into_owned();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{prefetching}");
+            assert_eq!(
+                error_code(&body),
+                "witness_redaction_failed",
+                "{prefetching}"
+            );
+            assert!(headers.get(header::RETRY_AFTER).is_none(), "{prefetching}");
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(!body.contains("zzq-classifier-marker-zzq"));
+        }
+    }
+
+    /// Reports more requests than any review allows, and counts calls.
+    struct TooManyRequests {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for TooManyRequests {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+        fn requests_needed(&self, _texts: &[&str]) -> Option<usize> {
+            Some(1800)
+        }
+        fn request_interval(&self) -> Option<Duration> {
+            Some(Duration::from_secs(2))
+        }
+    }
+
+    /// A trace too large to review in time is answered, through the sealed
+    /// job result, `422 witness_trace_too_large_for_review` with the two
+    /// counts and nothing else: no certificate, no `Retry-After`, no
+    /// contribution text, and no classifier call.
+    #[tokio::test]
+    async fn a_trace_too_large_to_review_is_a_422_with_its_counts() {
+        use trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag;
+        let adapter = Arc::new(TooManyRequests {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let redactor = super::super::prefetch::PrefetchingContributionRedaction::new(
+            Vec::new(),
+            adapter.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        )
+        // 520 s at one request per 2 s, 80% of it: 208.
+        .with_classify_budget(Duration::from_secs(520));
+        let service = Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(Arc::new(redactor)),
+        );
+        let marker = "zzq-oversize-marker-zzq";
+        let (status, headers, body) =
+            send_full(service, post_witness(contribution_body(marker))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "error": "witness_trace_too_large_for_review",
+                "windows_needed": 1800,
+                "windows_allowed": 208,
+            })
+        );
+        assert!(headers.get(header::RETRY_AFTER).is_none());
+        assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+        assert!(!String::from_utf8_lossy(&body).contains(marker));
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

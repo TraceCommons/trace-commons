@@ -1023,6 +1023,7 @@ impl Sheet {
                         Err(failure) => result_sheet.fill_failure_with(
                             &failure.label,
                             crate::copy::witness_busy_retry_line(failure.result.as_ref()),
+                            too_long_sentence(&failure.label, failure.result.as_ref()),
                         ),
                     }
                     result_sheet.sync_witness();
@@ -1379,16 +1380,31 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
-        self.fill_failure_with(label, None);
+        self.fill_failure_with(label, None, None);
     }
 
     /// [`Self::fill_failure`], with a second line under the sentence: when a
     /// busy witness asked to be tried again. Shown only for a review the
     /// person asked for, the one path that line can describe.
-    fn fill_failure_with(self: &Rc<Self>, label: &str, retry_line: Option<String>) {
+    ///
+    /// `filled` is a refusal sentence already filled in with the witness's
+    /// numbers (a session too large to review); it wins over the label's
+    /// sentence for a review the person asked for.
+    fn fill_failure_with(
+        self: &Rc<Self>,
+        label: &str,
+        retry_line: Option<String>,
+        filled: Option<String>,
+    ) {
         self.pinned.set(false);
         self.sync_contribute();
         self.sync_witness();
+        if let Some(filled) = filled.filter(|_| self.witness_requested.get()) {
+            self.copy_all.set_sensitive(false);
+            self.transcript.show_sentence(&filled);
+            self.search_summary.set_text(&filled);
+            return;
+        }
         let sentence = if self.witness_requested.get() {
             // The same function the daemon selects with for the other two
             // shells. GTK reaches it directly because it is Rust and has no
@@ -2688,4 +2704,19 @@ mod request_epoch_tests {
         epoch.begin();
         assert!(!epoch.accepts(old));
     }
+}
+
+/// The too-large refusal's sentence, filled in with the counts the daemon
+/// put beside it, through the same function the daemon fills it with for
+/// the other shells. `None` for any other label, or without both counts.
+fn too_long_sentence(label: &str, result: Option<&serde_json::Value>) -> Option<String> {
+    if label != trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW {
+        return None;
+    }
+    let view = result?.get("view")?;
+    let needed = view.get("windows_needed")?.as_u64()?;
+    let allowed = view.get("windows_allowed")?.as_u64()?;
+    Some(trace_commons_contributor::witness_copy::witness_too_long_line(
+        needed, allowed,
+    ))
 }
