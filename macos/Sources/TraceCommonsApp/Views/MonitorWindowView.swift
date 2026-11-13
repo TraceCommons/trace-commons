@@ -889,8 +889,10 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                                 MonitorShellWords.graphToggle(shown: showsGraph && MonitorWindowView.graphAvailable(shown)),
                                 icon: .glyph(.graph), pressed: showsGraph && MonitorWindowView.graphAvailable(shown)
                             ) {
-                                // #1146's footer opens and closes over .25s.
-                                withAnimation(GlassMotion.systemReducesMotion ? nil : .easeInOut(duration: 0.25)) {
+                                // #1146's footer opens and closes over .25s, on
+                                // the shell's one curve: it enters and leaves,
+                                // so it starts fast rather than easing in.
+                                withAnimation(GlassMotion.systemReducesMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide)) {
                                     showsGraph.toggle()
                                 }
                             }

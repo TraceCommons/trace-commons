@@ -140,7 +140,9 @@ struct MapToolPile: View {
         .position(fit.point(stack.coinCenter(index, open: open)))
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.8), value: index)
         .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.82), value: open)
-        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: grown)
+        // A coin grows because a run started, not because it was flung, so it
+        // settles without a bounce.
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9), value: grown)
         .accessibilityElement()
         .accessibilityLabel(node.label)
         .accessibilityValue(node.detail)
