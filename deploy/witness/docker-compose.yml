@@ -39,7 +39,7 @@ services:
     # By digest, never a tag: a tag is a moving target and a measurement
     # pinned over one is pinning nothing.
     #
-    # Built by the `witness-image` workflow from commit 3644ca0 -- natively
+    # Built by the `witness-image` workflow from commit 31d69f5 -- natively
     # amd64, because TDX is Intel, and in CI rather than on a developer
     # machine because this image is not reproducibly buildable. A measurement
     # therefore pins a specific artifact only its builder can produce, which
@@ -48,7 +48,7 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:15d6c664589ccb42593fd0cbd686bfdf8221110d8f3efd2612591b1169aca21b
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:f92c1d5d55acd645f9b8d9e8b49a9bf6e297b551605e936792ab35512eab36c0
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
