@@ -87,7 +87,8 @@ use trace_commons_protocol::witness_refusal::{
     WITNESS_INFERENCE_CALL_ABSENT, WITNESS_INFERENCE_CALL_UNATTESTABLE,
     WITNESS_INFERENCE_RECEIPT_UNVERIFIED, WITNESS_MEASUREMENT_UNAVAILABLE,
     WITNESS_REDACTION_FAILED, WITNESS_REQUEST_TIMED_OUT, WITNESS_REQUEST_TOO_LARGE,
-    WITNESS_SIGNING_UNAVAILABLE,
+    WITNESS_SIGNING_UNAVAILABLE, WITNESS_TRACE_TOO_LARGE_FOR_REVIEW, WITNESS_WINDOWS_ALLOWED_FIELD,
+    WITNESS_WINDOWS_NEEDED_FIELD,
 };
 
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
@@ -300,6 +301,8 @@ impl WitnessLoadBound {
                 .mean_turn()
                 .map(|turn| u64::try_from(turn.as_millis()).unwrap_or(u64::MAX));
             snapshot.prefetch_replay_misses = Some(queue.replay_misses());
+            snapshot.oversized_refusals = Some(queue.oversized_refusals());
+            snapshot.oversized_windows_needed = Some(queue.oversized_windows_needed());
         }
         snapshot
     }
@@ -640,6 +643,9 @@ struct Refusal {
     /// the right answer. `None` everywhere else: telling a caller to retry a
     /// malformed body would be advice to send it again.
     retry_after_secs: Option<u32>,
+    /// `(windows_needed, windows_allowed)` for a trace too large to review:
+    /// two counts, written beside the label and nothing else.
+    review_limits: Option<(u64, u64)>,
 }
 
 impl Refusal {
@@ -648,6 +654,7 @@ impl Refusal {
             status,
             code,
             retry_after_secs: None,
+            review_limits: None,
         }
     }
 
@@ -659,11 +666,12 @@ impl Refusal {
 
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        let mut response = (
-            self.status,
-            axum::Json(serde_json::json!({ "error": self.code })),
-        )
-            .into_response();
+        let mut body = serde_json::json!({ "error": self.code });
+        if let Some((needed, allowed)) = self.review_limits {
+            body[WITNESS_WINDOWS_NEEDED_FIELD] = needed.into();
+            body[WITNESS_WINDOWS_ALLOWED_FIELD] = allowed.into();
+        }
+        let mut response = (self.status, axum::Json(body)).into_response();
         if let Some(seconds) = self.retry_after_secs {
             // An integer renders as a valid header value; a hypothetical
             // failure here loses the hint and keeps the refusal, which is the
@@ -697,6 +705,19 @@ fn refusal_for(error: WitnessError) -> Refusal {
             WITNESS_CLASSIFIER_UNAVAILABLE,
         )
         .retry_after(WITNESS_CLASSIFIER_UNAVAILABLE_RETRY_AFTER_SECS),
+        // 422, not 503: retrying the same trace needs the same requests, so
+        // a client must not keep resubmitting it. Not 413 either, which is
+        // the request-bytes bound. The two counts go in the body.
+        WitnessError::TraceTooLargeForReview {
+            windows_needed,
+            windows_allowed,
+        } => Refusal {
+            review_limits: Some((windows_needed, windows_allowed)),
+            ..Refusal::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+            )
+        },
         WitnessError::ArtifactBindingFailed => Refusal::new(
             StatusCode::SERVICE_UNAVAILABLE,
             WITNESS_ARTIFACT_BINDING_FAILED,
@@ -2228,6 +2249,77 @@ mod tests {
             assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
             assert!(!body.contains("zzq-classifier-marker-zzq"));
         }
+    }
+
+    /// Reports more requests than any review allows, and counts calls.
+    struct TooManyRequests {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for TooManyRequests {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+        fn requests_needed(&self, _texts: &[&str]) -> Option<usize> {
+            Some(1800)
+        }
+        fn request_interval(&self) -> Option<Duration> {
+            Some(Duration::from_secs(2))
+        }
+    }
+
+    /// A trace too large to review in time is answered, through the sealed
+    /// job result, `422 witness_trace_too_large_for_review` with the two
+    /// counts and nothing else: no certificate, no `Retry-After`, no
+    /// contribution text, and no classifier call.
+    #[tokio::test]
+    async fn a_trace_too_large_to_review_is_a_422_with_its_counts() {
+        use trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag;
+        let adapter = Arc::new(TooManyRequests {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let redactor = super::super::prefetch::PrefetchingContributionRedaction::new(
+            Vec::new(),
+            adapter.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        )
+        // 520 s at one request per 2 s, 80% of it: 208.
+        .with_classify_budget(Duration::from_secs(520));
+        let service = Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(Arc::new(redactor)),
+        );
+        let marker = "zzq-oversize-marker-zzq";
+        let (status, headers, body) =
+            send_full(service, post_witness(contribution_body(marker))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "error": "witness_trace_too_large_for_review",
+                "windows_needed": 1800,
+                "windows_allowed": 208,
+            })
+        );
+        assert!(headers.get(header::RETRY_AFTER).is_none());
+        assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+        assert!(!String::from_utf8_lossy(&body).contains(marker));
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

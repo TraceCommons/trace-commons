@@ -772,6 +772,35 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         self.max_batch_inputs
     }
 
+    /// One request per distinct window not already in the window cache,
+    /// windowed exactly as [`Self::redact_text`] windows. Blank text and
+    /// text over the input limit send nothing. A 413 split or a retry would
+    /// send more, never fewer, so this is a floor. With batching on, texts
+    /// share requests in a way this does not model, so it declines.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        if self.max_batch_inputs > 1 {
+            return None;
+        }
+        let budget = self.max_input_json_bytes();
+        let mut windows = std::collections::HashSet::new();
+        for text in texts {
+            if text.trim().is_empty() || text.len() > self.max_input_bytes {
+                continue;
+            }
+            for range in window_ranges(text, budget) {
+                let key = window_key(&text[range]);
+                if !self.window_is_cached(&key) {
+                    windows.insert(key);
+                }
+            }
+        }
+        Some(windows.len())
+    }
+
+    fn request_interval(&self) -> Option<Duration> {
+        self.pacer.as_ref().map(|pacer| pacer.interval())
+    }
+
     async fn redact_texts(&self, texts: &[&str]) -> Vec<Answer> {
         self.redact_texts_by(texts, None).await
     }
@@ -1022,6 +1051,15 @@ impl NearAiPrivacyFilterAdapter {
     /// the window are never stored: verification refuses them first, and
     /// this guard keeps any later path from caching what `apply_spans` would
     /// refuse.
+    /// Whether `key` is in the window cache, without counting a hit or a
+    /// miss: a prediction is not a lookup.
+    fn window_is_cached(&self, key: &[u8; 32]) -> bool {
+        match self.window_cache.lock() {
+            Ok(cache) => cache.entries.contains_key(key),
+            Err(poisoned) => poisoned.into_inner().entries.contains_key(key),
+        }
+    }
+
     fn remember_window(&self, window: &str, spans: &[ClassifySpan]) {
         if !crate::privacy_filter_spans::spans_fit(window, spans) {
             tracing::warn!(

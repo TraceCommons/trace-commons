@@ -1192,6 +1192,23 @@ async fn build_witnessed_preview_unbounded(
                     },
                 ));
             }
+            // A session too large to review is restored to its typed error
+            // with the witness's counts, so the handler can say how far
+            // over it is.
+            Err(error)
+                if error.to_string()
+                    == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+                    && context.last_witness_review_limits().is_some() =>
+            {
+                let (windows_needed, windows_allowed) =
+                    context.last_witness_review_limits().unwrap_or_default();
+                return Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                        windows_needed,
+                        windows_allowed,
+                    },
+                ));
+            }
             Err(error) => return Err(error),
         };
         (response, record, None)

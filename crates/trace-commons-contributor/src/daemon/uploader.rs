@@ -73,8 +73,13 @@ pub enum UploadDecision {
     /// The session changed after it was offered. Nothing was sent, and
     /// `new_hash` describes what is on disk now.
     Superseded { new_hash: String },
-    /// The pipeline declined to send this, fail-closed.
-    Refused { reason_label: String },
+    /// The pipeline declined to send this, fail-closed. `review_limits` is
+    /// `(windows_needed, windows_allowed)` when the witness refused the
+    /// session as too large to review, kept on the entry for listings.
+    Refused {
+        reason_label: String,
+        review_limits: Option<(u64, u64)>,
+    },
     /// The approval no longer covers what would be sent -- an
     /// envelope-determining input moved, or the envelope the pipeline built
     /// is not the one the contributor was shown. Nothing was sent; the
@@ -350,10 +355,18 @@ fn decision_for(
         SubmitOutcome::AlreadySubmitted { submission_id, .. } => {
             UploadDecision::AlreadySubmitted { submission_id }
         }
-        SubmitOutcome::SkippedParseFailure { reason_label } => {
-            UploadDecision::Refused { reason_label }
-        }
-        SubmitOutcome::Refused { reason_label, .. } => UploadDecision::Refused { reason_label },
+        SubmitOutcome::SkippedParseFailure { reason_label } => UploadDecision::Refused {
+            reason_label,
+            review_limits: None,
+        },
+        SubmitOutcome::Refused {
+            reason_label,
+            review_limits,
+            ..
+        } => UploadDecision::Refused {
+            reason_label,
+            review_limits,
+        },
         SubmitOutcome::Failed { reason_label } => UploadDecision::Failed { reason_label },
         // Turned into a decision by `Uploader::hold_for_review`, which has
         // the entry the certified review is saved under; never reaches here.
@@ -415,7 +428,7 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         // Like a lease another attempt holds, nothing to tell anyone about;
         // above all not `ingest-unreachable`, which reads as an outage.
         UploadDecision::RateLimited { .. } | UploadDecision::Paced { .. } => None,
-        UploadDecision::Refused { reason_label } => match reason_label.as_str() {
+        UploadDecision::Refused { reason_label, .. } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
             LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
             LABEL_NOT_LOGGED_IN => Some(LABEL_NOT_LOGGED_IN),
@@ -579,6 +592,7 @@ impl Uploader<'_, '_> {
         if entry.has_no_user_messages() {
             return Some(UploadDecision::Refused {
                 reason_label: super::queue::REASON_NO_USER_MESSAGES.to_string(),
+                review_limits: None,
             });
         }
         // The Manual Scrub check (K4 of #1118): nothing goes without a
@@ -599,6 +613,7 @@ impl Uploader<'_, '_> {
             self.health.fail(LABEL_NOT_LOGGED_IN, now);
             return Some(UploadDecision::Refused {
                 reason_label: LABEL_NOT_LOGGED_IN.to_string(),
+                review_limits: None,
             });
         }
         // Enrollment is live, so retract the not-logged-in condition if it was set.
@@ -612,6 +627,7 @@ impl Uploader<'_, '_> {
             self.health.fail(LABEL_NEAR_AI_NOTICE_PENDING, now);
             return Some(UploadDecision::Refused {
                 reason_label: LABEL_NEAR_AI_NOTICE_PENDING.to_string(),
+                review_limits: None,
             });
         }
         // Near-AI notice requirement is met (either not configured or already shown),
@@ -657,6 +673,7 @@ impl Uploader<'_, '_> {
             Err(_) => {
                 return Err(UploadDecision::Refused {
                     reason_label: "parse-failed".to_string(),
+                    review_limits: None,
                 });
             }
         };
@@ -718,6 +735,7 @@ impl Uploader<'_, '_> {
             let decision = if label == "admission_request_malformed" {
                 UploadDecision::Refused {
                     reason_label: label.into(),
+                    review_limits: None,
                 }
             } else {
                 UploadDecision::ApprovalStale {
@@ -1050,6 +1068,7 @@ mod tests {
                     session_ref: "hash".to_string(),
                     size_bytes: None,
                     limit_bytes: None,
+                    review_limits: None,
                 },
                 crate::submit::ReceiptShipped::NoCall,
                 None,
@@ -1067,6 +1086,38 @@ mod tests {
                 "{hold}"
             );
         }
+    }
+
+    /// A session the witness refused as too large to review is a refusal
+    /// that keeps its two counts for the entry, and is neither the privacy
+    /// scan waiting (`pii-filter-unavailable`) nor anything retried.
+    #[test]
+    fn a_too_large_witness_refusal_is_a_refusal_with_its_counts() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let decision = super::decision_for(
+            crate::submit::SubmitOutcome::Refused {
+                reason_label: label.to_string(),
+                session_ref: "hash".to_string(),
+                size_bytes: None,
+                limit_bytes: None,
+                review_limits: Some((1800, 208)),
+            },
+            crate::submit::ReceiptShipped::NoCall,
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: label.to_string(),
+                review_limits: Some((1800, 208)),
+            }
+        );
+        assert_ne!(
+            health_label_for(&decision),
+            Some(LABEL_PII_FILTER_UNAVAILABLE)
+        );
+        assert!(!crate::submit::witness_failure_is_transient(label));
     }
 
     use super::*;
@@ -1116,7 +1167,8 @@ mod tests {
         // A refusal under a blocking label is not a blocked send.
         assert_eq!(
             witness_blocked_label(&UploadDecision::Refused {
-                reason_label: "witness_timeout".to_string()
+                reason_label: "witness_timeout".to_string(),
+                review_limits: None,
             }),
             None
         );
@@ -1604,8 +1656,10 @@ mod tests {
                 panic!("explicit review must not produce a certified artifact");
             };
             if request.starts_with("{invalid") {
-                assert!(matches!(decision, UploadDecision::Refused { reason_label }
-                    if reason_label == expected));
+                assert!(
+                    matches!(decision, UploadDecision::Refused { reason_label, .. }
+                    if reason_label == expected)
+                );
             } else {
                 assert!(
                     matches!(decision, UploadDecision::ApprovalStale { reason_label }
@@ -1845,7 +1899,7 @@ mod tests {
             assert!(
                 matches!(
                     &decision,
-                    UploadDecision::Refused { reason_label }
+                    UploadDecision::Refused { reason_label, .. }
                         if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES
                 ),
                 "{decision:?}"
@@ -1862,7 +1916,7 @@ mod tests {
         )
         .await;
         assert!(
-            !matches!(&decision, UploadDecision::Refused { reason_label }
+            !matches!(&decision, UploadDecision::Refused { reason_label, .. }
                 if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES),
             "no recorded shape is unknown, not zero: {decision:?}"
         );
@@ -2807,7 +2861,8 @@ mod tests {
         assert_eq!(
             decision,
             UploadDecision::Refused {
-                reason_label: LABEL_NOT_LOGGED_IN.to_string()
+                reason_label: LABEL_NOT_LOGGED_IN.to_string(),
+                review_limits: None,
             }
         );
         assert_eq!(

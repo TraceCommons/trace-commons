@@ -1519,3 +1519,68 @@ async fn each_malformed_answer_is_counted_by_its_kind() {
         );
     }
 }
+
+// ---- How many requests a set of texts will cost, before any is sent. The
+// witness refuses a trace up front when the count cannot fit its review
+// budget at the configured pace, so the count must never be HIGHER than what
+// is actually sent: an over-count would refuse a trace that fits.
+
+/// The prediction equals the requests an unpaced, cold-cache run sends:
+/// blank text and text over the input limit send nothing, a long field sends
+/// one per window, and a window repeated across texts is counted once. On a
+/// warm cache it is zero.
+#[tokio::test]
+async fn requests_needed_matches_what_a_cold_cache_sends() {
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        // Room for the long field below, and a limit the last text is over.
+        8 * APPROX_BYTES_PER_WINDOW,
+    )
+    .expect("adapter builds");
+    let long_field = format!(
+        "{}tail bob@example.com",
+        "clean line\n".repeat(APPROX_BYTES_PER_WINDOW * 3 / 11)
+    );
+    let over_limit = "x".repeat(9 * APPROX_BYTES_PER_WINDOW);
+    let texts: Vec<String> = vec![
+        String::new(),
+        "   ".to_string(),
+        "mail bob@example.com".to_string(),
+        "mail bob@example.com".to_string(),
+        long_field.clone(),
+        format!("{long_field} and more"),
+        over_limit,
+    ];
+    let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let predicted = adapter
+        .requests_needed(&borrowed)
+        .expect("an unbatched NEAR AI adapter can count");
+    assert!(predicted >= 4, "{predicted}");
+
+    for text in &borrowed {
+        let _ = adapter.redact_text(text).await;
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), predicted);
+    assert_eq!(adapter.requests_needed(&borrowed), Some(0), "warm cache");
+}
+
+/// A batching adapter packs several texts into a request, which this count
+/// does not model, so it declines to count rather than over-count.
+#[tokio::test]
+async fn a_batching_adapter_does_not_count_requests() {
+    let adapter = batching_adapter("http://127.0.0.1:1".to_string(), 8);
+    assert_eq!(adapter.requests_needed(&["one", "two"]), None);
+}
+
+/// The pace is the adapter's own: unpaced has none.
+#[tokio::test]
+async fn the_request_interval_is_the_configured_pace() {
+    let unpaced = adapter("http://127.0.0.1:1".to_string());
+    assert_eq!(unpaced.request_interval(), None);
+    let paced = adapter("http://127.0.0.1:1".to_string()).with_requests_per_minute(30);
+    assert_eq!(paced.request_interval(), Some(Duration::from_secs(2)));
+}

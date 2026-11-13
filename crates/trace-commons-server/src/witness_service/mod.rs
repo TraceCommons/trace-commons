@@ -210,6 +210,19 @@ pub enum WitnessError {
     /// a permanent classifier refusal or a residual secret never does.
     #[error("the witness's privacy classifier was unavailable")]
     ClassifierUnavailable,
+    /// The trace needs more classifier requests than one review can make at
+    /// the configured pace, so it was refused before any was made.
+    ///
+    /// The one variant that carries numbers, by owner decision (2026-11-13):
+    /// the two counts go back to the submitting client in the refusal body
+    /// so a person can be told how far over the trace is. They are counts
+    /// of classifier requests, not content, and they never reach a log --
+    /// `Display` (and so `Debug`) is the label alone.
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
     /// The witness could not bind a digest to the artifact it produced.
     #[error("the witness could not bind a digest to the artifact it produced")]
     ArtifactBindingFailed,
@@ -346,6 +359,13 @@ pub enum RedactionUnavailable {
     /// The prose classifier stayed unavailable through its retries.
     #[error("the privacy classifier was unavailable")]
     ClassifierUnavailable,
+    /// The trace needs more classifier requests than one review allows; see
+    /// [`WitnessError::TraceTooLargeForReview`].
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
 }
 
 impl From<SeamUnavailable> for RedactionUnavailable {
@@ -359,6 +379,13 @@ impl From<RedactionUnavailable> for WitnessError {
         match error {
             RedactionUnavailable::Failed => WitnessError::RedactionFailed,
             RedactionUnavailable::ClassifierUnavailable => WitnessError::ClassifierUnavailable,
+            RedactionUnavailable::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } => WitnessError::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            },
         }
     }
 }

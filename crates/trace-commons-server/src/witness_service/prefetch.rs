@@ -73,6 +73,35 @@ use super::{
 /// while a driver is using it.
 pub const DEFAULT_MAX_CLASSIFY_IN_FLIGHT: usize = 2;
 
+/// The share of a review's paced request slots, in percent, a trace may
+/// need and still be reviewed. 80 (owner decision 2026-11-13): the slots are
+/// the bound for a trace alone on the witness, before retries, 413 splits
+/// and other traces' turns, so a trace that would need all of them would
+/// most likely run out of time anyway.
+pub const REVIEW_CAPACITY_PERCENT: u64 = 80;
+
+/// Classifier requests one review allows: [`REVIEW_CAPACITY_PERCENT`] of the
+/// paced slots in `budget`, whole slots only. `None` for an unpaced
+/// interval, which sets no bound. Zero when not even one slot fits.
+pub fn review_capacity(budget: std::time::Duration, interval: std::time::Duration) -> Option<u64> {
+    let interval_ms = interval.as_millis();
+    if interval_ms == 0 {
+        return None;
+    }
+    let slots = budget.as_millis() / interval_ms;
+    let allowed = slots.saturating_mul(u128::from(REVIEW_CAPACITY_PERCENT)) / 100;
+    Some(u64::try_from(allowed).unwrap_or(u64::MAX))
+}
+
+/// The `requests.oversized_windows_needed` buckets in `/v1/diagnostics`:
+/// how many requests refused traces needed, at most each bound.
+pub const OVERSIZED_WINDOW_BUCKETS: [(&str, u64); 4] = [
+    ("le_1500", 1500),
+    ("le_3000", 3000),
+    ("le_6000", 6000),
+    ("gt_6000", u64::MAX),
+];
+
 type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
 
 fn permits_closed() -> TraceContributionError {
@@ -203,6 +232,10 @@ pub struct ClassifyQueue {
     /// Texts the replay asked about that the record pass never saw, each
     /// classified then and there. See [`AnsweringAdapter`].
     replay_misses: std::sync::atomic::AtomicU64,
+    /// Traces refused up front as too large to review, and by how many
+    /// requests they needed ([`OVERSIZED_WINDOW_BUCKETS`]).
+    oversized_refusals: std::sync::atomic::AtomicU64,
+    oversized_buckets: [std::sync::atomic::AtomicU64; 4],
 }
 
 impl Default for ClassifyQueue {
@@ -219,6 +252,8 @@ impl ClassifyQueue {
             joined: std::sync::atomic::AtomicU64::new(0),
             mean_turn_ms: std::sync::atomic::AtomicU64::new(0),
             replay_misses: std::sync::atomic::AtomicU64::new(0),
+            oversized_refusals: std::sync::atomic::AtomicU64::new(0),
+            oversized_buckets: Default::default(),
         }
     }
 
@@ -232,6 +267,32 @@ impl ClassifyQueue {
     pub fn replay_misses(&self) -> u64 {
         self.replay_misses
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Traces refused up front as too large to review, since start.
+    pub fn oversized_refusals(&self) -> u64 {
+        self.oversized_refusals
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Those refusals by how many requests the trace needed, every bucket
+    /// listed.
+    pub fn oversized_windows_needed(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        OVERSIZED_WINDOW_BUCKETS
+            .iter()
+            .zip(&self.oversized_buckets)
+            .map(|((label, _), count)| (*label, count.load(std::sync::atomic::Ordering::Relaxed)))
+            .collect()
+    }
+
+    fn record_oversized(&self, windows_needed: u64) {
+        self.oversized_refusals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bucket = OVERSIZED_WINDOW_BUCKETS
+            .iter()
+            .position(|(_, at_most)| windows_needed <= *at_most)
+            .unwrap_or(OVERSIZED_WINDOW_BUCKETS.len() - 1);
+        self.oversized_buckets[bucket].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn record_replay_miss(&self) {
@@ -354,8 +415,43 @@ impl PrefetchingContributionRedaction {
             .with_privacy_filter(adapter, self.backend)
     }
 
+    /// Refuse `texts` when classifying them would need more requests than
+    /// one review allows ([`review_capacity`]). Only with a classify budget,
+    /// a paced adapter, and an adapter that can count its requests; anything
+    /// else sets no bound here, and the budget still applies as before.
+    fn refuse_if_too_large_for_review(&self, texts: &[String]) -> Result<(), RedactionUnavailable> {
+        let (Some(budget), Some(interval)) = (self.budget, self.adapter.request_interval()) else {
+            return Ok(());
+        };
+        let Some(windows_allowed) = review_capacity(budget, interval) else {
+            return Ok(());
+        };
+        let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let Some(needed) = self.adapter.requests_needed(&borrowed) else {
+            return Ok(());
+        };
+        let windows_needed = u64::try_from(needed).unwrap_or(u64::MAX);
+        if windows_needed <= windows_allowed {
+            return Ok(());
+        }
+        self.queue.record_oversized(windows_needed);
+        // Label only: the counts describe the trace, and go to its
+        // submitter in the refusal body, never to a log.
+        tracing::info!(
+            refusal = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+            "witness refused a trace too large to review"
+        );
+        Err(RedactionUnavailable::TraceTooLargeForReview {
+            windows_needed,
+            windows_allowed,
+        })
+    }
+
     /// Steps 1 and 2: record the texts, then classify them concurrently.
-    async fn answers_for(&self, raw: &RawTraceContribution) -> AnsweringAdapter {
+    async fn answers_for(
+        &self,
+        raw: &RawTraceContribution,
+    ) -> Result<AnsweringAdapter, RedactionUnavailable> {
         let recorder = Arc::new(RecordingAdapter::default());
         // The record pass's own result is discarded. If it refuses (a
         // credential in metadata, a key collision), the replay refuses at the
@@ -366,6 +462,10 @@ impl PrefetchingContributionRedaction {
             .redact_trace_with_edits(raw.clone())
             .await;
         let texts = recorder.distinct();
+        // Before the turn: a trace that cannot be reviewed in time is
+        // refused at once, with no classifier call, without queuing behind
+        // anyone or moving the pace the admission check reads.
+        self.refuse_if_too_large_for_review(&texts)?;
         let deadline = self.budget.map(|budget| std::time::Instant::now() + budget);
         // Waiting for the turn counts against the deadline, as it should:
         // the caller's clock is running.
@@ -445,13 +545,13 @@ impl PrefetchingContributionRedaction {
             }
         }
         self.queue.record_turn(turn_started.elapsed());
-        AnsweringAdapter {
+        Ok(AnsweringAdapter {
             answers,
             fallback: self.adapter.clone(),
             permits: self.permits.clone(),
             deadline,
             queue: self.queue.clone(),
-        }
+        })
     }
 }
 
@@ -470,7 +570,8 @@ impl ContributionRedactor for PrefetchingContributionRedaction {
         ),
         RedactionUnavailable,
     > {
-        let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
+        let answers =
+            refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await??;
         // The replay meets each stored classifier error where the
         // sequential pass would have, with its transience intact.
         let (envelope, maps) = redaction_outcome(
@@ -492,7 +593,8 @@ impl ContributionRedactor for PrefetchingContributionRedaction {
         raw: RawTraceContribution,
     ) -> Result<RedactedContribution, RedactionUnavailable> {
         use trace_commons_protocol::trace_contribution::TraceRedactor;
-        let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
+        let answers =
+            refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await??;
         let envelope =
             redaction_outcome(self.pipeline(Arc::new(answers)).redact_trace(raw)).await?;
         Ok(RedactedContribution {
@@ -800,6 +902,150 @@ mod tests {
             prefetching.classify_queue().replay_misses() >= 2,
             "both replays met the text the record pass never saw"
         );
+    }
+
+    // ---- A trace too large to review in time is refused up front.
+
+    /// The deployed shape: a 520 s classify budget at 30 requests a minute
+    /// allows 260 requests, of which the check offers 80%.
+    #[test]
+    fn review_capacity_is_a_share_of_the_paced_slots_in_the_budget() {
+        let two_secs = Duration::from_secs(2);
+        assert_eq!(
+            review_capacity(Duration::from_secs(520), two_secs),
+            Some(208)
+        );
+        assert_eq!(review_capacity(Duration::from_secs(5), two_secs), Some(1));
+        // Less than one slot: nothing fits, so everything is refused.
+        assert_eq!(review_capacity(Duration::from_secs(1), two_secs), Some(0));
+        assert_eq!(
+            review_capacity(Duration::from_secs(520), Duration::ZERO),
+            None
+        );
+    }
+
+    /// Answers at once and reports a fixed request count and pace, so the
+    /// up-front check is tested without a clock.
+    struct Sized {
+        needed: Option<usize>,
+        interval: Option<Duration>,
+        calls: AtomicUsize,
+    }
+
+    impl Sized {
+        fn new(needed: Option<usize>, interval: Option<Duration>) -> Arc<Self> {
+            Arc::new(Self {
+                needed,
+                interval,
+                calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for Sized {
+        async fn redact_text(&self, _text: &str) -> Answer {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+        fn requests_needed(&self, _texts: &[&str]) -> Option<usize> {
+            self.needed
+        }
+        fn request_interval(&self) -> Option<Duration> {
+            self.interval
+        }
+    }
+
+    /// 10 s at one request a second, of which 80%: 8 requests a review.
+    fn sized_redactor(adapter: Arc<Sized>) -> PrefetchingContributionRedaction {
+        PrefetchingContributionRedaction::new(
+            Vec::new(),
+            adapter,
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        )
+        .with_classify_budget(Duration::from_secs(10))
+    }
+
+    /// Needing one request more than a review allows: refused with both
+    /// numbers, before a single classifier call, counted and bucketed.
+    #[tokio::test]
+    async fn a_trace_needing_more_requests_than_a_review_allows_is_refused_up_front() {
+        let adapter = Sized::new(Some(9), Some(Duration::from_secs(1)));
+        let redactor = sized_redactor(adapter.clone());
+        let refused = redactor
+            .redact_with_edits(rich_contribution(3))
+            .await
+            .err()
+            .expect("too large to review");
+        assert_eq!(
+            refused,
+            RedactionUnavailable::TraceTooLargeForReview {
+                windows_needed: 9,
+                windows_allowed: 8,
+            }
+        );
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            0,
+            "no classifier call"
+        );
+        let queue = redactor.classify_queue();
+        assert_eq!(queue.oversized_refusals(), 1);
+        assert_eq!(queue.oversized_windows_needed()["le_1500"], 1);
+        assert_eq!(queue.joined(), 0, "a refused trace never queues for a turn");
+
+        let plain = redactor
+            .redact(rich_contribution(3))
+            .await
+            .err()
+            .expect("refused");
+        assert!(matches!(
+            plain,
+            RedactionUnavailable::TraceTooLargeForReview { .. }
+        ));
+        assert_eq!(queue.oversized_refusals(), 2);
+
+        let big = Sized::new(Some(7000), Some(Duration::from_secs(1)));
+        let big_redactor = sized_redactor(big);
+        let _ = big_redactor
+            .redact(rich_contribution(1))
+            .await
+            .err()
+            .expect("refused");
+        let buckets = big_redactor.classify_queue().oversized_windows_needed();
+        assert_eq!(buckets["gt_6000"], 1);
+        assert_eq!(buckets.values().sum::<u64>(), 1);
+    }
+
+    /// Exactly at the limit is reviewed. With no pace, no budget, or an
+    /// adapter that cannot count, nothing is refused up front.
+    #[tokio::test]
+    async fn a_trace_at_the_limit_or_unmeasured_is_reviewed() {
+        for (needed, interval, budget) in [
+            (Some(8), Some(Duration::from_secs(1)), true),
+            (Some(9_000), None, true),
+            (None, Some(Duration::from_secs(1)), true),
+            (Some(9_000), Some(Duration::from_secs(1)), false),
+        ] {
+            let adapter = Sized::new(needed, interval);
+            let redactor = if budget {
+                sized_redactor(adapter.clone())
+            } else {
+                PrefetchingContributionRedaction::new(
+                    Vec::new(),
+                    adapter.clone(),
+                    PrivacyFilterBackendTag::NearAi,
+                    2,
+                )
+            };
+            redactor
+                .redact(rich_contribution(3))
+                .await
+                .unwrap_or_else(|e| panic!("{needed:?} {interval:?} {budget}: {e}"));
+            assert!(adapter.calls.load(Ordering::SeqCst) > 0);
+            assert_eq!(redactor.classify_queue().oversized_refusals(), 0);
+        }
     }
 
     /// A stand-in classifier that measures overlap.

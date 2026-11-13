@@ -161,6 +161,18 @@ is:
 | `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | `4194304` | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 1 GiB at most. |
 | `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
 
+A trace whose classifier requests cannot fit one review is refused up
+front, before any request is made and without waiting in the classify
+queue: `422 {"error":"witness_trace_too_large_for_review",
+"windows_needed":N,"windows_allowed":M}`. `N` is the distinct classifier
+windows its text needs that are not already cached, counted as the NEAR AI
+adapter windows them; `M` is 80% of the paced request slots in the classify
+budget, `floor(budget / pace interval) * 0.8`. With this deployment's
+defaults (540 s request timeout less a 20 s margin, 30 requests a minute)
+that is `floor(520 / 2) * 0.8 = 208`. With no pace configured, or a
+batching adapter, there is no up-front refusal. Not a `413`, which stays
+the request-bytes bound. Clients treat it as final for that session.
+
 A job whose prose classifier stayed unavailable through the adapter's
 retries (transport errors, timeouts, 5xx, rate limits), or whose classify
 budget ran out before a classifier call could start (possible while waiting
@@ -809,7 +821,10 @@ when the witness is saturated. It serves:
   `classify_queue_waiting`, `classify_queue_mean_turn_ms` and
   `prefetch_replay_misses` (texts a contribution's replay classified because
   its record pass never saw them -- a classified tool name can change its
-  payload's text; a count only).
+  payload's text; a count only), `oversized_refusals` (traces refused up
+  front as too large to review) and `oversized_windows_needed` (those
+  refusals by how many classifier requests the trace needed: `le_1500`,
+  `le_3000`, `le_6000`, `gt_6000`; counts only).
 - **NEAR AI classifier** (`classifier`, `null` for any other backend):
   - requests by outcome since start, every retry counted: `ok`, `timeout`,
     `transport`, `auth_401_403`, `quota_402_429`, `server_5xx`,

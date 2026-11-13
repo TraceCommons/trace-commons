@@ -2754,6 +2754,22 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         }
         answers
     }
+
+    /// How many classifier requests asking about `texts` would send now,
+    /// before any retry or split, given what this adapter already holds.
+    /// Never more than it would send: a caller refuses work on this count,
+    /// and an over-count would refuse work that fits. `None` (the default)
+    /// when the backend cannot say.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        let _ = texts;
+        None
+    }
+
+    /// The spacing this adapter keeps between its requests, when it paces
+    /// them. `None` (the default) when it does not.
+    fn request_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 pub struct NoopPrivacyFilterAdapter;
