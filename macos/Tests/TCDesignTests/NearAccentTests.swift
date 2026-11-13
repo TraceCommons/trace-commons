@@ -16,9 +16,9 @@ final class NearAccentTests: XCTestCase {
     static let roles: [(role: String, light: UInt32, dark: UInt32, tokens: [String])] = [
         ("accent", 0x0558B6, 0x7EBCFF,
          ["controlSelected", "controlSelectedFloating", "toggleOn", "toggleOnSettings", "selection",
-          "menuSelection"]),
+          "menuSelection", "menuHover", "toolbarExpanded"]),
         ("accent-text", 0x023E83, 0xC6E1FF, ["purpleText", "linkText"]),
-        ("accent-soft", 0x056BDC, 0x0091FD, ["purpleSoft", "tabEmber"]),
+        ("accent-soft", 0x056BDC, 0x0091FD, ["purpleSoft", "tabEmber", "mapOrbShared", "tintAccent", "tabEmberHalo"]),
     ]
 
     func test_theAccentIsTheNearAIAccent() throws {
@@ -32,6 +32,22 @@ final class NearAccentTests: XCTestCase {
         // Dark's light blue.
         XCTAssertEqual(try Self.hex("textOnAccent", theme: "flatLight"), 0xFFFFFF)
         XCTAssertEqual(try Self.hex("textOnAccent", theme: "flatDark"), 0x071A2E)
+    }
+
+    func test_everyAccentGradientStopUsesItsRole() throws {
+        let source = try Self.tokens()
+        for (token, light, dark) in [("ctaFill", "#0558b6", "#7ebcff"),
+                                     ("ctaSecondaryFill", "#03459c", "#6aa8eb"),
+                                     ("checkboxOnFill", "#0558b6", "#7ebcff")] {
+            for (theme, expected) in [("flatLight", light), ("flatDark", dark)] {
+                let stops = try Self.hexes("gradient", token, theme: theme, source: source)
+                XCTAssertFalse(stops.isEmpty)
+                XCTAssertTrue(stops.allSatisfy { $0.lowercased() == expected }, "\(theme) \(token)")
+            }
+        }
+        // First run is always dark; its soft blue intentionally keeps the parent hue.
+        XCTAssertEqual(try Self.hex("firstRunGlow", theme: "flatDark"), 0x0091FD)
+        XCTAssertEqual(try FlatThemeContrastTests.colour("tabEmberHalo", theme: "flatLight").alpha, 0.28)
     }
 
     /// A label on an accent fill clears 4.5:1; a glyph, a knob or a check

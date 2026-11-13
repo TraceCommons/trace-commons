@@ -80,7 +80,7 @@ public enum GlassTokens {
         public static let dataKept: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let dataInference: GlassRGBA = GlassRGBA(0xA78BFA, alpha: 1, light: GlassRGBA(0x7D5CE0, alpha: 1))
         /// A shared trace on the Traces map: its orb on the lines, the light round its coin, the pile's glow and the launch pad's charge. The accent's soft blue (owner, 2026-10-20: it was the watching green).
-        public static let mapOrbShared: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
+        public static var mapOrbShared: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1)), flat: GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x056BDC, alpha: 1))) }
         /// A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).
         public static let mapOrbKept: GlassRGBA = GlassRGBA(0xD95926, alpha: 1, light: GlassRGBA(0xCF5320, alpha: 1))
         /// The animated first run's light (Ron, 2026-10-21): the corner glow on the scene, the glow behind the N, the travelled step thread and the trace orbs. Drawn at low alpha; never text.
@@ -123,8 +123,10 @@ public enum GlassTokens {
         public static var sceneWarm: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1D2430, alpha: 1, light: GlassRGBA(0xF6F7FA, alpha: 1)), flat: GlassRGBA(0x11152B, alpha: 1, light: GlassRGBA(0xF6F7FA, alpha: 1))) }
         /// The neutral dark a pane's glass sits on where there is no native material.
         public static var paneBase: GlassRGBA { GlassTheme.pick(GlassRGBA(0x161A22, alpha: 0.96, light: GlassRGBA(0xF4F5F8, alpha: 0.96)), flat: GlassRGBA(0x0D1124, alpha: 0.96, light: GlassRGBA(0xF4F5F8, alpha: 0.96))) }
+        /// Settings window backing. Flat Light is greyer so its white cards stand apart; other opaque panes keep paneOpaque.
+        public static var settingsGround: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1C1E24, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1)), flat: GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xE9EBEF, alpha: 1))) }
         /// A pane under Reduce Transparency: solid, no material (spec).
-        public static var paneOpaque: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1C1E24, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1)), flat: GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xE9EBEF, alpha: 1))) }
+        public static var paneOpaque: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1C1E24, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1)), flat: GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1))) }
         /// Over native glass, the thin dark veil kept for text contrast.
         public static var glassVeil: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3)), flat: GlassRGBA(0x070A1A, alpha: 0.68, light: GlassRGBA(0xE3E6EC, alpha: 0.66))) }
         /// The closed edge rail's handle, a 3 by 72 bar drawn straight on the desktop at the screen's right edge (Run 1 OS-level Explorations, 1b). Not text: it marks where to rest the pointer.
@@ -132,16 +134,16 @@ public enum GlassTokens {
         /// Painted over a pane's veil while its window is out of focus, so a background window reads darker, as the system's own windows do (owner, 2026-10-12). Classic paints nothing (alpha 0); the flat theme sets it.
         public static var inactiveDim: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0), flat: GlassRGBA(0x070A1A, alpha: 0.14, light: GlassRGBA(0x000000, alpha: 0.04))) }
         public static var wellFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06)), flat: GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
-        /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.
+        /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Classic Light greys under the pointer; flat Light brightens from the 70% white fill to 92% white. Flat Light controls on cards instead deepen their slate fill.
         public static var controlHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84)), flat: GlassRGBA(0x000000, alpha: 0.44, light: GlassRGBA(0xFFFFFF, alpha: 0.92))) }
         /// A control's fill on a menu or popover (owner, 2026-10-22: the control fill, a dark well, all but vanished on the dark menu). A step lighter than the menu in dark, darker in light.
         public static let controlOnMenu: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0x000000, alpha: 0.08))
         /// controlOnMenu under the pointer, in its place.
         public static let controlOnMenuHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.13))
-        /// A control's fill on a card (owner, 2026-11-12: Light's white control all but vanished on a white card, as on the menu). Dark is the flat control fill, so Dark does not change; Light is the cool slate of wellFill, darker than the card.
-        public static let controlOnCard: GlassRGBA = GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0x8A93A5, alpha: 0.18))
-        /// controlOnCard under the pointer, in its place. Dark is the flat control hover.
-        public static let controlOnCardHover: GlassRGBA = GlassRGBA(0x000000, alpha: 0.44, light: GlassRGBA(0x8A93A5, alpha: 0.28))
+        /// The card-control swatch, with a flat-Light-only slate override. GlassGround applies only that light override to controlFill, preserving every Classic stop and inheriting flat Dark directly from controlFill.
+        public static var controlOnCard: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.14, light: GlassRGBA(0xFFFFFF, alpha: 0.92)), flat: GlassRGBA(0xFFFFFF, alpha: 0.14, light: GlassRGBA(0x8A93A5, alpha: 0.18))) }
+        /// The card-control hover swatch. GlassGround applies only its flat Light override; Classic and flat Dark inherit controlHover.
+        public static var controlOnCardHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84)), flat: GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// A control's fill on a selected list row (owner, 2026-10-22): a deeper pill on the selection, its label in textOnAccent, the selected row's own ink, which clears 4.5:1 on it.
         public static var controlOnSelection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.18)), flat: GlassRGBA(0x071A2E, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.18))) }
         /// controlOnSelection under the pointer, in its place.
@@ -312,6 +314,7 @@ public enum GlassTokens {
             "sceneBase": sceneBase,
             "sceneWarm": sceneWarm,
             "paneBase": paneBase,
+            "settingsGround": settingsGround,
             "paneOpaque": paneOpaque,
             "glassVeil": glassVeil,
             "edgeRailHandle": edgeRailHandle,
