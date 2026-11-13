@@ -10,7 +10,7 @@
 //!
 //! - **The external wallet signs only a login message.** NEAR sign-in verifies
 //!   the callback locally and submits the proof to Cloud for authentication.
-//!   OAuth providers return a session through the existing loopback callback.
+//!   OAuth returns a code on loopback, redeemed with this attempt's verifier.
 //! - **The result is a credential, not an enrollment.** Nothing here touches
 //!   `contributor.json`, the device identity, or the account session. A
 //!   contributor may obtain an inference key before enrolling, after
@@ -243,9 +243,8 @@ enum BrowserSignIn {
 enum Ready {
     OAuth {
         listener: std::net::TcpListener,
-        /// The deposit's binding: in the bounce page's body only, never in a
-        /// URL.
-        state: String,
+        /// The verifier stays in this attempt; only its challenge is public.
+        pkce: loopback::Pkce,
         provider: &'static str,
         /// Another choice from the login page this listener served first.
         stale: Option<chooser::StaleChoice>,
@@ -275,12 +274,13 @@ impl Ready {
             let (url, listener) = near_wallet_loopback::adopt(listener, stale)?;
             return Ok((url, Self::Near(listener)));
         }
-        let url = api.authorize_url(provider, listener.local_addr()?.port())?;
+        let pkce = loopback::Pkce::new()?;
+        let url = api.authorize_url(provider, listener.local_addr()?.port(), &pkce)?;
         Ok((
             url,
             Self::OAuth {
                 listener,
-                state: loopback::random_state()?,
+                pkce,
                 provider,
                 stale,
             },
@@ -397,9 +397,8 @@ impl BrowserSignIn {
 
     /// The third argument is the agent that *created* the session, which the
     /// service matches on every later refresh. The two arms differ on it and
-    /// that difference is the point: the OAuth redirect is completed by the
-    /// browser, so the browser's agent is what cloud-api recorded, while the
-    /// NEAR wallet sign-in is a request this client makes itself.
+    /// OAuth and wallet sessions are both created by this native process;
+    /// refresh must present its agent rather than the browser's.
     ///
     /// `progress` is set to [`FailedStep::Exchange`] while the wallet proof
     /// is traded for a session, and told the login once it is known, which
@@ -414,14 +413,31 @@ impl BrowserSignIn {
         match ready {
             Ready::OAuth {
                 listener,
-                state,
+                pkce,
                 stale,
                 ..
             } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
-                loopback::receive_session_after(listener, &state, stale.as_ref(), |session| {
-                    finish(session.tokens, None, session.user_agent)
-                })
+                let port = listener.local_addr()?.port();
+                let state = pkce.state.clone();
+                loopback::receive_session_after(
+                    listener,
+                    &state,
+                    stale.as_ref(),
+                    move |code| async move {
+                        progress.set(FailedStep::Exchange);
+                        let authenticated = api
+                            .redeem_native_code(&code, &pkce, port)
+                            .await
+                            .map_err(at(FailedStep::Exchange))?;
+                        finish(
+                            authenticated.session,
+                            Some(authenticated.refresh_token_expires_at),
+                            super::api::USER_AGENT.to_string(),
+                        )
+                        .await
+                    },
+                )
                 .await
             }
             Ready::Near(listener) => {
@@ -1356,9 +1372,8 @@ pub(crate) fn persist_change(
 /// again: they do not have to forget first, and a stale session cannot survive
 /// beside a freshly minted key.
 ///
-/// No expiry is recorded for the refresh token here because the OAuth finish
-/// does not supply one -- it arrives in a URL fragment with the access token
-/// and nothing else. The first exchange fills it in.
+/// This legacy fixture omits an expiry so tests can exercise older stored
+/// sessions. New sign-ins persist the expiry returned by code redemption.
 ///
 /// **Test-only, and deliberately not the path a ceremony takes.** Production
 /// writes through [`persist_attempt`], which holds the same locks and then
