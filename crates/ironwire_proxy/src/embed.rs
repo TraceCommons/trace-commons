@@ -216,6 +216,88 @@ pub enum CredentialFiles {
     Off,
 }
 
+/// An immutable capability and inference destination for a host-owned Vertex listener.
+///
+/// The project is a bearer capability, not a Google project identifier. Generate
+/// a fresh UUID (32 hexadecimal digits) prefixed with `nearai-` for each binding,
+/// keep it private, and stop the old listener before disconnecting or replacing
+/// it. No other inference facade is exposed on a bound listener.
+#[derive(Clone)]
+pub struct VertexGateway {
+    project: String,
+    backend: String,
+    model: String,
+    background_model: Option<String>,
+}
+
+impl std::fmt::Debug for VertexGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexGateway").finish_non_exhaustive()
+    }
+}
+
+impl VertexGateway {
+    /// Bind a private project capability to exactly one backend and model pair.
+    ///
+    /// IDs must be nonempty ASCII without whitespace or control characters.
+    /// A requested model containing `haiku` (ASCII case-insensitive) selects
+    /// `background_model`, or the main model when none is configured. Other
+    /// requests select the main model. Normal eligibility checks still apply.
+    ///
+    /// # Errors
+    /// Fixed labels identify an invalid field without quoting its value.
+    pub fn new(
+        project: String,
+        backend: String,
+        model: String,
+        background_model: Option<String>,
+    ) -> Result<Self, &'static str> {
+        let token = project.strip_prefix("nearai").unwrap_or("");
+        let token = token.strip_prefix('-').unwrap_or(token);
+        if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid_vertex_project");
+        }
+        let valid_id = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 512
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        };
+        if !valid_id(&backend) {
+            return Err("invalid_vertex_backend");
+        }
+        if !valid_id(&model) {
+            return Err("invalid_vertex_model");
+        }
+        if background_model
+            .as_deref()
+            .is_some_and(|value| !valid_id(value))
+        {
+            return Err("invalid_vertex_background_model");
+        }
+        Ok(Self {
+            project,
+            backend,
+            model,
+            background_model,
+        })
+    }
+
+    pub(crate) fn accepts(&self, project: Option<&str>) -> bool {
+        project == Some(self.project.as_str())
+    }
+
+    pub(crate) fn route(&self, requested_model: Option<&str>) -> (BackendId, Option<String>) {
+        let background =
+            requested_model.is_some_and(|model| model.to_ascii_lowercase().contains("haiku"));
+        let model = if background {
+            self.background_model.as_ref().unwrap_or(&self.model)
+        } else {
+            &self.model
+        };
+        (BackendId::from(self.backend.as_str()), Some(model.clone()))
+    }
+}
+
 /// Everything an embedding host chooses about a start, other than the home,
 /// the port, and the announcement hook.
 ///
@@ -233,6 +315,8 @@ pub enum CredentialFiles {
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct EmbedOptions {
+    /// Restrict this listener to a host-bound Vertex capability and destination.
+    pub vertex_gateway: Option<VertexGateway>,
     /// Optional host consent override. Enabling requires explicitly configured
     /// qualified targets; disabling preserves cleanup of existing captures.
     pub token_capture_enabled: Option<bool>,
@@ -258,6 +342,7 @@ pub struct EmbedOptions {
 impl std::fmt::Debug for EmbedOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EmbedOptions")
+            .field("vertex_gateway", &self.vertex_gateway)
             .field("update_policy", &self.update_policy)
             .field("update_checks", &self.update_checks)
             .field("startup_probes", &self.startup_probes)
@@ -282,6 +367,14 @@ impl std::fmt::Debug for EmbedOptions {
 }
 
 impl EmbedOptions {
+    /// Expose only Vertex inference bound to this private capability and route.
+    /// Existing control endpoints retain their independent authentication.
+    #[must_use]
+    pub fn with_vertex_gateway(mut self, gateway: VertexGateway) -> Self {
+        self.vertex_gateway = Some(gateway);
+        self
+    }
+
     /// Supply the attestor that ties a NEAR AI receipt's signing key to a
     /// verified TDX quote, and turn receipt checks on.
     ///
@@ -489,6 +582,7 @@ pub struct EmbeddedProxy {
     port: u16,
     report: StartupReport,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    accepting_stopped: Option<tokio::sync::oneshot::Receiver<()>>,
     task: Option<tokio::task::JoinHandle<Result<(), ExitError>>>,
     exit: Option<Result<(), ExitError>>,
 }
@@ -527,6 +621,25 @@ impl EmbeddedProxy {
         self.exit = Some(exit);
         exit
     }
+    /// Request graceful shutdown and wait until the OS listener is closed.
+    ///
+    /// Accepted inference streams continue draining. This retains ownership of
+    /// the supervisor, home lock and housekeeping; call `shutdown` or `wait`
+    /// later to observe their completion. A host may move that drain to a
+    /// background task after this barrier, so disconnect need not wait for an
+    /// indefinitely held inference stream. No new connections can be accepted
+    /// when this returns. Repeated calls return immediately after closure.
+    ///
+    /// Cancellation-safe: canceling the wait still requests shutdown, and a
+    /// later call waits on the same listener-closure acknowledgement.
+    pub async fn stop_accepting(&mut self) {
+        self.request_shutdown();
+        if let Some(stopped) = self.accepting_stopped.as_mut() {
+            let _ = stopped.await;
+            self.accepting_stopped = None;
+        }
+    }
+
     /// Drain in-flight requests, stop housekeeping, flush quota, and release
     /// the listener, discovery pointer, and home lock. No timeout truncates a
     /// model stream; the host owns any policy for abandoning its own process.
@@ -731,6 +844,11 @@ pub async fn start_with_options(
         .with_bodies(bodies)
         .with_token_spool(token_spool)
         .with_catalog(catalog);
+    let state = if let Some(gateway) = options.vertex_gateway {
+        state.with_vertex_gateway(gateway)
+    } else {
+        state
+    };
     seed_spend(&state);
     let endpoint = ironwire_core::discovery::Endpoint::new(port, paths.control_token_file());
     let pointer = OwnedPointer {
@@ -798,7 +916,9 @@ pub async fn start_with_options(
     background.0.push(quota.spawn(state.clone()));
     let (tx, rx) = tokio::sync::oneshot::channel();
     let server_state = state.clone();
-    let server = tokio::spawn(crate::server::serve_on(
+    let (listener_stopped, accepting_stopped) = tokio::sync::oneshot::channel();
+    let listener = crate::server::ClosingListener::new(listener, Some(listener_stopped));
+    let server = tokio::spawn(crate::server::serve_listener(
         listener,
         server_state,
         async move {
@@ -822,6 +942,7 @@ pub async fn start_with_options(
         port,
         report,
         shutdown: Some(tx),
+        accepting_stopped: Some(accepting_stopped),
         task: Some(task),
         exit: None,
     })
@@ -2373,6 +2494,7 @@ mod lifecycle_tests {
             port: 1,
             report: StartupReport::default(),
             shutdown: None,
+            accepting_stopped: None,
             task: Some(task),
             exit: None,
         };
@@ -2392,6 +2514,7 @@ mod lifecycle_tests {
             port: 1,
             report: StartupReport::default(),
             shutdown: Some(tx),
+            accepting_stopped: None,
             task: Some(task),
             exit: None,
         };

@@ -10090,3 +10090,45 @@ snapshot. It does not represent notification permission. Consumers also read on
 attach/start and after a subscription delivery gap. Missing methods on an older
 daemon mean unavailable flags; native clients must not invent local enables.
 See [feature flags](operator/feature-flags.md) for lifetime and offline behavior.
+## Claude Desktop Code connection
+
+These asynchronous methods own one connection separately from managed CLI
+sessions. They require an enabled `claude_desktop_private_ai` effective feature
+flag; missing or disabled flags refuse setup/export/restore. Disconnect remains
+available for cleanup. A live disable stops accepting requests, clears pending
+starts and preserves the saved binding for re-enable; account-policy changes
+still revoke it. They require no new trace collection consent:
+
+| Method | Parameters | Action |
+| --- | --- | --- |
+| `claude_desktop_status` | `{}` | Report safe connection metadata. |
+| `claude_desktop_configure` | `{ "model": string, "background_model"?: string }` | Replace the connection and rotate its local capability. Private AI must already be on and the NEAR AI inference credential present. Omitted background defaults to the main model. |
+| `claude_desktop_preset` | `{}` | Return variables for explicit copy into Claude's saved environment. |
+| `claude_desktop_disconnect` | `{}` | Stop accepting requests and revoke the saved environment before replying. |
+
+Every successful result is `{ "state": string, "observed": boolean,
+"copy": { string: string }, "model"?: string, "background_model"?: string,
+"environment"?: string }`. States are `disconnected`, `ready`, `observed`,
+`unavailable`, `sign_in_required`, and `disabled`. `environment` appears only
+on a successful explicit configure/preset action. Status and disconnect never
+return a port, project capability, control token or inference credential.
+Unknown parameters are refused. Unsupported or unavailable model selection
+returns `unavailable`, without a preset.
+
+`copy` owns `title`, `setup`, `save`, `copy`, `disconnect`, `main_model`,
+`background_model`, all six `status_<state>` keys, `instructions`, and `error`.
+Shells use this shared table for the ordinary tool row and setup sheet.
+
+Connection metadata is atomically persisted at mode 0600, including a SHA-256
+binding to the non-expiring inference key; it never contains that key. Normal
+daemon restart retains the port and opaque Vertex project capability. Credential
+withdrawal/change, Private AI off and developer dry run revoke the binding.
+Concurrent configure, disconnect, shutdown and credential changes cancel stale
+startup generations rather than publishing them afterward. Shutdown closes the
+listener within the existing bounded cleanup wait while accepted calls drain in
+retained cleanup tasks.
+
+`observed` requires a completed successful inference ledger row for one of the
+selected served models. Token counts, attempts, listener readiness, failed calls
+and cancellation do not establish observation. The ledger is preserved for
+Insights; bodies and token capture stay off. See [Claude Desktop setup](claude-desktop.md).

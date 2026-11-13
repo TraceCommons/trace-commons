@@ -27,6 +27,8 @@ const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 /// Background-daemon state files. All live in the same 0700 directory as the
 /// device key and are removed by `wipe()`, so a logout cannot leave one
 /// contributor's auto-upload opt-ins in place for whoever enrolls next.
+/// Revocable Claude Desktop routing metadata; never contains inference keys.
+pub const DAEMON_CLAUDE_DESKTOP_CONNECTION_FILE: &str = "claude-desktop-connection.json";
 pub const DAEMON_SETTINGS_FILE: &str = "daemon-settings.json";
 /// Explicit CLI setup completion for one enrollment in this state directory.
 pub const DAEMON_SETUP_COMPLETION_FILE: &str = "daemon-setup-completion.json";
@@ -1643,6 +1645,7 @@ impl ConfigStore {
             RECEIPTS_FILE,
             NEAR_AI_NOTICE_MARKER_FILE,
             DAEMON_SETTINGS_FILE,
+            DAEMON_CLAUDE_DESKTOP_CONNECTION_FILE,
             DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,

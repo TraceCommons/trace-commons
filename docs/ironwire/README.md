@@ -13,6 +13,11 @@ pinned at the time. This repository is now their source of truth; changes land
 here as ordinary pull requests, and nearai/ironwire is no longer pinned or
 synced. Per-line history before the import is in that repository.
 
+One upstream change that was never merged there is also carried here:
+nearai/ironwire#78 (bound Vertex gateway support for Claude Desktop Code),
+applied at its head `eeab5a61ae658842946f03c857f1f50345dd9487` as its diff
+against its merge base `be23667`, without that pull request's CI change.
+
 Not imported: the `ironwire` command-line binary, its macOS app, packaging,
 release scripts and CI. Links to those point at the upstream revision above.
 

@@ -102,6 +102,7 @@ pub(crate) mod test_credential_store;
 pub(crate) mod os_secret_store {
     pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
 }
+pub(crate) mod claude_desktop;
 mod pass_supervisor;
 pub mod past_sessions;
 pub mod payout_link;

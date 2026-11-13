@@ -343,6 +343,10 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "feature_flags_snapshot",
     "feature_flags_refresh",
+    "claude_desktop_status",
+    "claude_desktop_configure",
+    "claude_desktop_preset",
+    "claude_desktop_disconnect",
     "managed_snapshot",
     "managed_tool_setup",
     "managed_cli_options_set",
@@ -958,6 +962,7 @@ pub struct GateHeld {
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
     pub feature_flags: crate::feature_flags::Runtime,
+    pub(crate) claude_desktop: Mutex<super::claude_desktop::Connection>,
     /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
     /// See `managed::catalogue_cache`.
     pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
@@ -1504,7 +1509,8 @@ impl DaemonShared {
     /// them that a pass takes with `expect` panics again before reading
     /// anything, which the supervisor's backoff absorbs.
     pub(crate) fn poisoned_state_lock(&self) -> Option<&'static str> {
-        let locks: [(&'static str, bool); 24] = [
+        let locks: [(&'static str, bool); 25] = [
+            ("claude_desktop", self.claude_desktop.is_poisoned()),
             ("managed", self.managed.is_poisoned()),
             ("queue", self.queue.is_poisoned()),
             ("policy", self.policy.is_poisoned()),
@@ -1675,6 +1681,7 @@ impl DaemonShared {
         let terms_held = terms.held();
         Ok(Self {
             feature_flags: crate::feature_flags::Runtime::for_store(&store)?,
+            claude_desktop: Mutex::new(super::claude_desktop::Connection::open(&store)),
             managed,
             model_catalogue,
             store,
@@ -1886,6 +1893,9 @@ impl DaemonShared {
         // ownership while Forget or shutdown needs to withdraw a live key.
         // Absorption rechecks disk authority under the credential commit lock.
         self.absorb_near_ai_credential_change().await;
+        // Revoke Desktop before waiting for managed CLI streams to drain: a
+        // withdrawn key must stop accepting Desktop calls promptly.
+        super::claude_desktop::reconcile(self).await;
         // A managed session on the NEAR AI sign-in loses its proxy with the
         // sign-in, whatever Private AI's switch says.
         super::managed::close_routes_without_sign_in(self).await;
@@ -2001,6 +2011,7 @@ impl DaemonShared {
     /// Begin terminal cleanup on the daemon runtime, retaining only proxy state.
     /// The cleanup task cannot restart hosting or keep contributor queues alive.
     pub(crate) fn request_private_inference_stop(&self) {
+        super::claude_desktop::request_stop(self);
         let mut task = self
             .private_inference_stop_task
             .lock()
@@ -2094,7 +2105,11 @@ impl DaemonShared {
     /// A deadline does not abort the retained cleanup task or report Off.
     pub(crate) async fn stop_private_inference(&self) {
         const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-        if !self.finish_private_inference_stop(STOP_BUDGET).await {
+        let (desktop, hosted) = tokio::join!(
+            tokio::time::timeout(STOP_BUDGET, super::claude_desktop::stop(self, false)),
+            self.finish_private_inference_stop(STOP_BUDGET),
+        );
+        if desktop.is_err() || !hosted {
             tracing::warn!(
                 reason = "private-inference-drain-pending",
                 "proxy cleanup is still pending"
@@ -3985,6 +4000,10 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("claude_desktop_status", "claude-desktop-requires-async"),
+    ("claude_desktop_configure", "claude-desktop-requires-async"),
+    ("claude_desktop_preset", "claude-desktop-requires-async"),
+    ("claude_desktop_disconnect", "claude-desktop-requires-async"),
     // It waits for the revoke at NEAR AI and takes the key out of the
     // running proxy; neither can happen on this dispatcher.
     (
@@ -7436,6 +7455,10 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         return super::managed::handle_async(shared, req).await;
     }
     match req.method.as_str() {
+        "claude_desktop_status" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_configure" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_preset" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_disconnect" => super::claude_desktop::handle(shared, req).await,
         "harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
@@ -20392,7 +20415,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 78);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 82);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -20876,7 +20899,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 114, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 85, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 89, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

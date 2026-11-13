@@ -91,6 +91,37 @@ fn cache_is_profile_scoped_and_profile_selection_is_channel_bound() {
     let rt = Runtime::open(r, other, temp.path(), now()).unwrap();
     assert!(!rt.snapshot().flags["live"].enabled);
 }
+
+#[test]
+fn desktop_ships_disabled_in_each_capable_environment() {
+    let registry = registry().unwrap();
+    let definition = &registry.flags["claude_desktop_private_ai"];
+    assert!(!definition.default);
+    assert_eq!(definition.class, FlagClass::Product);
+    assert_eq!(definition.timing, Timing::Live);
+    assert!(
+        definition
+            .required_capabilities
+            .contains("claude_desktop_private_ai_v1")
+    );
+    for environment in [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Testing,
+    ] {
+        let profile = profile_for_environment(environment).unwrap();
+        registry.validate(&profile).unwrap();
+        assert!(
+            profile
+                .capabilities
+                .contains("claude_desktop_private_ai_v1")
+        );
+        assert!(profile.remote_enable.contains("claude_desktop_private_ai"));
+        let decisions = evaluate(&registry, &profile, None, Utc::now());
+        assert!(!decisions["claude_desktop_private_ai"].enabled);
+    }
+}
+
 /// The rollback watermark is environment-scoped: a release that changes the
 /// build profile drops cached enables, but never the highest revision seen.
 #[test]

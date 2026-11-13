@@ -358,6 +358,8 @@ impl BackendRegistry {
 /// Shared daemon state.
 #[derive(Clone)]
 pub struct AppState {
+    /// Host binding is immutable for the lifetime of a listener. Never serialized.
+    pub(crate) vertex_gateway: Option<crate::embed::VertexGateway>,
     /// Registered backends.
     pub backends: BackendRegistry,
     /// Routing policy, including per-conversation affinity.
@@ -471,6 +473,14 @@ pub struct LastRoute {
 }
 
 impl AppState {
+    /// Restrict a listener assembled directly by a host to its Vertex binding.
+    /// Replace the listener to rotate or revoke the capability.
+    #[must_use]
+    pub fn with_vertex_gateway(mut self, gateway: crate::embed::VertexGateway) -> Self {
+        self.vertex_gateway = Some(gateway);
+        self
+    }
+
     /// Build state around a registry.
     #[must_use]
     pub fn new(
@@ -486,6 +496,7 @@ impl AppState {
         let mut policy = Policy::new();
         policy.set_cross_account_fallback(config.subscriptions.cross_account_fallback);
         Self {
+            vertex_gateway: None,
             backends,
             policy: Arc::new(Mutex::new(policy)),
             admission_bindings: Arc::new(Mutex::new(

@@ -113,6 +113,7 @@ pub struct Runtime {
     cache: cache::Cache,
     state: Mutex<State>,
     pub(crate) wake: tokio::sync::Notify,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 impl Runtime {
     pub fn open(
@@ -185,6 +186,7 @@ impl Runtime {
                 snapshot,
             }),
             wake: tokio::sync::Notify::new(),
+            changed: tokio::sync::watch::channel(1).0,
         })
     }
     pub fn for_store(store: &crate::config::ConfigStore) -> anyhow::Result<Self> {
@@ -196,6 +198,22 @@ impl Runtime {
             .expect("feature flags lock")
             .snapshot
             .clone()
+    }
+    /// Keep a product policy decision ordered with a synchronous publication.
+    /// Callers must acquire this guard before their feature's lifecycle lock.
+    pub(crate) fn with_snapshot<R>(&self, publish: impl FnOnce(&Snapshot) -> R) -> R {
+        let state = self.state.lock().expect("feature flags lock");
+        publish(&state.snapshot)
+    }
+    #[cfg(test)]
+    pub(crate) fn try_snapshot(&self) -> Option<Snapshot> {
+        self.state
+            .try_lock()
+            .ok()
+            .map(|state| state.snapshot.clone())
+    }
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
     pub fn request_refresh(&self) {
         self.wake.notify_one();
@@ -286,6 +304,13 @@ impl Runtime {
         s.snapshot.source = source.into();
         s.snapshot.revision = s.manifest.as_ref().map(|m| m.revision);
         s.snapshot.expires_at = s.manifest.as_ref().map(|m| m.expires_at);
+        self.changed.send_if_modified(|generation| {
+            if *generation == s.snapshot.generation {
+                return false;
+            }
+            *generation = s.snapshot.generation;
+            true
+        });
     }
 }
 fn remaining_deadline(manifest: &Manifest, now: DateTime<Utc>) -> Option<Instant> {
