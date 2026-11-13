@@ -85,7 +85,8 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                     "analytics_start_step_share_detail", "analytics_start_step_share_info",
                     "analytics_start_choose", "analytics_start_step_fill",
                     "analytics_start_step_fill_detail", "analytics_start_step_fill_info",
-                    "analytics_sample_banner", "analytics_sample_banner_detail"] {
+                    "analytics_sample_banner", "analytics_sample_banner_detail",
+                    "analytics_local_analysis_off", "analytics_local_analysis_detail", "analytics_local_analysis_enable"] {
             XCTAssertFalse((copy[key] ?? "").isEmpty, key)
         }
         XCTAssertEqual(copy["analytics_sample_banner"], "Sample data shown below")
@@ -365,6 +366,23 @@ final class InsightsGetStartedRenderTests: XCTestCase {
     }
 
     // MARK: Shots
+
+    func testDisabledLocalAnalysisBannerRendersAtBothWidths() async throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        XCTAssertEqual(copy["analytics_local_analysis_off"], "Local trace analysis is off")
+        XCTAssertEqual(copy["analytics_local_analysis_detail"], "Enable it to see Insights from traces on this Mac.")
+        XCTAssertEqual(copy["analytics_local_analysis_enable"], "Enable local trace analysis")
+        for width in [400, 760] as [CGFloat] {
+            let view = InsightsGetStartedHeader(start: .init(copy: copy, localAnalysisOff: true,
+                                                             enableLocalAnalysis: {}))
+            let png = try await Self.render(AnyView(view), width: width, height: 300) { true }
+            XCTAssertGreaterThan(png.count, 5_000)
+            if let dir = Self.shotsDir {
+                try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                try png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("local-analysis-off-\(Int(width)).png"))
+            }
+        }
+    }
 
     func testEveryTabForEveryKindOfUserRenders() async throws {
         for state in UserState.allCases {

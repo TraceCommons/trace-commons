@@ -29,6 +29,9 @@ struct InsightsGetStarted {
     /// Traces, on its folder list, where each folder is set to Automatic
     /// or Ask; `nil` draws no link.
     var openTraces: (() -> Void)?
+    var localAnalysisOff = false
+    var enablingLocalAnalysis = false
+    var enableLocalAnalysis: (() -> Void)? = nil
 }
 
 /// The get-started card, then the sample banner. Every word is the core's.
@@ -37,8 +40,10 @@ struct InsightsGetStartedHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-            InsightsGetStartedCard(start: start)
-            InsightsSampleBanner(copy: start.copy)
+            if !start.localAnalysisOff { InsightsGetStartedCard(start: start) }
+            InsightsSampleBanner(copy: start.copy, localAnalysisOff: start.localAnalysisOff,
+                                 enablingLocalAnalysis: start.enablingLocalAnalysis,
+                                 enableLocalAnalysis: start.enableLocalAnalysis)
         }
     }
 }
@@ -75,6 +80,9 @@ struct InsightsGetStartedCard: View {
 /// a test tube for "sample", and no border (product owner, 2026-11-02).
 struct InsightsSampleBanner: View {
     let copy: [String: String]
+    var localAnalysisOff = false
+    var enablingLocalAnalysis = false
+    var enableLocalAnalysis: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
@@ -86,8 +94,18 @@ struct InsightsSampleBanner: View {
                 Text(copy["analytics_sample_banner"] ?? "")
                     .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                     .foregroundStyle(GlassColor.textPrimary)
-                Text(copy["analytics_sample_banner_detail"] ?? "").insightsCaption()
-                    .fixedSize(horizontal: false, vertical: true)
+                if localAnalysisOff {
+                    Text(copy["analytics_local_analysis_off"] ?? "")
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    Text(copy["analytics_local_analysis_detail"] ?? "").insightsCaption()
+                    if let enableLocalAnalysis {
+                        Button(copy["analytics_local_analysis_enable"] ?? "", action: enableLocalAnalysis)
+                            .disabled(enablingLocalAnalysis)
+                    }
+                } else {
+                    Text(copy["analytics_sample_banner_detail"] ?? "").insightsCaption()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -96,7 +114,7 @@ struct InsightsSampleBanner: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
             .fill(GlassStatus.ask.color.opacity(0.12)))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 
