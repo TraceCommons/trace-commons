@@ -2377,6 +2377,10 @@ impl Queue {
             };
             e.reason_label = None;
             e.refused_on_version = None;
+            // The counts belong to the refusal being lifted; a new review
+            // records its own.
+            e.review_windows_needed = None;
+            e.review_windows_allowed = None;
             if malformed {
                 // A whole retry budget, as a fresh approval gets: a run
                 // started before the refusal must not count against it.
@@ -3807,12 +3811,13 @@ mod tests {
 
     /// A session the witness refused as too large to review keeps the two
     /// counts on its entry, through a save and a reload, so a listing can
-    /// show them. Only that refusal keeps them, and it is never offered
-    /// again on a newer build: the same session needs the same requests.
+    /// show them. Only that refusal keeps them. (A newer build offers it
+    /// again, since the limit depends on the witness's configuration; see
+    /// `a_too_large_refusal_is_offered_again_on_a_newer_build_without_its_counts`.)
     #[test]
     fn a_too_large_refusal_keeps_its_counts() {
         let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
-        assert!(!REOFFERED_ON_A_NEWER_BUILD.contains(&label));
+        assert!(REOFFERED_ON_A_NEWER_BUILD.contains(&label));
         let too_large = entry("too-large", "2026-11-13T00:00:00Z");
         let other = entry("other", "2026-11-13T00:00:00Z");
         let mut q = Queue::new();
