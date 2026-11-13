@@ -265,7 +265,40 @@ pub(crate) fn client_session_id(
     } else {
         native
     };
-    let raw = headers.get(name)?.to_str().ok()?;
+    plain_identifier(headers.get(name)?)
+}
+
+/// The subagent a request belongs to inside its client session, when the
+/// client names one ([`ironwire_upstream::headers::client_agent_header`]).
+///
+/// Validated as strictly as the session id. A value that fails is treated as
+/// absent, so the request routes as its session's main thread, which is what
+/// IronWire did before it read this header at all.
+pub(crate) fn client_agent_id(
+    headers: &axum::http::HeaderMap,
+    protocol: ironwire_core::protocol::Protocol,
+) -> Option<String> {
+    let name = ironwire_upstream::headers::client_agent_header(protocol)?;
+    plain_identifier(headers.get(name)?)
+}
+
+/// The conversation key for a request that names a client session: the
+/// session's own key, or one subagent's within it.
+pub(crate) fn key_for_session(
+    protocol: ironwire_core::protocol::Protocol,
+    session: &str,
+    agent: Option<&str>,
+    login: Option<&BackendId>,
+) -> ironwire_core::policy::ConversationKey {
+    match agent {
+        Some(agent) => ConversationKey::for_subagent(protocol, session, agent, login),
+        None => ConversationKey::for_session(protocol, session, login),
+    }
+}
+
+/// 1 to 200 characters of `[A-Za-z0-9-_:.]`, or nothing.
+fn plain_identifier(value: &axum::http::HeaderValue) -> Option<String> {
+    let raw = value.to_str().ok()?;
     let ok = !raw.is_empty()
         && raw.len() <= 200
         && raw
@@ -303,6 +336,59 @@ mod tests {
             client_session_id(&headers, Protocol::OpenAiResponses).as_deref(),
             Some("01a05a5d-243a-7ac0-bdcd-ba06b4309c36")
         );
+    }
+
+    #[test]
+    fn a_claude_code_subagent_gets_its_own_key_in_its_parents_session() {
+        // The shape Claude Code 2.1.322 sends: the main thread carries only the
+        // session id, each subagent adds its own agent id under the same one.
+        let session = "5db811ed-ce4a-45a7-ab00-56890e111668";
+        let main = with("x-claude-code-session-id", session);
+        let mut first = main.clone();
+        first.insert(
+            "x-claude-code-agent-id",
+            axum::http::HeaderValue::from_static("a0123456789abcdef"),
+        );
+        let mut second = main.clone();
+        second.insert(
+            "x-claude-code-agent-id",
+            axum::http::HeaderValue::from_static("afedcba9876543210"),
+        );
+        let protocol = Protocol::AnthropicMessages;
+        let key_of = |headers: &HeaderMap| {
+            let session = client_session_id(headers, protocol).expect("session");
+            let agent = client_agent_id(headers, protocol);
+            key_for_session(protocol, &session, agent.as_deref(), None)
+        };
+        assert!(client_agent_id(&main, protocol).is_none());
+        assert_eq!(
+            key_of(&main),
+            ConversationKey::for_session(protocol, session, None),
+            "the main thread keeps the key it always had"
+        );
+        assert_ne!(key_of(&first), key_of(&main));
+        assert_ne!(key_of(&first), key_of(&second));
+        assert_eq!(key_of(&first), key_of(&first.clone()));
+        // Recorded under the parent's session either way: `ironwire log` shows
+        // one session, not one per subagent.
+        assert_eq!(
+            client_session_id(&first, protocol).as_deref(),
+            Some(session)
+        );
+    }
+
+    #[test]
+    fn a_malformed_agent_id_routes_as_the_main_thread() {
+        let protocol = Protocol::AnthropicMessages;
+        let too_long = "a".repeat(201);
+        for bad in ["", "a b", "a/b", too_long.as_str()] {
+            let headers = with("x-claude-code-agent-id", bad);
+            assert!(client_agent_id(&headers, protocol).is_none(), "{bad:?}");
+        }
+        // The OpenAI wires read no agent header, even if one is sent.
+        let headers = with("x-claude-code-agent-id", "a0123456789abcdef");
+        assert!(client_agent_id(&headers, Protocol::OpenAiResponses).is_none());
+        assert!(client_agent_id(&headers, Protocol::OpenAiChat).is_none());
     }
 
     #[test]

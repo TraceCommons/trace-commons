@@ -77,6 +77,36 @@ impl ConversationKey {
         login.hash(&mut hasher);
         Self(hasher.finish())
     }
+
+    /// One subagent inside a client session.
+    ///
+    /// Claude Code sends a subagent's requests under its parent's
+    /// `x-claude-code-session-id`, adding `x-claude-code-agent-id` (measured
+    /// on 2.1.322, `docs/near-ai-and-subscription-routing.md` §4). Keyed by the
+    /// session alone, every subagent would share the main thread's affinity:
+    /// one subagent's descent would move the main thread, and the main
+    /// thread's pin to a backend would carry into every subagent. The agent id
+    /// gives each subagent its own conversation, still tied to the session's
+    /// protocol and login, and never equal to the main thread's key.
+    #[must_use]
+    pub fn for_subagent(
+        protocol: Protocol,
+        session: &str,
+        agent: &str,
+        login: Option<&BackendId>,
+    ) -> Self {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        protocol.hash(&mut hasher);
+        session.hash(&mut hasher);
+        login.hash(&mut hasher);
+        // A distinct tag, so no session string can collide with a
+        // session-plus-agent pair by construction.
+        "subagent".hash(&mut hasher);
+        agent.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
     /// Derive a key from the parts of a request that stay fixed as a
     /// conversation grows: the façade, the system preamble and the tool set.
     ///
@@ -2066,6 +2096,51 @@ mod tests {
         assert_ne!(
             key,
             ConversationKey::for_session(Protocol::AnthropicMessages, "session", Some(&personal))
+        );
+    }
+
+    #[test]
+    fn each_subagent_has_its_own_key_inside_its_session() {
+        let protocol = Protocol::AnthropicMessages;
+        let personal = BackendId::from("personal");
+        let work = BackendId::from("work");
+        let main = ConversationKey::for_session(protocol, "session", Some(&personal));
+        let first = ConversationKey::for_subagent(
+            protocol,
+            "session",
+            "a0123456789abcdef",
+            Some(&personal),
+        );
+        let second = ConversationKey::for_subagent(
+            protocol,
+            "session",
+            "afedcba9876543210",
+            Some(&personal),
+        );
+        assert_eq!(
+            first,
+            ConversationKey::for_subagent(
+                protocol,
+                "session",
+                "a0123456789abcdef",
+                Some(&personal)
+            ),
+            "one subagent keeps one key across its turns"
+        );
+        assert_ne!(first, main, "a subagent never shares the main thread's key");
+        assert_ne!(first, second, "parallel subagents do not share a key");
+        assert_ne!(
+            first,
+            ConversationKey::for_subagent(
+                protocol,
+                "another-session",
+                "a0123456789abcdef",
+                Some(&personal)
+            )
+        );
+        assert_ne!(
+            first,
+            ConversationKey::for_subagent(protocol, "session", "a0123456789abcdef", Some(&work))
         );
     }
 

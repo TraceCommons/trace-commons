@@ -320,7 +320,10 @@ already caused a wrong assumption:
   a filename stem, a path, a prefixed form -- must do that mapping itself.
   IronWire cannot, because it never sees the other spelling.
 - **It is not `conversation`.** That column is a hashed routing-affinity key.
-  With a valid session header it uses protocol, session and login; without
+  With a valid session header it uses protocol, session and login (and, for
+  a Claude Code subagent, its `x-claude-code-agent-id`, so a subagent's
+  `conversation` differs from its parent's while `client_session_id` is the
+  same); without
   one it falls back to protocol family, preamble head and tool list, which may
   collide across sessions with the same tools. It is right for stickiness and
   wrong for direct attribution.
