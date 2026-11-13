@@ -24,12 +24,12 @@ final class GroundContrastTests: XCTestCase {
         XCTAssertNil(GlassTier.controlSelected.ground)
     }
 
-    /// A control's hover follows its fill onto a menu or a selection; any
-    /// other hover is the caller's and stays.
+    /// A control's hover follows its fill onto a card, a menu or a
+    /// selection; any other hover is the caller's and stays.
     func test_aControlsHoverFollowsItsGround() {
         let hover = GlassTokens.Color.controlHover
         XCTAssertEqual(GlassGround.pane.hover(hover, tier: .control), hover)
-        XCTAssertEqual(GlassGround.card.hover(hover, tier: .control), hover)
+        XCTAssertEqual(GlassGround.card.hover(hover, tier: .control), GlassTokens.Color.controlOnCardHover)
         XCTAssertEqual(GlassGround.menu.hover(hover, tier: .control), GlassTokens.Color.controlOnMenuHover)
         XCTAssertEqual(GlassGround.selection.hover(hover, tier: .control), GlassTokens.Color.controlOnSelectionHover)
         let card = GlassTokens.Color.cardHover
@@ -89,6 +89,39 @@ final class GroundContrastTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(Flat.contrast(Flat.over(fill, text), fill), 4.5, theme)
             }
         }
+    }
+
+    /// A control on a card (Private AI's install buttons, Settings' Refresh)
+    /// stands out from the card in Light, more than the control fill did,
+    /// and under the pointer more again; Dark keeps its control fill and
+    /// hover. Its label clears 4.5:1 on it in both.
+    func test_aControlOnACardStandsOut() throws {
+        for theme in Self.themes {
+            let pane = Flat.over(try Flat.colour("paneOpaque", theme: theme).rgb, try Flat.colour("glassVeil", theme: theme))
+            for outer in ["cardFill", "cardFillQuiet"] {
+                let card = Flat.over(pane, try Flat.gradientMax(outer, theme: theme))
+                let control = Flat.over(card, try Flat.colour("controlOnCard", theme: theme))
+                let hover = Flat.over(card, try Flat.colour("controlOnCardHover", theme: theme))
+                let text = try Flat.colour("textPrimary", theme: theme)
+                XCTAssertGreaterThan(Flat.contrast(hover, card), Flat.contrast(control, card), "\(theme) \(outer)")
+                for fill in [control, hover] {
+                    XCTAssertGreaterThanOrEqual(Flat.contrast(Flat.over(fill, text), fill), 4.5, "\(theme) \(outer)")
+                }
+                if theme == "flatLight" {
+                    let well = Flat.over(card, try Flat.gradientMax("controlFill", theme: theme))
+                    XCTAssertGreaterThanOrEqual(Flat.contrast(control, card), 1.15, "\(theme) \(outer)")
+                    XCTAssertGreaterThan(Flat.contrast(control, card), Flat.contrast(well, card) + 0.05, "\(theme) \(outer)")
+                }
+            }
+        }
+        let rest = try Flat.colour("controlOnCard", theme: "flatDark")
+        let fill = try Flat.gradientMax("controlFill", theme: "flatDark")
+        XCTAssertEqual(rest.rgb, fill.rgb)
+        XCTAssertEqual(rest.alpha, fill.alpha, accuracy: 0.0001)
+        let hover = try Flat.colour("controlOnCardHover", theme: "flatDark")
+        let controlHover = try Flat.colour("controlHover", theme: "flatDark")
+        XCTAssertEqual(hover.rgb, controlHover.rgb)
+        XCTAssertEqual(hover.alpha, controlHover.alpha, accuracy: 0.0001)
     }
 
     /// A control on a selected row is a deeper pill on the selection, and

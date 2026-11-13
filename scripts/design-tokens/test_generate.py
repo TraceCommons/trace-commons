@@ -29,7 +29,10 @@ class InsightsTokensTests(unittest.TestCase):
             generate.insights_palette(self.tokens, 'dark')
 
     def test_light_fallback_resolves_before_compositing(self):
-        self.assertEqual(generate.insights_entry(self.tokens, 'color', 'paneOpaque', 'light')['hex'], '#f2f3f6')
+        # No flat Light override: the base token's light value.
+        self.assertEqual(generate.insights_entry(self.tokens, 'color', 'controlOnCard', 'light')['hex'], '#8a93a5')
+        # A flat Light override wins over the base token's light value (#f2f3f6).
+        self.assertEqual(generate.insights_entry(self.tokens, 'color', 'paneOpaque', 'light')['hex'], '#e9ebef')
         self.assertEqual(generate.opaque_over({'hex': '#ffffff', 'alpha': 0.5}, '#000000'), '#808080')
 
     def test_type_roles_follow_desktop_font_size(self):
