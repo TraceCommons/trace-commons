@@ -150,7 +150,19 @@ jq -S -n --rawfile compose "${compose}" '{
   # nothing goes out unreviewed and nothing goes anywhere else. In exchange
   # the pace can follow the limit NEAR AI sets for the key without a new
   # measurement and a re-pin everywhere.
-  allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE"],
+  #
+  # TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES and
+  # TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES (owner, 2026-11-13) are the two
+  # size bounds, admitted so they can follow real trace sizes without a new
+  # measurement. The argument: neither changes what is redacted, where text
+  # goes, or which model reads it. A value set too low refuses traces as too
+  # large (final for that session until a newer client offers it again); a
+  # value set too high costs availability, not privacy -- the binary only
+  # refuses zero, so a very large request bound lets unauthenticated requests
+  # spend CVM memory. The trade-off accepted: a contributor can no
+  # longer read these two values from the measurement. A ceiling enforced by
+  # the binary would restore a verifiable upper bound and is the follow-up.
+  allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE", "TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES", "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES"],
 
   # Leaving the per-deployment random instance-id in place. It is what makes
   # RTMR3 differ between two instances of identical code, and therefore

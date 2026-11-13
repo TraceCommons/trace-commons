@@ -126,7 +126,8 @@ the design is trying not to hand it.
 
 **State the consequence rather than assuming it is understood:**
 
-- `/v1/witness/jobs` is **unauthenticated compute over a 1 MiB body**, and that
+- `/v1/witness/jobs` is **unauthenticated compute over a request body of up to
+  `TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES`** (16 MiB since 2026-11-13), and that
   compute is a redaction pass over the whole of it. Anyone who can reach the
   route can spend the CVM's cores. In `full-pipeline` mode they can also spend
   your classifier's capacity, and if that classifier is a metered external
@@ -158,7 +159,8 @@ is:
 | `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `540` | How long one job may take from acceptance, waiting included. Over it, the job's result is `504` with `witness_request_timed_out`, and the slot is released. |
 | `TRACE_COMMONS_WITNESS_RESULTS_DIR` | `/var/lib/trace-commons-witness/results` | Where finished job results are sealed. Must be writable at startup or the witness does not start. On the `witness-results` volume. |
 | `TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS` | `256` | Finished, unfetched results kept at once. A full store answers busy at submit. |
-| `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | `4194304` | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 1 GiB at most. |
+| `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | sealed at deploy time, `20971520` since 2026-11-13 | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 5 GiB at 20 MiB. Its value is not measured (owner, 2026-11-13); see `build-app-compose.sh`. |
+| `TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES` | sealed at deploy time, `16777216` since 2026-11-13 | The largest request body. Raised from a measured 1 MiB that refused traces with a 4 MiB median. Its value is not measured (owner, 2026-11-13): a contributor can no longer read it from the measurement. Too high costs availability (memory), not privacy; the binary only refuses zero. |
 | `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
 
 A trace whose classifier requests cannot fit one review is refused up
