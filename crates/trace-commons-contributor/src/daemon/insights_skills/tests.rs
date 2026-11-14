@@ -179,6 +179,85 @@ fn inventory_remains_available_when_usage_analysis_is_disabled() {
 }
 
 #[test]
+fn ignoring_unknown_sessions_keeps_known_skill_inventory_readable() {
+    use super::super::policy::{ProjectMode, UNKNOWN_PROJECT_KEY};
+
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let projects = tempfile::tempdir().unwrap();
+    for (folder, name, mode) in [
+        ("visible", "Visible", ProjectMode::NotifyOnly),
+        ("private", "Private", ProjectMode::Ignore),
+    ] {
+        let project = projects.path().join(folder);
+        let skill = project.join(".agents/skills/example/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            skill,
+            format!("---\nname: {name}\ndescription: Local fixture\n---\n"),
+        )
+        .unwrap();
+        shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(project.to_str().unwrap(), mode, Utc::now())
+            .unwrap();
+    }
+    shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(UNKNOWN_PROJECT_KEY, ProjectMode::Ignore, Utc::now())
+        .unwrap();
+
+    let private = std::fs::canonicalize(projects.path().join("private")).unwrap();
+    assert!(
+        inventory_policy(&shared)
+            .unwrap()
+            .denied_roots
+            .iter()
+            .any(|root| std::fs::canonicalize(root).unwrap() == private)
+    );
+    let value = snapshot(&shared);
+    assert_eq!(value["readable"], true, "reason: {}", value["reason"]);
+    let skills = value["inventory"]["skills"].as_array().unwrap();
+    assert!(skills.iter().any(|skill| skill["name"] == "Visible"));
+    assert!(!skills.iter().any(|skill| skill["name"] == "Private"));
+    // The session policy still excludes unknown evidence; only filesystem
+    // inventory has no path to exclude for this sentinel.
+    let super::super::insights_week::NeverFolders::These(never) =
+        super::super::insights_week::never_project_keys(&shared).unwrap()
+    else {
+        panic!("a per-project Never rule must not exclude every project");
+    };
+    assert!(never.iter().any(|key| key == UNKNOWN_PROJECT_KEY));
+}
+
+#[test]
+fn unresolved_never_folder_still_makes_skills_unreadable() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    // A malformed stored folder rule is not the recognized unknown bucket.
+    shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(
+            "relative-folder",
+            super::super::policy::ProjectMode::Ignore,
+            Utc::now(),
+        )
+        .unwrap();
+    let value = snapshot(&shared);
+    assert_eq!(value["readable"], false);
+    assert_eq!(value["reason"], "insights-skills-policy-unavailable");
+    assert!(value.get("inventory").is_none());
+}
+
+#[test]
 fn dry_run_disables_proactive_catalog_even_when_insights_is_on() {
     let (_dir, store) = crate::config::tests_support::temp_store();
     let mut shared = with_feature_runtime(DaemonShared::load(store).unwrap());

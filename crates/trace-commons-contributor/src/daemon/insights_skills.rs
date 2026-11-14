@@ -723,6 +723,9 @@ fn inventory_policy(shared: &DaemonShared) -> Result<InventoryPolicy, ()> {
                 return Err(());
             }
             keys.iter()
+                // This bucket excludes sessions with no known project, not a
+                // filesystem location. Its Never rule still applies to usage.
+                .filter(|key| key.as_str() != super::policy::UNKNOWN_PROJECT_KEY)
                 .map(|key| {
                     super::policy::display_path_for_key(key)
                         .map(PathBuf::from)
