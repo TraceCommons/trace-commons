@@ -1,8 +1,8 @@
 # Witness worker validation results
 
-Recorded on 2026-11-14 for the source projection of branch
-`witness-circuit-followups`: Rust commit `7be2c37ba` on top of origin/main
-`453522e60` (the hashed Rust files are identical to that commit's). The model
+Recorded on 2026-11-14 for the source projection at origin/main `f785452ae`
+(#2139), on branch `witness-model-retry-order`, which changes only the model:
+retries are ordered by a live deadline, as `compare_send_priority` does. The model
 now has the failure-run chain rule and the non-outage `witness_redaction_failed`
 ending. The exact model, harness, checker and Rust source hashes are in
 [manifest.json](manifest.json).
@@ -10,7 +10,7 @@ ending. The exact model, harness, checker and Rust source hashes are in
 | Check | Result |
 | --- | --- |
 | Model and test typechecking | Passed with Quint 0.33.0 |
-| Deterministic model regressions | 42 passed, 0 failed, including six negative controls |
+| Deterministic model regressions | 43 passed, 0 failed, including six negative controls |
 | Full-step sampled safety | No violation in 1,000 traces of up to 100 steps; seed 20261114 |
 | Evidence-classifier tests | 6 passed |
 | Existing model-tool tests | 13 passed |

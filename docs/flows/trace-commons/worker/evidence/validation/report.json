@@ -2,11 +2,11 @@
   "kind": "source projection: deterministic regressions, sampled invariants, bounded symbolic safety",
   "unboundedProof": false,
   "temporalFairnessChecked": false,
-  "createdAt": "2026-11-14T16:18:38.829051+00:00",
+  "createdAt": "2026-11-14T18:11:06.952224+00:00",
   "quintVersion": "0.33.0",
   "nodeVersion": "v26.13.1",
   "javaVersion": "NOTE: Picked up JDK_JAVA_OPTIONS: -Xmx3g\nopenjdk version \"21.0.13.0.3\" 2026-10-24\nOpenJDK Runtime Environment Homebrew (build 21.0.13.0.3)\nOpenJDK 64-Bit Server VM Homebrew (build 21.0.13.0.3, mixed mode, sharing)",
-  "sourceCommit": "7be2c37bad3d7be86087ca530c03dfd4e1bc9746",
+  "sourceCommit": "bb474311b9997051b4db17e9fffcead5a15a70aa",
   "samples": 1000,
   "sampleSteps": 100,
   "symbolicBound": null,
@@ -23,11 +23,11 @@
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "seconds": 0.715,
+      "seconds": 2.083,
       "budgetSeconds": 240,
       "hashes": {
-        "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
-        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+        "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
+        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
         "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
         "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
         "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
@@ -51,11 +51,11 @@
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "seconds": 0.973,
+      "seconds": 1.536,
       "budgetSeconds": 240,
       "hashes": {
-        "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
-        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+        "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
+        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
         "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
         "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
         "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
@@ -85,11 +85,11 @@
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "seconds": 2.771,
+      "seconds": 4.625,
       "budgetSeconds": 240,
       "hashes": {
-        "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
-        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+        "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
+        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
         "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
         "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
         "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
@@ -99,7 +99,7 @@
         "crates/trace-commons-contributor/src/submit.rs": "e05d99e2714d79842428b832465a43b5c053bf95f11f50d2ea381c68bec8f903"
       },
       "log": "regressions/check.log",
-      "logSha256": "6669d3765bc803a067c16df7ed350683199778a69ca7679706d58de540c7f2a9"
+      "logSha256": "2a352c49ad671159003af7804fc955fa83f60fdd6c784821924ef33154316bea"
     },
     {
       "name": "simulation",
@@ -125,11 +125,11 @@
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "seconds": 2.033,
+      "seconds": 2.954,
       "budgetSeconds": 240,
       "hashes": {
-        "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
-        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+        "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
+        "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
         "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
         "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
         "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
@@ -139,7 +139,7 @@
         "crates/trace-commons-contributor/src/submit.rs": "e05d99e2714d79842428b832465a43b5c053bf95f11f50d2ea381c68bec8f903"
       },
       "log": "simulation/check.log",
-      "logSha256": "22e6ab637de22ad0867b0257da8ea73556e4ab521e0f417558ef3056917960de"
+      "logSha256": "acca41d80229b4ce74211d45ce677e33c503d228e92ac8ab37edf69cef3da119"
     }
   ]
 }
