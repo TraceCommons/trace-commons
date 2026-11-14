@@ -1,6 +1,6 @@
 {
-  "sourceBaseline": "7be2c37bad3d7be86087ca530c03dfd4e1bc9746",
-  "sourceBaselineNote": "branch witness-circuit-followups (working tree, identical to 7be2c37ba for the hashed Rust files) on top of origin/main 453522e60c4785a4f944356c4695c5e58c5b9c34",
+  "sourceBaseline": "f785452ae54d2732ac623f4f9be65c4984b9fc74",
+  "sourceBaselineNote": "origin/main f785452ae (#2139); evidence recorded on branch witness-model-retry-order, which changes only the model",
   "modelProof": "full-step safety induction; not liveness or Rust equivalence",
   "currentEvidence": [
     "validation/",
@@ -11,8 +11,8 @@
     "bounded-8-incomplete/": "incomplete; older pre-review model; does not cover the current model"
   },
   "hashes": {
-    "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
-    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+    "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
+    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
     "docs/flows/trace-commons/worker/witness_worker_induction.qnt": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
     "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
     "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",

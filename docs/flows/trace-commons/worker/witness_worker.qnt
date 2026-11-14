@@ -28,12 +28,15 @@ module witness_worker {
     not(t.entries.get(i).pinned) and t.entries.get(i).key == t.running.get(i).key
   pure def snapshot(e: Entry, order: int): Job = {present: true, key: e.key, attempts: e.attempts,
     retrying: e.retrying, due: e.due, order: order, started: false, dispatched: 0}
+  // A retry is an attempted entry still holding a deadline (`due` 0 is unset);
+  // attempts never reset, so a reapproved or pinned trace sorts as fresh work.
+  pure def isRetry(j: Job): bool = j.attempts > 0 and j.due > 0
   // Manual ties retain queue order. Automatic source age/UUID are represented by ID.
   pure def less(a: Job, ai: int, b: Job, bi: int): bool =
     if (a.key.manual != b.key.manual) a.key.manual
     else if (a.key.manual) false
-    else if ((a.attempts == 0) != (b.attempts == 0)) a.attempts == 0
-    else if (a.attempts > 0 and a.due != b.due) a.due < b.due
+    else if (isRetry(a) != isRetry(b)) not(isRetry(a))
+    else if (isRetry(a) and a.due != b.due) a.due < b.due
     else ai < bi
   pure def preferred(t: State, a: int, b: int): bool = {
     val aj = t.queued.get(a)

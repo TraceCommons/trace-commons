@@ -1,5 +1,5 @@
 {
-  "recordedAt": "2026-11-14T16:18:23.557821+00:00",
+  "recordedAt": "2026-11-14T18:10:43.728182+00:00",
   "status": "proved",
   "phases": [
     {
@@ -24,21 +24,21 @@
         "--verbosity",
         "3"
       ],
-      "modelSha256": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+      "modelSha256": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
       "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/initiation/check.log",
-      "logSha256": "b0b940e2821755b05a76da62c69234a90f4e53141a4328302dabec1ea26241b6",
-      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/initiation",
+      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/initiation/check.log",
+      "logSha256": "46f0440698b8a103d748af43f2e7c63585f83618316b279d4c46602c5b288e7f",
+      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/initiation",
       "budgetSeconds": 140,
       "environment": {
         "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
         "JDK_JAVA_OPTIONS": "-Xmx3g",
         "serverEndpoint": "localhost:8899"
       },
-      "seconds": 12.627
+      "seconds": 23.617
     },
     {
       "phase": "consecution",
@@ -62,21 +62,21 @@
         "--verbosity",
         "3"
       ],
-      "modelSha256": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+      "modelSha256": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
       "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/consecution/check.log",
-      "logSha256": "2735c86603478dfef27b947bbba5a1f2c93e0b95c1e09911d8232f9e2468b758",
-      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/consecution",
+      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/consecution/check.log",
+      "logSha256": "70c998f214ca1c9bb96bf635df7dfbea2ada063a47e85a2bcd9900965615f394",
+      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/consecution",
       "budgetSeconds": 140,
       "environment": {
         "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
         "JDK_JAVA_OPTIONS": "-Xmx3g",
         "serverEndpoint": "localhost:8899"
       },
-      "seconds": 48.395
+      "seconds": 80.394
     },
     {
       "phase": "implication",
@@ -100,21 +100,21 @@
         "--verbosity",
         "3"
       ],
-      "modelSha256": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+      "modelSha256": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
       "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
       "exitCode": 0,
       "timedOut": false,
       "artifactsChanged": false,
-      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/implication/check.log",
-      "logSha256": "a8b9032cd63a0e954e4adf96c917facae16248814490f193405a7f25cd7f3c7e",
-      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/implication",
+      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/implication/check.log",
+      "logSha256": "edf4befe141715b439d5de3559abd5405c32f3c493c63e72dbe3d2eee6a15509",
+      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/implication",
       "budgetSeconds": 140,
       "environment": {
         "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
         "JDK_JAVA_OPTIONS": "-Xmx3g",
         "serverEndpoint": "localhost:8899"
       },
-      "seconds": 13.058
+      "seconds": 28.311
     },
     {
       "phase": "nonvacuity",
@@ -138,21 +138,21 @@
         "--verbosity",
         "3"
       ],
-      "modelSha256": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+      "modelSha256": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
       "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
       "exitCode": 1,
       "timedOut": false,
       "artifactsChanged": false,
-      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/nonvacuity/check.log",
-      "logSha256": "f5b4f083f96c029154b28073cce03e75117e9880edfa376d1de6d460d6fcedd9",
-      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/induction/nonvacuity",
+      "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/nonvacuity/check.log",
+      "logSha256": "65c922ed594fc560cfa23901a1ba98437be3f47d3fe14545a8a6af31726e275b",
+      "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/m-induction/nonvacuity",
       "budgetSeconds": 140,
       "environment": {
         "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
         "JDK_JAVA_OPTIONS": "-Xmx3g",
         "serverEndpoint": "localhost:8899"
       },
-      "seconds": 12.812
+      "seconds": 21.387
     }
   ],
   "meaning": "Full-step safety induction for the source Quint model, not liveness or Rust equivalence."
