@@ -22,8 +22,23 @@ apply the same rules.
 Bump the registry version and every profile's matching version when definitions
 change. Never reuse a retired ID. Experimental flags default false.
 
-The shipped registry starts empty. No existing feature is automatically gated.
-Tests use fixture flags, which are absent from shipped registry/profile data.
+The shipped registry includes `insights_skills`, a live flag with a false default.
+All three build profiles declare `insights_skills_v1` and permit a remote enable
+of that flag. Missing, unavailable, expired, or omitted decisions leave Skills
+disabled. The dated example manifests keep it false; these files have not been
+published. Other existing features retain their behavior.
+
+Skills checks the daemon decision at its inventory, publisher-follow and
+background-refresh entry points, and throughout skill usage extraction. Reads
+that complete after disable do not publish new skill evidence. Catalog refreshes
+check the gate before each request and discard results after disable. Background
+catalog polling additionally requires a followed publisher; opening Skills or
+choosing Refresh can request a catalog check while enabled. Catalog request paths
+never depend on installed skills; historical hashes come only from previously
+observed public catalog versions.
+The native tab consumes the same daemon snapshot. Disabling it hides the tab and
+blocks new Skills work while ordinary Insights remains available. This does not
+grant folder access, consent, or permission to update installed skills.
 
 Production builds use the production profile. Staging builds default to staging;
 the staging workflow also offers a testing profile. Testing uses the same staging

@@ -135,6 +135,7 @@ pub async fn tick(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<Tick
     if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
+    super::insights_skills::maybe_refresh_public(shared);
     super::run_blocking(|| tick_blocking(shared, now))
 }
 

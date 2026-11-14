@@ -1,9 +1,13 @@
 {
   "schema_version": 1,
-  "registry_version": 1,
+  "registry_version": 2,
   "environment": "testing",
-  "capabilities": [],
-  "remote_enable": [],
+  "capabilities": [
+    "insights_skills_v1"
+  ],
+  "remote_enable": [
+    "insights_skills"
+  ],
   "signing_keys": [
     "328a5ecf5805942071d6cfdf822acb98d8d33dc4ff44f2640b1c2ad3475e5a53"
   ]

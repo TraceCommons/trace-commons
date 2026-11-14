@@ -1,5 +1,58 @@
 use super::*;
 use chrono::{Duration, TimeZone};
+
+#[test]
+fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
+    let registry = registry().unwrap();
+    let definition = &registry.flags["insights_skills"];
+    assert!(!definition.default);
+    assert_eq!(definition.class, FlagClass::Product);
+    assert_eq!(definition.timing, Timing::Live);
+    for env in [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Testing,
+    ] {
+        // The shipped profile validates, which needs a pinned signing key.
+        let shipped = profile_for_environment(env).unwrap();
+        registry.validate(&shipped).unwrap();
+        assert!(shipped.remote_enable.contains("insights_skills"));
+        // Run it with the test key, which signs the fixture manifests.
+        let profile = super::test_signing::pin(shipped);
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open(registry.clone(), profile.clone(), dir.path(), now()).unwrap();
+        assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("unknown-flag"));
+        let manifest = |revision, enabled| {
+            sign(
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_version":1,"environment":env,"revision":revision,
+                    "issued_at":now(),"expires_at":now()+Duration::hours(1),
+                    "flags":{"insights_skills":enabled}
+                }))
+                .unwrap(),
+            )
+        };
+        runtime.accept(&manifest(1, true), now()).unwrap();
+        assert!(runtime.snapshot().is_enabled("insights_skills"));
+        assert!(runtime.is_enabled("insights_skills"));
+        runtime.accept(&manifest(2, false), now()).unwrap();
+        assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("unknown-flag"));
+        let mut unsupported = profile;
+        unsupported.capabilities.clear();
+        // Its own state directory: the rollback watermark is per environment,
+        // so revision 1 here would be refused after revision 2 above.
+        let blocked_dir = tempfile::tempdir().unwrap();
+        let blocked =
+            Runtime::open(registry.clone(), unsupported, blocked_dir.path(), now()).unwrap();
+        blocked.accept(&manifest(1, true), now()).unwrap();
+        assert!(!blocked.snapshot().is_enabled("insights_skills"));
+        assert!(blocked.snapshot().flags["insights_skills"].capability_blocked);
+    }
+}
 pub(super) fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000, 0).unwrap()
 }
