@@ -1,9 +1,13 @@
 //! Remote configuration is advisory product policy, never an authorization grant.
 mod cache;
+mod environment;
+mod local;
 mod runtime;
 mod transport;
 use chrono::{DateTime, Utc};
 pub use runtime::run;
+/// JSON object of per-process product flag choices, read at daemon startup.
+pub const ENVIRONMENT_OVERRIDE_VARIABLE: &str = "TRACE_COMMONS_FEATURE_FLAGS";
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Instant};
 pub use trace_commons_protocol::feature_flags::*;
@@ -93,6 +97,15 @@ pub struct Snapshot {
     pub expires_at: Option<DateTime<Utc>>,
     pub fresh: bool,
     pub flags: BTreeMap<String, Decision>,
+    /// Per-machine selection; absence means follow the environment.
+    #[serde(default)]
+    pub local_overrides: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub local_override_allowed: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub environment_variable_overrides: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub environment_variable_error: Option<String>,
 }
 impl Snapshot {
     pub fn is_enabled(&self, id: &str) -> bool {
@@ -105,12 +118,14 @@ struct State {
     deadline: Option<Instant>,
     expired: bool,
     latched: BTreeMap<String, bool>,
+    local_overrides: BTreeMap<String, bool>,
     snapshot: Snapshot,
 }
 pub struct Runtime {
     registry: Registry,
     profile: Profile,
     cache: cache::Cache,
+    local: local::LocalOverrides,
     state: Mutex<State>,
     pub(crate) wake: tokio::sync::Notify,
 }
@@ -121,10 +136,32 @@ impl Runtime {
         dir: &Path,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Self> {
+        Self::open_with_environment(registry, profile, dir, now, None)
+    }
+    fn open_with_environment(
+        registry: Registry,
+        profile: Profile,
+        dir: &Path,
+        now: DateTime<Utc>,
+        environment_value: Option<&str>,
+    ) -> anyhow::Result<Self> {
         registry.validate(&profile)?;
+        let (environment_variable_overrides, environment_variable_error) =
+            match environment::parse(environment_value, &registry, &profile) {
+                Ok(flags) => (flags, None),
+                Err(error) => (BTreeMap::new(), Some(error.to_owned())),
+            };
         let identity = profile.digest()?;
         let cache = cache::Cache::new(dir, &identity, profile.environment);
         cache.remove_other_profiles();
+        let local = local::LocalOverrides::new(dir, &identity, profile.environment);
+        local.remove_other_profiles();
+        let local_overrides = local.load(&registry, &profile);
+        let local_override_allowed = registry
+            .flags
+            .keys()
+            .map(|id| (id.clone(), local::allowed(&registry, &profile, id)))
+            .collect();
         let cached = cache.load(&profile);
         // The higher of the stored watermark and the cached revision: either
         // write may have been the one that failed.
@@ -140,12 +177,14 @@ impl Runtime {
         .max_by_key(|w| w.revision);
         let manifest = cached.map(|(m, _, _)| m);
         let expired = manifest.as_ref().is_some_and(|m| !m.valid_at(now));
-        let flags = evaluate(
+        let mut flags = evaluate(
             &registry,
             &profile,
             manifest.as_ref().filter(|_| !expired),
             now,
         );
+        local::apply(&mut flags, &local_overrides);
+        local::apply(&mut flags, &environment_variable_overrides);
         let latched = flags
             .iter()
             .map(|(id, d)| (id.clone(), d.enabled))
@@ -171,24 +210,42 @@ impl Runtime {
             expires_at: manifest.as_ref().map(|m| m.expires_at),
             fresh: manifest.is_some() && !expired,
             flags,
+            local_overrides: local_overrides.clone(),
+            local_override_allowed,
+            environment_variable_overrides,
+            environment_variable_error,
         };
         Ok(Self {
             registry,
             profile,
             cache,
+            local,
             state: Mutex::new(State {
                 manifest,
                 watermark,
                 deadline,
                 expired,
                 latched,
+                local_overrides,
                 snapshot,
             }),
             wake: tokio::sync::Notify::new(),
         })
     }
     pub fn for_store(store: &crate::config::ConfigStore) -> anyhow::Result<Self> {
-        Self::open(registry()?, embedded_profile()?, store.dir(), Utc::now())
+        let value = match std::env::var(ENVIRONMENT_OVERRIDE_VARIABLE) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            // An invalid Unicode value is an invalid configuration, not an absent one.
+            Err(std::env::VarError::NotUnicode(_)) => Some(String::new()),
+        };
+        Self::open_with_environment(
+            registry()?,
+            embedded_profile()?,
+            store.dir(),
+            Utc::now(),
+            value.as_deref(),
+        )
     }
     pub fn snapshot(&self) -> Snapshot {
         self.state
@@ -203,6 +260,35 @@ impl Runtime {
             .lock()
             .map(|state| state.snapshot.is_enabled(id))
             .unwrap_or(false)
+    }
+    /// The daemon owns all mutations; persistence completes before the live decision changes.
+    pub fn set_local_override(
+        &self,
+        id: &str,
+        value: Option<bool>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Snapshot> {
+        anyhow::ensure!(
+            local::allowed(&self.registry, &self.profile, id),
+            "feature-local-override-unavailable"
+        );
+        let mut s = self.state.lock().expect("feature flags lock");
+        let mut updated = s.local_overrides.clone();
+        match value {
+            Some(value) => {
+                updated.insert(id.to_owned(), value);
+            }
+            None => {
+                updated.remove(id);
+            }
+        }
+        if updated != s.local_overrides {
+            self.local.save(&updated)?;
+            s.local_overrides = updated;
+        }
+        let source = s.snapshot.source.clone();
+        self.recompute(&mut s, now, &source);
+        Ok(s.snapshot.clone())
     }
     pub fn request_refresh(&self) {
         self.wake.notify_one();
@@ -273,6 +359,8 @@ impl Runtime {
             || s.deadline.is_some_and(|d| Instant::now() >= d);
         let manifest = s.manifest.as_ref().filter(|_| !s.expired);
         let mut flags = evaluate(&self.registry, &self.profile, manifest, now);
+        local::apply(&mut flags, &s.local_overrides);
+        local::apply(&mut flags, &s.snapshot.environment_variable_overrides);
         for (id, d) in &mut flags {
             if d.timing == Timing::NextStart {
                 d.enabled = s.latched.get(id).copied().unwrap_or(false);
@@ -280,7 +368,8 @@ impl Runtime {
         }
         let fresh = manifest.is_some();
         let source = if fresh { source } else { "default" };
-        if flags != s.snapshot.flags
+        if s.local_overrides != s.snapshot.local_overrides
+            || flags != s.snapshot.flags
             || fresh != s.snapshot.fresh
             || source != s.snapshot.source
             || s.manifest.as_ref().map(|m| m.revision) != s.snapshot.revision
@@ -289,6 +378,7 @@ impl Runtime {
             s.snapshot.sampled_at = now;
         }
         s.snapshot.flags = flags;
+        s.snapshot.local_overrides = s.local_overrides.clone();
         s.snapshot.fresh = fresh;
         s.snapshot.source = source.into();
         s.snapshot.revision = s.manifest.as_ref().map(|m| m.revision);
@@ -304,6 +394,10 @@ fn remaining_deadline(manifest: &Manifest, now: DateTime<Utc>) -> Option<Instant
             .ok()?,
     )
 }
+#[cfg(test)]
+mod environment_tests;
+#[cfg(test)]
+mod local_tests;
 #[cfg(test)]
 mod tests;
 /// Signing for tests anywhere in the crate. The key is a fixed throwaway,

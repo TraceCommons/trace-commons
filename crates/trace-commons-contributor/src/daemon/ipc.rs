@@ -343,6 +343,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "feature_flags_snapshot",
     "feature_flags_refresh",
+    "feature_flags_override_set",
     "managed_snapshot",
     "managed_tool_setup",
     "managed_cli_options_set",
@@ -4156,6 +4157,55 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("clear_public_profile", "profile-requires-async"),
 ];
 
+fn handle_feature_flags_override(shared: &DaemonShared, req: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        id: String,
+        value: Option<bool>,
+        environment: crate::feature_flags::Environment,
+        profile_digest: String,
+    }
+    // Option<bool> alone treats an omitted field as null: default must be explicit.
+    if req.params.get("value").is_none() {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-override-params-invalid");
+    }
+    let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-override-params-invalid");
+    };
+    let before = shared.feature_flags.snapshot();
+    if params.environment != before.environment || params.profile_digest != before.profile_digest {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-profile-mismatch");
+    }
+    if before.local_override_allowed.get(&params.id) != Some(&true) {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-local-override-unavailable");
+    }
+    match shared
+        .feature_flags
+        .set_local_override(&params.id, params.value, Utc::now())
+    {
+        Ok(snapshot) => {
+            if snapshot.generation != before.generation {
+                shared.publish(
+                    EVENT_FEATURE_FLAGS_CHANGED,
+                    serde_json::json!({
+                        "instance_id":snapshot.instance_id,"generation":snapshot.generation
+                    }),
+                );
+            }
+            Response::ok(
+                req.id,
+                serde_json::to_value(snapshot).expect("feature snapshot serialization"),
+            )
+        }
+        Err(_) => Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            "feature-local-override-write-failed",
+        ),
+    }
+}
+
 pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     if let Some(refused) = dev_dry_run_refusal(shared, req) {
         return refused;
@@ -4214,6 +4264,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             serde_json::to_value(shared.feature_flags.snapshot())
                 .expect("feature snapshot serialization"),
         ),
+        "feature_flags_override_set" => handle_feature_flags_override(shared, req),
         "feature_flags_refresh" => {
             shared.feature_flags.request_refresh();
             Response::ok(req.id, serde_json::json!({"requested":true}))
@@ -10764,6 +10815,9 @@ pub(crate) fn signer_attestor_for(
 
 #[cfg(test)]
 mod tests {
+    mod feature_flags_overrides {
+        include!("feature_flags_override_tests.rs");
+    }
     mod missions {
         include!("mission_catalogue_tests.rs");
         include!("activity_missions_tests.rs");
@@ -20882,7 +20936,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 115, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 116, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 86, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

@@ -3,7 +3,7 @@ use crate::{
     feature_flags::{self, Environment, Snapshot},
 };
 use anyhow::{Context, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
 #[derive(Args)]
 pub(super) struct FlagArgs {
@@ -12,6 +12,12 @@ pub(super) struct FlagArgs {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Override a product flag on this machine, or follow the environment again.
+    Set {
+        id: String,
+        #[arg(value_enum)]
+        value: LocalChoice,
+    },
     /// Show the immutable build profile (does not read local state).
     BuildProfile,
     /// Validate a local manifest without fetching or publishing it.
@@ -60,6 +66,94 @@ enum Action {
         #[arg(long)]
         pem: PathBuf,
     },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum LocalChoice {
+    On,
+    Off,
+    Default,
+}
+impl LocalChoice {
+    fn value(self) -> Option<bool> {
+        match self {
+            Self::On => Some(true),
+            Self::Off => Some(false),
+            Self::Default => None,
+        }
+    }
+}
+
+fn check_snapshot(snapshot: Snapshot) -> Result<Snapshot> {
+    let identity = feature_flags::build_profile_identity()?;
+    anyhow::ensure!(
+        snapshot.schema_version == 1
+            && snapshot.profile_digest == identity.profile_digest
+            && snapshot.environment == identity.environment,
+        "running daemon feature profile mismatch"
+    );
+    Ok(snapshot)
+}
+fn set_local(store: &ConfigStore, id: &str, value: LocalChoice) -> Result<Snapshot> {
+    let identity = feature_flags::build_profile_identity()?;
+    let reply = crate::daemon::client::try_call(store, "feature_flags_override_set", &serde_json::json!({
+        "id":id,"value":value.value(),"environment":identity.environment,"profile_digest":identity.profile_digest,
+    }))?.context("daemon-unreachable: start the app and check --config-dir")?;
+    if let Some(error) = reply.error {
+        anyhow::bail!("{}: {}", error.code, error.message);
+    }
+    check_snapshot(serde_json::from_value(
+        reply.result.context("missing feature snapshot")?,
+    )?)
+}
+fn print_snapshot(snapshot: &Snapshot, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(snapshot)?);
+    } else {
+        println!(
+            "Feature environment: {}\nBuild profile: {}\nConfiguration: {}\nRevision: {}\nSampled at: {}",
+            snapshot.environment.as_str(),
+            snapshot.profile_digest,
+            snapshot.source,
+            snapshot
+                .revision
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "none".into()),
+            snapshot.sampled_at
+        );
+        if let Some(error) = &snapshot.environment_variable_error {
+            println!(
+                "{}: {error} (ignored)",
+                feature_flags::ENVIRONMENT_OVERRIDE_VARIABLE
+            );
+        }
+        for (id, d) in &snapshot.flags {
+            let selection = match snapshot.local_overrides.get(id) {
+                Some(true) => "local on",
+                Some(false) => "local off",
+                None => "environment default",
+            };
+            let environment = match snapshot.environment_variable_overrides.get(id) {
+                Some(true) => " (environment variable: on; overrides local choice)",
+                Some(false) => " (environment variable: off; overrides local choice)",
+                None => "",
+            };
+            println!(
+                "{id}: {} ({selection}){environment}{}{}",
+                if d.enabled { "on" } else { "off" },
+                if d.enabled != d.pending {
+                    " (daemon restart required)"
+                } else {
+                    ""
+                },
+                if d.capability_blocked {
+                    " (unavailable in this build)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    Ok(())
 }
 fn environment_of(name: &str) -> Environment {
     match name {
@@ -143,6 +237,11 @@ fn decode_signature_file(bytes: &[u8]) -> Result<[u8; 64]> {
 }
 pub(super) fn run(args: &FlagArgs, json: bool, directory: Option<PathBuf>) -> Result<()> {
     match &args.action {
+        Some(Action::Set { id, value }) => {
+            let store = ConfigStore::resolve_existing(directory)
+                .context("feature flags state directory unavailable")?;
+            print_snapshot(&set_local(&store, id, *value)?, json)?;
+        }
         Some(Action::BuildProfile) => {
             println!(
                 "{}",
@@ -223,49 +322,45 @@ pub(super) fn run(args: &FlagArgs, json: bool, directory: Option<PathBuf>) -> Re
                     );
                     let snapshot: Snapshot =
                         serde_json::from_value(reply.result.context("missing feature snapshot")?)?;
-                    let identity = feature_flags::build_profile_identity()?;
-                    anyhow::ensure!(
-                        snapshot.schema_version == 1
-                            && snapshot.profile_digest == identity.profile_digest
-                            && snapshot.environment == identity.environment,
-                        "running daemon feature profile mismatch"
-                    );
-                    snapshot
+                    check_snapshot(snapshot)?
                 }
                 None => feature_flags::Runtime::for_store(&store)?.snapshot(),
             };
-            if json {
-                println!("{}", serde_json::to_string(&snapshot)?);
-            } else {
-                println!(
-                    "Feature environment: {}\nBuild profile: {}\nConfiguration: {}\nRevision: {}\nSampled at: {}",
-                    snapshot.environment.as_str(),
-                    snapshot.profile_digest,
-                    snapshot.source,
-                    snapshot
-                        .revision
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "none".into()),
-                    snapshot.sampled_at
-                );
-                for (id, d) in snapshot.flags {
-                    println!(
-                        "{id}: {}{}{}",
-                        if d.enabled { "on" } else { "off" },
-                        if d.enabled != d.pending {
-                            " (daemon restart required)"
-                        } else {
-                            ""
-                        },
-                        if d.capability_blocked {
-                            " (unavailable in this build)"
-                        } else {
-                            ""
-                        }
-                    );
-                }
-            }
+            print_snapshot(&snapshot, json)?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn cli_local_override_choices_are_explicit_and_default_is_not_false() {
+        for (text, wanted) in [("on", Some(true)), ("off", Some(false)), ("default", None)] {
+            let cli = super::super::Cli::try_parse_from([
+                "near-ai",
+                "feature-flags",
+                "set",
+                "insights_skills",
+                text,
+            ])
+            .unwrap();
+            let super::super::Command::FeatureFlags(args) = cli.command else {
+                panic!("flags command")
+            };
+            let Some(Action::Set { id, value }) = args.action else {
+                panic!("set command")
+            };
+            assert_eq!(id, "insights_skills");
+            assert_eq!(value.value(), wanted);
+        }
+        for args in [
+            vec!["near-ai", "feature-flags", "set", "insights_skills"],
+            vec!["near-ai", "feature-flags", "set", "insights_skills", "true"],
+        ] {
+            assert!(super::super::Cli::try_parse_from(args).is_err());
+        }
+    }
 }

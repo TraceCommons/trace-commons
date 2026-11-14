@@ -930,3 +930,53 @@ fn failed_refresh_persistence_does_not_latch_out_future_refreshes() {
     );
     assert_eq!(std::fs::read(target).unwrap(), b"secret");
 }
+
+#[tokio::test]
+async fn local_override_drives_skills_gate_and_invalidates_in_flight_scope() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    shared.settings.lock().unwrap().insights_counter_pass = false;
+    let request = Request {
+        id: 1,
+        method: "insights_skills".into(),
+        params: json!({}),
+    };
+    assert!(!feature_enabled(&shared));
+    shared
+        .feature_flags
+        .set_local_override("insights_skills", Some(true), Utc::now())
+        .unwrap();
+    assert!(feature_enabled(&shared));
+    let in_flight = SnapshotScope::capture(&shared).unwrap();
+    assert!(in_flight.is_current(&shared));
+    shared
+        .feature_flags
+        .set_local_override("insights_skills", Some(false), Utc::now())
+        .unwrap();
+    assert!(!in_flight.is_current(&shared));
+    assert_eq!(
+        handle(&shared, &request).await.result.unwrap()["enabled"],
+        false
+    );
+    set_skills_flag(&shared, 1, true);
+    assert!(
+        !feature_enabled(&shared),
+        "remote refresh must not undo local off"
+    );
+    shared
+        .feature_flags
+        .set_local_override("insights_skills", None, Utc::now())
+        .unwrap();
+    assert!(
+        feature_enabled(&shared),
+        "clear returns to current environment decision"
+    );
+    assert!(
+        !in_flight.is_current(&shared),
+        "re-enable cannot publish an old in-flight result"
+    );
+    assert!(
+        !shared.settings.lock().unwrap().insights_counter_pass,
+        "turning Skills on must not opt into Local trace analysis"
+    );
+}
