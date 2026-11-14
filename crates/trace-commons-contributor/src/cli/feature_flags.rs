@@ -324,7 +324,7 @@ pub(super) fn run(args: &FlagArgs, json: bool, directory: Option<PathBuf>) -> Re
                         serde_json::from_value(reply.result.context("missing feature snapshot")?)?;
                     check_snapshot(snapshot)?
                 }
-                None => feature_flags::Runtime::for_store(&store)?.snapshot(),
+                None => feature_flags::Runtime::for_store_read_only(&store)?.snapshot(),
             };
             print_snapshot(&snapshot, json)?;
         }

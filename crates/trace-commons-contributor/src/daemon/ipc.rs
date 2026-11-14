@@ -4180,6 +4180,13 @@ fn handle_feature_flags_override(shared: &DaemonShared, req: &Request) -> Respon
     if before.local_override_allowed.get(&params.id) != Some(&true) {
         return Response::err(req.id, ERR_BAD_PARAMS, "feature-local-override-unavailable");
     }
+    if shared.feature_flags.local_overrides_unreadable() {
+        return Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            crate::feature_flags::LOCAL_OVERRIDES_INVALID,
+        );
+    }
     match shared
         .feature_flags
         .set_local_override(&params.id, params.value, Utc::now())

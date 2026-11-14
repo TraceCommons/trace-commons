@@ -28,8 +28,21 @@ impl LocalOverrides {
             environment,
         }
     }
-    pub fn load(&self, registry: &Registry, profile: &Profile) -> BTreeMap<String, bool> {
-        self.load_valid(registry, profile).unwrap_or_default()
+    /// The valid choices, and whether a file is present that did not
+    /// validate. Such a file enables nothing, and it must not be replaced by
+    /// a later `set` either: that would silently drop every choice in it.
+    pub fn load_checked(
+        &self,
+        registry: &Registry,
+        profile: &Profile,
+    ) -> (BTreeMap<String, bool>, bool) {
+        match self.load_valid(registry, profile) {
+            Some(flags) => (flags, false),
+            None => (
+                BTreeMap::new(),
+                std::fs::symlink_metadata(&self.path).is_ok(),
+            ),
+        }
     }
     fn load_valid(&self, registry: &Registry, profile: &Profile) -> Option<BTreeMap<String, bool>> {
         let mut bytes = Vec::new();

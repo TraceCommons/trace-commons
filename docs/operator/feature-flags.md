@@ -100,7 +100,10 @@ Use `false` to force Off; remove the entry to follow the environment. Keep file
 permissions private (`0600`). The state directory for native macOS staging is
 `~/Library/Application Support/trace-commons-staging`. Choices survive restarts
 with the same profile and reset when a release changes the profile. Invalid
-local data is ignored. A failed CLI persistence write leaves the running choice
+local data is ignored as a whole: a file with any invalid entry enables
+nothing. The file is left in place, and `near-ai feature-flags set` refuses
+with `feature-local-overrides-invalid` until it is fixed or removed and the
+app restarts, so a typo never silently discards the other choices in it. A failed CLI persistence write leaves the running choice
 unchanged. Direct file edits are startup-only, not watched live.
 
 ### Environment variable

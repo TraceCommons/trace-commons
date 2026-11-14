@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 pub use runtime::run;
 /// JSON object of per-process product flag choices, read at daemon startup.
 pub const ENVIRONMENT_OVERRIDE_VARIABLE: &str = "TRACE_COMMONS_FEATURE_FLAGS";
+/// The refusal when the local choices file on disk did not validate.
+pub const LOCAL_OVERRIDES_INVALID: &str = "feature-local-overrides-invalid";
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Instant};
 pub use trace_commons_protocol::feature_flags::*;
@@ -119,6 +121,8 @@ struct State {
     expired: bool,
     latched: BTreeMap<String, bool>,
     local_overrides: BTreeMap<String, bool>,
+    /// A local choices file is present but did not validate at startup.
+    local_unreadable: bool,
     snapshot: Snapshot,
 }
 pub struct Runtime {
@@ -136,14 +140,18 @@ impl Runtime {
         dir: &Path,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Self> {
-        Self::open_with_environment(registry, profile, dir, now, None)
+        Self::open_with_environment(registry, profile, dir, now, None, true)
     }
+    /// `prune` removes other profiles' signed caches and local choices. Only
+    /// the daemon prunes: a read-only status view from another build must
+    /// not delete the running build's persisted choices.
     fn open_with_environment(
         registry: Registry,
         profile: Profile,
         dir: &Path,
         now: DateTime<Utc>,
         environment_value: Option<&str>,
+        prune: bool,
     ) -> anyhow::Result<Self> {
         registry.validate(&profile)?;
         let (environment_variable_overrides, environment_variable_error) =
@@ -153,10 +161,12 @@ impl Runtime {
             };
         let identity = profile.digest()?;
         let cache = cache::Cache::new(dir, &identity, profile.environment);
-        cache.remove_other_profiles();
         let local = local::LocalOverrides::new(dir, &identity, profile.environment);
-        local.remove_other_profiles();
-        let local_overrides = local.load(&registry, &profile);
+        if prune {
+            cache.remove_other_profiles();
+            local.remove_other_profiles();
+        }
+        let (local_overrides, local_unreadable) = local.load_checked(&registry, &profile);
         let local_override_allowed = registry
             .flags
             .keys()
@@ -227,12 +237,21 @@ impl Runtime {
                 expired,
                 latched,
                 local_overrides,
+                local_unreadable,
                 snapshot,
             }),
             wake: tokio::sync::Notify::new(),
         })
     }
+    /// The daemon's runtime: prunes other profiles' files.
     pub fn for_store(store: &crate::config::ConfigStore) -> anyhow::Result<Self> {
+        Self::for_store_with(store, true)
+    }
+    /// A status view with no daemon running. Deletes nothing.
+    pub fn for_store_read_only(store: &crate::config::ConfigStore) -> anyhow::Result<Self> {
+        Self::for_store_with(store, false)
+    }
+    fn for_store_with(store: &crate::config::ConfigStore, prune: bool) -> anyhow::Result<Self> {
         let value = match std::env::var(ENVIRONMENT_OVERRIDE_VARIABLE) {
             Ok(value) => Some(value),
             Err(std::env::VarError::NotPresent) => None,
@@ -245,6 +264,7 @@ impl Runtime {
             store.dir(),
             Utc::now(),
             value.as_deref(),
+            prune,
         )
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -273,6 +293,7 @@ impl Runtime {
             "feature-local-override-unavailable"
         );
         let mut s = self.state.lock().expect("feature flags lock");
+        anyhow::ensure!(!s.local_unreadable, LOCAL_OVERRIDES_INVALID);
         let mut updated = s.local_overrides.clone();
         match value {
             Some(value) => {
@@ -289,6 +310,15 @@ impl Runtime {
         let source = s.snapshot.source.clone();
         self.recompute(&mut s, now, &source);
         Ok(s.snapshot.clone())
+    }
+    /// Whether a present local choices file failed validation at startup;
+    /// `set_local_override` refuses until it is fixed or removed and the
+    /// daemon restarts.
+    pub fn local_overrides_unreadable(&self) -> bool {
+        self.state
+            .lock()
+            .expect("feature flags lock")
+            .local_unreadable
     }
     pub fn request_refresh(&self) {
         self.wake.notify_one();

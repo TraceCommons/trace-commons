@@ -220,3 +220,50 @@ fn non_regular_local_files_are_refused_without_blocking_startup() {
             .is_enabled("live")
     );
 }
+
+/// A hand-edited file with one bad entry enables nothing, and a later `set`
+/// must not replace it: that would drop every other choice in the file.
+#[test]
+fn an_invalid_local_file_is_kept_and_set_refuses_until_it_is_fixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, p) = fixtures();
+    let local = local::LocalOverrides::new(dir.path(), &p.digest().unwrap(), p.environment);
+    let bad = serde_json::to_vec(
+        &serde_json::json!({"schema_version":1,"environment":"staging",
+        "profile_digest":p.digest().unwrap(),"flags":{"live":true,"mistyped":true}}),
+    )
+    .unwrap();
+    std::fs::write(local.path(), &bad).unwrap();
+    let rt = Runtime::open(r.clone(), p.clone(), dir.path(), now()).unwrap();
+    assert!(!rt.is_enabled("live"));
+    assert!(rt.local_overrides_unreadable());
+    let error = rt
+        .set_local_override("live", Some(true), now())
+        .unwrap_err();
+    assert_eq!(error.to_string(), LOCAL_OVERRIDES_INVALID);
+    assert_eq!(std::fs::read(local.path()).unwrap(), bad);
+    // Fixed by hand, the next start reads it and `set` works again.
+    std::fs::remove_file(local.path()).unwrap();
+    let rt = Runtime::open(r, p, dir.path(), now()).unwrap();
+    assert!(!rt.local_overrides_unreadable());
+    rt.set_local_override("live", Some(true), now()).unwrap();
+    assert!(rt.is_enabled("live"));
+}
+
+/// A status view with no daemon running, from a build whose profile
+/// differs, must not delete the running build's persisted choices.
+#[test]
+fn a_read_only_open_does_not_prune_other_profiles_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, p) = fixtures();
+    let other = dir
+        .path()
+        .join(format!("feature-flags-local-{}.json", "a".repeat(64)));
+    std::fs::write(&other, b"{}").unwrap();
+    let _view =
+        Runtime::open_with_environment(r.clone(), p.clone(), dir.path(), now(), None, false)
+            .unwrap();
+    assert!(other.exists(), "a read-only open deletes nothing");
+    let _daemon = Runtime::open(r, p, dir.path(), now()).unwrap();
+    assert!(!other.exists(), "the daemon still prunes other profiles");
+}

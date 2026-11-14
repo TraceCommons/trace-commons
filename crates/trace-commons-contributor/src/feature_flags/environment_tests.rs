@@ -11,6 +11,7 @@ fn environment_variable_wins_without_overwriting_local_or_remote_state() {
         dir.path(),
         now(),
         Some(r#"{"live":true}"#),
+        true,
     )
     .unwrap();
     rt.set_local_override("live", Some(false), now()).unwrap();
@@ -53,8 +54,15 @@ fn invalid_environment_variables_apply_no_partial_enables() {
         r#"{"live":true,"blocked":true}"#,
         r#"{"live":true,"privacy":false}"#,
     ] {
-        let rt = Runtime::open_with_environment(r.clone(), p.clone(), dir.path(), now(), Some(raw))
-            .unwrap();
+        let rt = Runtime::open_with_environment(
+            r.clone(),
+            p.clone(),
+            dir.path(),
+            now(),
+            Some(raw),
+            true,
+        )
+        .unwrap();
         assert!(
             !rt.is_enabled("live"),
             "invalid environment value applied a partial enable"
@@ -63,7 +71,8 @@ fn invalid_environment_variables_apply_no_partial_enables() {
         assert!(rt.snapshot().environment_variable_error.is_some());
     }
     let oversized = " ".repeat(65_537);
-    let rt = Runtime::open_with_environment(r, p, dir.path(), now(), Some(&oversized)).unwrap();
+    let rt =
+        Runtime::open_with_environment(r, p, dir.path(), now(), Some(&oversized), true).unwrap();
     assert!(rt.snapshot().environment_variable_error.is_some());
 }
 
@@ -77,6 +86,7 @@ fn environment_variable_choice_is_applied_before_next_start_latching() {
         dir.path(),
         now(),
         Some(r#"{"restart":true,"live":false}"#),
+        true,
     )
     .unwrap();
     assert!(rt.is_enabled("restart"));

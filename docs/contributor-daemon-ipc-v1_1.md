@@ -10077,12 +10077,35 @@ Unenroll and managed-registry binding changes invalidate pending generations and
 `feature_flags_snapshot` (empty parameters) returns the daemon-owned schema-1
 feature snapshot: environment, profile digest, daemon-instance UUID, increasing
 snapshot generation, sampled time, source, manifest revision/expiry/freshness,
-and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
+and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`), plus
+the per-machine layers above the environment decision: `local_overrides`
+(persisted choices, id to boolean; absence means follow the environment),
+`local_override_allowed` (id to whether a local choice is accepted: known
+product flags whose required capabilities this build has; never
+privacy-sensitive flags), `environment_variable_overrides` (choices read once
+at daemon start from `TRACE_COMMONS_FEATURE_FLAGS`, never persisted) and
+`environment_variable_error` (a stable label when that variable was present
+and rejected as a whole, else null). Precedence is environment variable, then
+local choice, then a valid signed manifest, then the compiled default.
 It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
 returns `{"requested":true}` and schedules a coalesced anonymous refresh (at most
 one fetch start per 30 seconds; a sooner request is deferred, not dropped); it
 cannot accept a URL or flag values. Developer dry runs allow the snapshot read
 but refuse refresh. Neither method grants any operation authorization.
+
+`feature_flags_override_set` sets or clears one local choice. Parameters:
+`id`, `value` (`true`, `false`, or an explicit `null` to return to the
+environment decision; omitting it is refused), and the caller's
+`environment` and `profile_digest`, which must match the running daemon's.
+It persists the choice before applying it and returns the new snapshot,
+publishing `feature_flags_changed` when the generation advances. Errors:
+`feature-override-params-invalid` and `feature-profile-mismatch`
+(bad parameters), `feature-local-override-unavailable` (the flag does not
+accept a local choice), `feature-local-overrides-invalid` (the choices file on
+disk did not validate at startup; it is left untouched, and choices can be
+set again once it is fixed or removed and the daemon restarts), and
+`feature-local-override-write-failed`. A local choice never grants consent,
+folder access or upload permission.
 
 `feature_flags_changed` is an opt-in event, carrying `instance_id` and
 `generation`; subscribers declare that event in `accepts` and re-read the complete
