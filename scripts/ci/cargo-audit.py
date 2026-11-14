@@ -19,7 +19,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     with (root / "deny.toml").open("rb") as policy:
         advisories = tomllib.load(policy)["advisories"]
-    command = ["cargo", "audit", "--deny", "unsound"]
+    command = ["cargo", "audit", "--deny", "warnings"]
     # Parse only the lockfile selector; forward the complete CLI unchanged.
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-f", "--file", default="Cargo.lock")

@@ -46,3 +46,12 @@ trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol" }
 trace-commons-server = { path = "../trace-commons-server" }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Tier 3 in unsafe_boundary.rs: the only `unsafe` is documented process-env
+# setup in its serialized, ignored PostgreSQL suite. It ships nothing.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

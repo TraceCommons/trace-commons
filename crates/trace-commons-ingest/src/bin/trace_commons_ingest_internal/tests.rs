@@ -11694,6 +11694,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
 static PIPELINE_LEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
+#[allow(unsafe_code)]
 fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     let _guard = PIPELINE_LEASE_ENV_LOCK
         .lock()
@@ -11712,12 +11713,14 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     assert_eq!(defaults, PipelineLeaseConfig::default());
 
     // Out of range (two hours plus one second): refused with the safe label.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "7201") };
     let error =
         parse_pipeline_lease_config_from_env().expect_err("an out-of-range Score lease is refused");
     assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
 
     // Unparsable: refused with the same safe label, not a raw parse error.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "not-a-number") };
     let error =
         parse_pipeline_lease_config_from_env().expect_err("an unparsable Score lease is refused");
@@ -11726,6 +11729,7 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     // A value that parses as `i64` but overflows
     // `chrono::Duration::seconds` (above `i64::MAX / 1_000`) must refuse
     // with the safe label, not panic.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(
             TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
@@ -11737,12 +11741,14 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
 
     // In range: accepted, and the configured seconds land on the right phase.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "120") };
     let configured = parse_pipeline_lease_config_from_env().expect("120 seconds is in range");
     assert_eq!(configured.score(), chrono::Duration::seconds(120));
     assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
     assert_eq!(configured.settle(), PipelineLeaseConfig::default().settle());
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
@@ -11756,6 +11762,7 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
 /// still applies on top of it (`privacy_pass_timeout_for`). Only this test
 /// reads the variable, so setting it does not race another test.
 #[test]
+#[allow(unsafe_code)]
 fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
     let _guard = PIPELINE_LEASE_ENV_LOCK
         .lock()
@@ -11770,6 +11777,7 @@ fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
         std::time::Duration::from_secs(900)
     );
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(
             TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS,
@@ -11784,6 +11792,7 @@ fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
     assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
 
     for bad in ["59", "7201", "-1", "ten minutes", "1e3"] {
+        // SAFETY: test-only process environment mutation; restored within this test.
         unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS, bad) };
         let error = parse_pipeline_lease_config_from_env()
             .expect_err("an out-of-range or unparsable ceiling refuses startup");
@@ -11793,6 +11802,7 @@ fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
             "{bad}"
         );
     }
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS) };
 }
 
@@ -11801,6 +11811,7 @@ fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
 /// Unset is no issuer; a canonical ref is the issuer; a raw principal, a
 /// short hash, or an uppercase one refuses startup, naming the variable.
 #[test]
+#[allow(unsafe_code)]
 fn the_pipeline_credit_issuer_ref_must_be_canonical() {
     // SAFETY: env mutation in tests is OK here -- no other test in this
     // suite reads this variable (only startup does, and no test runs it).
@@ -11811,6 +11822,7 @@ fn the_pipeline_credit_issuer_ref_must_be_canonical() {
     );
 
     let canonical = format!("principal_sha256:{}", "a".repeat(64));
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(
             TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
@@ -11828,6 +11840,7 @@ fn the_pipeline_credit_issuer_ref_must_be_canonical() {
         format!("principal_sha256:{}", "A".repeat(64)),
         format!("sha256:{}", "a".repeat(64)),
     ] {
+        // SAFETY: test-only process environment mutation; restored within this test.
         unsafe {
             std::env::set_var(
                 TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF,
@@ -11845,6 +11858,7 @@ fn the_pipeline_credit_issuer_ref_must_be_canonical() {
         assert!(!error.to_string().contains(&non_canonical), "{error}");
     }
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF) };
 }
 
@@ -11856,6 +11870,7 @@ fn the_pipeline_credit_issuer_ref_must_be_canonical() {
 /// reads it. With a pipeline, the same value is refused, and a valid one is
 /// the payout's confirmation interval.
 #[test]
+#[allow(unsafe_code)]
 fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
     // SAFETY: env mutation in tests is OK here -- no other test in this
     // suite reads this variable (only startup and the NEAR scheduler's own
@@ -11874,6 +11889,7 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
     pipeline_near_confirmation_interval_from_env(true)
         .expect_err("a pipeline runtime refuses an interval below the floor");
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(
             TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
@@ -11888,6 +11904,7 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
     pipeline_near_confirmation_interval_from_env(true)
         .expect_err("a pipeline runtime refuses an interval that is not a number");
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(
             TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
@@ -11899,6 +11916,7 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
         StdDuration::from_secs(120)
     );
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS) };
 }
 
@@ -11911,6 +11929,7 @@ fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
 /// the threshold handed to the runtime. The delta is `main`'s, in
 /// microcredits, either way.
 #[test]
+#[allow(unsafe_code)]
 fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
     // SAFETY: env mutation in tests is OK here -- no other test in this
     // suite reads this variable (only startup and `main`'s feature-gated
@@ -11927,6 +11946,7 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
     pipeline_main_gate_config_from_env(true, 2.5)
         .expect_err("a pipeline runtime refuses a threshold that is not an integer");
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS, "120000") };
     assert_eq!(
         pipeline_main_gate_config_from_env(true, 0.0)
@@ -11935,6 +11955,7 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
         120_000
     );
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
 }
 
@@ -11943,6 +11964,7 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
 /// `flat`; `graded_perplexity_v1` selects the graded rule; anything else
 /// refuses the start with a safe label naming the variable.
 #[test]
+#[allow(unsafe_code)]
 fn the_credit_rule_is_read_with_the_main_gate_configuration() {
     use trace_commons_server::versioned_pipeline_compat::{
         CompatibilityCreditRule, NOVELTY_UTILITY_CREDIT_RULE_ENV,
@@ -11956,6 +11978,7 @@ fn the_credit_rule_is_read_with_the_main_gate_configuration() {
             .credit_rule,
         CompatibilityCreditRule::Flat
     );
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded_perplexity_v1") };
     assert_eq!(
         pipeline_main_gate_config_from_env(true, 1.0)
@@ -11970,12 +11993,14 @@ fn the_credit_rule_is_read_with_the_main_gate_configuration() {
         CompatibilityCreditRule::Flat,
         "no pipeline: the rule is not read"
     );
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded") };
     let error = pipeline_main_gate_config_from_env(true, 1.0).unwrap_err();
     assert_eq!(
         error.to_string(),
         "novelty_utility_credit_rule_invalid (TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE)"
     );
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
 }
 
@@ -79724,6 +79749,7 @@ async fn novelty_credit_emission_concurrent_evaluations_write_one_paid_award() {
 
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
+#[allow(unsafe_code)]
 fn parse_required_u64_env_bails_when_unset() {
     // Use a per-test env var name so we don't race other tests.
     let var = "TRACE_COMMONS_TEST_REQUIRED_U64_UNSET";
@@ -79737,13 +79763,16 @@ fn parse_required_u64_env_bails_when_unset() {
 
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
+#[allow(unsafe_code)]
 fn parse_required_u64_env_accepts_zero() {
     // "0" is a valid u64 — only ALL-ZERO floors is invalid, and that
     // check lives at the caller. This helper must accept 0.
     let var = "TRACE_COMMONS_TEST_REQUIRED_U64_ZERO";
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(var, "0") };
     let v = parse_required_u64_env(var).expect("0 must parse");
     assert_eq!(v, 0);
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::remove_var(var) };
 }
 
@@ -80127,6 +80156,7 @@ fn compute_gate_version_hash_changes_on_any_dimension() {
 /// label, which the gate-rollout drills assert on as a stable string.
 #[cfg(feature = "local-gpu-models")]
 #[tokio::test]
+#[allow(unsafe_code)]
 async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
     // Save and clear all env vars the helper reads so the test is
     // isolated from operator-machine config. We restore each var on
@@ -80170,6 +80200,7 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
 
     // Restore env state before any assertion so a failure here does not
     // leak state across other tests in the same process.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         for k in &keys {
             std::env::remove_var(k);
@@ -86070,30 +86101,37 @@ async fn near_payout_endpoint_unknown_and_cross_account_404() {
 // --- Slice 3b Task 10: mockable NEAR settlement modes + dry-run submitter + hold recovery ---
 
 #[test]
+#[allow(unsafe_code)]
 fn near_settlement_mode_from_env_parses_known_values_and_defaults_disabled() {
     // Serialize env mutation: these tests run with --test-threads=1, but keep the
     // set/remove paired so a value never leaks across cases.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "disabled");
     }
     assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "dry_run");
     }
     assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::DryRun);
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "  HTTP  ");
     }
     assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Http);
     // Blank, garbage, and unset all fail safe to Disabled.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "");
     }
     assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "garbage");
     }
     assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         std::env::remove_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE);
     }
@@ -89666,6 +89704,7 @@ struct NearAiEnvGuard {
 }
 
 impl NearAiEnvGuard {
+    #[allow(unsafe_code)]
     fn set(base_url: &str) -> Self {
         let vars = [
             ("TRACE_NEAR_AI_PRIVACY_API_KEY", "backstop-test-key"),
@@ -89683,8 +89722,10 @@ impl NearAiEnvGuard {
 }
 
 impl Drop for NearAiEnvGuard {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         for key in &self.keys {
+            // SAFETY: test-only process environment mutation; restored within this test.
             unsafe { std::env::remove_var(key) };
         }
     }
@@ -95537,6 +95578,7 @@ async fn a_record_written_before_v51_reads_as_not_recorded_not_as_empty() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn classify_policy_env_defaults_closed() {
     const VAR: &str = "TRACE_COMMONS_PII_CLASSIFY_POLICY";
     let prior = std::env::var(VAR).ok();
@@ -95547,13 +95589,16 @@ fn classify_policy_env_defaults_closed() {
     unsafe { std::env::remove_var(VAR) };
     assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::AllEvents);
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(VAR, "prose-only") };
     assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::ProseOnly);
 
     // A typo must not silently narrow what the classifier examines.
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe { std::env::set_var(VAR, "typo") };
     assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::AllEvents);
 
+    // SAFETY: test-only process environment mutation; restored within this test.
     unsafe {
         match prior {
             Some(value) => std::env::set_var(VAR, value),

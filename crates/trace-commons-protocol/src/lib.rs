@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod account_device_code;
 pub mod account_login_change;
 pub mod activity_missions;

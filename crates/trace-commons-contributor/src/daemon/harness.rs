@@ -2098,11 +2098,10 @@ mod tests {
     /// leave the variable set for whatever runs next. Codex, unlike Claude
     /// Code, is still located by upstream, which follows `CODEX_HOME` as
     /// Codex itself does.
-    static CODEX_HOME_LOCK: StdMutex<()> = StdMutex::new(());
-
-    /// Serializes the one test that sets `CLAUDE_CONFIG_DIR`, for the same
-    /// reason as [`CODEX_HOME_LOCK`].
-    static CLAUDE_CONFIG_DIR_LOCK: StdMutex<()> = StdMutex::new(());
+    /// Serializes tests that mutate process-wide environment variables
+    /// (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) so two test threads never race
+    /// `setenv()`/`unsetenv()` on POSIX `environ`.
+    static HARNESS_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// Claude Code's row, connect and repair address the default login's
     /// file whatever `CLAUDE_CONFIG_DIR` the daemon inherited.
@@ -2120,8 +2119,9 @@ mod tests {
     /// status line an old connect left, so that each of the three would act
     /// on it if it were the one being read.
     #[test]
+    #[allow(unsafe_code)]
     fn claude_code_is_connected_in_the_default_login_whatever_claude_config_dir_says() {
-        let _env = CLAUDE_CONFIG_DIR_LOCK
+        let _env = HARNESS_ENV_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let other = tempfile::tempdir().expect("tempdir");
@@ -2133,12 +2133,19 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 match self.0.take() {
-                    Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
-                    None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
+                    Some(v) => {
+                        // SAFETY: `_env` holds `HARNESS_ENV_LOCK` outliving `_restore`.
+                        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) }
+                    }
+                    None => {
+                        // SAFETY: `_env` holds `HARNESS_ENV_LOCK` outliving `_restore`.
+                        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") }
+                    }
                 }
             }
         }
         let _restore = Restore(std::env::var_os("CLAUDE_CONFIG_DIR"));
+        // SAFETY: `_env` holds `HARNESS_ENV_LOCK`, serializing env mutations in this module.
         unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", other.path()) };
 
         // The row is the default login's file, and that file is not connected.
@@ -2179,11 +2186,13 @@ mod tests {
     }
 
     impl CodexHomeAt {
+        #[allow(unsafe_code)]
         fn at(dir: &Path) -> Self {
-            let lock = CODEX_HOME_LOCK
+            let lock = HARNESS_ENV_LOCK
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             let previous = std::env::var_os("CODEX_HOME");
+            // SAFETY: `lock` holds `HARNESS_ENV_LOCK`, serializing env mutations in this module.
             unsafe { std::env::set_var("CODEX_HOME", dir) };
             Self {
                 _lock: lock,
@@ -2193,10 +2202,17 @@ mod tests {
     }
 
     impl Drop for CodexHomeAt {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
-                None => unsafe { std::env::remove_var("CODEX_HOME") },
+                Some(v) => {
+                    // SAFETY: `self._lock` holds `HARNESS_ENV_LOCK` until fields drop.
+                    unsafe { std::env::set_var("CODEX_HOME", v) }
+                }
+                None => {
+                    // SAFETY: `self._lock` holds `HARNESS_ENV_LOCK` until fields drop.
+                    unsafe { std::env::remove_var("CODEX_HOME") }
+                }
             }
         }
     }

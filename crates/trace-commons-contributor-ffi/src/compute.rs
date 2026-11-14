@@ -115,10 +115,10 @@ pub unsafe extern "C" fn tc_compute_open_local(
     local_config_json: *const c_char,
     err: *mut *mut c_char,
 ) -> *mut tc_compute_handle {
-    if !err.is_null() {
-        unsafe { *err = std::ptr::null_mut() };
-    }
     guard(|| {
+        if !err.is_null() {
+            unsafe { *err = std::ptr::null_mut() };
+        }
         let path = unsafe { borrow_str(config_dir) }?;
         let config = serde_json::from_slice(unsafe { bounded_json_bytes(local_config_json) }?)?;
         let controller = ComputeController::open_local(std::path::Path::new(path), config)?;
@@ -156,10 +156,10 @@ pub unsafe extern "C" fn tc_compute_open(
     config_dir: *const c_char,
     err: *mut *mut c_char,
 ) -> *mut tc_compute_handle {
-    if !err.is_null() {
-        unsafe { *err = std::ptr::null_mut() };
-    }
     guard(|| {
+        if !err.is_null() {
+            unsafe { *err = std::ptr::null_mut() };
+        }
         let path = unsafe { borrow_str(config_dir) }?;
         let controller = ComputeController::open(std::path::Path::new(path))?;
         let ptr = Box::into_raw(Box::new(tc_compute_handle { controller }));

@@ -3,6 +3,8 @@
 
 //! TraceCommons hosted server crate.
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod account_ceremony;
 pub mod account_login_change;
 pub mod account_native_auth;
