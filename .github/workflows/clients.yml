@@ -30,8 +30,8 @@ on:
       - "scripts/make-appinstaller.ps1"
       - "scripts/ci/verify-macos-entitlements.sh"
       - "scripts/ci/test-verify-macos-entitlements.sh"
-      # The fixture test also reads the Tauri app's entitlements.
-      - "tauri-desktop/src-tauri/entitlements.plist"
+      # The Tauri desktop workspace (clippy, tests, and macOS entitlements fixture).
+      - "tauri-desktop/**"
       - "crates/trace-commons-client-server-tests/**"
       - "crates/trace-commons-contributor/**"
       - "crates/trace-commons-contributor-sources/**"
@@ -50,6 +50,9 @@ concurrency:
   # repository budget and evicted the required server jobs' caches. See
   # .github/actions/trim-cargo-cache.
   cancel-in-progress: ${{ github.event_name != 'push' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,7 +75,21 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy and test the Tauri desktop workspace
+        shell: bash
+        run: |
+          mkdir -p tauri-desktop/frontend/dist
+          cargo clippy --locked --manifest-path tauri-desktop/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
+          cargo test --locked --manifest-path tauri-desktop/Cargo.toml
       # The Swift package links the contributor FFI dylib
       # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
       # defaults to ../target/debug), so the dylib has to exist before
@@ -152,6 +169,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # The newest Xcode 26 the image carries. Fails, rather than quietly
       # building with an older SDK, when there is none.
@@ -176,6 +195,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # On Windows the daemon's named-pipe DACL is the ONLY access control on
       # the IPC socket -- there is no 0700 state directory doing that work as
@@ -218,7 +239,21 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy and test the Tauri desktop workspace
+        shell: bash
+        run: |
+          mkdir -p tauri-desktop/frontend/dist
+          cargo clippy --locked --manifest-path tauri-desktop/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
+          cargo test --locked --manifest-path tauri-desktop/Cargo.toml
       # RUSTFLAGS=-D warnings comes from the workflow-level env, so an
       # unused import behind a cfg gate fails here the way it would in the
       # unix jobs. trace-commons-contributor-sources holds the session
@@ -246,6 +281,8 @@ jobs:
     # so this job is what stands behind the claim that they work at all.
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # Proven on a real Windows host (the tc-win-dev GCE box) on 2026-08-17:
       # this compiles every #[cfg(windows)] body under -D warnings. It is the
@@ -295,6 +332,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # This installer's whole claim is that it refuses to install what it
       # cannot verify, and that claim is not testable by reading it. Both paths
       # run here against the actually published release: the success path, and
@@ -383,6 +422,8 @@ jobs:
     # the copy in the weston job can be removed.
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # Through the hardened update, never a bare `apt-get update`: the
       # runner image's vendor repositories would fail this job before it
       # validated anything, which is the exposure the action exists to close.
@@ -454,6 +495,8 @@ jobs:
     # versus what ran live.
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -533,6 +576,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       # The project defaults to its unpackaged flavour, and that remains worth
       # asserting because changing the default changes what contributors get.
@@ -591,7 +636,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # An exact patch makes the installer use the public SDK feeds instead
       # of aka.ms channel redirects, which can target non-public origin storage.
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '8.0.427'
 
@@ -642,7 +687,7 @@ jobs:
       # Suppressing the first failing target only surfaces the next task from
       # the same missing assembly set; this was confirmed by reproducing both
       # failures on a clean Windows box.
-      - uses: microsoft/setup-msbuild@v3
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
       # Packaging, not just compiling. Package.appxmanifest, MakePri and the
       # visual assets are only exercised by a packaging build, and every one

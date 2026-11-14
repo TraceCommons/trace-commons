@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![forbid(unsafe_code)]
+
 //! The ingest binary refuses to boot on a NEAR AI host from the other
 //! channel (staging design, section 3.9).
 //!

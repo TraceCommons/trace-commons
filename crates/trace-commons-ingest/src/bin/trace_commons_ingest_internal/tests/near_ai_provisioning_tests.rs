@@ -38,6 +38,7 @@ struct ProvisioningEnv {
 }
 
 impl ProvisioningEnv {
+    #[allow(unsafe_code)]
     fn publish() -> Self {
         let vars = [
             (
@@ -59,6 +60,7 @@ impl ProvisioningEnv {
 }
 
 impl Drop for ProvisioningEnv {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         for (name, value) in self.previous.drain(..) {
             // SAFETY: as above.
@@ -1147,6 +1149,7 @@ mod open_sign_up {
     }
 
     impl EnvVar {
+        #[allow(unsafe_code)]
         fn set(name: &'static str, value: Option<&str>) -> Self {
             let previous = std::env::var(name).ok();
             // SAFETY: the PostgreSQL suite runs single-threaded.
@@ -1161,6 +1164,7 @@ mod open_sign_up {
     }
 
     impl Drop for EnvVar {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             // SAFETY: as above.
             unsafe {

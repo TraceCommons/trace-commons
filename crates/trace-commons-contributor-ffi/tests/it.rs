@@ -8,6 +8,7 @@
 //! the others is its own `[[test]]` in Cargo.toml, with the reason beside
 //! it. The package sets `autotests = false`, so a file in neither place
 //! would never be built; `it_harness` refuses that.
+#![allow(unsafe_code)]
 
 #[macro_use]
 #[path = "../../trace-commons-protocol/tests/support/it_harness.rs"]

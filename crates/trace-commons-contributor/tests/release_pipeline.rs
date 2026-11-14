@@ -2347,7 +2347,7 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
 /// a step can neither satisfy nor defeat it, and each pinned value is
 /// matched as a whole line rather than a substring.
 #[test]
-fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
+fn cargo_deny_jobs_pin_their_graphs_and_enforce_bans_and_audit() {
     let workflow = executable_text(&read(".github/workflows/cargo-deny.yml"));
 
     let has_line = |job: &str, want: &str| job.lines().any(|line| line.trim() == want);
@@ -2365,8 +2365,8 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
          feature list has to track every deployable feature and did not"
     );
     assert!(
-        has_line(all_features, "command-arguments: licenses sources"),
-        "cargo-deny-all-features must run licences and sources together, \
+        has_line(all_features, "command-arguments: licenses bans sources"),
+        "cargo-deny-all-features must run licences, bans and sources together, \
          loading the dependency graph once"
     );
 
@@ -2388,27 +2388,48 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
         "cargo-deny-advisories must run the advisories check"
     );
 
-    // `check bans` must not run anywhere: deny.toml's [bans] section sets
-    // only `multiple-versions = "allow"` and configures no deny/skip list,
-    // so the check is a standing no-op today -- a job for it would be
-    // ceremony, not a gate. If deny.toml ever grows a real ban list, this
-    // assertion is the reminder to add the job back. Both spellings are
-    // checked: cargo-deny-action takes the checks through
-    // `command-arguments`, and its own README uses `command` for the same
-    // thing.
-    for (name, job) in [
-        ("cargo-deny-all-features", all_features),
-        ("cargo-deny-advisories", advisories),
+    let clients = extract_job(&workflow, "cargo-deny-clients");
+    assert!(
+        clients.contains("uses: EmbarkStudios/cargo-deny-action"),
+        "cargo-deny-clients must run cargo-deny-action"
+    );
+    assert!(
+        has_line(
+            clients,
+            "workspace: [crates/trace-commons-contributor-gtk, tauri-desktop]"
+        ),
+        "cargo-deny-clients must check both standalone client workspaces"
+    );
+    assert!(
+        has_line(
+            clients,
+            r#"checks: ["licenses bans sources", "advisories"]"#
+        ),
+        "cargo-deny-clients must run licenses, bans, sources, and advisories"
+    );
+
+    let audit = extract_job(&workflow, "cargo-audit");
+    for lockfile in [
+        "- Cargo.lock",
+        "- crates/trace-commons-contributor-gtk/Cargo.lock",
+        "- tauri-desktop/Cargo.lock",
     ] {
         assert!(
-            !job.lines().any(|line| {
-                let line = line.trim_start();
-                (line.starts_with("command-arguments:") || line.starts_with("command:"))
-                    && line.contains("bans")
-            }),
-            "{name} must not name `bans` -- deny.toml's [bans] section \
-             enforces nothing today, so running the check would only be \
-             ceremony"
+            has_line(audit, lockfile),
+            "cargo-audit matrix must cover {lockfile}"
         );
     }
+    assert!(
+        has_line(
+            audit,
+            r#"run: python3 scripts/ci/cargo-audit.py --file "$AUDIT_LOCKFILE""#
+        ),
+        "cargo-audit must run scripts/ci/cargo-audit.py via env binding"
+    );
+
+    let audit_script = read("scripts/ci/cargo-audit.py");
+    assert!(
+        audit_script.contains(r#"["cargo", "audit", "--deny", "warnings"]"#),
+        "scripts/ci/cargo-audit.py must deny all cargo-audit warnings (unmaintained, unsound, yanked)"
+    );
 }

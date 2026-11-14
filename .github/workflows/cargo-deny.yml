@@ -38,8 +38,8 @@
 # 0.13.3 requires by semver -- the fix needs a reqwest release, not a
 # lockfile bump. It is the first thing to re-check when reqwest moves.
 #
-# `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
-# and configures no deny/skip list, so the check is a standing no-op today.
+# `check bans` runs alongside `licenses` and `sources` so banned crates in
+# deny.toml (`libsql`, `parquet`, `arrow`) are rejected across every workspace.
 #
 # Action pinning (last reviewed 2026-09-02): cargo-deny-action's v2 tag
 # pins cargo-deny 0.20.2 in its own Dockerfile, the version these jobs were
@@ -76,16 +76,18 @@ concurrency:
 
 jobs:
   cargo-deny-all-features:
-    name: cargo deny licences and sources (all features)
+    name: cargo deny licences, bans and sources (all features)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: info
           arguments: --all-features --locked
-          command-arguments: licenses sources
+          command-arguments: licenses bans sources
 
   cargo-deny-advisories:
     name: cargo deny advisories (all features)
@@ -93,6 +95,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: info
@@ -107,9 +111,11 @@ jobs:
       fail-fast: false
       matrix:
         workspace: [crates/trace-commons-contributor-gtk, tauri-desktop]
-        checks: ["licenses sources", "advisories"]
+        checks: ["licenses bans sources", "advisories"]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.workspace == 'tauri-desktop' && matrix.checks == 'advisories'
       - name: Install GLib regression prerequisites
@@ -149,6 +155,8 @@ jobs:
           - tauri-desktop/Cargo.lock
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked

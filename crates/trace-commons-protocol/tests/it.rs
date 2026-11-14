@@ -9,6 +9,8 @@
 //! it. The package sets `autotests = false`, so a file in neither place
 //! would never be built; `it_harness` refuses that.
 
+#![forbid(unsafe_code)]
+
 #[macro_use]
 #[path = "support/it_harness.rs"]
 mod it_harness;

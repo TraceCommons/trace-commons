@@ -1008,3 +1008,10 @@ path = "tests/preflight.rs"
 [[test]]
 name = "version_channel"
 path = "tests/version_channel.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

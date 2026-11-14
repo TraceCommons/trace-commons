@@ -74,3 +74,6 @@ collateral-client = ["dcap-qvl/report"]
 # compiles none of it, so a production binary holds no code that reads a
 # signed pin set.
 near-ai-staging = []
+
+[lints.rust]
+unsafe_code = "forbid"

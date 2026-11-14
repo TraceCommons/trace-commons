@@ -46,3 +46,10 @@ self-hosted-privacy-filter = ["dep:reqwest", "dep:tracing", "dep:tiktoken-rs", "
 [[test]]
 name = "it"
 path = "tests/it.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![forbid(unsafe_code)]
+
 //! The `trace-commons-ingest` binary: the library's ingest entry point
 //! (`trace_commons_ingest`) with the open-build options, which
 //! register no Score policies. The service itself is

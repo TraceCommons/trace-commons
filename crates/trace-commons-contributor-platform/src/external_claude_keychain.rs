@@ -10,6 +10,7 @@
 //!
 //! The attributes-only query, no-UI context and access-list preflight
 //! patterns are credited in ../CODEXBAR-NOTICE.
+#![allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 use std::ffi::{c_char, c_void};
 
 type Ref = *const c_void;
@@ -176,14 +177,18 @@ impl NoUiContext {
             return Err("unavailable");
         }
         let context = Self(context);
-        // SAFETY: `-setInteractionNotAllowed:` takes one BOOL and returns void.
-        let set: unsafe extern "C" fn(Ref, Ref, bool) =
+        #[cfg(target_arch = "aarch64")]
+        let yes: ObjCBool = true;
+        #[cfg(not(target_arch = "aarch64"))]
+        let yes: ObjCBool = 1;
+        // SAFETY: `-setInteractionNotAllowed:` takes one Objective-C BOOL and returns void.
+        let set: unsafe extern "C" fn(Ref, Ref, ObjCBool) =
             unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
         unsafe {
             set(
                 context.0,
                 sel_registerName(c"setInteractionNotAllowed:".as_ptr()),
-                true,
+                yes,
             )
         };
         Ok(context)
@@ -193,12 +198,26 @@ impl NoUiContext {
         interaction_not_allowed(self.0)
     }
 }
+/// Objective-C `BOOL` is `bool` on arm64 Darwin and `signed char` (`i8`) on x86_64 Darwin.
+#[cfg(target_arch = "aarch64")]
+type ObjCBool = bool;
+#[cfg(not(target_arch = "aarch64"))]
+type ObjCBool = i8;
+
 #[cfg(test)]
 fn interaction_not_allowed(context: Ref) -> bool {
-    // SAFETY: the getter takes no arguments and returns a BOOL.
-    let get: unsafe extern "C" fn(Ref, Ref) -> bool =
+    // SAFETY: the getter takes no arguments and returns an Objective-C BOOL.
+    let get: unsafe extern "C" fn(Ref, Ref) -> ObjCBool =
         unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-    unsafe { get(context, sel_registerName(c"interactionNotAllowed".as_ptr())) }
+    let raw = unsafe { get(context, sel_registerName(c"interactionNotAllowed".as_ptr())) };
+    #[cfg(target_arch = "aarch64")]
+    {
+        raw
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        raw != 0
+    }
 }
 impl Drop for NoUiContext {
     fn drop(&mut self) {

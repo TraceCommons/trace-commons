@@ -45,6 +45,9 @@ concurrency:
   # that completes costs the same minutes a cancelled one already spent.
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -57,10 +60,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml -- --check
+          cargo fmt --manifest-path tauri-desktop/Cargo.toml -- --check
       # Seconds, no build. The contributor crate's `test-credential-store`
       # feature swaps the OS keychain for a plaintext file and must only ever
       # be on under `cargo test`; this refuses any release/packaging workflow,
@@ -233,7 +241,7 @@ jobs:
     # allow-list elsewhere. Do not add a suite without running it first.
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: trace
           POSTGRES_PASSWORD: trace
@@ -258,6 +266,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # Several suites assert their database name begins `admission_test`
       # before running destructive fixtures, and every one of them requires the
@@ -781,7 +791,7 @@ jobs:
     timeout-minutes: 40
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: trace
           POSTGRES_PASSWORD: trace
@@ -798,6 +808,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # One database, named `admission_test_*` on the literal host 127.0.0.1,
       # because fixtures assert both before running destructive cleanup.
@@ -881,7 +893,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: trace
           POSTGRES_PASSWORD: trace
@@ -896,6 +908,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -986,7 +1000,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: trace
           POSTGRES_PASSWORD: trace
@@ -1001,6 +1015,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1102,6 +1118,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1179,6 +1197,8 @@ jobs:
     # still needs macOS and still regenerates inside the release job.
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - run: ./scripts/mark/check-drift.sh
       # The renderer writes its own PNGs, including a hand-rolled deflate.
@@ -1212,6 +1232,8 @@ jobs:
     # detectable without a Mac.
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Pins and empty catalog, with mutation regressions
         run: |
           python3 scripts/qualification/check-opencode-qualification.py
@@ -1223,6 +1245,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -1271,6 +1295,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1307,6 +1333,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # The MIT OR Apache-2.0 crates ship inside third-party agent harnesses,
       # which depend on them one at a time and enable none of this workspace's
@@ -1338,6 +1366,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1373,6 +1403,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1442,6 +1474,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
         uses: actions/cache/restore@v5
@@ -1549,6 +1583,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # A stable toolchain purely to run `cargo metadata`. The checks below
       # run under the derived floor toolchain, installed once it is known.
       - uses: dtolnay/rust-toolchain@stable
@@ -1593,9 +1629,12 @@ jobs:
             crates/trace-commons-contributor-gtk/Cargo.toml \
             crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml
       - name: Install the floor toolchain(s)
+        env:
+          ROOT_FLOOR: ${{ steps.floor.outputs.root }}
+          GTK_FLOOR: ${{ steps.floor.outputs.gtk }}
         run: |
           set -euo pipefail
-          for v in "${{ steps.floor.outputs.root }}" "${{ steps.floor.outputs.gtk }}"; do
+          for v in "${ROOT_FLOOR}" "${GTK_FLOOR}"; do
             rustup toolchain install "$v" --profile minimal --no-self-update
           done
           rustup toolchain list
@@ -1621,12 +1660,18 @@ jobs:
       # the whole workspace, because the server is not something an outsider
       # builds from source and is not what the floor promises.
       - name: Check the contributor CLI at the floor
-        run: cargo "+${{ steps.floor.outputs.root }}" check --locked -p trace-commons-contributor --bins
+        env:
+          ROOT_FLOOR: ${{ steps.floor.outputs.root }}
+        run: cargo "+${ROOT_FLOOR}" check --locked -p trace-commons-contributor --bins
       - name: Check the contributor FFI at the floor
-        run: cargo "+${{ steps.floor.outputs.root }}" check --locked -p trace-commons-contributor-ffi --lib
+        env:
+          ROOT_FLOOR: ${{ steps.floor.outputs.root }}
+        run: cargo "+${ROOT_FLOOR}" check --locked -p trace-commons-contributor-ffi --lib
       - name: Check the GTK shell at the floor
+        env:
+          GTK_FLOOR: ${{ steps.floor.outputs.gtk }}
         run: |
-          cargo "+${{ steps.floor.outputs.gtk }}" check --locked \
+          cargo "+${GTK_FLOOR}" check --locked \
             --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bins
 
   cargo-test-default:
@@ -1635,6 +1680,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Verify native wallet browser state transitions
         run: node scripts/ci/test-near-wallet-browser.cjs
       - uses: dtolnay/rust-toolchain@stable
@@ -1691,6 +1738,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # Before the cache restore: these jobs restore a large `target` and
       # compile on top of it; see the action for what it deletes and why.
@@ -1753,6 +1802,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # Before the cache restore: these jobs restore a large `target` and
       # compile on top of it; see the action for what it deletes and why.
@@ -1801,6 +1852,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # The end-to-end proof for crates/trace-commons-protocol/src/canonical_json.rs,
       # narrowed to the one build graph that still needs it.
@@ -1844,6 +1897,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Setup Python 3
         uses: actions/setup-python@v6
@@ -1878,6 +1933,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # Builds and exercises the four operator CLIs (review, admin, worker,
       # tenant), confirming --version + --help + per-binary subcommand counts.
@@ -1891,6 +1948,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -1906,3 +1965,19 @@ jobs:
       - name: Run shim contract tests
         working-directory: deploy/pilot-gcp/privacy-filter
         run: python -m pytest test_app.py -v
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install zizmor
+        run: python3 -m pip install --disable-pip-version-check 'zizmor>=1.20,<2'
+      - name: Audit GitHub Actions workflows and composite actions
+        run: zizmor --offline --persona=regular .github

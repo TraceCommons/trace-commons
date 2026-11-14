@@ -564,6 +564,7 @@ fn file_identity(path: &Path) -> Option<String> {
 /// file index reports zero, and treating zero as an identity would make every
 /// such file identical to every other.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn file_identity(path: &Path) -> Option<String> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
@@ -577,9 +578,9 @@ fn file_identity(path: &Path) -> Option<String> {
         .custom_flags(0x00200000)
         .open(path)
         .ok()?;
-    // SAFETY: the structure is plain integers, so a zeroed value is valid, and
-    // the handle stays live for the duration of the call.
+    // SAFETY: the structure is plain integers, so a zeroed value is valid.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` owns a live file handle and `information` is a valid out-pointer.
     let read = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) };
     if read == 0 {
         return None;

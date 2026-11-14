@@ -22,14 +22,10 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # contents: write lives only on the publish job below, not here. The build
-  # job imports the .p12, holds the ASC notary key and carries the Trusted
-  # Signing OIDC session -- the job with signing authority is not the job
-  # that needs to cut a release, so it does not need repo-write. Matches
-  # release-apps.yml, which makes the same call for the same reason.
+  # contents: write lives only on the publish job below, not here, and
+  # id-token / attestations write live only on the build job that signs and
+  # attests artifacts.
   contents: read
-  id-token: write
-  attestations: write
 
 jobs:
   release-config:
@@ -88,9 +84,15 @@ jobs:
     # fails OIDC. Gating the whole matrix job under one job keeps the Linux
     # leg here too, which is a scoping cost, not a correctness problem.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # The updater and `--version` both use CARGO_PKG_VERSION, not the tag.
       # Refuse a tag that would publish correctly named assets containing a
@@ -657,6 +659,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # Pushes a branch to the fork and stops there. It deliberately does
       # NOT open the pull request: winget-pkgs is a third-party repository

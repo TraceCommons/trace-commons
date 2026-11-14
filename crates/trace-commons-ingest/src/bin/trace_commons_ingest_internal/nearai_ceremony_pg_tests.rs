@@ -167,6 +167,7 @@ async fn stub_near_ai(subject: String) -> String {
 ///
 /// These are process-global, which is why this suite is `#[ignore]`d and run in
 /// its own step rather than alongside the parallel unit tests.
+#[allow(unsafe_code)]
 fn publish_provisioning_material() {
     // SAFETY: single-threaded setup at the top of one serial, ignored test.
     unsafe {
@@ -355,6 +356,7 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
 /// operator-reviewed connection configuration.
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+#[allow(unsafe_code)]
 async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
     let _serial = serial().lock().await;
     let db = ceremony_pg_admin().await;

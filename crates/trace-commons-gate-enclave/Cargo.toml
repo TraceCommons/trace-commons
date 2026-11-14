@@ -99,3 +99,6 @@ tokio = { version = "1", features = ["rt", "macros"] }
 # Used by the `UsearchVectorIndex` unit tests (under `local-gpu-models`) to
 # provision a real on-disk root directory per test.
 tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

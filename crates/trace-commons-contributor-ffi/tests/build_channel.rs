@@ -5,6 +5,7 @@
 //! Every assertion compares against `trace_commons_contributor::channel`, so
 //! the same tests hold in a default build and under the contributor's
 //! `near-ai-staging` feature.
+#![allow(unsafe_code)]
 
 use std::collections::BTreeSet;
 use std::ffi::{CStr, c_char};

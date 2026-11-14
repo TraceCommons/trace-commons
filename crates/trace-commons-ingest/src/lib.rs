@@ -3,5 +3,7 @@
 
 //! Hosted ingest service and the entry point for embedding builds.
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod ingest;
 pub use ingest::{IngestOptions, OPEN_BUILD_BIN_NAME, run, run_with_score_policies};

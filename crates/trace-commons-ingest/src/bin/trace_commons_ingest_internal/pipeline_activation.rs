@@ -2170,6 +2170,7 @@ mod tests {
     /// optional setting: it refuses no start, also in a binary that holds no
     /// pipeline runtime.
     #[test]
+    #[allow(unsafe_code)]
     fn an_empty_trust_store_variable_is_unset() {
         const VARIABLE: &str = "TRACE_COMMONS_PIPELINE_TEST_EMPTY_TRUSTED_KEYS_PATH";
         for value in ["", "   "] {

@@ -143,8 +143,9 @@ async fn rpc_fixture(public_key: String) -> (String, Arc<std::sync::atomic::Atom
 
 /// The returned directory backs the state's local storage; hold it for the
 /// test's lifetime so it is removed afterwards rather than leaked.
+#[allow(unsafe_code)]
 fn state(db: Arc<PgBackend>, rpc_url: String) -> (Arc<AppState>, tempfile::TempDir) {
-    // No legacy witness is published; v2 must still complete. This ignored test
+    // SAFETY: No legacy witness is published; v2 must still complete. This ignored test
     // runs alone in CI because readiness reads these process-global variables.
     unsafe {
         std::env::remove_var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON");

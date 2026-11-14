@@ -642,6 +642,7 @@ pub(super) struct SelfHostedPrivacyEnvGuard {
 }
 
 impl SelfHostedPrivacyEnvGuard {
+    #[allow(unsafe_code)]
     pub(super) fn set(base_url: &str) -> Self {
         let vars = [
             ("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted"),
@@ -660,6 +661,7 @@ impl SelfHostedPrivacyEnvGuard {
 }
 
 impl Drop for SelfHostedPrivacyEnvGuard {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         for (key, value) in &self.previous {
             match value {

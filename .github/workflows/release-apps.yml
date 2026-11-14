@@ -52,8 +52,6 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
 
 jobs:
   # Every credential a tag push spends is checked here, before a single
@@ -145,6 +143,8 @@ jobs:
       build: ${{ steps.v.outputs.build }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # CFBundleVersion must increase monotonically across releases.
       # GitHub's run_number is monotonic per workflow and increments with every
@@ -221,9 +221,15 @@ jobs:
     # hang required reviewers or environment secrets, matching how the
     # Windows job is gated.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       # Pinned by commit SHA, so dtolnay/rust-toolchain cannot infer the
       # toolchain from a ref name (@stable, @1.96) the way it does when
       # pinned to a branch or tag -- `toolchain` becomes a required input.
@@ -319,9 +325,15 @@ jobs:
     # repo:...:environment:release, so this job must declare the environment
     # or the OIDC token will not match and signing fails at auth.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           toolchain: "1.96"
@@ -735,9 +747,15 @@ jobs:
     # subject is repo:...:environment:release, so this job must declare the
     # environment or the OIDC token will not match and signing fails at auth.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           toolchain: "1.96"
@@ -984,10 +1002,11 @@ jobs:
           QUAD: ${{ steps.identity.outputs.quad }}
           CERT_SUBJECT: ${{ steps.subject.outputs.subject }}
           PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_PATH: ${{ steps.pkg.outputs.path }}
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "${{ steps.pkg.outputs.path }}" "dist\$env:PKG_NAME" -Force
+          Copy-Item "$env:PKG_PATH" "dist\$env:PKG_NAME" -Force
           ./windows/scripts/make-appinstaller.ps1 `
             -PackageName Iqlusion.TraceCommons `
             -Publisher $env:CERT_SUBJECT `
@@ -1080,12 +1099,17 @@ jobs:
     # Windows job this is protection rather than a hard auth requirement --
     # but a job holding a signing key is gated either way.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     # This manifest had never been built when the job was written. The
     # generous timeout is because a from-scratch flatpak build compiles the
     # whole GTK crate against the GNOME SDK with no cargo cache.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # Ubuntu-archive packages only, so the runner image's vendor apt
       # sources are pure exposure. A bare `apt-get update` here fetches
@@ -1490,9 +1514,14 @@ jobs:
     # macos-26, not ubuntu: Sparkle's sign_update is a macOS binary, and this
     # job signs the appcast.
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       # macOS ships LibreSSL at /usr/bin/openssl, which implements neither
       # `pkeyutl ... -rawin` nor `genpkey -algorithm ed25519` -- both of which

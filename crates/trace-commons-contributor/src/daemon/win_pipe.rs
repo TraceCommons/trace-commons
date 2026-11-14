@@ -1,5 +1,7 @@
 //! The Windows transport: a per-user named pipe carrying the same
 //! `trace_commons.daemon.v1_1` protocol as the unix-socket transport.
+
+#![allow(unsafe_code)]
 //!
 //! # Why this file is security-critical
 //!

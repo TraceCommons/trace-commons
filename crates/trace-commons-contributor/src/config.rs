@@ -2741,6 +2741,7 @@ mod tests {
     // serialize the mutating tests so they do not race each other.
     static ATTESTATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[allow(unsafe_code)]
     fn set_attestation_env(value: Option<&str>) {
         // SAFETY: serialized through ATTESTATION_ENV_LOCK.
         unsafe {

@@ -353,3 +353,10 @@ path = "tests/witness_evidence_pg.rs"
 [[test]]
 name = "r1_pipeline_measurement"
 path = "tests/r1_pipeline_measurement.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -604,9 +604,11 @@ mod tests {
     }
 
     impl EnvGuard {
+        #[allow(unsafe_code)]
         fn set(name: String, value: &str) -> Self {
-            // SAFETY: edition 2024 marks env mutation unsafe. We use a unique
-            // name per test so no other thread reads or writes this variable.
+            let _lock = crate::env_mutation_lock();
+            // SAFETY: serialized across env-mutating tests in this crate via
+            // `crate::env_mutation_lock`, and uses a unique variable name per test.
             unsafe {
                 std::env::set_var(&name, value);
             }
@@ -615,8 +617,10 @@ mod tests {
     }
 
     impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
-            // SAFETY: see EnvGuard::set.
+            let _lock = crate::env_mutation_lock();
+            // SAFETY: serialized via `crate::env_mutation_lock`; see `EnvGuard::set`.
             unsafe {
                 std::env::remove_var(&self.name);
             }

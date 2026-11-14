@@ -7,6 +7,7 @@
 //! [`ProcessGroupGuard`] owns that group, so a timeout, an early return or a
 //! panic kills the child and every descendant. No `libc` crate: the handful
 //! of calls are declared here, as `native_process_group` does.
+#![allow(unsafe_code)]
 
 use std::ffi::{c_int, c_short, c_uint, c_ulong, c_void};
 use std::fs::File;
@@ -45,6 +46,7 @@ const SIGTERM: c_int = 15;
 /// is writing is not cut off, before the group is killed.
 const GRACE: Duration = Duration::from_millis(1500);
 
+// SAFETY: Darwin libSystem PTY, descriptor, poll, and process-group C ABI declarations.
 unsafe extern "C" {
     fn openpty(
         master: *mut c_int,
@@ -320,6 +322,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         drop(child);
+        // SAFETY: POSIX `kill(2)` declaration matching Darwin libSystem ABI.
         unsafe extern "C" {
             fn kill(pid: c_int, signal: c_int) -> c_int;
         }

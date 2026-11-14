@@ -86,3 +86,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # through notify-rust's own D-Bus use, at the same major version pinned
 # here, so this adds zero new packages -- only a direct edge.
 zbus = "5"
+
+[lints.rust]
+unsafe_code = "forbid"

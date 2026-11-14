@@ -65,6 +65,7 @@ mod trace_artifact_store_envelope;
 mod trace_corpus_storage_contract;
 mod trace_gate_service;
 mod trace_session_identity;
+mod unsafe_boundary;
 mod versioned_pipeline_remote_restore;
 mod witness_admission_chain;
 mod witness_certificate_cross_implementation;

@@ -1,0 +1,19 @@
+# GitHub Actions static security policy for zizmor.
+# Release and staging workflows hash-pin every action; CI workflows permit
+# major-tag / toolchain-channel refs only for the vetted actions below, while
+# any other third-party action must be pinned to a full 40-char commit SHA.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        actions/*: ref-pin
+        dtolnay/rust-toolchain: ref-pin
+        EmbarkStudios/cargo-deny-action: ref-pin
+        "*": hash-pin
+  github-env:
+    # Tag-only and manual release/staging workflows resolve trusted runner-local
+    # Homebrew OpenSSL paths, GPG key IDs, and computed DMG filenames. Every PR
+    # workflow stays under full `github-env` enforcement.
+    ignore:
+      - release-apps.yml
+      - staging-macos.yml

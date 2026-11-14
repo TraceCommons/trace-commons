@@ -34,13 +34,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   routing-counterexample:
     name: opencode routing counterexample
     runs-on: macos-26
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Read the version the repository qualified
         id: pin
@@ -55,16 +60,19 @@ jobs:
       # floating install would qualify a binary the reader would refuse, and
       # report a pass about software nobody here runs.
       - name: Install the pinned OpenCode
-        run: npm install -g "opencode-ai@${{ steps.pin.outputs.version }}"
+        env:
+          OPENCODE_VERSION: ${{ steps.pin.outputs.version }}
+        run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
       - name: Confirm the installed binary is the pinned one
+        env:
+          OPENCODE_VERSION: ${{ steps.pin.outputs.version }}
         run: |
           bin=$(command -v opencode) || { echo "opencode not on PATH after install" >&2; exit 1; }
           got=$("$bin" --version)
-          want="${{ steps.pin.outputs.version }}"
+          want="${OPENCODE_VERSION}"
           echo "binary=$bin version=$got"
           [ "$got" = "$want" ] || { echo "installed $got, qualified $want" >&2; exit 1; }
-          echo "OPENCODE_BIN=$bin" >> "$GITHUB_ENV"
 
       # The script asserts its own conclusions and exits non-zero if any
       # profile disagrees, so a pass here is the counterexample still holding:
@@ -74,8 +82,9 @@ jobs:
       # that is the outcome to bring back to the catalog decision.
       - name: Run the seven-profile experiment
         run: |
+          bin=$(command -v opencode) || { echo "opencode not on PATH" >&2; exit 1; }
           python3 scripts/qualification/opencode-routing.py \
-            --opencode "$OPENCODE_BIN" | tee "${RUNNER_TEMP}/qualification.json"
+            --opencode "$bin" | tee "${RUNNER_TEMP}/qualification.json"
 
       - name: The conclusion is still REFUSED
         run: |
@@ -89,7 +98,7 @@ jobs:
                exit 1 ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: opencode-qualification

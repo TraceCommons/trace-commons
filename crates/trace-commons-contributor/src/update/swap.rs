@@ -93,6 +93,7 @@ pub fn swap_in_place(new_binary: &VerifiedArtifact, target: &Path) -> Result<(),
 /// leftover `.old-<n>` file is a wart, not a failure to report to a
 /// contributor.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn schedule_delete(path: &Path) {
     use std::os::windows::ffi::OsStrExt;
 
@@ -100,11 +101,16 @@ fn schedule_delete(path: &Path) {
         return;
     }
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return;
+    }
     wide.push(0);
     // A NULL destination with MOVEFILE_DELAY_UNTIL_REBOOT registers the path
     // in PendingFileRenameOperations for deletion at the next boot. Requires
     // administrator rights on some systems; a failure is ignored for the same
     // reason the remove_file failure above is.
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path with no interior NULs, and
+    // `MoveFileExW` accepts a null destination pointer under `MOVEFILE_DELAY_UNTIL_REBOOT`.
     unsafe {
         let _ = windows_sys::Win32::Storage::FileSystem::MoveFileExW(
             wide.as_ptr(),

@@ -271,6 +271,7 @@ fn open_same_regular_file(
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn windows_file_identity(
     file: &fs::File,
     changed_error: SkillInstallError,

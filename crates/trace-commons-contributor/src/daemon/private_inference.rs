@@ -1253,8 +1253,10 @@ mod tests {
 
     #[cfg(feature = "near-ai-staging")]
     impl EnvVar {
+        #[allow(unsafe_code)]
         fn set(name: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(name);
+            // SAFETY: caller holds `IronWireAt`, which serializes IronWire env mutations.
             unsafe { std::env::set_var(name, value) };
             Self { name, previous }
         }
@@ -1262,10 +1264,17 @@ mod tests {
 
     #[cfg(feature = "near-ai-staging")]
     impl Drop for EnvVar {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(v) => unsafe { std::env::set_var(self.name, v) },
-                None => unsafe { std::env::remove_var(self.name) },
+                Some(v) => {
+                    // SAFETY: caller's `IronWireAt` guard outlives `EnvVar` in the test scope.
+                    unsafe { std::env::set_var(self.name, v) }
+                }
+                None => {
+                    // SAFETY: caller's `IronWireAt` guard outlives `EnvVar` in the test scope.
+                    unsafe { std::env::remove_var(self.name) }
+                }
             }
         }
     }

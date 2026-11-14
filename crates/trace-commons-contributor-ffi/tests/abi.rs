@@ -3,6 +3,7 @@
 //! included alongside `cdylib`/`staticlib`). Every helper here frees every
 //! string it receives, so a leak-detector run over this file is a genuine
 //! check of the ownership rule stated in `include/trace_commons.h`.
+#![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;

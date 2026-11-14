@@ -59,3 +59,10 @@ windows-sys = { version = "0.61", features = [
 # for the week-rollup DST tests.
 chrono-tz = "0.10"
 tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

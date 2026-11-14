@@ -9416,6 +9416,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn read_privacy_env_prefers_canonical_then_legacy() {
         use super::read_privacy_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9577,9 +9578,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_returns_none_when_unset() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -9588,9 +9591,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_rejects_unknown_backend() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
         }
@@ -9601,12 +9606,14 @@ mod tests {
             Err(other) => panic!("expected UnknownBackend, got err {other:?}"),
             Ok(_) => panic!("expected UnknownBackend, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn self_hosted_backend_resolves_without_an_api_key() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9623,6 +9630,7 @@ mod tests {
             std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
         }
         let resolved = privacy_filter_adapter_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
             std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
@@ -9640,6 +9648,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn self_hosted_backend_without_a_base_url_is_refused() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9650,6 +9659,7 @@ mod tests {
             std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
         }
         let resolved = privacy_filter_adapter_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -9667,9 +9677,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "near-ai");
             std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
@@ -9687,6 +9699,7 @@ mod tests {
             Err(other) => panic!("unexpected err: {other:?}"),
             Ok(_) => panic!("expected MissingEnv or FeatureDisabled, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -10066,12 +10079,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn legacy_privacy_env_emits_deprecation_warning_once() {
         use super::{read_privacy_env, reset_legacy_privacy_env_warning_for_tests};
         let _guard = ENV_LOCK.lock().unwrap();
         reset_legacy_privacy_env_warning_for_tests();
         let canonical = "TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
         let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var(canonical);
             std::env::set_var(legacy, "legacy-only");
@@ -10092,6 +10107,7 @@ mod tests {
         // Second read; latch should remain true (idempotent).
         let _ = read_privacy_env(canonical, legacy);
         assert!(super::LEGACY_PRIVACY_ENV_WARNED.load(std::sync::atomic::Ordering::SeqCst));
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var(legacy);
         }
@@ -10099,9 +10115,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_requires_sidecar_command() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
@@ -10115,6 +10133,7 @@ mod tests {
             Err(other) => panic!("unexpected err: {other:?}"),
             Ok(_) => panic!("expected MissingEnv, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -12814,6 +12833,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn deterministic_only_constructor_ignores_inherited_backend() {
         use super::DeterministicTraceRedactor;
 
@@ -12827,6 +12847,7 @@ mod tests {
             DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
         let has_filter = redactor.attached_privacy_filter().is_some();
         let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        // SAFETY: ENV_LOCK serializes process-environment mutation across every env-touching test.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -13987,9 +14008,11 @@ mod tests {
     // deployment can demand that one exists.
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_reports_none_when_unset() {
         use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -14002,6 +14025,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_reports_the_configured_backend() {
         use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
         // Sidecar rather than near-ai: the near-ai adapter is behind an
@@ -14010,11 +14034,13 @@ mod tests {
         // backend. The server crate compiles the near-ai feature in
         // unconditionally.
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::set_var("TRACE_PRIVACY_FILTER_COMMAND", "/bin/true");
         }
         let backend = privacy_filter_backend_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
@@ -14027,6 +14053,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_surfaces_a_misconfigured_backend() {
         use super::privacy_filter_backend_from_env;
         // A backend named without its required configuration is the one
@@ -14034,12 +14061,14 @@ mod tests {
         // surfaced per-submission instead of at boot, which is how a filter
         // stays broken unnoticed.
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
             std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
         }
         let result = privacy_filter_backend_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }

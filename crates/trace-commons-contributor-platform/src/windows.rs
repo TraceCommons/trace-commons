@@ -4,6 +4,7 @@
 //! Moved here from `trace_commons_contributor::daemon::win_pipe`, which
 //! re-exports [`current_user_sid_string`] at its old path. The pipe itself
 //! stays there.
+#![allow(unsafe_code)]
 
 use std::ffi::c_void;
 
@@ -34,7 +35,7 @@ pub fn current_user_sid_string() -> Result<String> {
     // SAFETY: a null buffer with a zero length is the documented way to
     // query the required size; the call is expected to fail.
     unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
-    if needed == 0 {
+    if (needed as usize) < std::mem::size_of::<TOKEN_USER>() {
         bail!("cannot size the process token's user information");
     }
     let mut buf = vec![0u8; needed as usize];
@@ -49,13 +50,15 @@ pub fn current_user_sid_string() -> Result<String> {
             &mut needed,
         )
     };
-    if got == 0 {
+    if got == 0 || (needed as usize) < std::mem::size_of::<TOKEN_USER>() {
         bail!("cannot read the process token's user information");
     }
 
-    // SAFETY: on success the buffer holds a TOKEN_USER, whose first field is
-    // the SID_AND_ATTRIBUTES we need.
-    let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    // SAFETY: `GetTokenInformation` succeeded and `buf` holds at least
+    // `size_of::<TOKEN_USER>()` initialized bytes. `read_unaligned` avoids
+    // alignment UB on the byte-aligned `Vec<u8>`; `token_user.User.Sid` points
+    // into `buf`, which stays live through `ConvertSidToStringSidW` below.
+    let token_user = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>()) };
     let mut raw: *mut u16 = std::ptr::null_mut();
     // SAFETY: `token_user.User.Sid` points into `buf`, which outlives this
     // call, and `raw` is a valid out-pointer.

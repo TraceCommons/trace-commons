@@ -1,5 +1,7 @@
 //! Verifies that the daemon's Windows named pipe actually excludes other
 //! users. This is a test tool, not a contributor-facing command.
+
+#![allow(unsafe_code)]
 //!
 //! # Why this binary exists
 //!

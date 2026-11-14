@@ -532,6 +532,7 @@ fn file_revision(path: &std::path::Path) -> String {
 /// so the call is made directly, as `trace_commons_contributor_insights`
 /// does for its file identity.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn windows_file_identity(path: &std::path::Path) -> Option<String> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
@@ -539,9 +540,9 @@ fn windows_file_identity(path: &std::path::Path) -> Option<String> {
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
     let file = std::fs::OpenOptions::new().access_mode(0).open(path).ok()?;
-    // SAFETY: the structure is plain integers, so a zeroed value is valid,
-    // and the handle stays live for the duration of the call.
+    // SAFETY: the structure is plain integers, so a zeroed value is valid.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` owns a live file handle and `information` is a valid out-pointer.
     let read = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) };
     if read == 0 {
         return None;

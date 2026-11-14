@@ -14,3 +14,6 @@ description = "Commit and build-time identity stamped into Trace Commons binarie
 build = "build.rs"
 
 [dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
