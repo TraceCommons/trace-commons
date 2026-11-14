@@ -148,9 +148,12 @@ module witness_worker_tests {
   run identicalAutomaticReapprovalCanAcceptMatchingOldCompletionTest = init.then(review(0)).then(cancel(0))
     .then(approve(0, false)).then(success(0)).expect(safety and s.entries.get(0).pinned)
 
-  // Known defect retained as a counterexample to an unconditional deadline claim.
-  run freshWatchdogDeadlineIsNotEffectiveWithoutRetryLabelTest = init.then(review(0)).then(watchdog(0))
-    .expect(safety and s.entries.get(0).due > s.now and ready(s.entries.get(0), s.now))
+  // A trace that hung on its first try waits out the watchdog's deadline,
+  // though the watchdog records no retry label.
+  run freshWatchdogDeadlineIsEffectiveWithoutRetryLabelTest = init.then(review(0)).then(watchdog(0))
+    .then(require(not(ready(s.entries.get(0), s.now)))).then(tick(599))
+    .then(require(not(ready(s.entries.get(0), s.now)))).then(tick(1))
+    .expect(safety and ready(s.entries.get(0), s.now))
 
   run watchdogDeadlineIsEffectiveOnAnAlreadyRetryingTraceTest = init.then(failTrace(0, 30)).then(tick(30))
     .then(review(0)).then(watchdog(0)).expect(safety and not(ready(s.entries.get(0), s.now)))

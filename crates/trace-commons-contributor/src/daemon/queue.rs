@@ -805,9 +805,18 @@ impl QueueEntry {
     /// attempt held the submission's lease (#1358) -- stays approved, but cannot
     /// be claimed before its persisted deadline. A missing deadline fails
     /// closed.
+    ///
+    /// Any deadline paces the entry, retry label or not: the hung-job
+    /// watchdog (`UPLOAD_HUNG_RETRY`) defers an entry without recording an
+    /// attempt or a label, and a trace that hung on its first try must not
+    /// be claimed again on the next pass. Every approval clears the deadline,
+    /// so a stale one cannot outlive a new decision.
     pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
         self.state == QueueState::Approved
-            && (!self.waiting_on_a_retry() || self.retry_after.is_some_and(|due| due <= now))
+            && match self.retry_after {
+                Some(due) => due <= now,
+                None => !self.waiting_on_a_retry(),
+            }
     }
 
     /// Whether this entry is approved and paced behind a deadline rather
@@ -7167,5 +7176,27 @@ mod tests {
             sort_suggested(&mut refs, &SKIPPED);
             assert_eq!(ids(&refs), once);
         }
+    }
+
+    /// A deadline paces an approved entry whatever its label: the hung-job
+    /// watchdog writes one with no retry label. A retry label with no
+    /// deadline still fails closed.
+    #[test]
+    fn a_future_deadline_paces_an_entry_with_no_retry_label() {
+        let now = at("2026-08-08T12:00:00Z");
+        let mut e = QueueEntry {
+            state: QueueState::Approved,
+            ..Default::default()
+        };
+        assert!(e.ready_for_upload(now));
+        e.retry_after = Some(now + chrono::Duration::minutes(10));
+        assert!(!e.ready_for_upload(now));
+        assert!(e.ready_for_upload(now + chrono::Duration::minutes(10)));
+        e.retry_after = None;
+        e.reason_label = Some("witness_timeout".into());
+        assert!(
+            !e.ready_for_upload(now),
+            "a retry with no deadline fails closed"
+        );
     }
 }
