@@ -51,6 +51,86 @@ selection, not a runtime override. Production channel builds reject testing.
 Bundles compare the CLI, FFI and plist feature identities before signing; the
 native application checks its loaded FFI profile against the plist at startup.
 
+## Local overrides
+
+Every build profile, including production, supports per-machine product flag
+choices through the CLI, a local config file, or environment variables. There
+are no Settings controls. Precedence is: **process environment variable**, then
+**local config**, then the **valid signed environment manifest**, then the
+**compiled default**, always subject to the build's required capabilities.
+Privacy-sensitive flags cannot be overridden. These controls grant no consent,
+folder access, enrollment, or upload permission; Local trace analysis remains a
+separate choice for skill usage evidence.
+
+### CLI
+
+```bash
+near-ai feature-flags set insights_skills on
+near-ai feature-flags set insights_skills off
+near-ai feature-flags set insights_skills default
+near-ai --json feature-flags
+```
+
+Use `near-ai-staging` for the separately installed staging app. Changes require
+the matching app/daemon to be running. The CLI uses authenticated local IPC and
+checks the environment and immutable profile identity before mutation; it never
+writes an offline daemon's state. `default` clears the persisted choice and uses
+the current lower-priority environment policy, unless a process environment
+variable still overrides it. CLI output reports both local and process choices.
+Live flags change immediately; `next_start` flags show the pending value until
+the daemon restarts.
+
+### Config file
+
+The CLI stores choices in `feature-flags-local-<profile_digest>.json` in the
+app's state directory. `near-ai feature-flags build-profile` reports the digest
+and environment. Quit the matching app/daemon before editing this file manually,
+then restart it to load the edit. A minimal document looks like this:
+
+```json
+{
+  "schema_version": 1,
+  "environment": "staging",
+  "profile_digest": "<digest from this build>",
+  "flags": { "insights_skills": true }
+}
+```
+
+Use `false` to force Off; remove the entry to follow the environment. Keep file
+permissions private (`0600`). The state directory for native macOS staging is
+`~/Library/Application Support/trace-commons-staging`. Choices survive restarts
+with the same profile and reset when a release changes the profile. Invalid
+local data is ignored as a whole: a file with any invalid entry enables
+nothing. The file is left in place, and `near-ai feature-flags set` refuses
+with `feature-local-overrides-invalid` until it is fixed or removed and the
+app restarts, so a typo never silently discards the other choices in it. A failed CLI persistence write leaves the running choice
+unchanged. Direct file edits are startup-only, not watched live.
+
+### Environment variable
+
+Set `TRACE_COMMONS_FEATURE_FLAGS` to a JSON object when starting the daemon:
+
+```bash
+TRACE_COMMONS_FEATURE_FLAGS='{"insights_skills":true}' near-ai-staging daemon run
+```
+
+Stop the existing daemon first. For a native app, the variable must be in the
+app process's launch environment; setting it only on a later CLI command does
+not change an already-running app. `false` forces Off; omit a key or unset the
+variable before restart to use the local config or environment policy. Values
+are sampled at startup and never persisted. An empty object is valid. Unknown
+IDs, duplicate keys, non-boolean values, unsupported capabilities, or
+privacy-sensitive entries reject the entire variable; diagnostics report a
+stable error label and use the remaining configuration layers.
+
+Remote refresh, remote disable, and manifest expiry do not erase explicit
+local/process choices. Signed cache and rollback watermarks remain independent;
+no override publishes to other machines or changes the shared feed. Diagnostics
+expose `local_overrides`, `local_override_allowed`,
+`environment_variable_overrides`, and `environment_variable_error` alongside
+the effective `flags`. Existing `source`, `revision`, `expires_at`, and `fresh`
+fields continue to describe the signed environment layer.
+
 ## Add a feature
 
 1. Register a stable ID with an owner, description, `class`, false default,

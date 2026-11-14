@@ -48,7 +48,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect environment-wide feature flags.
+    /// Inspect feature flags and change per-machine overrides.
     FeatureFlags(feature_flags_cli::FlagArgs),
     /// Discover, inspect, preview, and apply running-app settings as JSON
     Config(config_cli::ConfigArgs),
