@@ -5438,6 +5438,10 @@ mod tests {
         // answered either way.
         assert!(h.uploads.load(Ordering::SeqCst) <= 1);
         assert!(entry.retry_after.unwrap() >= now + UPLOAD_HUNG_RETRY);
+        // The deadline paces the entry even though a hang records no retry
+        // label: a fresh trace that hung must not be claimed again at once.
+        assert!(!entry.ready_for_upload(now + chrono::Duration::seconds(1)));
+        assert!(entry.ready_for_upload(entry.retry_after.unwrap()));
         assert_eq!(
             entry.attempts, 0,
             "a hang is not counted against the session"

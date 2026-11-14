@@ -93,19 +93,20 @@ pause ladder, and pin/approval identity.
   releases a probe slot like a cancellation and records nothing in the
   failure run). Both close the second slot.
 
-Two limitations are modeled deliberately rather than silently repaired:
+One limitation is modeled deliberately rather than silently repaired:
 
 1. **Approval equality is not a generation token.** Cancel then automatic
    reapproval with identical terms can recreate the same `JobKey`; the old
    matching result may pin. Manual reapproval changes origin/timestamp and
    rejects an old automatic result. The tests assert both behaviors.
-2. **The existing outer watchdog can write an ineffective deadline.** On a
-   fresh trace it sets `retry_after` without a retry reason, so readiness still
-   returns true. On a trace already marked for retry the new deadline applies.
-   The model records both. This is an executable counterexample to claiming
-   every timestamp always paces a trace, not a repair or endorsement of the bug.
-   The 15-minute watchdog also cannot preempt synchronous setup/load work until
-   it yields; no absolute wall-clock job bound is claimed.
+
+The outer watchdog's deadline used to be ineffective on a fresh trace: it sets
+`retry_after` without a retry reason, and readiness honored a deadline only
+under a retry reason. Readiness now honors any deadline, and a retry reason
+with no deadline still fails closed (`daemon/queue.rs`, `ready_for_upload`);
+the model's `ready` and `eligible` match, and both watchdog cases are
+regression-tested. The 15-minute watchdog still cannot preempt synchronous
+setup/load work until it yields; no absolute wall-clock job bound is claimed.
 
 Late non-probe circuit completion guards are defensive in the source. With
 normal worker transitions, the first transient failure closes the second slot;

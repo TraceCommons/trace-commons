@@ -23,7 +23,9 @@ module witness_worker {
     retrying: false, due: 0, pinned: false, pinKey: emptyKey}
   pure def waiting(t: State): Set[int] = Ids.filter(i => t.queued.get(i).present)
   pure def running(t: State): Set[int] = Ids.filter(i => t.running.get(i).present)
-  pure def ready(e: Entry, now: int): bool = e.state == "approved" and (not(e.retrying) or e.due <= now)
+  // Any deadline paces (`due` 0 is unset); a retry with no deadline fails closed.
+  pure def ready(e: Entry, now: int): bool = e.state == "approved" and
+    (if (e.due > 0) e.due <= now else not(e.retrying))
   pure def current(t: State, i: int): bool = t.entries.get(i).state == "approved" and
     not(t.entries.get(i).pinned) and t.entries.get(i).key == t.running.get(i).key
   pure def snapshot(e: Entry, order: int): Job = {present: true, key: e.key, attempts: e.attempts,
@@ -47,7 +49,7 @@ module witness_worker {
   }
   pure def eligible(t: State): Set[int] = waiting(t).filter(i => {
     val j = t.queued.get(i)
-    not(j.retrying) or j.due <= t.now
+    if (j.due > 0) j.due <= t.now else not(j.retrying)
   })
   pure def laneReady(t: State): bool = running(t).size() <
     (if (t.answering and t.circuit.reopen < 0) 2 else 1) and
