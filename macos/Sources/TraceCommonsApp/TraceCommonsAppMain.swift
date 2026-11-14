@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -53,7 +54,15 @@ enum MonitorLaunchSuppressed: MonitorLaunchPolicy {
 
 struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
     private let insightsStoreSelection: InsightsStoreSelection
-    @StateObject private var model = AppModel()
+    /// Held, not observed. The views that read it observe it themselves
+    /// (`environmentObject`, `Launcher`). Observed here, every change to any
+    /// of its published values re-ran this body, so SwiftUI rebuilt every
+    /// scene and the whole main menu on each daemon status update: the main
+    /// thread stayed busy rebuilding menus, about one core while idle.
+    @State private var model: AppModel
+    /// The one thing the app menu shows from the model: the Private AI
+    /// switch, republished only when its label or state changes.
+    @State private var privateInferenceMenu: PrivateInferenceMenuItem
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
     @State private var missionDrafts = MissionDraftsModel()
@@ -67,6 +76,9 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
 
     init() {
         insightsStoreSelection = .parse(arguments: CommandLine.arguments)
+        let model = AppModel()
+        _model = State(initialValue: model)
+        _privateInferenceMenu = State(initialValue: PrivateInferenceMenuItem(model: model))
         // Earlier builds wrote the preview sheet's recent-search list to
         // UserDefaults. That list is the contributor's own record of what
         // they were checking for -- client names, employers, unreleased
@@ -99,7 +111,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // `OpenMonitor` opens it, or first run while onboarding is required.
         MonitorLaunch.launch(MonitorScene(
             model: model, compute: compute, navigation: navigation,
-            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts))
+            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
+            privateInferenceMenu: privateInferenceMenu))
 
         #if DEBUG
         // The menu-bar item and popover in a window (R13 of #1173), for
@@ -202,6 +215,8 @@ struct MonitorScene: Scene {
     let navigation: MainWindowNavigation
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// The app menu's Private AI switch (`MonitorCommands`).
+    let privateInferenceMenu: PrivateInferenceMenuItem
 
     var body: some Scene {
         Window("Monitor", id: WindowID.monitor) {
@@ -242,7 +257,7 @@ struct MonitorScene: Scene {
         // worth reaching without the window. Menu items, so they are in-app
         // only; see `MonitorCommands`.
         .commands {
-            MonitorCommands(model: model, navigation: navigation)
+            MonitorCommands(privateInference: privateInferenceMenu, navigation: navigation)
         }
     }
 }
@@ -261,7 +276,13 @@ struct MonitorScene: Scene {
 /// Traces open first run, and Inference opens the Monitor on its own tab,
 /// where Private AI sign-in is (R-38).
 struct MonitorCommands: Commands {
-    @ObservedObject var model: AppModel
+    /// The switch's item, not the whole `AppModel`: SwiftUI rebuilds the
+    /// entire main menu whenever a `Commands` value's observed object
+    /// changes, and the model changes on every daemon status update.
+    @ObservedObject var privateInference: PrivateInferenceMenuItem
+    /// The command-line tool's item, observed here so a change of status
+    /// rebuilds the menu item; it publishes only on a change.
+    @ObservedObject var cliTool: CliToolController = .shared
     let navigation: MainWindowNavigation
     /// The person's tab order, so Cmd-N follows the strip as dragged.
     @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
@@ -312,7 +333,7 @@ struct MonitorCommands: Commands {
         // Install, update or remove the command-line tool (owner,
         // 2026-10-29), like VS Code's "Install 'code' command in PATH".
         CommandGroup(after: .appSettings) {
-            CliToolMenuItem()
+            CliToolMenuItem(controller: cliTool)
         }
     }
 
@@ -329,20 +350,68 @@ struct MonitorCommands: Commands {
     /// against a stale switch position is an enable.
     @ViewBuilder
     private var toggle: some View {
-        if let copy = model.privateInferenceCopy {
-            let on = model.daemonSettings?.privateInferenceOn ?? false
-            Button(PrivateInferenceTray.label(on: on, copy: copy)) {
+        if let item = privateInference.state {
+            Button(item.label) {
                 PrivateInferenceTray.perform(
-                    on: on,
-                    turnOff: { model.applyPrivateInference(false) },
+                    on: item.on,
+                    turnOff: { privateInference.turnOff() },
                     open: { OpenMonitor.request(.inference) })
             }
             .keyboardShortcut(KeyEquivalent(Self.toggleKey), modifiers: Self.toggleModifiers)
             // Only the writing direction can be unavailable. Navigation stays
             // reachable whatever the daemon is doing.
-            .disabled(
-                on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+            .disabled(item.disabled)
         }
+    }
+}
+
+/// The app menu's Private AI switch, derived from `AppModel` and republished
+/// only when what the item shows changes.
+///
+/// `MonitorCommands` observes this instead of the model. The model publishes
+/// on every daemon status update, and each publish to an object a `Commands`
+/// value observes makes SwiftUI rebuild the whole main menu.
+@MainActor
+final class PrivateInferenceMenuItem: ObservableObject {
+    /// What the item shows, or nil if the core's Private AI words did not
+    /// load (they are decoded once, in `AppModel`'s initializer).
+    struct Item: Equatable {
+        let label: String
+        let on: Bool
+        let disabled: Bool
+    }
+
+    @Published private(set) var state: Item?
+    private let model: AppModel
+    private var watch: AnyCancellable?
+
+    init(model: AppModel) {
+        self.model = model
+        let copy = model.privateInferenceCopy
+        state = Self.item(copy: copy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+        // Only these two values change what the item shows. A @Published
+        // value sends its new value, so the item follows in the same turn.
+        watch = model.$daemonSettings
+            .combineLatest(model.$privateInferenceBusy)
+            .map { Self.item(copy: copy, settings: $0, busy: $1) }
+            .removeDuplicates()
+            .sink { [weak self] item in self?.state = item }
+    }
+
+    /// The off direction, the one write the item may make
+    /// (`PrivateInferenceTray.perform`).
+    func turnOff() {
+        model.applyPrivateInference(false)
+    }
+
+    static func state(of model: AppModel) -> Item? {
+        item(copy: model.privateInferenceCopy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+    }
+
+    private static func item(copy: PrivateInferenceCopy?, settings: DaemonSettingsView?, busy: Bool) -> Item? {
+        guard let copy else { return nil }
+        let on = settings?.privateInferenceOn ?? false
+        return Item(label: PrivateInferenceTray.label(on: on, copy: copy), on: on, disabled: on && busy)
     }
 }
 

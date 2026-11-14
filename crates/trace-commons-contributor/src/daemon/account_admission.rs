@@ -72,7 +72,7 @@ const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_millis(300);
 /// The longest a spent allowance is held without asking again, whatever
 /// `retry_after_seconds` says. Also what keeps a broken or hostile value
 /// from overflowing the clock.
-const MAX_HOLD: TimeDelta = TimeDelta::days(1);
+pub(super) const MAX_HOLD: TimeDelta = TimeDelta::days(1);
 
 /// The prefix of a native account session: `tcn1_<b64url tenant>.<secret>`.
 const NATIVE_TOKEN_PREFIX: &str = "tcn1_";
@@ -207,6 +207,22 @@ impl AccountAdmissionState {
         }
     }
 
+    /// Until when the last status read for `cfg` said its allowance is
+    /// spent, if it said so with a reset time. `None` for any other answer,
+    /// one read for another ingest or account, and no answer. The upload
+    /// pass sends nothing before then (`daemon::account_allowance_held`).
+    pub fn spent_until(&self, cfg: &ContributorConfig) -> Option<DateTime<Utc>> {
+        let key = AnswerKey::of(cfg);
+        match &*self.answer.lock().expect("account admission lock") {
+            Some(Answer {
+                key: held,
+                admission: AccountAdmission::AllowanceSpent,
+                hold_until,
+            }) if *held == key => *hold_until,
+            _ => None,
+        }
+    }
+
     /// An admission refusal from ingest: whatever it said before, it does not
     /// admit this account by account now.
     pub fn refused(&self) {
@@ -255,6 +271,26 @@ impl AccountAdmissionState {
                 retry_after_seconds: None,
             }),
             Utc::now(),
+        );
+    }
+
+    /// Record, for `cfg`, a status read at `now` saying the allowance is
+    /// spent until `retry_after_seconds` from then. Tests only.
+    #[cfg(test)]
+    pub(crate) fn record_spent_for_test(
+        &self,
+        cfg: &ContributorConfig,
+        retry_after_seconds: i64,
+        now: DateTime<Utc>,
+    ) {
+        self.record(
+            AnswerKey::of(cfg),
+            Some(StatusBody {
+                authority: "bounded".to_string(),
+                ready: false,
+                retry_after_seconds: Some(retry_after_seconds),
+            }),
+            now,
         );
     }
 
@@ -382,14 +418,34 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         state.forget();
         return;
     };
+    // The answer also decides whether queue rows read "cannot be sent"
+    // (`contribution_eligibility::applies`), so a change in what that rule
+    // says is a change to every row: shells are told to read the queue again.
+    let rows_before = shared.eligibility_applies_for(Some(&cfg));
+    read_answer(shared, &cfg, now, dry_run).await;
+    if shared.eligibility_applies_for(Some(&cfg)) != rows_before {
+        shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+}
+
+/// One pass's read of the status, or the decision not to ask.
+async fn read_answer(
+    shared: &DaemonShared,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    dry_run: bool,
+) {
+    let state = &shared.account_admission;
+    // Asked when something is armed, for R3, and for an evidence-admitted
+    // contributor with nothing armed, whose rows the answer decides.
     if !trace_commons_protocol::admission::is_anchored_tenant(&cfg.tenant_id)
         || dry_run
-        || !anything_armed(shared)
+        || !(anything_armed(shared) || super::contribution_eligibility::evidence_flag(Some(cfg)))
     {
         state.forget();
         return;
     }
-    let key = AnswerKey::of(&cfg);
+    let key = AnswerKey::of(cfg);
     if !state.should_ask(&key, now) {
         return;
     }
@@ -407,7 +463,7 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         state.record(key, None, now);
         return;
     }
-    let reply = fetch_status(&cfg, &session.session.access_token).await;
+    let reply = fetch_status(cfg, &session.session.access_token).await;
     if let Some(rotated) = reply.rotated_token {
         // Stored against the snapshot the session was read under, so a
         // sign-out in the meantime is not overwritten. Either way the held
@@ -1041,6 +1097,30 @@ mod tests {
             1,
             "asked once something is armed"
         );
+    }
+
+    /// An evidence-admitted contributor is asked with nothing armed: the
+    /// answer also decides whether their queue rows read "cannot be sent"
+    /// (`contribution_eligibility::applies`), which every contributor sees.
+    #[tokio::test]
+    async fn an_evidence_contributor_is_asked_with_nothing_armed() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let base = serve(status_router(StatusCode::OK, yes(), None, hits.clone())).await;
+        let mut d = Daemon::new(&base, &token("original"));
+        d.arm(false);
+        d.cfg.witness = Some(
+            serde_json::from_value(serde_json::json!({
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                "admission_evidence": true,
+            }))
+            .unwrap(),
+        );
+        d.shared.store.save_config(&d.cfg).unwrap();
+        d.refresh().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(d.current(), AccountAdmission::Advertised);
     }
 
     /// A dry run sends nothing, so it asks nothing either.

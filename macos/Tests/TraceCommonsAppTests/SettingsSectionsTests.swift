@@ -16,7 +16,7 @@ final class SettingsSectionsTests: XCTestCase {
             .account, .payouts, .referrals,
             .watching, .watchedFolders, .tools, .insights,
             .projects, .consent, .publicProfile, .changes,
-            .privateAI,
+            .privateAI, .savedAccounts,
             .general, .startup, .notifications, .updates,
             .witness, .compute,
         ])
@@ -27,19 +27,19 @@ final class SettingsSectionsTests: XCTestCase {
         }, groups, "a group is split")
     }
 
-    /// The list names sixteen rows in the core's words, with a hairline
+    /// The list names seventeen rows in the core's words, with a hairline
     /// before the first row of every group but the first (D17: no group
     /// headings). Watched folders sits under Watching (D12) and Notifications
     /// under "Startup & notifications"; Updates has its own row (D19).
     func test_theListIsGroupedInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
             .account, .payouts, .referrals, .watching, .tools, .insights, .projects, .consent, .publicProfile,
-            .changes, .privateAI, .general, .startup, .updates, .witness, .compute,
+            .changes, .privateAI, .savedAccounts, .general, .startup, .updates, .witness, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
             "Account", "Payouts", "Referrals", "Watching", "Tools", "Insights", "Projects", "Data uses",
-            "Public profile", "Change log", "Private AI", "General", "Startup & notifications", "Updates",
+            "Public profile", "Change log", "Private AI", "Saved accounts", "General", "Startup & notifications", "Updates",
             "Redaction witness", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
@@ -99,6 +99,22 @@ final class SettingsSectionsTests: XCTestCase {
             }
         }
         XCTAssertEqual(drawn.count, Set(drawn).count, "a view is drawn by two sections: \(drawn)")
+    }
+
+    /// Saved accounts (owner, 2026-11-11) draws the saved-account card that
+    /// left the Private AI tab in #1490, with every dialog it opened: Add,
+    /// Launch, Rename and Remove. Without this section nothing in the app
+    /// opens any of them.
+    func test_savedAccountsOpensEveryAccountDialog() throws {
+        let section = try SettingsParityTests.text("Views/Settings/SavedAccountsSection.swift")
+        for sheet in ["ManagedAccountSheet(", "ManagedLaunchSheet(", "ManagedRenameSheet(", "ManagedRemoveSheet("] {
+            XCTAssertTrue(section.contains(sheet), "Saved accounts does not open \(sheet)")
+        }
+        for method in ["managed_select", "managed_account_reconnect", "managed_account_verify"] {
+            XCTAssertTrue(section.contains("\"\(method)\""), "Saved accounts' menu lacks \(method)")
+        }
+        XCTAssertEqual(SettingsSection.savedAccounts.group, .privateAI)
+        XCTAssertFalse(SettingsSection.savedAccounts.availableBeforeOnboarding)
     }
 
     /// Account (was Connection, D1) carries the account contribution card in
@@ -180,7 +196,7 @@ final class SettingsSectionsTests: XCTestCase {
             // daemon's choice), as the payout card's Sign in again runs it.
             "if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {",
             "Button(signIn) { Task { await model.signInToAccount() } }",
-            ".disabled(model.accountSigningIn)",
+            ".disabled(model.accountSigningIn && !model.canRetryAccountSignIn)",
             // One Sign in in the section: the NEAR AI login card and the
             // devices card, whose own Sign in again would be a second, wait
             // for the account to be signed in.
@@ -270,6 +286,9 @@ final class SettingsSectionsTests: XCTestCase {
             // The section's own panels, headed by the standard-settings rule
             // (owner, 2026-10-10); the modal's rule names it by the list's word.
             .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
+            // The card's title is the managed table's "accounts_title", the
+            // same key the list row reads (`SettingsWords.savedAccounts`).
+            .savedAccounts: ("SavedAccountsSection", "systemImage: Self.symbol, title: model.managedText(\"accounts_title\")"),
             .referrals: ("ReferralsSection", "GlassEyebrowCard(surface.copy.title)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
             .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects, accessory: {"),

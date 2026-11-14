@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
@@ -8,14 +9,9 @@ namespace TraceCommons.Interop;
 /// title/body pair the visual design draws for the Windows frame
 /// (2026-08-17 section 5.1 item 3).
 ///
-/// Two rules bind every sentence here, and both are the design's:
-/// <list type="bullet">
-/// <item><b>Never name the mechanism.</b> "Privacy filter", "claim",
-/// "ingest", "canary" and "PII" are internal words. The label carries them;
-/// the sentence must not.</item>
-/// <item><b>Always state the data consequence.</b> "Nothing has been lost",
-/// "your queue is safe", "rather than going out unscanned".</item>
-/// </list>
+/// One rule binds every sentence here, the design's: <b>never name the
+/// mechanism.</b> "Privacy filter", "claim", "ingest", "canary" and "PII" are
+/// internal words. The label carries them; the sentence must not.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -85,12 +81,19 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 return new HealthCopy(title, detail, null);
         }
 
+        // An upload outage is retried on its own (#1358, #2095). Its words are
+        // the core's (`health_copy::health_copy_for_label`), the same ones
+        // macOS and Tauri draw, rather than a fourth transcription here.
+        if (label is "claim-mint-failed" or "ingest-unreachable" && FromCore(label) is HealthCopy outage)
+        {
+            return outage;
+        }
+
         return label switch
         {
             "not-logged-in" => new HealthCopy(
                 "Not connected.",
-                "Traces are being queued, but nothing can be sent until you reconnect. "
-                + "Nothing has been lost.",
+                "",
                 "Reconnect"),
             "near-ai-notice-not-acknowledged" => new HealthCopy(
                 "One thing to confirm.",
@@ -98,18 +101,12 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "Confirm you're OK with that and contributions resume.",
                 "Review and confirm"),
             "privacy-filter-canary-failed" => new HealthCopy(
-                "The privacy scan failed its own self-test,",
-                "so nothing is being sent through it. This is deliberate -- a scan we can't "
-                + "verify doesn't get used.",
+                "Privacy scan failed its self-test.",
+                "",
                 null),
             "pii-filter-unavailable" => new HealthCopy(
-                "The extra privacy scan isn't reachable.",
-                "Your traces are waiting rather than going out unscanned. Retrying "
-                + "automatically.",
-                null),
-            "claim-mint-failed" or "ingest-unreachable" => new HealthCopy(
-                "Can't upload right now.",
-                "Your queue is safe; it'll retry on its own.",
+                "Waiting on the privacy scan.",
+                "",
                 null),
             "queue-full" => new HealthCopy(
                 "Near.ai has stopped queuing new traces",
@@ -122,11 +119,44 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
             // label is an internal name, and showing it would break the
             // never-name-the-mechanism rule by the most direct route there is.
             _ => new HealthCopy(
-                "Contributions are on hold.",
-                "Something is stopping traces from being sent. Nothing has been lost, and "
-                + "nothing has gone out.",
+                "Contributions on hold.",
+                "",
                 null),
         };
+    }
+
+    /// <summary>
+    /// The core's banner for a label the daemon reported
+    /// (<c>tc_health_copy_json</c>), or null when the library could not be
+    /// read; the caller then falls through to the on-hold banner.
+    /// </summary>
+    private static HealthCopy? FromCore(string label)
+    {
+        try
+        {
+            string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_health_copy_json(1, label, 0));
+            if (json is null)
+            {
+                return null;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
+            if (root.TryGetProperty("title", out JsonElement title) && title.ValueKind == JsonValueKind.String &&
+                root.TryGetProperty("detail", out JsonElement detail) && detail.ValueKind == JsonValueKind.String)
+            {
+                string? action = root.TryGetProperty("action", out JsonElement a) && a.ValueKind == JsonValueKind.String
+                    ? a.GetString()
+                    : null;
+                return new HealthCopy(title.GetString()!, detail.GetString()!, action);
+            }
+
+            return null;
+        }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

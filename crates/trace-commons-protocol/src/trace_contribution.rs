@@ -2637,6 +2637,17 @@ pub enum TraceContributionError {
     /// by inspecting `reason`.
     #[error("trace contribution redaction failed (transient upstream): {reason}")]
     TransientRedactionFailed { reason: String },
+    /// The privacy classifier's answer for some of the text could not be
+    /// verified or corrected: a span whose text does not match its offsets
+    /// and occurs zero or several times in the window, a span with no text,
+    /// or a span out of range. NEAR AI answers such text the same way every
+    /// time, so it is about the content, not the classifier being down.
+    /// Permanent: nothing was treated as classified, and retrying costs the
+    /// caller its attempt budget for nothing.
+    #[error(
+        "trace contribution redaction failed (text the classifier could not classify): {reason}"
+    )]
+    UnclassifiableText { reason: String },
 }
 
 impl TraceContributionError {
@@ -2753,6 +2764,22 @@ pub trait PrivacyFilterAdapter: Send + Sync {
             answers.push(self.redact_text_before(text, deadline).await);
         }
         answers
+    }
+
+    /// How many classifier requests asking about `texts` would send now,
+    /// before any retry or split, given what this adapter already holds.
+    /// Never more than it would send: a caller refuses work on this count,
+    /// and an over-count would refuse work that fits. `None` (the default)
+    /// when the backend cannot say.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        let _ = texts;
+        None
+    }
+
+    /// The spacing this adapter keeps between its requests, when it paces
+    /// them. `None` (the default) when it does not.
+    fn request_interval(&self) -> Option<std::time::Duration> {
+        None
     }
 }
 

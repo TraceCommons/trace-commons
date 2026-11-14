@@ -191,8 +191,9 @@ pub enum WitnessTrustError {
         control: &'static str,
         reported: Option<String>,
     },
-    /// The contribution is larger than this client will send. Refused
-    /// locally, before anything is offered.
+    /// The contribution is larger than this client will send, refused
+    /// locally before anything is offered, or larger than the witness
+    /// accepts (`413 witness_request_too_large`).
     #[error("the contribution is larger than the witness path will carry")]
     WitnessPayloadTooLarge,
     /// The certificate's digest does not cover the bytes the witness
@@ -203,12 +204,16 @@ pub enum WitnessTrustError {
     /// The certificate's signature does not recover to the pinned address.
     #[error("the witness certificate did not verify")]
     WitnessCertificateUnverified,
-    /// A witness response could not be read as a certificate and an envelope.
+    /// A witness response could not be read as a certificate and an envelope,
+    /// or the witness refused with a client error this build does not
+    /// recognise. A witness that cannot serve is [`Self::WitnessUnreachable`].
     #[error("the witness response was malformed")]
     WitnessResponseMalformed,
     /// The witness declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
-    /// what that deployment accepts.
+    /// what that deployment accepts. Also the witness's own attested-inference
+    /// refusals (`403 witness_inference_*`): a receipt missing, unverified or
+    /// too large for its policy is the same decision.
     ///
     /// A decision, not a fault. It is the refusal a rollout produces most
     /// often -- a signer not yet trusted, a model not yet accepted -- and
@@ -248,10 +253,32 @@ pub enum WitnessTrustError {
     /// is any witness call that was waited on and never answered.
     #[error("the witness did not answer in time")]
     WitnessTimeout,
-    /// The witness could not be connected to at all: DNS, refused or reset
-    /// connection, or a TLS handshake that failed. Nothing was sent.
+    /// The witness could not be connected to at all (DNS, refused or reset
+    /// connection, or a TLS handshake that failed), or it, or the gateway in
+    /// front of it, answered that it cannot serve right now: any `5xx`
+    /// other than saturation and timeout, such as `503
+    /// witness_signing_unavailable`, or a gateway `404` with no instance
+    /// behind it. Nothing was certified, and the same request may succeed
+    /// later.
     #[error("the witness could not be reached")]
     WitnessUnreachable,
+    /// The witness answered `422 witness_trace_too_large_for_review`: the
+    /// session needs more classifier requests than one review can make, so
+    /// it was refused before any was made. Final for this session; the same
+    /// session needs the same requests next time. The two counts are the
+    /// witness's, kept so a person can be told how far over it is.
+    #[error("the session is too large for the witness to review")]
+    WitnessTraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
+    /// The witness answered `422 witness_text_unclassifiable`: its privacy
+    /// classifier could not classify some of this session's text, so
+    /// nothing was certified. About this session's content, not the witness
+    /// being down: the session is refused and the pass goes on to the next.
+    /// A newer build offers it again, since a witness improvement may fix it.
+    #[error("the witness's privacy classifier could not classify this session")]
+    WitnessTextUnclassifiable,
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -295,6 +322,12 @@ impl WitnessTrustError {
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
             Self::WitnessTimeout => "witness_timeout",
             Self::WitnessUnreachable => "witness_unreachable",
+            Self::WitnessTextUnclassifiable => {
+                trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE
+            }
+            Self::WitnessTraceTooLargeForReview { .. } => {
+                trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+            }
             // The wire label itself, like the admission refusal below.
             Self::WitnessSaturated { .. } => {
                 trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
@@ -314,7 +347,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 17] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 19] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -332,6 +365,8 @@ impl WitnessTrustError {
         trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
         "witness_timeout",
         "witness_unreachable",
+        trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+        trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
     ];
 
     /// Recognise a refusal label that has been through a `String`.

@@ -246,6 +246,25 @@ final class InsightsSkillsTests: XCTestCase {
         XCTAssertFalse(model.busy)
     }
 
+    private actor UnreadableReplies {
+        private var reads = 0
+        func next() -> DaemonData.SkillsSnapshot {
+            reads += 1
+            return reads == 1 ? .init(enabled: true, followedPublishers: ["old"])
+                : .init(enabled: true, readable: false)
+        }
+    }
+
+    func testUnreadableResponseClearsPreviouslyVisibleSkills() async {
+        let replies = UnreadableReplies()
+        let model = InsightsSkillsModel(reader: { _ in await replies.next() })
+        await model.load(refresh: false)
+        XCTAssertEqual(model.shown?.followedPublishers, ["old"])
+        await model.load(refresh: false)
+        XCTAssertNil(model.shown, "An authoritative unreadable response may reflect revoked scope")
+        XCTAssertEqual(model.failureKey, "skills_unavailable")
+    }
+
     func testFollowUsesConfirmedSnapshotAndSerializesMutations() async {
         let gate = FollowGate()
         let model = InsightsSkillsModel(writer: { publisher, followed in

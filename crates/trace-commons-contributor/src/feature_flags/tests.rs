@@ -22,6 +22,8 @@ fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::open(registry.clone(), profile.clone(), dir.path(), now()).unwrap();
         assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("unknown-flag"));
         let manifest = |revision, enabled| {
             sign(
                 &serde_json::to_vec(&serde_json::json!({
@@ -34,8 +36,11 @@ fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
         };
         runtime.accept(&manifest(1, true), now()).unwrap();
         assert!(runtime.snapshot().is_enabled("insights_skills"));
+        assert!(runtime.is_enabled("insights_skills"));
         runtime.accept(&manifest(2, false), now()).unwrap();
         assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("insights_skills"));
+        assert!(!runtime.is_enabled("unknown-flag"));
         let mut unsupported = profile;
         unsupported.capabilities.clear();
         // Its own state directory: the rollback watermark is per environment,

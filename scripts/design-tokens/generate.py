@@ -401,6 +401,96 @@ def pascal(name: str) -> str:
     return name[0].upper() + name[1:]
 
 
+def insights_entry(tokens: dict, section: str, name: str, scheme: str) -> dict:
+    """Resolve the same flat-theme override and appearance as native macOS."""
+    override = tokens["themes"]["flat" + scheme.title()].get(section, {}).get(name)
+    entry = override if override is not None else tokens[section][name]
+    return entry.get("light", entry) if scheme == "light" else entry
+
+
+def opaque_over(entry: dict, ground: str) -> str:
+    """Flatten a glass fill over the Linux solid ground, never the desktop."""
+    alpha = entry.get("alpha", 1)
+    rgb(entry["hex"], "Insights colour")
+    channels = [round(int(entry["hex"][i:i + 2], 16) * alpha
+                      + int(ground[i:i + 2], 16) * (1 - alpha)) for i in (1, 3, 5)]
+    return "#" + "".join(f"{c:02x}" for c in channels)
+
+
+def insights_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    def color(name):
+        return insights_entry(tokens, "color", name, scheme)
+
+    def fill(name):
+        entry = insights_entry(tokens, "gradient", name, scheme)
+        # Flat gradients are uniform fills. Refuse a future nonuniform gradient
+        # rather than silently discarding its stops in the Linux translation.
+        stops = entry["stops"]
+        if any((s["hex"], s.get("alpha", 1)) !=
+               (stops[0]["hex"], stops[0].get("alpha", 1)) for s in stops):
+            raise TokenError(f"Insights {name}: expected a uniform flat fill")
+        return stops[0]
+
+    ground = opaque_over(fill("paneFill"), color("paneOpaque")["hex"])
+    card = opaque_over(fill("cardFill"), ground)
+    control = opaque_over(fill("controlFill"), ground)
+    # White hover on Linux's already-white solid surfaces is imperceptible.
+    # Use the flat Light card-control slate on each actual backing; Dark
+    # retains its card hover and uses the raised menu-control hover on
+    # the equally dark switcher track (the black control hover disappears).
+    card_hover = (opaque_over(color("controlOnCardHover"), card) if scheme == "light"
+                  else opaque_over(color("cardHover"), ground))
+    control_hover = opaque_over(color("controlOnCardHover" if scheme == "light"
+                                      else "controlOnMenuHover"), control)
+    palette = {"ground": ground, "card": card,
+               "hover": card_hover,
+               "control": control,
+               "control_hover": control_hover,
+               "selected": opaque_over(color("controlSelected"), ground),
+               "selected_ink": opaque_over(color("textOnSelected"), ground),
+               "ink": opaque_over(color("textPrimary"), ground),
+               "secondary": opaque_over(color("textSecondary"), ground)}
+    for ink in ("ink", "secondary"):
+        for surface in ("ground", "card", "hover", "control", "control_hover"):
+            if contrast(palette[ink], palette[surface]) < 4.5:
+                raise TokenError(f"Insights {scheme}: {ink} on {surface} under 4.5:1")
+    if contrast(palette["selected_ink"], palette["selected"]) < 4.5:
+        raise TokenError(f"Insights {scheme}: selection text under 4.5:1")
+    for hover, surface in (("hover", "card"), ("control_hover", "control")):
+        if contrast(palette[hover], palette[surface]) < 1.15:
+            raise TokenError(f"Insights {scheme}: {hover} on {surface} under 1.15:1")
+    return palette
+
+
+def render_insights_css(tokens: dict, scheme: str) -> str:
+    p = insights_palette(tokens, scheme)
+    theme = tokens["themes"]["flat" + scheme.title()]
+    radius = {**tokens["radius"], **theme.get("radius", {})}
+    space = tokens["space"]
+    weights = {"regular": 400, "medium": 500, "semibold": 600, "bold": 700, "heavy": 800}
+    out = [f".tc-insights {{ background: {p['ground']}; color: {p['ink']}; }}",
+           f".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary {{ background: {p['card']}; border: none; box-shadow: none; border-radius: {radius['card']}px; padding: {space['s5']}px; }}",
+           ".tc-insights button.tc-insights-summary { min-width: 10em; }",
+           ".tc-insights .tc-insights-summary-grid { background: transparent; }",
+           ".tc-insights .tc-insights-summary-grid > flowboxchild { padding: 0; background: transparent; }",
+           f".tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover {{ background: {p['hover']}; }}",
+           f".tc-insights button:focus-visible, .tc-insights dropdown:focus-visible {{ outline: 2px solid {p['selected']}; outline-offset: 2px; }}",
+           f".tc-insights stackswitcher {{ background: {p['control']}; border-radius: {radius['control']}px; padding: {space['s2']}px; }}",
+           f".tc-insights stackswitcher button {{ background: transparent; color: {p['ink']}; border: none; box-shadow: none; border-radius: {radius['control']}px; }}",
+           f".tc-insights stackswitcher button:hover {{ background: {p['control_hover']}; }}",
+           f".tc-insights stackswitcher button:checked {{ background: {p['selected']}; color: {p['selected_ink']}; }}",
+           f".tc-insights .caption, .tc-insights .dim-label {{ color: {p['secondary']}; opacity: 1; }}"]
+    for selector, role in [("", "body"), (" .title-2", "title"),
+                           (" .title-3", "number"), (" .heading", "bodyStrong"),
+                           (" .caption", "caption")]:
+        t = tokens["type"][role]
+        # Preserve the desktop font setting; tokens determine relative hierarchy.
+        # Role classes belong on leaf labels, never nested type containers.
+        relative_size = t["size"] / tokens["type"]["body"]["size"]
+        out.append(f".tc-insights{selector} {{ font-size: {relative_size:.6g}em; font-weight: {weights[t['weight']]}; }}")
+    return "\n".join(out)
+
+
 def render_gtk(tokens: dict) -> str:
     values = role_values(tokens)
     out = [
@@ -431,7 +521,16 @@ def render_gtk(tokens: dict) -> str:
             out.append(f"@define-color tc_{snake(role)} {hex_}; /* {token} */")
         out.append('"#;')
         out.append("")
-    out[-1:] = []
+    out.append("/// Insights layout roles shared with the macOS Insights layout.")
+    out.append("pub mod insights {")
+    for role, token in [("SECTION_GAP", "s8"), ("HEADING_GAP", "s4"),
+                        ("LINE_GAP", "s2"), ("BODY_INSET", "s5")]:
+        out.append(f"    pub const {role}: i32 = {tokens['space'][token]};")
+    out.append("}")
+    for scheme in SCHEMES:
+        out.append(f'pub const INSIGHTS_{scheme.upper()}_CSS: &str = r#"')
+        out.append(render_insights_css(tokens, scheme))
+        out.append('"#;')
     out.append("")
     return "\n".join(out)
 

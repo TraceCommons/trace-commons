@@ -91,3 +91,49 @@ pub const DARK_CSS: &str = r#"
 @define-color tc_status_outside_text #FF9494; /* statusOutsideText */
 @define-color tc_on_status #0C0C0E; /* textOnStatus */
 "#;
+
+/// Insights layout roles shared with the macOS Insights layout.
+pub mod insights {
+    pub const SECTION_GAP: i32 = 16;
+    pub const HEADING_GAP: i32 = 8;
+    pub const LINE_GAP: i32 = 4;
+    pub const BODY_INSET: i32 = 10;
+}
+pub const INSIGHTS_LIGHT_CSS: &str = r#"
+.tc-insights { background: #f2f3f6; color: #1d1d1f; }
+.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: #fafafb; border: none; box-shadow: none; border-radius: 16px; padding: 10px; }
+.tc-insights button.tc-insights-summary { min-width: 10em; }
+.tc-insights .tc-insights-summary-grid { background: transparent; }
+.tc-insights .tc-insights-summary-grid > flowboxchild { padding: 0; background: transparent; }
+.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: #dbdde3; }
+.tc-insights button:focus-visible, .tc-insights dropdown:focus-visible { outline: 2px solid #0558b6; outline-offset: 2px; }
+.tc-insights stackswitcher { background: #fbfbfc; border-radius: 11px; padding: 4px; }
+.tc-insights stackswitcher button { background: transparent; color: #1d1d1f; border: none; box-shadow: none; border-radius: 11px; }
+.tc-insights stackswitcher button:hover { background: #dbdee4; }
+.tc-insights stackswitcher button:checked { background: #0558b6; color: #ffffff; }
+.tc-insights .caption, .tc-insights .dim-label { color: #3c3c43; opacity: 1; }
+.tc-insights { font-size: 1em; font-weight: 400; }
+.tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
+.tc-insights .title-3 { font-size: 2em; font-weight: 700; }
+.tc-insights .heading { font-size: 1em; font-weight: 600; }
+.tc-insights .caption { font-size: 0.846154em; font-weight: 400; }
+"#;
+pub const INSIGHTS_DARK_CSS: &str = r#"
+.tc-insights { background: #171b2d; color: #f2f3f8; }
+.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: #14182a; border: none; box-shadow: none; border-radius: 16px; padding: 10px; }
+.tc-insights button.tc-insights-summary { min-width: 10em; }
+.tc-insights .tc-insights-summary-grid { background: transparent; }
+.tc-insights .tc-insights-summary-grid > flowboxchild { padding: 0; background: transparent; }
+.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: #2a2d3e; }
+.tc-insights button:focus-visible, .tc-insights dropdown:focus-visible { outline: 2px solid #7ebcff; outline-offset: 2px; }
+.tc-insights stackswitcher { background: #10131f; border-radius: 11px; padding: 4px; }
+.tc-insights stackswitcher button { background: transparent; color: #f2f3f8; border: none; box-shadow: none; border-radius: 11px; }
+.tc-insights stackswitcher button:hover { background: #3b3d47; }
+.tc-insights stackswitcher button:checked { background: #7ebcff; color: #071a2e; }
+.tc-insights .caption, .tc-insights .dim-label { color: #d8d9e0; opacity: 1; }
+.tc-insights { font-size: 1em; font-weight: 400; }
+.tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
+.tc-insights .title-3 { font-size: 2em; font-weight: 700; }
+.tc-insights .heading { font-size: 1em; font-weight: 600; }
+.tc-insights .caption { font-size: 0.846154em; font-weight: 400; }
+"#;

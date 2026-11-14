@@ -441,6 +441,9 @@ final class AppModel: ObservableObject {
     /// alongside `projects`, because every reason the project list changes
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
+    /// Where the offer's Enable is, or nil before it is pressed
+    /// (`ArmingOfferMotion`).
+    @Published private(set) var armingOfferStep: ArmingOfferStep?
     /// The standing Automatic grant, for Settings' sharing choice (#1753
     /// A2). Nil until `automatic_grant` has answered, which the choice draws
     /// as nothing picked. Refreshed alongside `projects`.
@@ -533,9 +536,10 @@ final class AppModel: ObservableObject {
             ?? PrivateInferenceState(label: "", port: nil)
     }
 
-    var privateInferenceQuitDetail: String? {
-        PrivateInferenceSurface.quitDetail(on: daemonSettings?.privateInferenceOn ?? false,
-            state: privateInferenceState, copy: privateInferenceCopy, calls: privateInferenceCalls)
+    /// Whether quitting would stop Private AI answering model calls.
+    var privateInferenceQuitStops: Bool {
+        PrivateInferenceSurface.quitStops(on: daemonSettings?.privateInferenceOn ?? false,
+            state: privateInferenceState, calls: privateInferenceCalls)
     }
 
     /// Whether to put the offer in front of the contributor right now.
@@ -1716,15 +1720,6 @@ final class AppModel: ObservableObject {
     /// contributor who is not told that meets it as a dead control.
     var isAttachedDaemon: Bool { daemon?.isAttached ?? false }
 
-    /// The quit prompt that is true for this process, from the core
-    /// (`tc_quit_prompt_json`): the ABI reads off the daemon handle whether
-    /// this app hosts the watcher, is attached to one, or has none, and
-    /// chooses the sentence. Nil only on a caught panic.
-    var quitPrompt: QuitPrompt? {
-        QuitPrompt.decode(fromJSON: daemon?.quitPromptJSON()
-            ?? TCCoreCopy.quitPromptWithoutWatcherJSON())
-    }
-
     var traceNavigationReady: Bool {
         guard case .running = startup else { return false }
         return !requiresOnboarding
@@ -2179,21 +2174,33 @@ final class AppModel: ObservableObject {
     /// cannot drift into offering different things.
     func refreshArmingOffer() {
         perform("arming_suggestion", work: { try $0.armingSuggestion() }) {
-            self.publishIfChanged(\.armingOffer, $0)
+            self.publishIfChanged(\.armingOffer, ArmingOfferMotion.offerAfterRefresh(
+                current: self.armingOffer, answered: $0, step: self.armingOfferStep))
         }
     }
 
     /// Arms the offered project. The offer clears because the daemon's next
     /// answer will not include an armed project, but it is cleared here too
-    /// so the card does not linger for a round trip.
+    /// so the card does not linger for a round trip. Enable is answered on
+    /// the card first (`ArmingOfferMotion`): locked while the daemon arms,
+    /// a check once it has, and the card leaves after a short hold. A
+    /// failure unlocks it and says so in `lastActionError`.
     func acceptArmingOffer(_ offer: ArmingOffer) {
+        guard client != nil, armingOfferStep == nil else { return }
+        armingOfferStep = .arming
         perform(
             "set_project_mode",
-            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) }
+            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) },
+            onFailure: { self.armingOfferStep = nil }
         ) { _ in
-            self.armingOffer = nil
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            withAnimation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion)) { self.armingOfferStep = .armed }
             self.refreshProjects()
             self.refreshAudit()
+            Task { @MainActor in
+                try? await Task.sleep(for: ArmingOfferMotion.hold)
+                self.clearArmingOffer()
+            }
         }
     }
 
@@ -2201,8 +2208,19 @@ final class AppModel: ObservableObject {
     /// and persisted there rather than here, so it survives a relaunch and
     /// applies to whichever shell asks next.
     func declineArmingOffer(_ offer: ArmingOffer) {
+        guard armingOfferStep == nil else { return }
         perform("decline_arming", work: { try $0.declineArming(projectID: offer.projectId) }) { _ in
-            self.armingOffer = nil
+            self.clearArmingOffer()
+        }
+    }
+
+    /// Takes the offer's card away, fading it and sliding what is below it
+    /// up (never under Reduce Motion), and unlocks the next offer's Enable.
+    private func clearArmingOffer() {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        withAnimation(ArmingOfferMotion.exit(reduceMotion: reduceMotion)) {
+            armingOffer = nil
+            armingOfferStep = nil
         }
     }
 
@@ -3299,6 +3317,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setPrivateInferenceBusyForTesting(_ busy: Bool) { privateInferenceBusy = busy }
     func setHarnessesForTesting(_ harnesses: HarnessList) { publishIfChanged(\.harnesses, harnesses) }
     func setArmingOfferForTesting(_ offer: ArmingOffer?) { publishIfChanged(\.armingOffer, offer) }
     func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
@@ -3937,6 +3956,17 @@ final class AppModel: ObservableObject {
     /// or before a read.
     @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
+    /// `account_sign_in` is out waiting on the browser. Pressing Sign in
+    /// again starts a new one, which the daemon lets replace it
+    /// (`account-sign-in-replaced`), so a closed tab never leaves Sign in
+    /// disabled until the wait times out.
+    @Published private(set) var accountBrowserSignInWaiting = false
+    private var accountBrowserSignInGeneration = 0
+    /// Whether a Sign in on an account card may be pressed while
+    /// `accountSigningIn`: a browser wait of either path is replaced.
+    var canRetryAccountSignIn: Bool {
+        canRestartNearAiBrowserSignIn || accountBrowserSignInWaiting
+    }
     /// The last status read's `renewal_failure`: `near_ai_sign_in_required`
     /// when NEAR AI refused the stored login, so only a fresh browser
     /// sign-in helps. Nil when the last read named none, and before a read.
@@ -4097,11 +4127,21 @@ final class AppModel: ObservableObject {
     func signInToWithdraw() async {
         // A NEAR AI account signs in through NEAR AI.
         if accountSignInPath == "near_ai" { return await signInAgain() }
-        guard !accountSigningIn else { return }
+        // Pressed again while the browser is out (its tab closed, most
+        // often): a new sign-in replaces that one, and only the newest
+        // press's answer is read. The one it replaced ends at the daemon
+        // (`account-sign-in-replaced`) and says nothing here.
+        guard !accountSigningIn || accountBrowserSignInWaiting else { return }
+        accountBrowserSignInGeneration &+= 1
+        let generation = accountBrowserSignInGeneration
         accountSigningIn = true
+        accountBrowserSignInWaiting = true
         accountSignInFailure = nil
+        let answer = await firstRunCall({ try $0.accountSignIn() })
+        guard generation == accountBrowserSignInGeneration else { return }
+        accountBrowserSignInWaiting = false
         defer { accountSigningIn = false }
-        guard case .success = await firstRunCall({ try $0.accountSignIn() }) else {
+        guard case .success = answer else {
             accountSignInFailure = .failed
             return
         }

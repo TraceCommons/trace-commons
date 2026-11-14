@@ -300,6 +300,15 @@ pub struct QueueEntry {
     /// Absent for every other state and refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_on_version: Option<String>,
+    /// For a session the witness refused as too large to review
+    /// (`witness_trace_too_large_for_review`): the classifier requests it
+    /// needed and the most one review allows, as the witness counted them.
+    /// Absent for every other state and refusal, and for an entry written
+    /// before these existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_windows_needed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_windows_allowed: Option<u64>,
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
     /// Transient classifier failures since this entry was last approved.
@@ -810,6 +819,7 @@ impl QueueEntry {
                 crate::submit::REASON_TRANSIENT_REDACTION
                     | crate::submit::REASON_WITNESS_SATURATED
                     | crate::submit::REASON_RATE_LIMITED
+                    | REASON_ACCOUNT_LIMIT_REACHED
                     | crate::submit::REASON_INGEST_UNREACHABLE
                     | super::health::LABEL_CLAIM_MINT_FAILED
             )
@@ -821,6 +831,15 @@ impl QueueEntry {
                 trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
                     == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
             })
+    }
+
+    /// Whether this entry is approved and waiting, at `now`, for an account
+    /// allowance ingest said was spent. While any entry is, the upload pass
+    /// sends nothing (`daemon::account_allowance_held`).
+    pub(crate) fn waiting_on_account_allowance(&self, now: DateTime<Utc>) -> bool {
+        self.state == QueueState::Approved
+            && self.reason_label.as_deref() == Some(REASON_ACCOUNT_LIMIT_REACHED)
+            && self.retry_after.is_some_and(|due| due > now)
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -915,6 +934,13 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// this exact string. Changing it in one place and not the other would
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
+
+/// Ingest refused the upload because the account's allowance for the period
+/// is spent (`AdmissionRefusal::AccountLimitReached`, in the server's own
+/// spelling). Not a verdict on the session: the entry keeps its approval and
+/// waits, `Approved` under this label, until `retry_after`.
+pub const REASON_ACCOUNT_LIMIT_REACHED: &str =
+    trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
 
 /// The reason label `keep` records: the contributor chose "Keep on this Mac"
 /// for this session (K5, open decision #4 in #1118).
@@ -1045,11 +1071,33 @@ const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavai
 /// rather than the trace's. A redaction that panicked is a defect in the
 /// build; `witness_attestation_unavailable` was also what earlier builds
 /// recorded when the witness merely ran past its deadline, a terminal
-/// refusal for a session nothing had judged.
+/// refusal for a session nothing had judged. `witness_response_malformed`
+/// was what earlier builds recorded for every witness refusal they did not
+/// spell, a witness that was down among them; only an approved one is
+/// offered again, and it goes back to approved.
+/// `witness_trace_too_large_for_review` depends on the witness's pace and
+/// classify budget as much as on the trace, so a newer build offers it again
+/// rather than keeping a refusal a later configuration would not give.
+/// `witness_text_unclassifiable` is the witness's classifier failing on the
+/// text, which a later witness may not.
 pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
     crate::envelope::REASON_REDACTION_PANICKED,
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+    REASON_WITNESS_RESPONSE_MALFORMED,
+    trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+    // A witness improvement may classify what this one could not.
+    trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
+    // The witness's request-body bound as much as the trace.
+    REASON_WITNESS_PAYLOAD_TOO_LARGE,
 ];
+
+/// `witness_payload_too_large`, as `witness::WitnessTrustError` spells it.
+/// Offered again on a newer build: it is the witness's request-body bound as
+/// much as the trace (raised from 1 MiB to 16 MiB on 2026-11-13).
+const REASON_WITNESS_PAYLOAD_TOO_LARGE: &str = "witness_payload_too_large";
+
+/// `witness_response_malformed`, as `witness::WitnessTrustError` spells it.
+const REASON_WITNESS_RESPONSE_MALFORMED: &str = "witness_response_malformed";
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
@@ -1062,6 +1110,8 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
     QueueEntry {
         state: QueueState::Pending,
         reason_label: None,
+        review_windows_needed: None,
+        review_windows_allowed: None,
         attempts: 0,
         retry_after: None,
         transient_redaction_failures: 0,
@@ -1271,7 +1321,12 @@ impl Queue {
             body.push_str(&serde_json::to_string(e).context("serializing queue entry")?);
             body.push('\n');
         }
-        store.write_daemon_file(DAEMON_QUEUE_FILE, body.as_bytes())
+        store.write_daemon_file(DAEMON_QUEUE_FILE, body.as_bytes())?;
+        // The enrollment observation takes the credential commit lock:
+        // policy -> queue -> commit, the same order as unenroll. Callers
+        // must not already hold commit (which is not reentrant).
+        super::first_trace::observe(store, self.entries.iter().map(|e| e.discovered_at));
+        Ok(())
     }
 
     pub fn all(&self) -> &[QueueEntry] {
@@ -2259,6 +2314,22 @@ impl Queue {
         changed
     }
 
+    /// Record, or clear with `None`, the counts a too-large-to-review
+    /// refusal came with. Kept only on an entry refused under exactly that
+    /// label; anything else is cleared.
+    pub fn note_review_limits(&mut self, entry_id: Uuid, limits: Option<(u64, u64)>) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            let too_large = e.state == QueueState::Refused
+                && e.reason_label.as_deref()
+                    == Some(
+                        trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+                    );
+            let kept = limits.filter(|_| too_large);
+            e.review_windows_needed = kept.map(|(needed, _)| needed);
+            e.review_windows_allowed = kept.map(|(_, allowed)| allowed);
+        }
+    }
+
     /// Record the build a refusal happened on, when it is one a newer build
     /// offers again ([`REOFFERED_ON_A_NEWER_BUILD`]); any other refusal is
     /// left as it is.
@@ -2283,7 +2354,10 @@ impl Queue {
     /// no recorded build stays refused too, except
     /// `witness_attestation_unavailable`: no build recorded one before this
     /// rule, and those builds also gave that label to a witness that only
-    /// ran out of time, so an unrecorded one is from an older build.
+    /// ran out of time, so an unrecorded one is from an older build. The same
+    /// holds for `witness_response_malformed`, which earlier builds gave to a
+    /// witness that was down; it is offered again only when it was approved,
+    /// since nothing but an approval sends a session to the witness.
     pub fn reoffer_panicked_refusals(&mut self, current_version: &str) -> bool {
         let mut changed = false;
         for e in self.entries.iter_mut() {
@@ -2293,25 +2367,107 @@ impl Queue {
             if e.state != QueueState::Refused || !REOFFERED_ON_A_NEWER_BUILD.contains(&reason) {
                 continue;
             }
+            // `approved_scopes`, not `approved_at`: a standing opt-in's
+            // approval leaves `approved_at` unset, and every revocation
+            // clears both together.
+            let malformed = reason == REASON_WITNESS_RESPONSE_MALFORMED;
+            if malformed && e.approved_scopes.is_none() {
+                continue;
+            }
             let newer = match e.refused_on_version.as_deref() {
                 Some(refused_on) => {
                     crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
                 }
-                None => reason == REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+                None => matches!(
+                    reason,
+                    REASON_WITNESS_ATTESTATION_UNAVAILABLE
+                        | REASON_WITNESS_RESPONSE_MALFORMED
+                        | REASON_WITNESS_PAYLOAD_TOO_LARGE
+                ),
             };
             if !newer {
                 continue;
             }
-            e.state = if e.approved_at.is_some() {
+            e.state = if malformed || e.approved_at.is_some() {
                 QueueState::Approved
             } else {
                 QueueState::Pending
             };
             e.reason_label = None;
             e.refused_on_version = None;
+            // The counts belong to the refusal being lifted; a new review
+            // records its own.
+            e.review_windows_needed = None;
+            e.review_windows_allowed = None;
+            if malformed {
+                // A whole retry budget, as a fresh approval gets: a run
+                // started before the refusal must not count against it.
+                e.retry_after = None;
+                e.transient_upload_failures = 0;
+                e.transient_upload_run_started_at = None;
+            }
             changed = true;
         }
         changed
+    }
+
+    /// Send again, once its account allowance allows, every approved
+    /// session an older build ended `Failed` with `account_limit_reached`,
+    /// returning how many moved.
+    ///
+    /// A spent allowance says nothing about the session: ingest refuses
+    /// every send until the period resets. Builds before this rule recorded
+    /// it as a final failure, so those sessions were never sent. Each goes
+    /// back to `Approved` under the same label, due `now`, with every term
+    /// of its approval as it was, so nobody is asked again and the usual
+    /// send-time checks still apply. The upload pass then holds the queue
+    /// again if the allowance is still spent.
+    ///
+    /// Only `Failed` entries with exactly this label that still carry an
+    /// approval (`approved_scopes`) move: a dismissed, kept or withdrawn
+    /// entry is in another state, and nothing is approved on anyone's
+    /// behalf here. One whose file already has a live entry stays, as in
+    /// [`Self::reoffer_refused_for_reason`]: the session grew and is offered
+    /// as it is now. Idempotent: a moved entry is no longer `Failed`.
+    ///
+    /// A `Failed` entry pins nothing, so the sweep has already removed any
+    /// certified bytes it was pinned to. An unattended approval's pin is the
+    /// witness's own certificate, not bytes a person was shown, so it is
+    /// dropped and the session is witnessed again, as a fresh unattended
+    /// approval is. A person's pin is kept: the upload then finds its bytes
+    /// gone and puts the session back in front of them, since they approved
+    /// those bytes and no others.
+    pub fn retry_account_limit_failures(&mut self, now: DateTime<Utc>) -> usize {
+        let limit = REASON_ACCOUNT_LIMIT_REACHED;
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
+        let mut moved = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Failed
+                && e.reason_label.as_deref() == Some(limit)
+                && e.approved_scopes.is_some()
+                && !live_paths.contains(&e.path)
+            {
+                e.state = QueueState::Approved;
+                e.retry_after = Some(now);
+                if e.approved_unattended {
+                    e.previewed_envelope_digest = None;
+                    e.attested_inference = None;
+                    e.would_send_bytes = None;
+                }
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// Revoke an unattended approval and pin the certified review the
@@ -3440,6 +3596,127 @@ mod tests {
         }
     }
 
+    /// Older builds ended an approved session `Failed` when the account's
+    /// allowance was spent. Such an entry goes back to approved and waiting,
+    /// due now, with its approval as it was; once only, since it is then no
+    /// longer `Failed`. A dismissed or kept entry, one whose approval was
+    /// revoked, one with another failure, and one whose file already has a
+    /// live entry all stay where they are.
+    #[test]
+    fn an_account_limit_failure_from_an_older_build_waits_to_be_sent_again() {
+        let limit =
+            trace_commons_protocol::admission::AdmissionRefusal::AccountLimitReached.label();
+        let now = at("2026-11-11T00:00:00Z");
+        let mut failed = entry("failed", "2026-11-01T00:00:00Z");
+        failed.path = PathBuf::from("/s/failed.jsonl");
+        let mut by_hand = entry("by-hand", "2026-11-01T00:00:00Z");
+        by_hand.path = PathBuf::from("/s/by-hand.jsonl");
+        let mut dismissed = entry("dismissed", "2026-11-01T00:00:00Z");
+        dismissed.path = PathBuf::from("/s/dismissed.jsonl");
+        let mut kept = entry("kept", "2026-11-01T00:00:00Z");
+        kept.path = PathBuf::from("/s/kept.jsonl");
+        let mut revoked = entry("revoked", "2026-11-01T00:00:00Z");
+        revoked.path = PathBuf::from("/s/revoked.jsonl");
+        let mut other = entry("other", "2026-11-01T00:00:00Z");
+        other.path = PathBuf::from("/s/other.jsonl");
+        let mut stale = entry("stale", "2026-11-01T00:00:00Z");
+        stale.path = PathBuf::from("/s/grew.jsonl");
+        let mut live = entry("live", "2026-11-02T00:00:00Z");
+        live.path = PathBuf::from("/s/grew.jsonl");
+        let mut q = Queue::new();
+        for e in [
+            &failed, &by_hand, &dismissed, &kept, &revoked, &other, &stale, &live,
+        ] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        let scopes = vec!["debugging_evaluation".to_string()];
+        for e in [&failed, &dismissed, &kept, &other, &stale] {
+            assert!(q.approve_unattended(e.entry_id, &scopes, Some("inputs")));
+        }
+        let approved_at = at("2026-11-02T00:00:00Z");
+        assert!(q.approve(
+            by_hand.entry_id,
+            &scopes,
+            None,
+            None,
+            None,
+            Some(approved_at)
+        ));
+        for e in [&failed, &by_hand, &stale] {
+            q.record_attempt(e.entry_id, None);
+            q.set_state(e.entry_id, QueueState::Failed, Some(limit.into()));
+        }
+        q.set_state(
+            dismissed.entry_id,
+            QueueState::Refused,
+            Some(REASON_DISMISSED.into()),
+        );
+        q.set_state(kept.entry_id, QueueState::Refused, Some(REASON_KEPT.into()));
+        // Failed with the label, but nothing says it was approved.
+        q.set_state(revoked.entry_id, QueueState::Failed, Some(limit.into()));
+        q.set_state(
+            other.entry_id,
+            QueueState::Failed,
+            Some("admission_refused".into()),
+        );
+        for e in [&failed, &by_hand] {
+            q.entry_mut_for_test(e.entry_id)
+                .unwrap()
+                .previewed_envelope_digest = Some("sha256:pinned".into());
+        }
+        let before = q.clone();
+
+        assert_eq!(q.retry_account_limit_failures(now), 2);
+        // The unattended pin goes, so the witness certifies it again; the
+        // person's stays, so they are asked rather than sent other bytes.
+        assert_eq!(
+            q.get(failed.entry_id).unwrap().previewed_envelope_digest,
+            None
+        );
+        assert_eq!(
+            q.get(by_hand.entry_id)
+                .unwrap()
+                .previewed_envelope_digest
+                .as_deref(),
+            Some("sha256:pinned")
+        );
+        for id in [failed.entry_id, by_hand.entry_id] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Approved, "{e:?}");
+            assert_eq!(e.reason_label.as_deref(), Some(limit));
+            assert_eq!(e.retry_after, Some(now));
+            assert!(e.ready_for_upload(now));
+            assert_eq!(e.approved_scopes, was.approved_scopes);
+            assert_eq!(e.approved_inputs, was.approved_inputs);
+            assert_eq!(e.approved_at, was.approved_at);
+            assert_eq!(e.approved_unattended, was.approved_unattended);
+        }
+        assert!(q.get(failed.entry_id).unwrap().approved_unattended);
+        assert_eq!(
+            q.get(by_hand.entry_id).unwrap().approved_at,
+            Some(approved_at)
+        );
+        for id in [
+            dismissed.entry_id,
+            kept.entry_id,
+            revoked.entry_id,
+            other.entry_id,
+            stale.entry_id,
+            live.entry_id,
+        ] {
+            let e = q.get(id).unwrap();
+            let was = before.get(id).unwrap();
+            assert_eq!(
+                (e.state, e.reason_label.as_deref()),
+                (was.state, was.reason_label.as_deref()),
+                "{e:?}"
+            );
+        }
+
+        assert_eq!(q.retry_account_limit_failures(now), 0, "once only");
+    }
+
     /// A trace refused because its redaction panicked is offered again once
     /// a newer build runs: approved again if it was approved, pending if it
     /// was not. The same build, an older one, or any other refusal leaves
@@ -3550,6 +3827,75 @@ mod tests {
         assert!(q.get(e.entry_id).unwrap().held_for_review());
     }
 
+    /// Text the witness's classifier could not classify is offered again on
+    /// a newer build: a witness improvement may classify what this one could
+    /// not.
+    #[test]
+    fn unclassifiable_text_is_offered_again_on_a_newer_build() {
+        assert!(
+            REOFFERED_ON_A_NEWER_BUILD
+                .contains(&trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE)
+        );
+    }
+
+    /// A session the witness refused as too large to review keeps the two
+    /// counts on its entry, through a save and a reload, so a listing can
+    /// show them. Only that refusal keeps them. (A newer build offers it
+    /// again, since the limit depends on the witness's configuration; see
+    /// `a_too_large_refusal_is_offered_again_on_a_newer_build_without_its_counts`.)
+    #[test]
+    fn a_too_large_refusal_keeps_its_counts() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        assert!(REOFFERED_ON_A_NEWER_BUILD.contains(&label));
+        let too_large = entry("too-large", "2026-11-13T00:00:00Z");
+        let other = entry("other", "2026-11-13T00:00:00Z");
+        let mut q = Queue::new();
+        for e in [&too_large, &other] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        q.set_state(
+            too_large.entry_id,
+            QueueState::Refused,
+            Some(label.to_string()),
+        );
+        q.note_review_limits(too_large.entry_id, Some((1800, 208)));
+        q.set_state(
+            other.entry_id,
+            QueueState::Refused,
+            Some("redaction-failed".to_string()),
+        );
+        q.note_review_limits(other.entry_id, Some((1, 2)));
+
+        let kept = q.get(too_large.entry_id).unwrap();
+        assert_eq!(kept.review_windows_needed, Some(1800));
+        assert_eq!(kept.review_windows_allowed, Some(208));
+        let reloaded: QueueEntry =
+            serde_json::from_value(serde_json::to_value(kept).unwrap()).unwrap();
+        assert_eq!(reloaded.review_windows_needed, Some(1800));
+        assert_eq!(reloaded.review_windows_allowed, Some(208));
+        let untouched = q.get(other.entry_id).unwrap();
+        assert_eq!(
+            untouched.review_windows_needed, None,
+            "only that refusal keeps counts"
+        );
+
+        // An entry written before these fields existed still loads.
+        let mut old = serde_json::to_value(&other).unwrap();
+        old.as_object_mut().unwrap().remove("review_windows_needed");
+        old.as_object_mut()
+            .unwrap()
+            .remove("review_windows_allowed");
+        let loaded: QueueEntry = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.review_windows_needed, None);
+
+        // Clearing them is the same call with `None`.
+        q.note_review_limits(too_large.entry_id, None);
+        assert_eq!(
+            q.get(too_large.entry_id).unwrap().review_windows_needed,
+            None
+        );
+    }
+
     #[test]
     fn a_panicked_refusal_is_offered_again_on_a_newer_build_only() {
         let panicked = crate::envelope::REASON_REDACTION_PANICKED;
@@ -3600,6 +3946,206 @@ mod tests {
         assert_eq!(untouched.reason_label.as_deref(), Some("redaction-failed"));
         // Nothing left to move.
         assert!(!q.reoffer_panicked_refusals("0.24.2"));
+    }
+
+    /// `witness_payload_too_large` is the witness's request-body bound as much
+    /// as the trace (raised from 1 MiB to 16 MiB on 2026-11-13), so a newer
+    /// build offers it again: one recorded on an older build, and one with
+    /// no recorded build at all, since no build recorded one before this rule.
+    #[test]
+    fn a_payload_too_large_refusal_is_offered_again_on_a_newer_build() {
+        let label = "witness_payload_too_large";
+        assert!(REOFFERED_ON_A_NEWER_BUILD.contains(&label));
+        let recorded = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("recorded", "2026-11-12T00:00:00Z")
+        };
+        let unrecorded = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("unrecorded", "2026-11-12T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        q.upsert(recorded.clone(), 5000).unwrap();
+        q.upsert(unrecorded.clone(), 5000).unwrap();
+        for e in [&recorded, &unrecorded] {
+            q.set_state(e.entry_id, QueueState::Refused, Some(label.to_string()));
+        }
+        q.note_refusal_version(recorded.entry_id, "1.0.7");
+
+        assert!(q.reoffer_panicked_refusals("1.0.7"));
+        assert_eq!(q.get(recorded.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(
+            q.get(unrecorded.entry_id).unwrap().state,
+            QueueState::Approved
+        );
+
+        assert!(q.reoffer_panicked_refusals("1.0.8"));
+        assert_eq!(
+            q.get(recorded.entry_id).unwrap().state,
+            QueueState::Approved
+        );
+    }
+
+    /// A too-large-to-review refusal depends on the witness's pace and
+    /// budget, not only on the trace, so a newer build offers it again (the
+    /// witness may since allow more), with the stored counts cleared.
+    #[test]
+    fn a_too_large_refusal_is_offered_again_on_a_newer_build_without_its_counts() {
+        let too_large = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let approved = QueueEntry {
+            approved_at: Some(at("2026-11-12T00:00:00Z")),
+            ..entry("too-large", "2026-11-12T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        q.upsert(approved.clone(), 5000).unwrap();
+        q.set_state(
+            approved.entry_id,
+            QueueState::Refused,
+            Some(too_large.to_string()),
+        );
+        q.note_review_limits(approved.entry_id, Some((1800, 720)));
+        q.note_refusal_version(approved.entry_id, "1.0.7");
+        let refused = q.get(approved.entry_id).unwrap();
+        assert_eq!(refused.refused_on_version.as_deref(), Some("1.0.7"));
+        assert_eq!(refused.review_windows_needed, Some(1800));
+
+        assert!(!q.reoffer_panicked_refusals("1.0.7"));
+        assert_eq!(q.get(approved.entry_id).unwrap().state, QueueState::Refused);
+
+        assert!(q.reoffer_panicked_refusals("1.0.8"));
+        let back = q.get(approved.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(back.review_windows_needed, None);
+        assert_eq!(back.review_windows_allowed, None);
+    }
+
+    /// Builds before the witness's refusals were read by status and label
+    /// refused an approved session `witness_response_malformed` for a witness
+    /// that was only down (the 2026-11-05 outage), and recorded no build. Such a
+    /// refusal goes back to approved and waiting, once, so the witness path
+    /// retries it with its usual backoff. An unapproved one, one recorded on
+    /// this build, a dismissal, a keep and any other refusal stay where they
+    /// are.
+    #[test]
+    fn an_approved_malformed_witness_refusal_from_an_older_build_is_approved_again() {
+        let malformed = REASON_WITNESS_RESPONSE_MALFORMED;
+        let approved_at = Some(at("2026-11-05T00:00:00Z"));
+        let approved = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            transient_upload_failures: 3,
+            transient_upload_run_started_at: approved_at,
+            ..entry("approved", "2026-11-05T00:00:00Z")
+        };
+        // A standing opt-in's approval: scopes stamped, no `approved_at`.
+        let unattended = QueueEntry {
+            approved_scopes: Some(Vec::new()),
+            approved_unattended: true,
+            ..entry("unattended", "2026-11-05T00:00:00Z")
+        };
+        let unapproved = entry("unapproved", "2026-11-05T00:00:00Z");
+        let current = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("current", "2026-11-05T00:00:00Z")
+        };
+        let dismissed = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("dismissed", "2026-11-05T00:00:00Z")
+        };
+        let kept = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("kept", "2026-11-05T00:00:00Z")
+        };
+        let other = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("other", "2026-11-05T00:00:00Z")
+        };
+        let failed = QueueEntry {
+            approved_at,
+            approved_scopes: Some(Vec::new()),
+            ..entry("failed", "2026-11-05T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        for e in [
+            &approved,
+            &unattended,
+            &unapproved,
+            &current,
+            &dismissed,
+            &kept,
+            &other,
+            &failed,
+        ] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        for (id, state, label) in [
+            (approved.entry_id, QueueState::Refused, malformed),
+            (unattended.entry_id, QueueState::Refused, malformed),
+            (unapproved.entry_id, QueueState::Refused, malformed),
+            (current.entry_id, QueueState::Refused, malformed),
+            (dismissed.entry_id, QueueState::Refused, REASON_DISMISSED),
+            (kept.entry_id, QueueState::Refused, REASON_KEPT),
+            (
+                other.entry_id,
+                QueueState::Refused,
+                "witness_quote_unverified",
+            ),
+            (failed.entry_id, QueueState::Failed, malformed),
+        ] {
+            q.set_state(id, state, Some(label.to_string()));
+        }
+        // A malformed refusal made on this build records the build.
+        q.note_refusal_version(current.entry_id, "0.30.0");
+        assert_eq!(
+            q.get(current.entry_id)
+                .unwrap()
+                .refused_on_version
+                .as_deref(),
+            Some("0.30.0")
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.30.0"));
+        let back = q.get(approved.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(back.approved_at, approved_at, "the approval is kept");
+        assert_eq!(back.transient_upload_failures, 0, "a whole retry budget");
+        assert_eq!(back.transient_upload_run_started_at, None);
+        let back = q.get(unattended.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert!(back.approved_unattended, "still the opt-in's approval");
+        for (id, state, label) in [
+            (unapproved.entry_id, QueueState::Refused, malformed),
+            (current.entry_id, QueueState::Refused, malformed),
+            (dismissed.entry_id, QueueState::Refused, REASON_DISMISSED),
+            (kept.entry_id, QueueState::Refused, REASON_KEPT),
+            (
+                other.entry_id,
+                QueueState::Refused,
+                "witness_quote_unverified",
+            ),
+            (failed.entry_id, QueueState::Failed, malformed),
+        ] {
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, state, "{label}");
+            assert_eq!(e.reason_label.as_deref(), Some(label));
+        }
+        // Once: nothing left to move on the same build, even after the
+        // moved entry is refused malformed again on it.
+        assert!(!q.reoffer_panicked_refusals("0.30.0"));
+        q.set_state(
+            approved.entry_id,
+            QueueState::Refused,
+            Some(malformed.to_string()),
+        );
+        q.note_refusal_version(approved.entry_id, "0.30.0");
+        assert!(!q.reoffer_panicked_refusals("0.30.0"));
+        assert_eq!(q.get(approved.entry_id).unwrap().state, QueueState::Refused);
     }
 
     /// `entry`, plus the observation it is supposed to be made of.

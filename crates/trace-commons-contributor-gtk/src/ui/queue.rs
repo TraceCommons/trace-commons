@@ -46,7 +46,14 @@ const METRIC_GAP: i32 = 24;
 // TODO(tokens): promote to `style::space` when style.rs is next opened.
 const CONTENT_GAP: i32 = 14;
 
+#[path = "traces_inspector.rs"]
+mod inspector;
+#[path = "traces_map.rs"]
+mod traces_map;
+
 pub struct QueueView {
+    inspector: inspector::Inspector,
+    map: traces_map::TraceMap,
     pub root: gtk::Box,
     first_contribution: gtk::Expander,
     /// The arming offer, above the cards it is about. Persistent and
@@ -130,6 +137,8 @@ impl QueueView {
             .margin_end(space::XL)
             .build();
         column.append(&heading);
+        let map = traces_map::TraceMap::new();
+        column.append(&map.root);
         column.append(&list);
         column.append(&disclaimer);
         column.append(&disclosure);
@@ -275,8 +284,47 @@ impl QueueView {
         root.append(&empty);
         root.append(&scroller);
 
+        let inspector = inspector::Inspector::new();
+        let split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .start_child(&root)
+            .end_child(&inspector.root)
+            .resize_start_child(true)
+            .shrink_start_child(true)
+            .shrink_end_child(true)
+            .vexpand(true)
+            .build();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&split);
+        // The libadwaita 1.2 floor predates Breakpoint. Observe the actual
+        // allocation, not the persisted default window width; change the
+        // layout only when crossing the breakpoint.
+        let weak_split = split.downgrade();
+        let map_body = map.body.downgrade();
+        root.add_tick_callback(move |root, _| {
+            let Some(split) = weak_split.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if let Some(body) = map_body.upgrade() {
+                let width = body.parent().map_or(root.width(), |parent| parent.width());
+                traces_map::TraceMap::orient(&body, width);
+            }
+            let orientation = inspector::orientation(root.width());
+            if split.orientation() != orientation {
+                split.set_orientation(orientation);
+                split.set_position(if orientation == gtk::Orientation::Horizontal {
+                    (root.width() - 320).max(0)
+                } else {
+                    root.height() / 2
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+
         Self {
             root,
+            inspector,
+            map,
             first_contribution,
             arming_offer,
             private_inference_offer,
@@ -440,6 +488,8 @@ pub(super) fn render_badge(app: &Rc<App>) {
 }
 
 pub fn render(app: &Rc<App>) {
+    app.queue.inspector.render(app);
+    app.queue.map.render(app);
     render_badge(app);
     let view = &app.queue;
     view.first_contribution
@@ -1254,6 +1304,24 @@ fn manifest_block(
     submit.add_css_class("suggested-action");
     submit.add_css_class("tc-primary");
     submit.set_tooltip_text(Some(copy::SUBMIT_TOOLTIP));
+    let review_words = trace_commons_contributor::preview_copy::monitor_traces_copy();
+    let review = gtk::Button::with_label(review_words.review);
+    review.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{} — {} — {}",
+        review_words.review,
+        entry.project_label,
+        human_when(entry.discovered_at)
+    ))]);
+    let weak = Rc::downgrade(app);
+    let selected_id = entry.entry_id.clone();
+    review.connect_clicked(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.queue
+                .inspector
+                .select(&app, inspector::Selection::Session(selected_id.clone()));
+        }
+    });
+    actions.append(&review);
     actions.append(&skip);
     actions.append(&look);
     // `Look inside` stays on every row: a contributor may always read their
@@ -1501,6 +1569,10 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
     open.connect_clicked(move |_| {
         *app_for_open.queue_location.borrow_mut() =
             crate::queue_folders::Location::Project(id_for_open.clone());
+        app_for_open.queue.inspector.select(
+            &app_for_open,
+            inspector::Selection::Folder(id_for_open.clone()),
+        );
         render(&app_for_open);
     });
     bar.append(&open);

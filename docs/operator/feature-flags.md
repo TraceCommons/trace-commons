@@ -29,7 +29,13 @@ disabled. The dated example manifests keep it false; these files have not been
 published. Other existing features retain their behavior.
 
 Skills checks the daemon decision at its inventory, publisher-follow and
-background-refresh entry points, and before scheduling skill usage extraction.
+background-refresh entry points, and throughout skill usage extraction. Reads
+that complete after disable do not publish new skill evidence. Catalog refreshes
+check the gate before each request and discard results after disable. Background
+catalog polling additionally requires a followed publisher; opening Skills or
+choosing Refresh can request a catalog check while enabled. Catalog request paths
+never depend on installed skills; historical hashes come only from previously
+observed public catalog versions.
 The native tab consumes the same daemon snapshot. Disabling it hides the tab and
 blocks new Skills work while ordinary Insights remains available. This does not
 grant folder access, consent, or permission to update installed skills.

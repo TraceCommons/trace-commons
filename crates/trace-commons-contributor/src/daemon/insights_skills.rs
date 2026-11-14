@@ -18,6 +18,7 @@ use crate::insights::skills::{
     CatalogSkill, Inventory, freshness, parse_skill_document, scan_inventory_with_policy,
 };
 
+const INSIGHTS_SKILLS_FLAG: &str = "insights_skills";
 const STATE_FILE: &str = "insights-skills-public-v1.json";
 const MAX_STATE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TREE_BYTES: usize = 4 * 1024 * 1024;
@@ -118,10 +119,15 @@ impl PublicState {
     }
 
     fn accept(&mut self, publisher: &str, skills: Vec<CatalogSkill>, now: DateTime<Utc>) {
+        let has_baseline = self
+            .publisher_states
+            .get(publisher)
+            .is_some_and(|state| state.checked_at.is_some());
         for skill in &skills {
             let previous = self.skills.iter().find(|old| old.id == skill.id);
             let kind = match previous {
-                None => Some("added"),
+                None if has_baseline => Some("added"),
+                None => None,
                 Some(old) if old.sha256 != skill.sha256 => {
                     let history = self.history.entry(skill.id.clone()).or_default();
                     if !history.contains(&old.sha256) {
@@ -163,6 +169,31 @@ impl PublicState {
         self.checked_at = Some(now);
     }
 
+    fn accept_fetched(&mut self, publisher: &str, mut fetched: FetchedCatalog, now: DateTime<Utc>) {
+        if !fetched.complete {
+            // Missing or malformed documents cannot prove deletion. Preserve
+            // their last public metadata and suppress freshness for this publisher.
+            let fetched_ids: BTreeSet<_> = fetched
+                .skills
+                .iter()
+                .map(|skill| skill.id.clone())
+                .collect();
+            fetched.skills.extend(
+                self.skills
+                    .iter()
+                    .filter(|skill| {
+                        skill.publisher_id == publisher && !fetched_ids.contains(&skill.id)
+                    })
+                    .cloned(),
+            );
+            fetched.skills.truncate(MAX_SKILLS);
+        }
+        self.accept(publisher, fetched.skills, now);
+        if !fetched.complete {
+            self.failed(publisher);
+        }
+    }
+
     fn failed(&mut self, publisher: &str) {
         self.publisher_states
             .entry(publisher.into())
@@ -181,8 +212,6 @@ struct Runtime {
     refreshing: bool,
     last_attempt: Option<Instant>,
     error: Option<&'static str>,
-    history_targets: Vec<HistoryTarget>,
-    history_requested: BTreeSet<String>,
     inventory: Option<(Instant, InventoryPolicy, Inventory)>,
     inventory_scanned_at: Option<DateTime<Utc>>,
 }
@@ -384,13 +413,36 @@ fn resolve_revision(commit: &Value) -> Result<&str, ()> {
         .ok_or(())
 }
 
+struct FetchedCatalog {
+    skills: Vec<CatalogSkill>,
+    complete: bool,
+}
+
 async fn fetch_publisher(
     client: &reqwest::Client,
     publisher: &Publisher,
-) -> Result<Vec<CatalogSkill>, ()> {
+    allowed: &impl Fn() -> bool,
+) -> Result<FetchedCatalog, ()> {
+    fetch_publisher_with(publisher, allowed, |url, limit| {
+        fetch_bytes(client, url, limit)
+    })
+    .await
+}
+
+async fn fetch_publisher_with<F, Fut>(
+    publisher: &Publisher,
+    allowed: &impl Fn() -> bool,
+    mut fetch: F,
+) -> Result<FetchedCatalog, ()>
+where
+    F: FnMut(String, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, ()>>,
+{
+    if !allowed() {
+        return Err(());
+    }
     let commit: Value = serde_json::from_slice(
-        &fetch_bytes(
-            client,
+        &fetch(
             format!(
                 "https://api.github.com/repos/{}/git/ref/heads/main",
                 publisher.repository
@@ -401,9 +453,11 @@ async fn fetch_publisher(
     )
     .map_err(|_| ())?;
     let revision = resolve_revision(&commit)?;
+    if !allowed() {
+        return Err(());
+    }
     let tree: Value = serde_json::from_slice(
-        &fetch_bytes(
-            client,
+        &fetch(
             format!(
                 "https://api.github.com/repos/{}/git/trees/{revision}?recursive=1",
                 publisher.repository
@@ -416,23 +470,37 @@ async fn fetch_publisher(
     let paths = skill_paths(&tree, publisher.skills_root)?;
     let mut skills = Vec::new();
     let mut total = 0usize;
-    // Sequential requests bound concurrency to one. A publisher is committed
-    // only after every listed entry has been fetched and parsed successfully.
+    let mut complete = true;
+    // Every request depends only on this fixed public catalog, never inventory.
+    // Check the live gate between requests, including within one publisher.
     for path in paths {
-        let bytes = fetch_bytes(
-            client,
+        if !allowed() {
+            return Err(());
+        }
+        let bytes = match fetch(
             format!(
                 "https://raw.githubusercontent.com/{}/{revision}/{path}",
                 publisher.repository
             ),
             MAX_SKILL_BYTES,
         )
-        .await?;
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(()) => {
+                complete = false;
+                continue;
+            }
+        };
         total = total.saturating_add(bytes.len());
         if total > MAX_STATE_BYTES {
-            return Err(());
+            complete = false;
+            break;
         }
-        let (name, description) = parse_skill_document(&bytes).ok_or(())?;
+        let Some((name, description)) = parse_skill_document(&bytes) else {
+            complete = false;
+            continue;
+        };
         skills.push(CatalogSkill {
             id: format!("{}:{path}", publisher.id),
             publisher_id: publisher.id.into(),
@@ -446,7 +514,7 @@ async fn fetch_publisher(
             instructions_url: publisher.instructions_url.into(),
         });
     }
-    Ok(skills)
+    Ok(FetchedCatalog { skills, complete })
 }
 
 impl SkillsService {
@@ -470,14 +538,10 @@ impl SkillsService {
         let Ok(mut runtime) = self.state(&dir) else {
             return;
         };
-        if runtime.refreshing || runtime.error == Some(ERROR_CACHE) {
+        if runtime.refreshing || !skills_flag_on(shared) {
             return;
         }
-        let pending_history = runtime
-            .history_targets
-            .iter()
-            .any(|target| !runtime.history_requested.contains(&target.key()));
-        let wait = if force || pending_history {
+        let wait = if force {
             REFRESH_DEBOUNCE
         } else {
             REFRESH_AFTER
@@ -489,17 +553,12 @@ impl SkillsService {
             return;
         }
         if !force
-            && !pending_history
             && runtime.last_attempt.is_none()
             && runtime.public.checked_at.is_some_and(|at| {
                 Utc::now().signed_duration_since(at).num_seconds() < REFRESH_AFTER.as_secs() as i64
             })
         {
             return;
-        }
-        let history_targets = runtime.history_targets.clone();
-        for target in &history_targets {
-            runtime.history_requested.insert(target.key());
         }
         runtime.last_attempt = Some(Instant::now());
         runtime.refreshing = true;
@@ -531,84 +590,14 @@ impl SkillsService {
                         if !enabled(&shared) {
                             break;
                         }
-                        let fetched = fetch_publisher(&client, publisher).await;
-                        let mut histories = BTreeMap::new();
-                        if let Ok(skills) = &fetched {
-                            for target in history_targets
-                                .iter()
-                                .filter(|target| target.publisher_id == publisher.id)
-                            {
-                                if let Some(skill) = skills.iter().find(|skill| {
-                                    skill.path == target.path && skill.sha256 != target.sha256
-                                }) {
-                                    if let Ok(hashes) =
-                                        fetch_history(&client, publisher, skill).await
-                                    {
-                                        histories.insert(skill.id.clone(), hashes);
-                                    }
-                                }
-                            }
-                        }
-                        results.push((publisher.id, fetched, histories));
+                        let fetched =
+                            fetch_publisher(&client, publisher, &|| enabled(&shared)).await;
+                        results.push((publisher.id, fetched));
                     }
                 };
                 let _ = tokio::time::timeout(REFRESH_TOTAL, work).await;
             }
-            let publish = enabled(&shared);
-            let Ok(mut runtime) = service.runtime.lock() else {
-                return;
-            };
-            runtime.refreshing = false;
-            // A refresh admitted while enabled may finish after a live disable.
-            // Discard its feature results and leave the durable cache untouched.
-            if !publish {
-                runtime.last_attempt = None;
-                for target in &history_targets {
-                    runtime.history_requested.remove(&target.key());
-                }
-                return;
-            }
-            let now = Utc::now();
-            let mut failed = false;
-            for publisher in publishers()
-                .iter()
-                .filter(|publisher| !publisher.repository.is_empty())
-            {
-                match results
-                    .iter_mut()
-                    .find(|(id, _, _)| id == &publisher.id)
-                    .map(|(_, result, histories)| (result, histories))
-                {
-                    Some((Ok(skills), histories)) => {
-                        runtime
-                            .public
-                            .accept(publisher.id, std::mem::take(skills), now);
-                        for (id, hashes) in histories {
-                            let stored = runtime.public.history.entry(id.clone()).or_default();
-                            for hash in hashes.iter() {
-                                if !stored.contains(hash) {
-                                    stored.push(hash.clone());
-                                }
-                            }
-                            if stored.len() > 8 {
-                                stored.drain(..stored.len() - 8);
-                            }
-                        }
-                    }
-                    _ => {
-                        runtime.public.failed(publisher.id);
-                        failed = true;
-                    }
-                }
-            }
-            runtime.refreshing = false;
-            runtime.error = if persist(&dir, &runtime.public).is_err() {
-                Some(ERROR_CACHE)
-            } else if failed {
-                Some(ERROR_REFRESH)
-            } else {
-                None
-            };
+            service.finish_refresh(&shared, &dir, results);
         });
         if spawned.is_none() {
             if let Ok(mut runtime) = self.runtime.lock() {
@@ -617,111 +606,89 @@ impl SkillsService {
             }
         }
     }
-}
 
-#[derive(Clone)]
-struct HistoryTarget {
-    publisher_id: &'static str,
-    path: String,
-    sha256: String,
-}
-
-impl HistoryTarget {
-    fn key(&self) -> String {
-        format!("{}:{}:{}", self.publisher_id, self.path, self.sha256)
-    }
-}
-
-fn history_targets(inventory: &Inventory) -> Vec<HistoryTarget> {
-    let mut targets = Vec::new();
-    for installed in &inventory.skills {
-        let Some(source) = &installed.source else {
-            continue;
+    fn finish_refresh(
+        &self,
+        shared: &DaemonShared,
+        dir: &Path,
+        mut results: Vec<(&str, Result<FetchedCatalog, ()>)>,
+    ) {
+        let publish = enabled(shared);
+        let Ok(mut runtime) = self.runtime.lock() else {
+            return;
         };
-        let Some(publisher) = publishers().into_iter().find(|publisher| {
-            !publisher.repository.is_empty()
-                && source.repository == publisher.repository
-                && safe_skill_path(&source.path, publisher.skills_root)
-        }) else {
-            continue;
+        runtime.refreshing = false;
+        // A refresh admitted while enabled may finish after a live disable.
+        // Discard its feature results and leave the durable cache untouched.
+        if !publish || !skills_flag_on(shared) {
+            // Keep the attempt timestamp: disable/re-enable is not a throttle bypass.
+            return;
+        }
+        let now = Utc::now();
+        let mut failed = false;
+        let mut next = runtime.public.clone();
+        for publisher in publishers()
+            .iter()
+            .filter(|publisher| !publisher.repository.is_empty())
+        {
+            match results
+                .iter_mut()
+                .find(|(id, _)| id == &publisher.id)
+                .map(|(_, result)| result)
+            {
+                Some(Ok(fetched)) => {
+                    failed |= !fetched.complete;
+                    next.accept_fetched(
+                        publisher.id,
+                        FetchedCatalog {
+                            skills: std::mem::take(&mut fetched.skills),
+                            complete: fetched.complete,
+                        },
+                        now,
+                    );
+                }
+                _ => {
+                    next.failed(publisher.id);
+                    failed = true;
+                }
+            }
+        }
+        if !skills_flag_on(shared) {
+            return;
+        }
+        runtime.public = next;
+        runtime.refreshing = false;
+        runtime.error = if persist(dir, &runtime.public).is_err() {
+            Some(ERROR_CACHE)
+        } else if failed {
+            Some(ERROR_REFRESH)
+        } else {
+            None
         };
-        if !targets.iter().any(|target: &HistoryTarget| {
-            target.publisher_id == publisher.id && target.path == source.path
-        }) {
-            targets.push(HistoryTarget {
-                publisher_id: publisher.id,
-                path: source.path.clone(),
-                sha256: installed.sha256.clone(),
-            });
-        }
-        if targets.len() >= 8 {
-            break;
-        }
     }
-    targets
 }
 
-async fn fetch_history(
-    client: &reqwest::Client,
-    publisher: &Publisher,
-    skill: &CatalogSkill,
-) -> Result<Vec<String>, ()> {
-    // The path has already matched a fixed public repository and curated root.
-    // Only that public path crosses the network; installed bytes/hashes do not.
-    let commits: Value = serde_json::from_slice(
-        &fetch_bytes(
-            client,
-            format!(
-                "https://api.github.com/repos/{}/commits?path={}&per_page=4",
-                publisher.repository, skill.path
-            ),
-            256 * 1024,
-        )
-        .await?,
-    )
-    .map_err(|_| ())?;
-    let commits = commits.as_array().ok_or(())?;
-    let mut hashes = Vec::new();
-    for commit in commits.iter().take(4) {
-        let revision = commit
-            .get("sha")
-            .and_then(Value::as_str)
-            .filter(|sha| is_hex(sha, 40))
-            .ok_or(())?;
-        if revision == skill.revision {
-            continue;
-        }
-        if hashes.len() >= 3 {
-            break;
-        }
-        let bytes = fetch_bytes(
-            client,
-            format!(
-                "https://raw.githubusercontent.com/{}/{revision}/{}",
-                publisher.repository, skill.path
-            ),
-            MAX_SKILL_BYTES,
-        )
-        .await?;
-        hashes.push(hex::encode(Sha256::digest(&bytes)));
-    }
-    Ok(hashes)
-}
-
-/// Called by the existing daemon poll; public refresh does not require opening
-/// the Skills tab, and has the same Insights gate and six-hour throttle.
+/// Daemon polling refreshes only after the user follows a publisher. Opening
+/// the Skills tab remains an explicit catalog request, subject to throttling.
 pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
-    if enabled(shared) {
+    if !enabled(shared) {
+        return;
+    }
+    let followed = shared
+        .insights_skills
+        .state(shared.store.dir())
+        .is_ok_and(|runtime| !runtime.public.followed.is_empty());
+    if followed {
         shared.insights_skills.start_refresh(shared, false);
     }
 }
 
+pub(crate) fn skills_flag_on(shared: &DaemonShared) -> bool {
+    !shared.dev_dry_run && shared.feature_flags.is_enabled(INSIGHTS_SKILLS_FLAG)
+}
+
 fn feature_enabled(shared: &DaemonShared) -> bool {
-    !shared.dev_dry_run
-        && shared
-            .feature_flags
-            .snapshot()
-            .is_enabled("insights_skills")
+    skills_flag_on(shared)
 }
 
 fn enabled(shared: &DaemonShared) -> bool {
@@ -876,6 +843,9 @@ fn snapshot(shared: &DaemonShared) -> Value {
             )
         };
         if let Ok(mut runtime) = shared.insights_skills.state(shared.store.dir()) {
+            if !skills_flag_on(shared) {
+                return inventory;
+            }
             runtime.inventory_scanned_at = Some(Utc::now());
             runtime.inventory = Some((Instant::now(), policy.clone(), inventory.clone()));
         }
@@ -883,9 +853,6 @@ fn snapshot(shared: &DaemonShared) -> Value {
     });
     if inventory_policy(shared).ok().as_ref() != Some(&policy) {
         return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-changed","copy":copy()});
-    }
-    if let Ok(mut runtime) = shared.insights_skills.state(shared.store.dir()) {
-        runtime.history_targets = history_targets(&inventory);
     }
     let usage_response = super::insights_week::skills_usage(shared);
     if usage_response.get("readable").and_then(Value::as_bool) == Some(false) {
@@ -914,6 +881,9 @@ fn snapshot(shared: &DaemonShared) -> Value {
     let Ok(runtime) = shared.insights_skills.state(shared.store.dir()) else {
         return json!({"enabled":true,"readable":false,"reason":ERROR_CACHE,"copy":copy()});
     };
+    if !skills_flag_on(shared) {
+        return json!({"enabled":false,"copy":copy()});
+    }
     let now = Utc::now();
     let publisher_states: Vec<_> = publishers().iter().map(|publisher| {
         let state = runtime.public.publisher_states.get(publisher.id);
@@ -945,7 +915,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
     }
     let value = json!({
         "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
-        "catalog":{"publishers":publishers(),"skills":catalog,"partial":catalog_partial,"checked_at":runtime.public.checked_at,"publisher_states":publisher_states},
+        "catalog":{"publishers":publishers(),"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states},
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
@@ -1083,14 +1053,18 @@ pub(crate) fn handle_follow(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(mut runtime) = service.state(shared.store.dir()) else {
         return Response::err(req.id, ERR_UNAVAILABLE, ERROR_CACHE);
     };
-    if runtime.error == Some(ERROR_CACHE) {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERROR_CACHE);
+    if !skills_flag_on(shared) {
+        return Response::ok(req.id, json!({"enabled":false,"copy":copy()}));
     }
     let mut next = runtime.public.clone();
     if let Err(label) = next.follow(id, followed) {
         return Response::err(req.id, ERR_BAD_PARAMS, label);
     }
+    if !skills_flag_on(shared) {
+        return Response::ok(req.id, json!({"enabled":false,"copy":copy()}));
+    }
     if persist(shared.store.dir(), &next).is_err() {
+        runtime.error = Some(ERROR_CACHE);
         return Response::err(
             req.id,
             ERR_UNAVAILABLE,
@@ -1098,6 +1072,9 @@ pub(crate) fn handle_follow(shared: &DaemonShared, req: &Request) -> Response {
         );
     }
     runtime.public = next;
+    if runtime.error == Some(ERROR_CACHE) {
+        runtime.error = None;
+    }
     drop(runtime);
     Response::ok(req.id, super::run_blocking(|| snapshot(shared)))
 }

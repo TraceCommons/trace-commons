@@ -225,9 +225,15 @@ struct ManagedFolderOptions: View {
     /// then a picker of the models no less private than the main model.
     private var backgroundPicker: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(model.managedText("background_model_title"))
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
+            let title = model.managedText("background_model_title")
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                // What the background model is (owner, 2026-11-11).
+                GlassInfoButton(SessionReviewCard.moreAbout(title),
+                                text: model.managedText("background_model_info"))
+            }
             GlassPicker(model.managedText("background_model_choice"), selection: Binding(
                 get: { draft.backgroundModel ?? ManagedSurface.defaultModel },
                 set: { draft.chooseBackground($0.flatMap { $0.isEmpty ? nil : $0 }) }),

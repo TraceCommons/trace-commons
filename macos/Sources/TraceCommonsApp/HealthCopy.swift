@@ -3,9 +3,8 @@ import TCShellCore
 import TCBridge
 
 /// The health sentences, verbatim from the shared design's failure-state
-/// table. Two rules hold across every one of them: never name the mechanism
-/// ("privacy filter", "claim", "ingest", "canary" are internal words), and
-/// always state the data consequence.
+/// table. One rule holds across every one of them: never name the mechanism
+/// ("privacy filter", "claim", "ingest", "canary" are internal words).
 ///
 /// `status.health.last_error_label` carries ONE label at a time, already
 /// resolved by the daemon's precedence order. This table does not
@@ -75,8 +74,8 @@ extension HealthCopy {
     /// panic or an undecodable payload), so a reported condition is never
     /// drawn as healthy.
     static let onHoldFallback = HealthCopy(
-        title: "Contributions are on hold.",
-        detail: "Something is stopping traces from being sent. Nothing has been lost, and nothing has gone out.",
+        title: "Contributions on hold.",
+        detail: "",
         severity: .waiting,
         actionTitle: nil
     )

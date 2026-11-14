@@ -41,7 +41,7 @@ enum PrivateInferenceCopyFixture {
          "state_running":"S-RUNNING","state_running_no_backends":"S-NO-BACKENDS","state_running_answered_elsewhere":"S-ELSEWHERE","state_running_destination_unknown":"S-DEST-UNKNOWN",
          "state_running_elsewhere":"S-ELSEWHERE","state_port_in_use":"S-PORT",
          "state_start_failed":"S-FAILED","state_crashed":"S-CRASHED",
-         "quit_also_stops":"QUIT","write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",
+         "write_unconfirmed":"UNCONFIRMED","settings_moved":"MOVED","tray_turn_off":"TRAYOFF","tray_open_to_turn_on":"TRAYON",
          "harnesses_title":"H-TITLE","harnesses_what":"H-WHAT","harnesses_precedence_tooltip":"H-PRECEDENCE",
          "harnesses_spend_scope":"H-SPEND-SCOPE",
          "harness_not_connected":"H-NOT-CONNECTED",

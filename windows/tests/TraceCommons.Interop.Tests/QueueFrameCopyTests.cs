@@ -49,13 +49,33 @@ public class HealthCopyTests
 
     [Theory]
     [MemberData(nameof(EveryLabel))]
-    public void EveryLabelRendersSomething(string label)
+    public void EveryLabelHasTheApprovedTitleAndDetailPresence(string label)
     {
+        // Banners name the condition and may stop at the title (#2113).
+        // The consent prompt and full-queue recovery still need their detail.
+        (string title, bool hasDetail) = label switch
+        {
+            "not-logged-in" => ("Not connected.", false),
+            "pii-filter-unavailable" => ("Waiting on the privacy scan.", false),
+            "privacy-filter-canary-failed" => ("Privacy scan failed its self-test.", false),
+            "near-ai-notice-not-acknowledged" => ("One thing to confirm.", true),
+            "claim-mint-failed" or "ingest-unreachable" => ("Can't reach the upload server.", false),
+            "queue-full" => ("Near.ai has stopped queuing new traces", true),
+            "a-label-nobody-has-written-yet" => ("Contributions on hold.", false),
+            _ => throw new ArgumentOutOfRangeException(nameof(label), label, "Add the approved banner expectation."),
+        };
         HealthCopy? copy = HealthCopy.ForLabel(label);
 
         Assert.NotNull(copy);
-        Assert.NotEmpty(copy!.Title);
-        Assert.NotEmpty(copy.Detail);
+        Assert.Equal(title, copy!.Title);
+        if (hasDetail)
+        {
+            Assert.NotEmpty(copy.Detail);
+        }
+        else
+        {
+            Assert.Empty(copy.Detail);
+        }
     }
 
     /// <summary>
@@ -88,31 +108,6 @@ public class HealthCopyTests
 
         Assert.DoesNotContain("some-future-label", copy.Title, StringComparison.Ordinal);
         Assert.DoesNotContain("some-future-label", copy.Detail, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The design's second copy rule: always state the data consequence.
-    /// </summary>
-    [Theory]
-    [MemberData(nameof(EveryLabel))]
-    public void EverySentenceStatesWhatHappenedToTheData(string label)
-    {
-        HealthCopy copy = HealthCopy.ForLabel(label)!;
-        string text = (copy.Title + " " + copy.Detail).ToLowerInvariant();
-
-        string[] consequences =
-        {
-            "nothing has been lost",
-            "queue is safe",
-            "rather than going out unscanned",
-            "nothing is being sent",
-            "nothing has gone out",
-            "contributions resume",
-            "goes out tomorrow",
-            "stopped queuing",
-        };
-
-        Assert.Contains(consequences, c => text.Contains(c, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -160,10 +155,7 @@ public class HealthCopyTests
 
         HealthCopy notConnected = HealthCopy.ForLabel("not-logged-in")!;
         Assert.Equal("Not connected.", notConnected.Title);
-        Assert.Equal(
-            "Traces are being queued, but nothing can be sent until you reconnect. "
-            + "Nothing has been lost.",
-            notConnected.Detail);
+        Assert.Equal("", notConnected.Detail);
     }
 
     /// <summary>

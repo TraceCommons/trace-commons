@@ -143,9 +143,10 @@ Three things live here:
   traces, and the C ABI (`trace-commons-contributor-ffi`) that the macOS and
   Windows apps link.
 - **The desktop apps**: the native SwiftUI macOS app in `macos/` is the lead
-  client and the one new releases ship. The Windows app (`windows/`, C#),
-  the Linux GTK app (`crates/trace-commons-contributor-gtk`) and the Tauri
-  app (`tauri-desktop/`) are frozen.
+  client and the one new releases ship. The Linux GTK app
+  (`crates/trace-commons-contributor-gtk`) is back in development but not
+  yet released again. The Windows app (`windows/`, C#) and the Tauri app
+  (`tauri-desktop/`) are frozen.
 
 Ironclaw is a separate, TEE-hosted trace source with its own client
 integration; the shared protocol DTOs live in
@@ -221,7 +222,10 @@ crates/
 │                                `trace_commons_contributor::insights`.
 ├── trace-commons-contributor-platform/  Shared OS credentials and local files.
 ├── trace-commons-contributor-ffi/  C ABI over the contributor, for the macOS and Windows apps.
-├── trace-commons-contributor-gtk/  Linux GTK app (frozen; its own Cargo workspace).
+├── trace-commons-contributor-gtk/  Linux GTK app (in development; its own Cargo workspace).
+├── ironwire_*/                  IronWire, the loopback inference proxy the daemon runs
+│                                for Private AI (11 crates; MIT OR Apache-2.0, copyright
+│                                NEAR AI; imported from nearai/ironwire). See docs/ironwire/.
 └── trace-commons-client-server-tests/  Unpublished cross-contract test package;
                                  client-only tests do not build the server.
 
@@ -235,6 +239,7 @@ docs/
 ├── status.md                    Deployment status and reference notes.
 ├── release-runbook.md           Cutting a signed app or CLI release.
 ├── operator/                    Operator runbooks (per slice).
+├── ironwire/                    IronWire design documents and working rules.
 └── superpowers/                 Per-slice design specs + implementation plans.
 .github/workflows/ci.yml         Server-side CI gates.
 .github/workflows/clients.yml    Desktop app CI.
@@ -380,8 +385,9 @@ command line, where it would land in your shell history and in `ps`.
 
 The desktop app ships as a universal notarized DMG
 (`brew install --cask TraceCommons/tap/trace-commons`). New `app-v*` releases
-are macOS only: the Windows and Linux apps are frozen on their existing
-releases, and [`docs/release-runbook.md`](docs/release-runbook.md) names the
+are macOS only: the Windows app is frozen and the Linux app is not yet
+released again, both on their existing releases, and
+[`docs/release-runbook.md`](docs/release-runbook.md) names the
 last release that carried them. The CLI above still ships for macOS, Linux
 and Windows. https://docs.tracecommons.ai/cli/quickstart/ is the fuller
 guide.

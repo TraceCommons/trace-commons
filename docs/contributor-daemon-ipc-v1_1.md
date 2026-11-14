@@ -922,7 +922,10 @@ limit: a busy witness never costs a session.
 
 A witness whose evidence could not be fetched (`witness_timeout`,
 `witness_unreachable`, `witness_attestation_unavailable`,
-`witness_collateral_unavailable`) also keeps the approval: the entry stays
+`witness_collateral_unavailable`), or that answered it cannot serve right now
+(`witness_unreachable` also covers any `5xx` other than saturation and
+timeout, such as `503 witness_signing_unavailable`, and a gateway `404` with
+nothing behind it), also keeps the approval: the entry stays
 `approved` under that label and is retried on the transient-upload backoff,
 and the worker takes no other session until that retry, since the next
 would meet the same witness. Once that budget is spent the entry returns to
@@ -1791,7 +1794,10 @@ A review that does not finish within the preview build deadline (seven
 minutes, below) is abandoned and refused as `witness_timeout`. A witness that
 does not answer within its own request bound, or answers
 `504 witness_request_timed_out`, is also `witness_timeout`; one that cannot be
-connected to is `witness_unreachable`. Both carry the `failed_unreachable`
+connected to, or answers that it cannot serve right now (a `5xx`), is
+`witness_unreachable`. A `413 witness_request_too_large` is
+`witness_payload_too_large`, and a `403 witness_inference_*` is
+`admission_evidence_refused`. `witness_timeout` and `witness_unreachable` carry the `failed_unreachable`
 sentence in `result.view`. Nothing is pinned and nothing falls back to local
 redaction.
 
@@ -3579,8 +3585,10 @@ reason no unattended approval can satisfy:
   attestation or no collateral) through every retry. Nothing was judged and
   nothing was sent. While it is still being retried the entry stays
   `approved` under the same label, with `retry_after` set, and is not held.
-  Earlier builds refused such a session as `witness_attestation_unavailable`;
-  a newer build offers that refusal again.
+  Earlier builds refused such a session as `witness_attestation_unavailable`,
+  or as `witness_response_malformed` when the witness answered with an error
+  they did not recognise; a newer build offers that refusal again (the
+  malformed one only when it was approved, back to `approved`).
 - `witness-measurement-not-accepted`: the witness's evidence was fetched and
   verified, but it reports a measurement outside the accepted set. It is not
   retried, and nothing was sent. A person decides; a newer accepted list can
@@ -6620,7 +6628,7 @@ state, the harness rows and the credential row:
   `state_running_answered_elsewhere`, `state_running_destination_unknown`,
   `state_running_elsewhere`,
   `state_port_in_use`, `state_start_failed`, `state_crashed`;
-- `quit_also_stops`, `write_unconfirmed`;
+- `write_unconfirmed`;
 - `settings_moved`, `tray_turn_off`, `tray_open_to_turn_on`;
 - `harnesses_title`, `harnesses_what`, `harnesses_spend_scope`,
   `harnesses_none_found`;

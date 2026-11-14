@@ -258,7 +258,7 @@ rm -rf "$DMG_ROOT"
 mkdir -p "$DMG_ROOT"
 ditto "$APP" "$DMG_ROOT/$(basename "$APP")"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -volname "$TC_DISPLAY_NAME" -srcfolder "$DMG_ROOT" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
+hdiutil create -volname "$TC_DMG_VOLUME_NAME" -srcfolder "$DMG_ROOT" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
 rm -rf "$DMG_ROOT"
 # Refuse an image without both, and one whose app no longer verifies.
 DMG_CHECK="$WORK/dmg-check"

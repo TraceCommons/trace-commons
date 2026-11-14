@@ -2010,6 +2010,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 session_ref,
                 size_bytes,
                 limit_bytes,
+                ..
             } => {
                 if let (Some(size), Some(limit)) = (size_bytes, limit_bytes) {
                     println!(

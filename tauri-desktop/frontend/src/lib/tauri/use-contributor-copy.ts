@@ -244,8 +244,9 @@ export function useWitnessReviewCopy() {
 }
 
 /**
- * Whether this app hosts the watcher or is attached to one can change while
- * it runs, so the prompt is re-read every time it opens rather than cached.
+ * Whether compute or Private AI is live changes while the app runs, so the
+ * prompt is re-read on every quit rather than cached. `null` data means
+ * quit without asking.
  */
 export function useQuitConfirmationCopy(open: boolean) {
   return useQuery({

@@ -288,26 +288,19 @@ fn tauri_commands_project_shared_contributor_copy() {
     assert!(preview.contains("consent_copy::consent_copy"));
     assert!(preview.contains("gate_statement"));
 
-    // Quitting says what keeps running, and that depends on whether this
-    // process hosts the watcher or is attached to one. The sentence and the
-    // role-to-sentence choice both belong to the shared crate.
+    // Quitting asks only when it would stop compute or Private AI, and the
+    // sentence and the choice of it belong to the shared crate.
     let platform = read(&root, "tauri-desktop/src-tauri/src/commands/platform.rs");
     let quit = rust_function(&platform, "fn quit_confirmation_copy");
-    assert!(quit.contains("quit_role()"));
+    assert!(quit.contains("quit_stops()"));
     let quit_value = rust_function(&platform, "fn quit_prompt_value");
     assert!(quit_value.contains("quit_copy::quit_prompt"));
     let state = read(&root, "tauri-desktop/src-tauri/src/state.rs");
-    let role = rust_function(&state, "fn quit_role(&self) -> QuitRole");
-    for role_name in [
-        "QuitRole::Hosting",
-        "QuitRole::Attached",
-        "QuitRole::Unavailable",
-    ] {
-        assert!(
-            role.contains(role_name),
-            "Tauri must map its daemon connection to `{role_name}`"
-        );
-    }
+    let stops = rust_function(&state, "fn private_ai_quit_stops");
+    assert!(
+        stops.contains("quit_needs_notice("),
+        "Tauri must ask the shared table whether quitting stops Private AI"
+    );
 }
 
 #[test]

@@ -243,6 +243,9 @@ pub enum SubmitOutcome {
         session_ref: String,
         size_bytes: Option<usize>,
         limit_bytes: Option<usize>,
+        /// `(windows_needed, windows_allowed)` when the witness refused the
+        /// session as too large to review; `None` for every other refusal.
+        review_limits: Option<(u64, u64)>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -455,6 +458,7 @@ fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
         session_ref: session_ref.to_string(),
         size_bytes: None,
         limit_bytes: None,
+        review_limits: None,
     }
 }
 
@@ -467,6 +471,7 @@ fn refused_for_size(session_ref: &str, size_bytes: usize, limit_bytes: usize) ->
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
         limit_bytes: Some(crate::envelope::clamp_envelope_limit(limit_bytes)),
+        review_limits: None,
     }
 }
 
@@ -655,7 +660,9 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 
 /// Whether a witness failure label says its evidence could not be fetched,
 /// so nothing was judged: the witness ran past its deadline
-/// (`witness_timeout`), could not be reached (`witness_unreachable`), or did
+/// (`witness_timeout`), could not be reached or answered that it cannot
+/// serve right now (`witness_unreachable`: a `5xx` such as `503
+/// witness_signing_unavailable`, or a gateway with nothing behind it), or did
 /// not hand over its attestation (`witness_attestation_unavailable`: a
 /// non-success answer, a body with no quote, a broken connection) or Intel's
 /// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
@@ -664,7 +671,7 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 /// spent. A busy witness (`witness_saturated`) is not covered: it names its
 /// own retry delay and has its own path.
 ///
-/// Fetching is the only thing these labels say failed. Evidence that was
+/// Fetching or serving is the only thing these labels say failed. Evidence that was
 /// fetched and did not verify has labels of its own
 /// ([`witness_trust_hold`]), and every other witness label is a
 /// judgement or a local refusal that stays one. Nothing is uploaded without a
@@ -989,6 +996,10 @@ pub struct SubmitContext<'a> {
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
     /// borrows the context immutably; there is no concurrency here.
     last_witness_retry_after: std::sync::atomic::AtomicU32,
+    /// The counts a witness gave when it refused the last submission as too
+    /// large to review, `(windows_needed, windows_allowed)`; `None`
+    /// otherwise. Reset like `last_witness_retry_after`.
+    last_witness_review_limits: std::sync::Mutex<Option<(u64, u64)>>,
     /// The wait ingest's rate limit asked for on the last submission, in
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
@@ -997,6 +1008,12 @@ pub struct SubmitContext<'a> {
     /// (or a body `retry_after_seconds`) on the most recent submission; zero
     /// for none. Reset like `last_rate_limit_retry_after`.
     last_unavailable_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, ingest named when it refused the last
+    /// submission with `account_limit_reached` (the body's
+    /// `retry_after_seconds`, or `Retry-After`); zero for none, which is
+    /// what ingest sends when the allowance has no reset. Reset like
+    /// `last_rate_limit_retry_after`. Unclamped; the daemon caps it.
+    last_account_limit_retry_after: std::sync::atomic::AtomicU32,
     /// When the last submission started sending to ingest, or `None` if it
     /// stopped before any send (a hold, a local refusal, a classifier
     /// failure, a dry run). Reset at the start of each submission. The
@@ -1089,8 +1106,10 @@ impl<'a> SubmitContext<'a> {
             background_witness: false,
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_witness_review_limits: std::sync::Mutex::new(None),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_account_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
@@ -1712,6 +1731,16 @@ impl<'a> SubmitContext<'a> {
                 self.last_witness_retry_after
                     .store(retry_after_secs, std::sync::atomic::Ordering::Relaxed);
             }
+            if let crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } = e
+            {
+                *self
+                    .last_witness_review_limits
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some((windows_needed, windows_allowed));
+            }
             e.refusal_label()
         })?;
 
@@ -1845,7 +1874,14 @@ impl<'a> SubmitContext<'a> {
                         reason_label: label.to_string(),
                     }));
                 }
-                Ok(Err(refused(label, &transcript.session_hash)))
+                let mut outcome = refused(label, &transcript.session_hash);
+                if label
+                    == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+                    && let SubmitOutcome::Refused { review_limits, .. } = &mut outcome
+                {
+                    *review_limits = self.last_witness_review_limits();
+                }
+                Ok(Err(outcome))
             }
         }
     }
@@ -1870,6 +1906,10 @@ impl<'a> SubmitContext<'a> {
         self.last_receipt_shipped = ReceiptShipped::NoCall;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         let Some(settings) = self.cfg.witness.clone() else {
             return Ok(WitnessForPin::Outcome(refused(
                 "witness-not-configured",
@@ -1990,6 +2030,17 @@ impl<'a> SubmitContext<'a> {
         self.upload_provenance = Some((approved_unattended, approved_verdict));
     }
 
+    /// The counts the witness gave when it refused the most recent
+    /// submission as too large to review, `(windows_needed,
+    /// windows_allowed)`, or `None` if it did not.
+    #[must_use]
+    pub fn last_witness_review_limits(&self) -> Option<(u64, u64)> {
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -2010,6 +2061,19 @@ impl<'a> SubmitContext<'a> {
     pub fn last_unavailable_retry_after(&self) -> Option<u32> {
         Some(
             self.last_unavailable_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
+    /// The wait, in seconds, ingest named for a spent account allowance on
+    /// the most recent submission, or `None` if it named none or did not
+    /// refuse it so. Meaningful immediately after a submission returns
+    /// `Failed` with `account_limit_reached`.
+    #[must_use]
+    pub fn last_account_limit_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_account_limit_retry_after
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
         .filter(|secs| *secs > 0)
@@ -2079,9 +2143,15 @@ impl<'a> SubmitContext<'a> {
         self.last_sent_witness = None;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_unavailable_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_account_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_ingest_send_at = None;
         let opts = self.opts;
@@ -2449,6 +2519,11 @@ impl<'a> SubmitContext<'a> {
                         uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
+                    crate::daemon::first_trace::observe_for_config(
+                        self.store,
+                        self.cfg,
+                        std::iter::once(receipt.submitted_at),
+                    );
                     self.receipts.push(receipt);
                     return Ok(SubmitOutcome::Submitted {
                         submission_id: envelope.submission_id,
@@ -2468,6 +2543,7 @@ impl<'a> SubmitContext<'a> {
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
         let mut unavailable_retry_after = None;
+        let mut account_limit_retry_after = None;
         self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
@@ -2479,9 +2555,14 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
             &mut unavailable_retry_after,
+            &mut account_limit_retry_after,
             envelope_limit,
         )
         .await;
+        if let Some(seconds) = account_limit_retry_after {
+            self.last_account_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
@@ -2504,6 +2585,11 @@ impl<'a> SubmitContext<'a> {
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
+                        crate::daemon::first_trace::observe_for_config(
+                            self.store,
+                            self.cfg,
+                            std::iter::once(r.submitted_at),
+                        );
                         self.receipts.push(r);
                         Ok(SubmitOutcome::Submitted {
                             submission_id: envelope.submission_id,
@@ -3402,6 +3488,9 @@ async fn upload_with_retry(
     // Written with the wait a `503` asked for (`Retry-After` or the body's
     // `retry_after_seconds`), clamped like the rate limit's.
     unavailable_retry_after: &mut Option<u32>,
+    // Written with the wait ingest named when it refused the upload with
+    // `account_limit_reached`, unclamped; left `None` when it named none.
+    account_limit_retry_after: &mut Option<u32>,
     // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
@@ -3502,6 +3591,9 @@ async fn upload_with_retry(
                 // constant for the variant that was recognised, never the
                 // string the server sent.
                 if let Some(refusal) = admission_refusal(&e) {
+                    if refusal == AdmissionRefusal::AccountLimitReached {
+                        *account_limit_retry_after = account_limit_retry_hint(&e, Utc::now());
+                    }
                     return Err(refusal.label().to_string());
                 }
                 // Sending too fast is not a verdict on the session. The
@@ -3556,6 +3648,24 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
         }
         _ => None,
     }
+}
+
+/// The wait ingest named on an `account_limit_reached` refusal: the body's
+/// `retry_after_seconds`, else `Retry-After`. `None` for none or zero, which
+/// is what ingest sends when the allowance has no reset. Unclamped.
+fn account_limit_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let OcError::ServerLabel {
+        body, retry_after, ..
+    } = e
+    else {
+        return None;
+    };
+    crate::retry_jitter::server_retry_after(
+        body_retry_after_seconds(body),
+        retry_after.as_deref(),
+        now,
+    )
+    .filter(|secs| *secs > 0)
 }
 
 /// The seconds to wait if this error is ingest's per-principal upload rate
@@ -3973,6 +4083,52 @@ mod tests {
             )),
             None,
             "only a 429"
+        );
+    }
+
+    /// The wait ingest names on `account_limit_reached` is read from the
+    /// body, else `Retry-After`, unclamped; none (an allowance with no
+    /// reset) or zero is no hint.
+    #[test]
+    fn an_account_limit_refusal_carries_its_wait() {
+        let now = Utc::now();
+        let refusal = |body: &str, header: Option<&str>| OcError::ServerLabel {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            label: "account_limit_reached".into(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        };
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":172800}"#,
+                    Some("5")
+                ),
+                now
+            ),
+            Some(172_800)
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(r#"{"error":"account_limit_reached"}"#, Some("120")),
+                now
+            ),
+            Some(120)
+        );
+        assert_eq!(
+            account_limit_retry_hint(&refusal(r#"{"error":"account_limit_reached"}"#, None), now),
+            None
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":0}"#,
+                    None
+                ),
+                now
+            ),
+            None
         );
     }
 
@@ -5111,7 +5267,9 @@ mod tests {
                 session_ref,
                 size_bytes,
                 limit_bytes,
+                review_limits,
             } => {
+                assert_eq!(review_limits, None);
                 assert_eq!(reason_label, "session-too-large");
                 assert_eq!(session_ref, "sha256:abc");
                 assert_eq!(size_bytes, Some(MAX_ENVELOPE_BYTES + 1));
@@ -8605,6 +8763,7 @@ mod tests {
             witnessed,
             &mut None,
             &mut None,
+            &mut None,
             MAX_ENVELOPE_BYTES,
         )
         .await;
@@ -8824,6 +8983,7 @@ pub fn outcomes_to_json(
                     session_ref,
                     size_bytes,
                     limit_bytes,
+                    ..
                 } => serde_json::json!({
                     "outcome": "refused",
                     "reason": reason_label,

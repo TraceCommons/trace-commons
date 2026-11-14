@@ -1,104 +1,68 @@
 //! What quitting says, in one place, for every shell.
 //!
-//! Quitting must say what keeps running, and the true sentence depends on
-//! which process is doing the watching (the shared shell design spec,
-//! "Quit is explicit about consequences"):
+//! Quitting asks first only when it would cut off something live: compute
+//! work this app runs, or Private AI answering model calls through this app.
+//! Anything else quits at once, without a prompt. When the prompt does
+//! appear it gives the one reason in one short sentence and nothing more
+//! (owner decision 2026-11-12, replacing the earlier "Quit is explicit about
+//! consequences" prompt shown on every quit).
 //!
-//! - A shell that HOSTS the watcher in-process stops it by quitting, because
-//!   the app *is* it.
-//! - A shell ATTACHED to a watcher some other process runs (a CLI, a service
-//!   manager, another shell) leaves that watcher running.
-//! - A shell with no watcher at all -- none started yet, or an attached one
-//!   whose connection dropped -- cannot claim either. It says only what is
-//!   true in both cases: quitting it stops nothing, and it cannot tell
-//!   whether a watcher is running elsewhere.
-//!
-//! Getting it wrong is a lie about whether the machine is still watching,
-//! so the choice lives here with the sentences rather than in each shell.
-//!
-//! Stopping an attached watcher from the quit prompt is deliberately not a
-//! shared action: a shell that talks to the watcher through
-//! [`crate::daemon::attached::AttachedDaemon`] cannot send `shutdown` (it is
-//! refused before it reaches the wire), so offering it there would be a
-//! button that does nothing.
+//! Each shell reads its own two facts (whether a compute worker is still
+//! running, and `private_inference_copy::quit_needs_notice`) and quits
+//! directly when both are false. Only when one is true does it ask here for
+//! the words. A shell that then cannot read them keeps its existing
+//! refusal, so a failed read never turns into a silent quit while something
+//! is running.
 
 use serde::Serialize;
 
 /// The prompt's heading.
 pub const QUIT_TITLE: &str = concat!("Quit ", crate::app_name!(), "?");
 
-/// This process is the watcher.
-pub const QUIT_HOSTING_BODY: &str = concat!(
-    "Quitting stops ",
-    crate::app_name!(),
-    " watching for finished traces. Nothing is queued or sent until you open it again. \
-     Anything already waiting stays waiting."
-);
+/// Compute work is running and quitting stops it.
+// Approved by the owner 2026-11-12.
+pub const QUIT_STOPS_COMPUTE: &str = "Quitting stops compute on this computer.";
 
-/// This process is attached to a watcher another process runs.
-///
-/// The watcher that outlives this shell does not stop sending. It uploads
-/// anything already approved, and in a project set to `auto_upload` it
-/// approves and uploads finished sessions itself -- including sessions that
-/// finish after the shell has quit. This used to end "Nothing will be sent
-/// while nobody's approving", which was false in both cases and steered a
-/// contributor towards quitting as though it stopped uploads.
-///
-/// Worded to be true whether or not any project is set to contribute
-/// automatically, so no shell has to know the project policy to say it. "Unless it's paused" is there because
-/// pause is the one state in which the watcher does neither.
-pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
-     Unless it's paused, it keeps sending traces you've already approved, and any trace \
-     from a project set to contribute automatically, including ones that finish after you \
-     quit. Everything else waits for you.";
+/// Private AI is answering model calls through this app and quitting stops it.
+// Approved by the owner 2026-11-12.
+pub const QUIT_STOPS_PRIVATE_AI: &str = "Quitting stops Private AI on this computer.";
 
-/// This process has no watcher to stop.
-///
-/// It cannot say nothing moves. The dropped-connection case is this role
-/// too, and there the watcher a CLI or service manager runs is still going
-/// and still sending, so this used to end "Anything already waiting stays
-/// waiting", the claim `QUIT_ATTACHED_BODY` no longer makes.
-pub const QUIT_UNAVAILABLE_BODY: &str = "This app can't reach a watcher right now, so it can't \
-     tell whether one is still running. Quitting won't stop one that is.";
+/// Both of the above at once.
+// Approved by the owner 2026-11-12.
+pub const QUIT_STOPS_COMPUTE_AND_PRIVATE_AI: &str =
+    "Quitting stops compute and Private AI on this computer.";
 
 pub const QUIT_CONFIRM: &str = "Quit";
 pub const QUIT_CANCEL: &str = "Cancel";
 
-/// Which process is doing the watching, from the quitting shell's side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuitRole {
-    /// This process runs the watcher; quitting stops it.
-    Hosting,
-    /// This process is a client of a watcher that outlives it.
-    Attached,
-    /// No watcher is reachable from this process.
-    Unavailable,
-}
-
-/// Every word of one quit prompt, already chosen for the role.
+/// Every word of one quit prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuitPrompt {
-    pub role: QuitRole,
     pub title: &'static str,
     pub body: &'static str,
     pub confirm: &'static str,
     pub cancel: &'static str,
 }
 
-/// The quit prompt for a shell in `role`.
-pub fn quit_prompt(role: QuitRole) -> QuitPrompt {
-    QuitPrompt {
-        role,
+/// The quit prompt, or `None` when quitting interrupts nothing and the shell
+/// should quit without asking.
+///
+/// `stops_compute`: a compute worker is still running (the compute
+/// snapshot's `worker_stopped` is false). `stops_private_ai`:
+/// `private_inference_copy::quit_needs_notice` is true.
+pub fn quit_prompt(stops_compute: bool, stops_private_ai: bool) -> Option<QuitPrompt> {
+    let body = match (stops_compute, stops_private_ai) {
+        (false, false) => return None,
+        (true, false) => QUIT_STOPS_COMPUTE,
+        (false, true) => QUIT_STOPS_PRIVATE_AI,
+        (true, true) => QUIT_STOPS_COMPUTE_AND_PRIVATE_AI,
+    };
+    Some(QuitPrompt {
         title: QUIT_TITLE,
-        body: match role {
-            QuitRole::Hosting => QUIT_HOSTING_BODY,
-            QuitRole::Attached => QUIT_ATTACHED_BODY,
-            QuitRole::Unavailable => QUIT_UNAVAILABLE_BODY,
-        },
+        body,
         confirm: QUIT_CONFIRM,
         cancel: QUIT_CANCEL,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -106,87 +70,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_role_gets_its_own_sentence() {
-        assert_eq!(quit_prompt(QuitRole::Hosting).body, QUIT_HOSTING_BODY);
-        assert_eq!(quit_prompt(QuitRole::Attached).body, QUIT_ATTACHED_BODY);
-        assert_eq!(
-            quit_prompt(QuitRole::Unavailable).body,
-            QUIT_UNAVAILABLE_BODY
-        );
+    fn nothing_live_means_no_prompt() {
+        assert_eq!(quit_prompt(false, false), None);
     }
 
-    /// Only the hosting process may say quitting stops the watcher.
     #[test]
-    fn only_hosting_claims_quitting_stops_watching() {
-        assert!(QUIT_HOSTING_BODY.starts_with(concat!(
-            "Quitting stops ",
-            crate::app_name!(),
-            " watching"
-        )));
-        for role in [QuitRole::Attached, QuitRole::Unavailable] {
-            let body = quit_prompt(role).body;
-            assert!(
-                !body.contains("Quitting stops"),
-                "{role:?} must not claim quitting stops the watcher: {body}"
-            );
-        }
-        assert!(QUIT_ATTACHED_BODY.contains("keeps running"));
-    }
-
-    /// The attached watcher keeps sending, so its quit prompt may not say
-    /// otherwise.
-    ///
-    /// It used to say "Nothing will be sent while nobody's approving", which
-    /// was false for any project set to contribute automatically and for
-    /// anything already approved but not yet uploaded.
-    #[test]
-    fn the_attached_prompt_does_not_claim_nothing_is_sent() {
-        let body = quit_prompt(QuitRole::Attached).body;
-        for claim in [
-            "Nothing will be sent",
-            "Nothing is sent",
-            "nobody's approving",
+    fn each_live_combination_gets_its_own_sentence() {
+        for (compute, private_ai, body) in [
+            (true, false, QUIT_STOPS_COMPUTE),
+            (false, true, QUIT_STOPS_PRIVATE_AI),
+            (true, true, QUIT_STOPS_COMPUTE_AND_PRIVATE_AI),
         ] {
-            assert!(
-                !body.contains(claim),
-                "the attached watcher keeps sending; the prompt must not say {claim:?}: {body}"
-            );
+            let prompt = quit_prompt(compute, private_ai).expect("something live asks");
+            assert_eq!(prompt.body, body);
+            assert_eq!(prompt.title, concat!("Quit ", crate::app_name!(), "?"));
+            assert_eq!(prompt.confirm, "Quit");
+            assert_eq!(prompt.cancel, "Cancel");
         }
-        assert!(
-            body.contains("contribute automatically"),
-            "automatic projects keep uploading after quit and the prompt must say so: {body}"
-        );
-        assert!(
-            body.contains("already approved"),
-            "approved sessions still upload after quit and the prompt must say so: {body}"
-        );
     }
 
-    /// With no watcher reachable, the prompt cannot know whether one is
-    /// still sending, so it may not say that nothing moves.
+    /// The owner's rule: one short sentence saying why, and nothing more.
     #[test]
-    fn the_unavailable_prompt_does_not_claim_nothing_moves() {
-        let body = quit_prompt(QuitRole::Unavailable).body;
-        for claim in ["stays waiting", "Nothing will be sent", "Nothing is sent"] {
-            assert!(
-                !body.contains(claim),
-                "a watcher may still be running; the prompt must not say {claim:?}: {body}"
-            );
+    fn every_body_is_one_short_sentence() {
+        for body in [
+            QUIT_STOPS_COMPUTE,
+            QUIT_STOPS_PRIVATE_AI,
+            QUIT_STOPS_COMPUTE_AND_PRIVATE_AI,
+        ] {
+            assert!(body.starts_with("Quitting stops "), "{body}");
+            assert!(body.ends_with('.'), "{body}");
+            assert_eq!(body.matches('.').count(), 1, "one sentence: {body}");
+            assert!(!body.contains('\n'), "{body}");
+            assert!(body.len() <= 60, "short: {body}");
         }
-        assert!(body.contains("can't tell"), "{body}");
     }
 
     #[test]
-    fn role_serializes_as_a_fixed_label() {
-        let value = serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap();
-        assert_eq!(value["role"], "unavailable");
-        assert_eq!(value["title"], concat!("Quit ", crate::app_name!(), "?"));
-        assert_eq!(value["confirm"], "Quit");
-        assert_eq!(value["cancel"], "Cancel");
-        assert_eq!(serde_json::to_value(QuitRole::Hosting).unwrap(), "hosting");
+    fn prompt_serializes_without_a_role() {
+        let value = serde_json::to_value(quit_prompt(true, false)).unwrap();
         assert_eq!(
-            serde_json::to_value(QuitRole::Attached).unwrap(),
-            "attached"
+            value,
+            serde_json::json!({
+                "title": QUIT_TITLE,
+                "body": QUIT_STOPS_COMPUTE,
+                "confirm": "Quit",
+                "cancel": "Cancel",
+            })
         );
     }
 }

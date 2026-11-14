@@ -285,7 +285,7 @@ fn run_family_skills(f: &Fixture, family: &Family) -> PassSummary {
             QUIET,
             &mut |_| (PROJECT.to_owned(), false),
             f.pass.cleared.load(Ordering::SeqCst),
-            true,
+            &|| true,
             &|| false,
         )
         .unwrap()

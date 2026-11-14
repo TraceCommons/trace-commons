@@ -148,6 +148,7 @@
     "model_choice": "Model",
     "background_model_title": "Background model",
     "background_model_choice": "Model for background tasks",
+    "background_model_info": "A smaller, faster model the tool uses for quick work in the background, like naming the session and searching the code. Only models at least as private as your main model are listed.",
     "model_default": "Default: {model}",
     "model_default_unknown": "Default",
     "model_group_incognito": "Incognito models",
