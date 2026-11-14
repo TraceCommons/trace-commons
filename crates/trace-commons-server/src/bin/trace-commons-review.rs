@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-review` — reviewer-audience operator CLI.
 //!
 //! Eight subcommands matching the reviewer-bearer endpoints on
@@ -607,19 +609,30 @@ mod tests {
         format!("TC_REVIEW_TEST_BEARER_{n}")
     }
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     struct EnvGuard {
         name: String,
     }
 
     impl EnvGuard {
+        #[allow(unsafe_code)]
         fn set(name: String, value: &str) -> Self {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock` and uses a unique variable name per test.
             unsafe { std::env::set_var(&name, value) };
             EnvGuard { name }
         }
     }
 
     impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock`; see `EnvGuard::set`.
             unsafe { std::env::remove_var(&self.name) };
         }
     }

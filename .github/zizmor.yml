@@ -1,0 +1,34 @@
+# GitHub Actions static security policy for zizmor.
+# Release and staging workflows hash-pin every action; CI workflows permit
+# major-tag / toolchain-channel refs only for the vetted actions below, while
+# any other third-party action must be pinned to a full 40-char commit SHA.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        actions/*: ref-pin
+        dtolnay/rust-toolchain: ref-pin
+        EmbarkStudios/cargo-deny-action: ref-pin
+        "*": hash-pin
+  github-env:
+    # Tag-only and manual release/staging workflows resolve trusted runner-local
+    # Homebrew OpenSSL paths, GPG key IDs, and computed DMG filenames. Every PR
+    # workflow stays under full `github-env` enforcement.
+    ignore:
+      - release-apps.yml
+      - staging-macos.yml
+  self-repository:
+    # Style only: it suggests GitHub's `$/` self-repository syntax for local
+    # composite actions (`./.github/actions/...`), which already resolve to
+    # this repository's checked-out tree. Not adopted until that syntax is
+    # verified against the runner; revisit when bumping zizmor.
+    disable: true
+  adhoc-packages:
+    # Both installs pin an exact version on purpose and run outside a
+    # lockfile only because no package manifest exists for them: the wallet
+    # browser runtime (playwright@1.63.0, --ignore-scripts) and the OpenCode
+    # binary the qualification reader accepts (its own pinned version).
+    # Line-specific, so a new ad-hoc install still fails.
+    ignore:
+      - ci.yml:2342
+      - opencode-qualification.yml:65

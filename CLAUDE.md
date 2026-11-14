@@ -161,9 +161,11 @@ edit. `cargo test --workspace` still runs all of it.
 Two crates are separate Cargo workspaces with their own lockfiles, so `-p`
 from the repo root does not reach them: the GTK shell
 (`--manifest-path crates/trace-commons-contributor-gtk/Cargo.toml`) and the
-Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
-`pnpm test` and `pnpm build` in `tauri-desktop/frontend`). No CI job builds or
-tests the Tauri app; run those commands by hand when you change it.
+Tauri app (`--manifest-path tauri-desktop/Cargo.toml`, plus
+`pnpm test` and `pnpm build` in `tauri-desktop/frontend`). `clients.yml`
+runs `cargo clippy` and `cargo test` on the Tauri Rust workspace on macOS and
+Windows, and `ci.yml` checks its formatting; run the `pnpm` frontend checks by
+hand when you change `tauri-desktop/frontend`.
 
 ### Shared compile cache (recommended)
 
@@ -273,8 +275,9 @@ names exactly: renaming a required job drops it from the gate.
 
 ### Required checks
 
-- `cargo fmt --check` — runs `cargo fmt --all -- --check`. Run
-  `cargo fmt --all` before committing.
+- `cargo fmt --check` — runs `cargo fmt --all -- --check` plus formatting
+  checks on the separate GTK and Tauri workspaces. Run `cargo fmt --all` (and
+  on GTK/Tauri if touched) before committing.
 - `cargo clippy` — with the allow-list under "Local development". Do not
   widen the allow-list without explicit approval.
 - `cargo check (default features)`.
@@ -327,6 +330,10 @@ names exactly: renaming a required job drops it from the gate.
   merge queue, but blocks nothing until the owner promotes it. See
   `docs/operator/pipeline-qualification.md` and
   `docs/operator/pipeline-comparison.md`.
+- `zizmor` — runs `zizmor --offline --persona=regular .github` against
+  `.github/zizmor.yml` to audit every workflow and composite action for
+  excessive permissions, persisted checkout credentials, template injection in
+  `run:` scripts, unpinned third-party actions, and unpinned container images.
 
 ### Client shells: `clients.yml`
 
@@ -449,9 +456,32 @@ cargo deny --all-features check licenses
   `gcp-kms`, the `cudarc` / `ug-cuda` stack behind `local-gpu-models-cuda`,
   and `dcap-qvl`'s collateral client behind `near-attestation-collateral`. Do
   not delete it as duplicated coverage.
-- CI runs `check licenses`, `check sources` and `check advisories` under
-  `--all-features`, so the manual runs are a pre-flight, not the only
-  enforcement.
+- `.github/workflows/cargo-deny.yml` runs `cargo deny` (`licenses`, `bans`,
+  `sources` and `advisories`) across the root workspace (`--all-features`), the
+  GTK workspace and the Tauri workspace, plus `scripts/ci/cargo-audit.py`
+  (`cargo audit --deny warnings`) across all three `Cargo.lock` files, so the
+  manual runs are a pre-flight, not the only enforcement.
+
+## Unsafe code
+
+Every first-party Rust crate and `build.rs` script is classified in
+`crates/trace-commons-server/tests/unsafe_boundary.rs` (`cargo test -p
+trace-commons-server --test it -- 'unsafe_boundary::'`):
+
+- Zero-unsafe crates (`FORBID_CRATES`) set `[lints.rust] unsafe_code = "forbid"`
+  in `Cargo.toml` (and `#![forbid(unsafe_code)]` in `build.rs` scripts). New
+  crates belong here by default.
+- Crates whose only `unsafe` is mutex-serialized `std::env::{set_var, remove_var}`
+  in unit tests (`TEST_ONLY_ENV_CRATES`: `-protocol`, `-operator-client`,
+  `-server`, `-ingest`) set `#![cfg_attr(not(test), forbid(unsafe_code))]` (or
+  `#![forbid(unsafe_code)]`) on every shipped `lib` and `bin` target, plus
+  `unsafe_code = "deny"`, `unsafe_op_in_unsafe_fn = "forbid"`, and
+  `clippy::undocumented_unsafe_blocks = "deny"`.
+- Crates with audited FFI, OS keychain/ACL/handle, or volatile-wipe `unsafe`
+  (`AUDITED_FFI_PLATFORM_CRATES`: `-contributor`, `-contributor-ffi`,
+  `-contributor-insights`, `-contributor-platform`, `-tauri-desktop`) set
+  `unsafe_code = "deny"` and `unsafe_op_in_unsafe_fn = "forbid"` with narrow
+  `allow(unsafe_code)` scopes and `// SAFETY:` comments.
 
 ## Product text
 

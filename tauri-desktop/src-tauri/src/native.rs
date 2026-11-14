@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 use std::ffi::CString;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
@@ -5,6 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::ffi::c_void;
 
+// SAFETY: signatures match the C functions compiled from `native_macos.m` by `build.rs`.
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn tc_macos_notification_configure(on_review: extern "C" fn()) -> i32;
@@ -18,6 +21,7 @@ unsafe extern "C" {
 #[cfg(target_os = "windows")]
 type HKey = *mut c_void;
 
+// SAFETY: signatures match Microsoft's Advapi32 registry exports (`winreg.h`).
 #[cfg(target_os = "windows")]
 #[link(name = "advapi32")]
 unsafe extern "system" {
@@ -136,6 +140,8 @@ pub(crate) fn configure_notifications(on_review: impl Fn() + Send + Sync + 'stat
         // user-facing failure at launch: an unsigned/dev binary may not have
         // a notification center, while the packaged app will configure its
         // category here.
+        // SAFETY: `tc_notification_review_requested` is a static `extern "C" fn()`
+        // that catches panics before returning to Objective-C.
         unsafe {
             let _ = tc_macos_notification_configure(tc_notification_review_requested);
         }
@@ -146,6 +152,7 @@ pub(crate) fn configure_notifications(on_review: impl Fn() + Send + Sync + 'stat
 
 pub(crate) fn notification_capability() -> serde_json::Value {
     #[cfg(target_os = "macos")]
+    // SAFETY: `tc_macos_notification_status` takes no pointers and returns a plain integer status.
     let status = unsafe { tc_macos_notification_status() };
     #[cfg(not(target_os = "macos"))]
     let status = -1;
@@ -158,6 +165,7 @@ pub(crate) fn notification_capability() -> serde_json::Value {
 pub(crate) fn request_notification_permission() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: `tc_macos_request_notification_permission` takes no pointers and returns an integer status.
         let result = unsafe { tc_macos_request_notification_permission() };
         if result < 0 {
             return Err("notification-permission-unavailable".to_owned());
@@ -170,6 +178,7 @@ pub(crate) fn request_notification_permission() -> Result<serde_json::Value, Str
 
 pub(crate) fn login_item_capability() -> serde_json::Value {
     #[cfg(target_os = "macos")]
+    // SAFETY: `tc_macos_login_item_status` takes no pointers and returns a plain integer status.
     let status = unsafe { tc_macos_login_item_status() };
     #[cfg(target_os = "windows")]
     let status = windows_login_item_status();
@@ -186,6 +195,7 @@ pub(crate) fn login_item_capability() -> serde_json::Value {
 pub(crate) fn set_login_item(enabled: bool) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: `tc_macos_set_login_item` takes a plain `i32` flag and returns an integer status.
         let status = unsafe { tc_macos_set_login_item(i32::from(enabled)) };
         if status < 0 {
             return Err("start-at-login-change-failed".to_owned());
@@ -225,10 +235,12 @@ pub(crate) fn post_digest(body: &str) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: `tc_macos_notification_status` takes no pointers and returns a plain integer status.
         let status = unsafe { tc_macos_notification_status() };
         if !notification_can_post(status) {
             return Ok(());
         }
+        // SAFETY: `body` is a valid NUL-terminated `CString` alive for the duration of the call.
         let result = unsafe { tc_macos_post_digest(body.as_ptr()) };
         (result == 0)
             .then_some(())
@@ -548,8 +560,12 @@ fn windows_set_login_item(enabled: bool) -> i32 {
         let Ok(executable) = std::env::current_exe() else {
             return -1;
         };
+        let exe_wide: Vec<u16> = executable.as_os_str().encode_wide().collect();
+        if exe_wide.contains(&0) {
+            return -1;
+        }
         let mut command = vec![b'"' as u16];
-        command.extend(executable.as_os_str().encode_wide());
+        command.extend(exe_wide);
         command.extend([b'"' as u16, 0]);
         let Some(byte_len) = command
             .len()

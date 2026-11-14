@@ -945,6 +945,7 @@ fn require_private_dir(_path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 mod windows_private_dir {
     //! The Windows half of the journal's private-directory control.
     //!

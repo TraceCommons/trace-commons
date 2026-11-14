@@ -27,16 +27,19 @@ concurrency:
 
 permissions:
   contents: read
-  # The only reason this workflow needs more than read: pushing to GHCR.
-  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The only reason this job needs more than read: pushing to GHCR.
+      packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
           # The build stamps identity from git, and .gcloudignore-style context
           # stripping is not in play here, but a shallow clone still has the
           # commit and its timestamp, which is all the build args need.
@@ -58,13 +61,17 @@ jobs:
           echo "Building $commit with SOURCE_DATE_EPOCH=$epoch"
 
       - name: Build the image
+        env:
+          IMAGE_NAME: ${{ steps.id.outputs.image }}
+          BUILD_COMMIT: ${{ steps.id.outputs.commit }}
+          BUILD_EPOCH: ${{ steps.id.outputs.epoch }}
         run: |
           set -euo pipefail
           docker build \
             -f deploy/witness/Dockerfile \
-            --build-arg TRACE_COMMONS_BUILD_COMMIT="${{ steps.id.outputs.commit }}" \
-            --build-arg SOURCE_DATE_EPOCH="${{ steps.id.outputs.epoch }}" \
-            -t "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}" \
+            --build-arg TRACE_COMMONS_BUILD_COMMIT="${BUILD_COMMIT}" \
+            --build-arg SOURCE_DATE_EPOCH="${BUILD_EPOCH}" \
+            -t "${IMAGE_NAME}:${BUILD_COMMIT}" \
             .
 
       # The README's three pre-push runs, and they are the point of building
@@ -72,9 +79,13 @@ jobs:
       # socket, no configuration. They catch on a runner what is expensive to
       # diagnose on a CVM.
       - name: Check the image before pushing it
+        env:
+          IMAGE_NAME: ${{ steps.id.outputs.image }}
+          BUILD_COMMIT: ${{ steps.id.outputs.commit }}
+          BUILD_EPOCH: ${{ steps.id.outputs.epoch }}
         run: |
           set -euo pipefail
-          img="${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+          img="${IMAGE_NAME}:${BUILD_COMMIT}"
           run="docker run --rm --read-only --tmpfs /tmp --network none"
 
           echo "--- 1. the runtime image resolves every library the binary links"
@@ -86,7 +97,7 @@ jobs:
           # instead, and every rebuild of this commit yields a different image.
           # Verified rather than assumed: a wrong stamp is invisible until two
           # builds disagree, by which point a measurement may already be pinned.
-          expected="$(date -u -d "@${{ steps.id.outputs.epoch }}" +%Y-%m-%d)"
+          expected="$(date -u -d "@${BUILD_EPOCH}" +%Y-%m-%d)"
           if ! grep -q "$expected" <<<"$version_out"; then
             echo "::error::SOURCE_DATE_EPOCH did not take: --version does not carry $expected"
             echo "the binary stamped a wall clock, so rebuilds of this commit will differ"
@@ -108,17 +119,26 @@ jobs:
           echo "ok: refused without a guest agent"
 
       - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s\n' "${GHCR_TOKEN}" \
+            | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
 
       - name: Push
-        run: docker push "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+        env:
+          IMAGE_NAME: ${{ steps.id.outputs.image }}
+          BUILD_COMMIT: ${{ steps.id.outputs.commit }}
+        run: docker push "${IMAGE_NAME}:${BUILD_COMMIT}"
 
       - name: Report the digest to pin
+        env:
+          IMAGE_NAME: ${{ steps.id.outputs.image }}
+          BUILD_COMMIT: ${{ steps.id.outputs.commit }}
         run: |
           set -euo pipefail
-          img="${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+          img="${IMAGE_NAME}:${BUILD_COMMIT}"
           digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$img")"
           echo "$digest"
           {

@@ -16,6 +16,9 @@
 //!
 //! There is deliberately no entry for Administrators, for the reason given in
 //! `daemon::win_pipe`: an administrator can already take ownership.
+
+#![allow(unsafe_code)]
+
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -89,6 +92,9 @@ pub(super) fn restrict_to_current_user(dir: &Path) -> Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    if wide_path[..wide_path.len() - 1].contains(&0) {
+        bail!(super::InsightsStoreError::PrivateDirectoryRequired);
+    }
     // SAFETY: `wide_path` is a NUL-terminated wide path that outlives the
     // call, and `dacl` points into the descriptor kept alive below. Owner,
     // group and SACL are deliberately left unchanged.

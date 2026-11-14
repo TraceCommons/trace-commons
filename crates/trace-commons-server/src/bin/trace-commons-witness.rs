@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-witness` — the redaction witness, served over HTTP.
 //!
 //! Runs inside a dstack TDX guest. It takes a raw transcript, redacts it,

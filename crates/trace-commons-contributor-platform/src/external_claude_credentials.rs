@@ -38,6 +38,7 @@ impl Drop for SecretBytes {
 
 /// Best-effort erasure of an owned initialized buffer, without a new dependency.
 /// Does not claim to erase allocator copies or native framework allocations.
+#[allow(unsafe_code)]
 pub fn wipe(bytes: &mut [u8]) {
     for byte in bytes {
         // SAFETY: each byte is a valid exclusive mutable reference. Volatile
@@ -155,12 +156,14 @@ pub fn normalized_profile_directory(value: &str) -> Result<String, &'static str>
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod normalization {
     use std::ffi::{c_char, c_void};
     type CFIndex = isize;
     const UTF8: u32 = 0x0800_0100;
     const NFC: isize = 2;
 
+    // SAFETY: CoreFoundation CFString C ABI declarations linked from the system framework.
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFStringCreateWithBytes(
