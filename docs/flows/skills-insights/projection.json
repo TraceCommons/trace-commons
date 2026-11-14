@@ -1,0 +1,42 @@
+{
+  "states": 74288,
+  "steps": 1578878,
+  "views": {
+    "FLOW": {
+      "labels": 7,
+      "arrows": 24,
+      "internalSteps": 1254118,
+      "projectedSteps": 324760
+    },
+    "USAGE": {
+      "labels": 8,
+      "arrows": 38,
+      "internalSteps": 1166682,
+      "projectedSteps": 412196
+    },
+    "DETAIL": {
+      "labels": 6,
+      "arrows": 21,
+      "internalSteps": 1315678,
+      "projectedSteps": 263200
+    },
+    "DELEGATED": {
+      "labels": 10,
+      "arrows": 57,
+      "internalSteps": 1110208,
+      "projectedSteps": 468670
+    },
+    "OPENCODE": {
+      "labels": 8,
+      "arrows": 38,
+      "internalSteps": 1154110,
+      "projectedSteps": 424768
+    }
+  },
+  "analysisOffInventoryWitness": [
+    "YouPressRefresh",
+    "TheScanFindsSkills"
+  ],
+  "duplicateTransitions": 36288,
+  "incompleteTransitions": 99792
+}

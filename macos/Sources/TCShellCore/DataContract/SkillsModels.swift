@@ -66,25 +66,33 @@ extension DaemonData {
     public struct SkillsInventory: Codable, Equatable, Sendable {
         public let skills: [InstalledSkill]
         public let partial: Bool
+        public let scannedAt: String?
         public let coverage: [SkillsInventoryCoverage]
+        public let details: [String: SkillInstallationDetails]
 
-        public init(skills: [InstalledSkill] = [], partial: Bool = true, coverage: [SkillsInventoryCoverage] = []) {
+        public init(skills: [InstalledSkill] = [], partial: Bool = true, coverage: [SkillsInventoryCoverage] = [], details: [String: SkillInstallationDetails] = [:], scannedAt: String? = nil) {
             self.skills = skills
             self.partial = partial
+            self.scannedAt = scannedAt
             self.coverage = coverage
+            self.details = details
         }
 
         enum CodingKeys: String, CodingKey {
+            case scannedAt = "scanned_at"
             case skills
             case partial
             case coverage
+            case details
         }
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            scannedAt = try values.decodeIfPresent(String.self, forKey: .scannedAt)
             skills = try values.decodeIfPresent([InstalledSkill].self, forKey: .skills) ?? []
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? true
             coverage = try values.decodeIfPresent([SkillsInventoryCoverage].self, forKey: .coverage) ?? []
+            details = try values.decodeIfPresent([String: SkillInstallationDetails].self, forKey: .details) ?? [:]
         }
     }
 
@@ -344,23 +352,47 @@ extension DaemonData {
     }
 
     public struct SkillsUsage: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let lastAnalysisAt: String?
+        public let earliestEvidence: String?
+        public let sessionsPartial: Int
         public let sessionsObserved: Int
         public let sessionsUnknown: Int
+        public let delegatedSessionsObserved: Int?
+        public let delegatedSessionsUnknown: Int?
+        public let unclassifiedSessionsObserved: Int?
+        public let unclassifiedSessionsUnknown: Int?
         public let partial: Bool
         public let skills: [SkillsUsageRow]
         public let coverage: [SkillsUsageCoverage]
 
-        public init(sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = []) {
+        public init(enabled: Bool = false, lastAnalysisAt: String? = nil, earliestEvidence: String? = nil, sessionsPartial: Int = 0, sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = [], delegatedSessionsObserved: Int? = nil, delegatedSessionsUnknown: Int? = nil, unclassifiedSessionsObserved: Int? = nil, unclassifiedSessionsUnknown: Int? = nil) {
+            self.enabled = enabled
+            self.lastAnalysisAt = lastAnalysisAt
+            self.earliestEvidence = earliestEvidence
+            self.sessionsPartial = sessionsPartial
             self.sessionsObserved = sessionsObserved
             self.sessionsUnknown = sessionsUnknown
+            self.delegatedSessionsObserved = delegatedSessionsObserved
+            self.delegatedSessionsUnknown = delegatedSessionsUnknown
+            self.unclassifiedSessionsObserved = unclassifiedSessionsObserved
+            self.unclassifiedSessionsUnknown = unclassifiedSessionsUnknown
             self.partial = partial
             self.skills = skills
             self.coverage = coverage
         }
 
         enum CodingKeys: String, CodingKey {
+            case enabled
+            case lastAnalysisAt = "last_analysis_at"
+            case earliestEvidence = "earliest_evidence"
+            case sessionsPartial = "sessions_partial"
             case sessionsObserved = "sessions_observed"
             case sessionsUnknown = "sessions_unknown"
+            case delegatedSessionsObserved = "delegated_sessions_observed"
+            case delegatedSessionsUnknown = "delegated_sessions_unknown"
+            case unclassifiedSessionsObserved = "unclassified_sessions_observed"
+            case unclassifiedSessionsUnknown = "unclassified_sessions_unknown"
             case partial
             case skills
             case coverage
@@ -368,8 +400,16 @@ extension DaemonData {
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+            lastAnalysisAt = try values.decodeIfPresent(String.self, forKey: .lastAnalysisAt)
+            earliestEvidence = try values.decodeIfPresent(String.self, forKey: .earliestEvidence)
+            sessionsPartial = try values.decodeIfPresent(Int.self, forKey: .sessionsPartial) ?? 0
             sessionsObserved = try values.decodeIfPresent(Int.self, forKey: .sessionsObserved) ?? 0
             sessionsUnknown = try values.decodeIfPresent(Int.self, forKey: .sessionsUnknown) ?? 0
+            delegatedSessionsObserved = try values.decodeIfPresent(Int.self, forKey: .delegatedSessionsObserved)
+            delegatedSessionsUnknown = try values.decodeIfPresent(Int.self, forKey: .delegatedSessionsUnknown)
+            unclassifiedSessionsObserved = try values.decodeIfPresent(Int.self, forKey: .unclassifiedSessionsObserved)
+            unclassifiedSessionsUnknown = try values.decodeIfPresent(Int.self, forKey: .unclassifiedSessionsUnknown)
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? true
             skills = try values.decodeIfPresent([SkillsUsageRow].self, forKey: .skills) ?? []
             coverage = try values.decodeIfPresent([SkillsUsageCoverage].self, forKey: .coverage) ?? []
@@ -392,6 +432,9 @@ extension DaemonData {
     }
 
     public struct SkillsUsageRow: Codable, Equatable, Sendable {
+        public let windows: [SkillsUsageWindow]
+        public let daily: [SkillsUsageDay]
+        public let undatedEvents: Int
         public let name: String
         public let agent: String
         public let invocations: Int
@@ -399,8 +442,15 @@ extension DaemonData {
         public let sessions: Int
         public let lastSeen: String?
         public let sessionRefs: [String]
+        public let population: String
+        public let evidence: [SkillsUsageEvidence]
+        public let parentSessionRefs: [String]
+        public var identity: String { agent + "\u{0}" + population + "\u{0}" + name }
 
-        public init(name: String, agent: String, invocations: Int, loads: Int, sessions: Int, lastSeen: String? = nil, sessionRefs: [String] = []) {
+        public init(name: String, agent: String, invocations: Int, loads: Int, sessions: Int, lastSeen: String? = nil, sessionRefs: [String] = [], windows: [SkillsUsageWindow] = [], daily: [SkillsUsageDay] = [], undatedEvents: Int = 0, population: String = "direct", evidence: [SkillsUsageEvidence] = [], parentSessionRefs: [String] = []) {
+            self.windows = windows
+            self.daily = daily
+            self.undatedEvents = undatedEvents
             self.name = name
             self.agent = agent
             self.invocations = invocations
@@ -408,9 +458,14 @@ extension DaemonData {
             self.sessions = sessions
             self.lastSeen = lastSeen
             self.sessionRefs = sessionRefs
+            self.population = population
+            self.evidence = evidence
+            self.parentSessionRefs = parentSessionRefs
         }
 
         enum CodingKeys: String, CodingKey {
+            case windows, daily
+            case undatedEvents = "undated_events"
             case name
             case agent
             case invocations
@@ -418,10 +473,15 @@ extension DaemonData {
             case sessions
             case lastSeen = "last_seen"
             case sessionRefs = "session_refs"
+            case population, evidence
+            case parentSessionRefs = "parent_session_refs"
         }
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            windows = try values.decodeIfPresent([SkillsUsageWindow].self, forKey: .windows) ?? []
+            daily = try values.decodeIfPresent([SkillsUsageDay].self, forKey: .daily) ?? []
+            undatedEvents = try values.decodeIfPresent(Int.self, forKey: .undatedEvents) ?? 0
             name = try values.decode(String.self, forKey: .name)
             agent = try values.decode(String.self, forKey: .agent)
             invocations = try values.decode(Int.self, forKey: .invocations)
@@ -429,7 +489,89 @@ extension DaemonData {
             sessions = try values.decode(Int.self, forKey: .sessions)
             lastSeen = try values.decodeIfPresent(String.self, forKey: .lastSeen)
             sessionRefs = try values.decodeIfPresent([String].self, forKey: .sessionRefs) ?? []
+            population = try values.decodeIfPresent(String.self, forKey: .population) ?? "direct"
+            evidence = try values.decodeIfPresent([SkillsUsageEvidence].self, forKey: .evidence) ?? []
+            parentSessionRefs = try values.decodeIfPresent([String].self, forKey: .parentSessionRefs) ?? []
         }
     }
 
+}
+
+extension DaemonData {
+    public struct SkillInstallationDetails: Codable, Equatable, Sendable {
+        public let aliases: [String]
+        public let availability: String
+        public let definitionStatus: String
+        enum CodingKeys: String, CodingKey {
+            case aliases, availability
+            case definitionStatus = "definition_status"
+        }
+    }
+    public struct SkillsUsageWindow: Codable, Equatable, Sendable {
+        public let days: Int
+        public let invocations: Int
+        public let loads: Int
+        public let sessions: Int
+        public init(days: Int, invocations: Int, loads: Int, sessions: Int) {
+            self.days = days; self.invocations = invocations; self.loads = loads; self.sessions = sessions
+        }
+    }
+    public struct SkillsUsageDay: Codable, Equatable, Sendable {
+        public let day: String
+        public let invocations: Int
+        public let loads: Int
+        public let sessions: Int
+    }
+}
+
+
+extension DaemonData {
+    public struct SkillDefinition: Decodable, Sendable {
+        public let skillID: String
+        public let status: String
+        public let definition: String?
+        enum CodingKeys: String, CodingKey { case skillID = "skill_id", status, definition }
+    }
+    public struct SkillEvidence: Decodable, Sendable {
+        public let enabled: Bool
+        public let readable: Bool?
+        public let session: Session?
+        public let agent: String?
+        public let population: String?
+        public let skillUsage: Observations?
+        enum CodingKeys: String, CodingKey {
+            case enabled, readable, session, agent, population
+            case skillUsage = "skill_usage"
+        }
+        public struct Observations: Decodable, Sendable {
+            public let coverage: String
+            public let partial: Bool
+            public let skills: [Count]
+        }
+        public struct Count: Decodable, Sendable {
+            public let name: String
+            public let invocations: Int
+            public let loads: Int
+        }
+        public struct Session: Decodable, Sendable {
+            public let source: String?
+            public let date: String?
+            public let turns: UInt64?
+            public let tokens: UInt64?
+        }
+    }
+}
+
+extension DaemonData {
+    public struct SkillsUsageEvidence: Codable, Equatable, Sendable {
+        public let sessionRef: String
+        public let parentSessionRef: String?
+        public init(sessionRef: String, parentSessionRef: String? = nil) {
+            self.sessionRef = sessionRef; self.parentSessionRef = parentSessionRef
+        }
+        enum CodingKeys: String, CodingKey {
+            case sessionRef = "session_ref"
+            case parentSessionRef = "parent_session_ref"
+        }
+    }
 }

@@ -1,0 +1,41 @@
+stateDiagram-v2
+  direction TB
+  state "Inventory pending" as s0
+  state "Skills disabled" as s1
+  state "Folder excluded" as s2
+  state "Scanning inventory" as s3
+  state "Inventory available" as s4
+  state "No skills found" as s5
+  state "Inventory incomplete" as s6
+  [*] --> s0
+  s0 --> s1 : the skills flag turns off
+  s0 --> s2 : you exclude the folder
+  s0 --> s3 : the periodic scan starts / you press refresh
+  s1 --> s0 : the skills flag turns on
+  s2 --> s1 : the skills flag turns off
+  s2 --> s0 : you permit the folder
+  s3 --> s1 : the skills flag turns off
+  s3 --> s2 : you exclude the folder
+  s3 --> s4 : the scan finds skills
+  s3 --> s5 : the scan finds no skills
+  s3 --> s6 : the scan is incomplete
+  s1 --> s2 : the skills flag turns on
+  s1 --> s3 : the skills flag turns on
+  s2 --> s3 : you permit the folder
+  s4 --> s1 : the skills flag turns off
+  s4 --> s2 : you exclude the folder
+  s4 --> s3 : the periodic scan starts / you press refresh
+  s5 --> s1 : the skills flag turns off
+  s5 --> s2 : you exclude the folder
+  s5 --> s3 : the periodic scan starts / you press refresh
+  s6 --> s1 : the skills flag turns off
+  s6 --> s2 : you exclude the folder
+  s6 --> s3 : the periodic scan starts / you press refresh
+  s3 --> s0 : the old scan returns
+  class s0 teal
+  class s1 tan
+  class s2 tan
+  class s3 yellow
+  class s4 teal
+  class s5 teal
+  class s6 teal

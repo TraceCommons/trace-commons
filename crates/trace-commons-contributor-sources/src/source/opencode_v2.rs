@@ -211,7 +211,7 @@ fn parse_tool<'a>(
     let status = field(state, "status")?;
     if status == "streaming" {
         field(state, "input")?;
-        events.push(opaque("streaming-tool", created));
+        events.push(SessionEvent::opaque("streaming-tool", Some(created)));
         return Ok(());
     }
     if !matches!(status, "running" | "completed" | "error") {

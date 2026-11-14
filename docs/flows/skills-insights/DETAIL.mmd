@@ -1,0 +1,36 @@
+stateDiagram-v2
+  direction TB
+  state "Detail closed or unavailable" as s0
+  state "Skills disabled" as s1
+  state "Folder excluded" as s2
+  state "Reading definition" as s3
+  state "Definition available" as s4
+  state "Old detail request pending" as s5
+  [*] --> s0
+  s0 --> s1 : the skills flag turns off
+  s0 --> s2 : you exclude the folder
+  s1 --> s0 : the skills flag turns on
+  s2 --> s1 : the skills flag turns off
+  s2 --> s0 : you permit the folder
+  s1 --> s2 : the skills flag turns on
+  s0 --> s3 : you read the definition
+  s3 --> s1 : the skills flag turns off
+  s3 --> s2 : you exclude the folder
+  s3 --> s4 : the definition returns
+  s3 --> s0 : the definition is unavailable
+  s3 --> s5 : the definition changes / you leave the detail
+  s1 --> s5 : the skills flag turns on
+  s2 --> s5 : you permit the folder
+  s4 --> s1 : the skills flag turns off
+  s4 --> s2 : you exclude the folder
+  s4 --> s3 : you read the definition
+  s4 --> s0 : the definition changes / you leave the detail
+  s5 --> s1 : the skills flag turns off
+  s5 --> s2 : you exclude the folder
+  s5 --> s0 : the old definition returns
+  class s0 teal
+  class s1 tan
+  class s2 tan
+  class s3 yellow
+  class s4 teal
+  class s5 teal

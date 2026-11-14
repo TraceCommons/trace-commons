@@ -455,14 +455,30 @@ pub fn handle_session_drill(shared: &DaemonShared, req: &Request) -> Response {
             super::insights_glance::ERR_TZ_INVALID,
         );
     };
+    // Child references are a Skills capability. Ordinary session drills
+    // keep their existing analysis gate; children require the live Skills
+    // flag and the same permission/clear scope throughout this answer.
+    let child_scope = if reference.starts_with('c') {
+        let Some(scope) = super::insights_skills::SnapshotScope::capture(shared)
+            .filter(|scope| scope.is_current(shared))
+        else {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_SESSION_UNKNOWN);
+        };
+        Some(scope)
+    } else {
+        None
+    };
     let (enabled, never) = match gate(shared) {
         Ok(gate) => gate,
         Err(answer) => return Response::ok(req.id, answer),
     };
-    match shared
+    let result = shared
         .insights_counter
-        .drill_value(enabled, reference, &never, tz)
-    {
+        .drill_value(enabled, reference, &never, tz);
+    if child_scope.is_some_and(|scope| !scope.is_current(shared)) {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_SESSION_UNKNOWN);
+    }
+    match result {
         Ok(value) => Response::ok(req.id, value),
         Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
     }

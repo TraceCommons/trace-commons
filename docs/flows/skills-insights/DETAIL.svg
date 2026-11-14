@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 1585 845" width="1585" height="845" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state"><style>
+.pele {
+  --pele-bg: #ffffff;
+  --pele-fg: #1c1c1c;
+  --pele-muted: #656565;
+  --pele-line: #808080;
+  --pele-surface: #fcfcfc;
+  --pele-surface-alt: #f1f1f1;
+  --pele-border: #c9c9c9;
+}
+.pele .blue rect { fill: #c3e0ff; }
+.pele .orange rect { fill: #f0d3bf; }
+.pele .purple rect { fill: #e3d5ff; }
+.pele .yellow rect { fill: #f0dcbf; }
+.pele .teal rect { fill: #bfe3df; }
+.pele .tan rect { fill: #e5d9ce; }
+.pele .pink rect { fill: #ffcbe6; }
+.pele .breaks rect {
+  fill: #ffecee !important;
+  stroke: #e72e3b !important;
+  stroke-width: 2.5px !important;
+}
+.pele .breaks text {
+  fill: #cd2834 !important;
+}
+.pele .mayBreak rect {
+  fill: #fff3e6 !important;
+  stroke: #e8730c !important;
+  stroke-width: 2.5px !important;
+}
+.pele .mayBreak text {
+  fill: #b85a06 !important;
+}
+.pele .bugPath rect {
+  stroke: #1680f3 !important;
+  stroke-width: 2.5px !important;
+}
+.pele .repeats rect {
+  stroke: #9b35d6 !important;
+  stroke-width: 2.5px !important;
+  stroke-dasharray: 6 3;
+}
+@media (prefers-color-scheme: dark) {
+  .pele {
+    --pele-bg: #1f1f1f;
+    --pele-fg: #f5f5f5;
+    --pele-muted: #acacac;
+    --pele-line: #939393;
+    --pele-surface: #121212;
+    --pele-surface-alt: #2c2c2c;
+    --pele-border: #4e4e4e;
+  }
+  .pele .blue rect { fill: #1b3857; }
+  .pele .orange rect { fill: #573117; }
+  .pele .purple rect { fill: #3c2e57; }
+  .pele .yellow rect { fill: #573d17; }
+  .pele .teal rect { fill: #174641; }
+  .pele .tan rect { fill: #3d3127; }
+  .pele .pink rect { fill: #57233e; }
+  .pele .breaks rect {
+    fill: #2e2021 !important;
+    stroke: #cf2b35 !important;
+  }
+  .pele .breaks text {
+    fill: #ff6463 !important;
+  }
+  .pele .mayBreak rect {
+    fill: #2e2619 !important;
+    stroke: #d0700f !important;
+  }
+  .pele .mayBreak text {
+    fill: #ffa257 !important;
+  }
+  .pele .bugPath rect {
+    stroke: #116dd2 !important;
+  }
+  .pele .repeats rect {
+    stroke: #9a3fcf !important;
+  }
+}
+</style><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M1145.59,22L1145.59,59"/><path class="pele-marker" d="M1145.59,66L1142.23,58L1148.95,58Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M1195.31,110L1195.31,123C1195.31,180 1260.62,180 1260.62,237L1260.62,394C1260.62,420.94 795.02,423.06 795.02,450L795.02,456"/><path class="pele-marker" d="M795.02,463L791.66,455L798.38,455Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M1227.31,110L1227.31,123C1227.31,180 1502.21,180 1502.21,237L1502.21,507C1502.21,564 1127.58,564 1127.58,621L1127.58,627"/><path class="pele-marker" d="M1127.58,634L1124.22,626L1130.94,626Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M779.02,463L779.02,450C779.02,422 1179.31,422 1179.31,394L1179.31,117"/><path class="pele-marker" d="M1179.31,110L1182.67,118L1175.95,118Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M1079.58,634L1079.58,621C1079.58,596.82 1050.44,582 1002.9,582C955.36,582 926.22,571.36 926.22,554L926.22,529C926.22,525.34 787.83,521.41 787.83,517.75L787.83,514"/><path class="pele-marker" d="M787.83,507L791.19,515L784.47,515Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M1111.58,634L1111.58,621C1111.58,564 1341.92,564 1341.92,507L1341.92,237C1341.92,180 1211.31,180 1211.31,123L1211.31,117"/><path class="pele-marker" d="M1211.31,110L1214.67,118L1207.95,118Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M771.83,507L771.83,516.63C771.83,522.81 763.61,522.81 763.61,529L763.61,554C763.61,578.8 820.6,594 913.59,594C1006.58,594 1063.58,604.26 1063.58,621L1063.58,627"/><path class="pele-marker" d="M1063.58,634L1060.22,626L1066.94,626Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge7"><path d="M1107.78,110L1107.78,123C1107.78,147.18 1057.97,162 976.72,162C895.46,162 845.66,172.64 845.66,190L845.66,215C845.66,218.49 700.78,222.76 700.78,226.25L700.78,230"/><path class="pele-marker" d="M700.78,237L697.42,229L704.14,229Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge8"><path d="M695.72,281L695.72,293.31C695.72,301.28 763.02,301.28 763.02,309.25L763.02,456"/><path class="pele-marker" d="M763.02,463L759.66,455L766.38,455Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge9"><path d="M711.72,281L711.72,293.31C711.72,297.3 1007.53,305.27 1007.53,309.25L1007.53,547.75C1007.53,584.38 1095.58,584.38 1095.58,621L1095.58,627"/><path class="pele-marker" d="M1095.58,634L1092.22,626L1098.94,626Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge10"><path d="M679.72,281L679.72,290.63C679.72,296.81 685.6,296.81 685.6,303L685.6,328C685.6,331.92 556.44,335.33 556.44,339.25L556.44,343"/><path class="pele-marker" d="M556.44,350L553.08,342L559.8,342Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge11"><path d="M664.75,237L664.75,190C664.75,165.2 745.88,150 878.26,150C1010.64,150 1091.78,139.74 1091.78,123L1091.78,117"/><path class="pele-marker" d="M1091.78,110L1095.14,118L1088.42,118Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge12"><path d="M636.71,281L636.71,293.31C636.71,297.3 276.63,305.27 276.63,309.25L276.63,678C276.63,729 638.05,729 638.05,780L638.05,786"/><path class="pele-marker" d="M638.05,793L634.69,785L641.41,785Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge13"><path d="M755.83,507L755.83,519.31C755.83,527.28 682.31,527.28 682.31,535.25L682.31,786"/><path class="pele-marker" d="M682.31,793L678.95,785L685.67,785Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge14"><path d="M1115.46,678L1115.46,687.63C1115.46,693.81 1174.69,693.81 1174.69,700L1174.69,725C1174.69,749.8 1096.05,765 967.75,765C839.45,765 760.82,770.99 760.82,780.75L760.82,786"/><path class="pele-marker" d="M760.82,793L757.46,785L764.18,785Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge15"><path d="M539.63,394L539.63,437.5C539.63,441.21 747.02,447.66 747.02,451.38L747.02,456"/><path class="pele-marker" d="M747.02,463L743.66,455L750.38,455Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge16"><path d="M458.33,394L458.33,547.75C458.33,583.87 570.28,606 752.95,606C935.62,606 1047.58,611.99 1047.58,621.75L1047.58,627"/><path class="pele-marker" d="M1047.58,634L1044.22,626L1050.94,626Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge17"><path d="M525.31,350L525.31,303C525.31,299.03 652.71,295.72 652.71,291.75L652.71,288"/><path class="pele-marker" d="M652.71,281L656.07,289L649.35,289Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge18"><path d="M494.17,350L494.17,337.69C494.17,333.58 246.53,325.85 246.53,321.75L246.53,196.25C246.53,160.14 404.08,138 661.15,138C918.22,138 1075.78,132.01 1075.78,122.25L1075.78,117"/><path class="pele-marker" d="M1075.78,110L1079.14,118L1072.42,118Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge19"><path d="M654.05,793L654.05,780C654.05,729 474.32,729 474.32,678L474.33,535.25C474.33,531.27 739.83,523.3 739.83,519.31L739.83,514"/><path class="pele-marker" d="M739.83,507L743.19,515L736.47,515Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge20"><path d="M744.82,793L744.82,780C744.82,763.26 796.04,753 879.61,753C963.18,753 1014.4,742.36 1014.4,725L1014.4,700C1014.4,694.38 1073.64,694.38 1073.64,688.75L1073.64,685"/><path class="pele-marker" d="M1073.64,678L1077,686L1070.28,686Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge21"><path d="M622.05,793L622.05,780C622.05,729 88.7,729 88.7,678L88.7,196.25C88.7,174.15 1059.78,145.1 1059.78,123L1059.78,117"/><path class="pele-marker" d="M1059.78,110L1063.14,118L1056.42,118Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="edge1"><rect x="1189.31" y="248.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="1260.62" y="263.9" text-anchor="middle">the skills flag turns off</text></g><g class="pele-edge-label" data-id="edge2"><rect x="1429.73" y="361.5" width="144.96" height="21" rx="3" fill="var(--_bg)"/><text x="1502.21" y="376.9" text-anchor="middle">you exclude the folder</text></g><g class="pele-edge-label" data-id="edge3"><rect x="1108.01" y="361.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="1179.31" y="376.9" text-anchor="middle">the skills flag turns on</text></g><g class="pele-edge-label" data-id="edge4"><rect x="854.92" y="531" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="926.22" y="546.4" text-anchor="middle">the skills flag turns off</text></g><g class="pele-edge-label" data-id="edge5"><rect x="1274.12" y="361.5" width="135.61" height="21" rx="3" fill="var(--_bg)"/><text x="1341.92" y="376.9" text-anchor="middle">you permit the folder</text></g><g class="pele-edge-label" data-id="edge6"><rect x="692.31" y="531" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="763.61" y="546.4" text-anchor="middle">the skills flag turns on</text></g><g class="pele-edge-label" data-id="edge7"><rect x="772.79" y="192" width="145.75" height="21" rx="3" fill="var(--_bg)"/><text x="845.66" y="207.4" text-anchor="middle">you read the definition</text></g><g class="pele-edge-label" data-id="edge8"><rect x="691.71" y="361.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="763.02" y="376.9" text-anchor="middle">the skills flag turns off</text></g><g class="pele-edge-label" data-id="edge9"><rect x="935.05" y="361.5" width="144.96" height="21" rx="3" fill="var(--_bg)"/><text x="1007.53" y="376.9" text-anchor="middle">you exclude the folder</text></g><g class="pele-edge-label" data-id="edge10"><rect x="618.18" y="305" width="134.84" height="21" rx="3" fill="var(--_bg)"/><text x="685.6" y="320.4" text-anchor="middle">the definition returns</text></g><g class="pele-edge-label" data-id="edge11"><rect x="576.7" y="192" width="176.08" height="21" rx="3" fill="var(--_bg)"/><text x="664.75" y="207.4" text-anchor="middle">the definition is unavailable</text></g><g class="pele-edge-label" data-id="edge12"><rect x="187.41" y="467" width="178.44" height="36" rx="3" fill="var(--_bg)"/><text text-anchor="middle" xml:space="preserve"><tspan x="276.63" y="480.9">the definition changes / you</tspan><tspan x="276.63" y="498.9">leave the detail</tspan></text></g><g class="pele-edge-label" data-id="edge13"><rect x="611" y="645.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="682.31" y="660.9" text-anchor="middle">the skills flag turns on</text></g><g class="pele-edge-label" data-id="edge14"><rect x="1106.89" y="702" width="135.61" height="21" rx="3" fill="var(--_bg)"/><text x="1174.69" y="717.4" text-anchor="middle">you permit the folder</text></g><g class="pele-edge-label" data-id="edge15"><rect x="468.33" y="414.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="539.63" y="429.9" text-anchor="middle">the skills flag turns off</text></g><g class="pele-edge-label" data-id="edge16"><rect x="385.84" y="474.5" width="144.96" height="21" rx="3" fill="var(--_bg)"/><text x="458.33" y="489.9" text-anchor="middle">you exclude the folder</text></g><g class="pele-edge-label" data-id="edge17"><rect x="452.43" y="305" width="145.75" height="21" rx="3" fill="var(--_bg)"/><text x="525.31" y="320.4" text-anchor="middle">you read the definition</text></g><g class="pele-edge-label" data-id="edge18"><rect x="157.31" y="241" width="178.44" height="36" rx="3" fill="var(--_bg)"/><text text-anchor="middle" xml:space="preserve"><tspan x="246.53" y="254.9">the definition changes / you</tspan><tspan x="246.53" y="272.9">leave the detail</tspan></text></g><g class="pele-edge-label" data-id="edge19"><rect x="403.02" y="645.5" width="142.61" height="21" rx="3" fill="var(--_bg)"/><text x="474.32" y="660.9" text-anchor="middle">the skills flag turns off</text></g><g class="pele-edge-label" data-id="edge20"><rect x="941.92" y="702" width="144.96" height="21" rx="3" fill="var(--_bg)"/><text x="1014.4" y="717.4" text-anchor="middle">you exclude the folder</text></g><g class="pele-edge-label" data-id="edge21"><rect x="10" y="474.5" width="157.41" height="21" rx="3" fill="var(--_bg)"/><text x="88.7" y="489.9" text-anchor="middle">the old definition returns</text></g></g><g class="pele-nodes"><g class="pele-node pele-state teal" data-id="s0" transform="translate(1145.59,88)"><rect x="-113.82" y="-22" width="227.63" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Detail closed or unavailable</text></g><g class="pele-node pele-state tan" data-id="s1" transform="translate(768.93,485)"><rect x="-66.68" y="-22" width="133.36" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Skills disabled</text></g><g class="pele-node pele-state tan" data-id="s2" transform="translate(1094.55,656)"><rect x="-72.91" y="-22" width="145.82" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Folder excluded</text></g><g class="pele-node pele-state yellow" data-id="s3" transform="translate(672.75,259)"><rect x="-80.03" y="-22" width="160.06" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Reading definition</text></g><g class="pele-node pele-state teal" data-id="s4" transform="translate(525.31,372)"><rect x="-83.14" y="-22" width="166.27" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Definition available</text></g><g class="pele-node pele-state teal" data-id="s5" transform="translate(695.43,815)"><rect x="-109.38" y="-22" width="218.77" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Old detail request pending</text></g><g class="pele-node pele-state-start" data-id="root_start" transform="translate(1145.59,15)"><circle r="7" fill="var(--_l)"/></g></g></svg>

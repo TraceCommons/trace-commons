@@ -403,6 +403,9 @@ struct CounterRow {
     /// enables Skills, reread once within the existing pass budget.
     #[serde(default, skip_serializing_if = "is_zero")]
     skill_usage_version: u32,
+    /// Discovered Claude child transcripts, including ones deferred by the read budget.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    skill_children_expected: u32,
     /// Whether the session was started by a tool (`Automation`). An
     /// automated row is kept under its own allowance
     /// (`COUNTER_STORE_MAX_AUTOMATED_SESSIONS`), outside the shared caps,
@@ -1055,6 +1058,8 @@ pub(crate) struct CounterJob {
 struct QueuedJob {
     job: CounterJob,
     cleared: u64,
+    skills_generation: u64,
+    skills_policy: Option<super::policy::ProjectPolicy>,
 }
 
 /// A ledger fold to run on the worker: the ledger's window as the refresh
@@ -1098,6 +1103,8 @@ pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
     let queued = QueuedJob {
         job,
         cleared: counter.cleared.load(Ordering::SeqCst),
+        skills_generation: shared.feature_flags.generation(),
+        skills_policy: shared.policy.lock().ok().map(|policy| policy.clone()),
     };
     let start = {
         let mut slot = counter.worker_slot();
@@ -1186,10 +1193,21 @@ fn run_counter_jobs(shared: &DaemonShared) {
 /// recorded as `last_pass_at`, as it was when the pass ran in the tick.
 fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     let counter = &shared.insights_counter;
-    let QueuedJob { job, cleared } = queued;
-    let skills_enabled = || super::insights_skills::skills_flag_on(shared);
+    let QueuedJob {
+        job,
+        cleared,
+        skills_generation,
+        skills_policy,
+    } = queued;
+    // A disable/re-enable cycle cannot validate work under the old scope.
+    // Only Skills is suppressed: ordinary counters continue across flag changes.
+    let skills_enabled = || {
+        super::insights_skills::skills_flag_on(shared)
+            && shared.feature_flags.generation() == skills_generation
+    };
     let should_stop = || {
-        shared.shutdown.load(Ordering::Relaxed)
+        !shared.policy.lock().is_ok_and(|policy| skills_policy.as_ref() == Some(&*policy))
+            || shared.shutdown.load(Ordering::Relaxed)
             // A poisoned lock reads as off: fail closed.
             || !shared
                 .settings
@@ -1499,6 +1517,10 @@ struct TestSeams {
 }
 
 impl CounterPass {
+    pub(crate) fn clear_generation(&self) -> u64 {
+        self.cleared.load(Ordering::SeqCst)
+    }
+
     /// The pass for a daemon over `store`, with the key custody owner
     /// decision D16 (open) names.
     pub fn for_store(store: &ConfigStore) -> Self {
@@ -1942,7 +1964,9 @@ impl CounterPass {
                     && row.harness_session_read
                     && row.event_span_read
                     && row.facts_version == SESSION_FACTS_VERSION
-                    && (!skills_enabled() || row.skill_usage_version == SKILL_USAGE_VERSION)
+                    && (!skills_enabled()
+                        || (row.skill_usage_version == SKILL_USAGE_VERSION
+                            && row.skill_children_expected == candidate.group_member_count))
                     && !row.awaiting_classification()
                     && (row.streamed
                         || !matches!(
@@ -2048,6 +2072,7 @@ impl CounterPass {
                     streamed: true,
                     facts: read.facts,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_children_expected: candidate.group_member_count,
                     skill_usage: read.skill_usage,
                     skill_usage_version: if keep_skills { SKILL_USAGE_VERSION } else { 0 },
                     automation: read.automation,
@@ -2103,6 +2128,7 @@ impl CounterPass {
                 stored.row.size_bytes == candidate.size_bytes
                     && stored.row.modified_at == candidate.modified_at
                     && stored.row.facts_version == SESSION_FACTS_VERSION
+                    && (!skills_enabled() || stored.row.skill_usage_version == SKILL_USAGE_VERSION)
             });
             if unchanged && !spawned_removals.contains(&session) {
                 continue;
@@ -2135,7 +2161,21 @@ impl CounterPass {
             }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             spawned_removals.remove(&session);
-            let read = read_body(AnalyticsSource::ClaudeCode, candidate, &key, false);
+            #[cfg(test)]
+            self.run_before_read_hook();
+            let collect_skills = skills_enabled();
+            let mut read = read_body(AnalyticsSource::ClaudeCode, candidate, &key, collect_skills);
+            #[cfg(test)]
+            {
+                let hook = self.test_seams.after_read.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            let keep_skills = collect_skills && skills_enabled();
+            if !keep_skills {
+                read.skill_usage = None;
+            }
             spawned_reads.push((
                 session,
                 SpawnedRow {
@@ -2157,8 +2197,9 @@ impl CounterPass {
                         streamed: true,
                         facts: read.facts,
                         facts_version: SESSION_FACTS_VERSION,
-                        skill_usage: None,
-                        skill_usage_version: 0,
+                        skill_children_expected: candidate.group_member_count,
+                        skill_usage: read.skill_usage,
+                        skill_usage_version: if keep_skills { SKILL_USAGE_VERSION } else { 0 },
                         automation: Automation::Unknown,
                         automation_read: true,
                         not_analyzable: None,
@@ -2266,6 +2307,10 @@ impl CounterPass {
             store.spawned.remove(session);
         }
         for (session, mut spawned) in spawned_reads {
+            if !keep_skills {
+                spawned.row.skill_usage = None;
+                spawned.row.skill_usage_version = 0;
+            }
             spawned.row.seq = store.spawned_next_seq;
             store.spawned_next_seq += 1;
             store.spawned.insert(session, spawned);
@@ -2721,10 +2766,21 @@ impl CounterPass {
     /// Name-only skill observations for the person's visible sessions. A
     /// name can match several installations; this is not source attribution
     /// or evidence of a skill's effect on the session outcome.
+    #[cfg(test)]
     pub(crate) fn skill_usage_value(
         &self,
         enabled: bool,
         never_project_keys: &NeverFolders,
+    ) -> serde_json::Value {
+        self.skill_usage_value_with_opencode(enabled, never_project_keys, Vec::new(), false)
+    }
+
+    fn skill_usage_value_with_opencode(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        opencode: Vec<super::insights_skills::opencode::OpenCodeSkillRow>,
+        opencode_partial: bool,
     ) -> serde_json::Value {
         if !enabled {
             return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
@@ -2733,6 +2789,24 @@ impl CounterPass {
             Ok(found) => found,
             Err(reason) => return unreadable_value(reason),
         };
+        #[derive(Default, Serialize)]
+        struct Period {
+            invocations: u64,
+            loads: u64,
+            sessions: usize,
+        }
+        #[derive(Serialize)]
+        struct Window {
+            days: i64,
+            #[serde(flatten)]
+            counts: Period,
+        }
+        #[derive(Serialize)]
+        struct Day {
+            day: String,
+            #[serde(flatten)]
+            counts: Period,
+        }
         #[derive(Serialize)]
         struct Aggregate {
             name: String,
@@ -2741,26 +2815,64 @@ impl CounterPass {
             loads: u64,
             sessions: usize,
             last_seen: Option<DateTime<Utc>>,
+            population: &'static str,
             session_refs: Vec<String>,
+            parent_session_refs: Vec<String>,
+            evidence: Vec<serde_json::Value>,
+            windows: Vec<Window>,
+            daily: Vec<Day>,
+            undated_events: usize,
         }
-        let mut aggregates: BTreeMap<(String, &'static str), Aggregate> = BTreeMap::new();
+        let now = Utc::now();
+        let mut earliest_evidence: Option<DateTime<Utc>> = None;
+        let mut sessions_partial = 0usize;
+        let mut aggregates: BTreeMap<(String, &'static str, &'static str), Aggregate> =
+            BTreeMap::new();
         let mut observed = 0usize;
         let mut unknown = 0usize;
-        let mut partial = false;
+        let mut partial = opencode_partial;
+        let mut inputs = Vec::new();
+        let mut delegated_observed = 0usize;
+        let mut delegated_unknown = 0usize;
+        let mut unclassified_observed = 0usize;
+        let mut unclassified_unknown = 0usize;
         if let (Some(key), Some(store)) = (&key, &store) {
             let never = never_digests(key, never_project_keys);
             let tag = store_tag_of(key, store);
-            for row in store.rows.values().filter(|row| is_listed(row, &never)) {
-                let Some(evidence) = row
-                    .skill_usage
-                    .as_ref()
-                    .filter(|e| e.schema_version == SKILL_USAGE_VERSION)
-                else {
-                    unknown += 1;
-                    continue;
-                };
-                observed += 1;
-                partial |= evidence.partial;
+            let mut retained_children: BTreeMap<KeyedDigest, usize> = BTreeMap::new();
+            for child in store
+                .spawned
+                .values()
+                .filter(|child| !never.contains(&child.row.project))
+            {
+                *retained_children.entry(child.parent).or_default() += 1;
+            }
+            for (parent_key, parent) in store.rows.iter().filter(|(_, row)| is_listed(row, &never))
+            {
+                delegated_unknown += (parent.skill_children_expected as usize).saturating_sub(
+                    retained_children
+                        .get(parent_key)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+            }
+            let direct = store
+                .rows
+                .values()
+                .filter(|row| is_listed(row, &never))
+                .map(|row| (row, "direct", row.listed_reference(tag), None));
+            let delegated = store.spawned.values().filter_map(|child| {
+                let parent = store.rows.get(&child.parent)?;
+                (is_listed(parent, &never) && !never.contains(&child.row.project)).then(|| {
+                    (
+                        &child.row,
+                        "delegated",
+                        format!("c{}.{tag}", child.row.seq),
+                        Some(parent.listed_reference(tag)),
+                    )
+                })
+            });
+            for (row, population, reference, parent_reference) in direct.chain(delegated) {
                 let agent = match row.body {
                     RowBody::Claude { .. }
                     | RowBody::Unknown {
@@ -2769,32 +2881,134 @@ impl CounterPass {
                     } => "claude_code",
                     _ => "codex",
                 };
-                for count in &evidence.skills {
-                    let key = (count.name.clone(), agent);
-                    // Response size stays bounded independently of the
-                    // number of rows the counter store retains.
-                    if !aggregates.contains_key(&key) && aggregates.len() >= 512 {
-                        partial = true;
+                inputs.push((
+                    row.skill_usage.as_ref(),
+                    agent,
+                    population,
+                    reference,
+                    parent_reference,
+                ));
+            }
+        }
+        inputs.extend(opencode.iter().map(|row| {
+            (
+                Some(&row.evidence),
+                "opencode",
+                row.population,
+                row.reference.clone(),
+                row.parent_reference.clone(),
+            )
+        }));
+        for (evidence, agent, population, reference, parent_reference) in inputs {
+            let Some(evidence) = evidence.filter(|e| e.schema_version == SKILL_USAGE_VERSION)
+            else {
+                match population {
+                    "delegated" => delegated_unknown += 1,
+                    "direct" => unknown += 1,
+                    _ => unclassified_unknown += 1,
+                }
+                continue;
+            };
+            match population {
+                "delegated" => delegated_observed += 1,
+                "direct" => observed += 1,
+                _ => unclassified_observed += 1,
+            }
+            partial |= evidence.partial || population == "unknown";
+            sessions_partial += usize::from(evidence.partial);
+            for count in &evidence.skills {
+                let key = (count.name.clone(), agent, population);
+                // Response size stays bounded independently of the
+                // number of rows the counter store retains.
+                if !aggregates.contains_key(&key) && aggregates.len() >= 512 {
+                    partial = true;
+                    continue;
+                }
+                let entry = aggregates.entry(key).or_insert_with(|| Aggregate {
+                    name: count.name.clone(),
+                    agent,
+                    invocations: 0,
+                    loads: 0,
+                    sessions: 0,
+                    last_seen: None,
+                    population,
+                    session_refs: Vec::new(),
+                    parent_session_refs: Vec::new(),
+                    evidence: Vec::new(),
+                    windows: [7, 30, 90]
+                        .into_iter()
+                        .map(|days| Window {
+                            days,
+                            counts: Period::default(),
+                        })
+                        .collect(),
+                    daily: Vec::new(),
+                    undated_events: 0,
+                });
+                entry.invocations = entry
+                    .invocations
+                    .saturating_add(u64::from(count.invocations));
+                entry.loads = entry.loads.saturating_add(u64::from(count.loads));
+                entry.sessions += 1;
+                entry.last_seen = entry.last_seen.max(count.last_seen);
+                let mut session_days = BTreeSet::new();
+                let mut session_windows = BTreeSet::new();
+                for event in &count.events {
+                    let Some(at) = event.at else {
+                        entry.undated_events += 1;
+                        continue;
+                    };
+                    earliest_evidence = Some(earliest_evidence.map_or(at, |old| old.min(at)));
+                    if at > now {
                         continue;
                     }
-                    let entry = aggregates.entry(key).or_insert_with(|| Aggregate {
-                        name: count.name.clone(),
-                        agent,
-                        invocations: 0,
-                        loads: 0,
-                        sessions: 0,
-                        last_seen: None,
-                        session_refs: Vec::new(),
-                    });
-                    entry.invocations = entry
-                        .invocations
-                        .saturating_add(u64::from(count.invocations));
-                    entry.loads = entry.loads.saturating_add(u64::from(count.loads));
-                    entry.sessions += 1;
-                    entry.last_seen = entry.last_seen.max(count.last_seen);
-                    if entry.session_refs.len() < 20 {
-                        entry.session_refs.push(row.listed_reference(tag));
+                    for window in &mut entry.windows {
+                        if at >= now - chrono::Duration::days(window.days) {
+                            window.counts.loads += u64::from(event.loaded);
+                            window.counts.invocations += u64::from(!event.loaded);
+                            session_windows.insert(window.days);
+                        }
                     }
+                    if at < now - chrono::Duration::days(90) {
+                        continue;
+                    }
+                    let day = at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    let index = entry
+                        .daily
+                        .iter()
+                        .position(|item| item.day == day)
+                        .unwrap_or_else(|| {
+                            entry.daily.push(Day {
+                                day: day.clone(),
+                                counts: Period::default(),
+                            });
+                            entry.daily.len() - 1
+                        });
+                    entry.daily[index].counts.loads += u64::from(event.loaded);
+                    entry.daily[index].counts.invocations += u64::from(!event.loaded);
+                    session_days.insert(day);
+                }
+                for window in &mut entry.windows {
+                    window.counts.sessions += usize::from(session_windows.contains(&window.days));
+                }
+                for day in &mut entry.daily {
+                    day.counts.sessions += usize::from(session_days.contains(&day.day));
+                }
+                entry.daily.sort_by(|a, b| a.day.cmp(&b.day));
+                if entry.session_refs.len() < 20 {
+                    entry.session_refs.push(reference.clone());
+                    if let Some(parent) = &parent_reference {
+                        if !entry.parent_session_refs.contains(parent) {
+                            entry.parent_session_refs.push(parent.clone());
+                        }
+                    }
+                    entry.evidence.push(serde_json::json!({
+                        "session_ref": reference,
+                        "parent_session_ref": parent_reference,
+                    }));
                 }
             }
         }
@@ -2803,16 +3017,28 @@ impl CounterPass {
             "feed": FEED_COUNTER_PASS,
             "readable": true,
             "usage": {
+                "enabled": true,
+                "last_analysis_at": self.updated_at(),
+                "earliest_evidence": earliest_evidence,
+                "sessions_partial": sessions_partial,
+                "child_sessions_unavailable": delegated_unknown,
+                "delegated_sessions_observed": delegated_observed,
+                "delegated_sessions_unknown": delegated_unknown,
+                "unclassified_sessions_observed": unclassified_observed,
+                "unclassified_sessions_unknown": unclassified_unknown,
                 "sessions_observed": observed,
                 "sessions_unknown": unknown,
-                "partial": partial || unknown > 0 || observed == 0,
+                "partial": partial || unknown > 0 || delegated_unknown > 0 || unclassified_unknown > 0 || observed + delegated_observed + unclassified_observed == 0,
                 "skills": aggregates.into_values().collect::<Vec<_>>(),
             },
             "coverage": {
                 "claude_code": "explicit_invocations",
                 "codex": "loads_only",
-                "opencode": "unsupported",
+                "opencode": "explicit_invocations",
                 "matching": "name_only",
+                "child_sessions": "partial",
+                "claude_child_sessions": "explicit_invocations",
+                "codex_child_sessions": "unsupported",
             },
         })
     }
@@ -3043,7 +3269,9 @@ impl CounterPass {
             Err(reason) => return Ok(unreadable_value(reason)),
         };
         let never = never_digests(&key, never_project_keys);
-        let (_, row) = find_listed(&key, &store, &never, reference)
+        let row = find_listed(&key, &store, &never, reference)
+            .map(|(_, row)| row)
+            .or_else(|| find_skill_child(&key, &store, &never, reference))
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
         let input = row.session_input();
         let mut drill = crate::insights::session_drill::session_drill(
@@ -3737,7 +3965,7 @@ fn read_body(
     let mut facts = scanned.facts;
     let mut skill_usage = scanned.skill_usage;
     if let Some(skill_usage) = skill_usage.as_mut() {
-        skill_usage.partial |= scanned.long_lines_skipped > 0 || candidate.group_member_count > 0;
+        skill_usage.partial |= scanned.long_lines_skipped > 0;
     }
     // A line passed over may have held counters: partial, never complete.
     let skipped = scanned.long_lines_skipped > 0;
@@ -4301,6 +4529,26 @@ fn find_listed<'s>(
         .rows
         .iter()
         .find(|(_, row)| row.seq == seq && is_listed(row, never))
+}
+
+/// Skills child references never grant label, analyze, or billing access.
+/// Both the child and its retained parent must remain permitted.
+fn find_skill_child<'s>(
+    key: &DigestKey,
+    store: &'s CounterStore,
+    never: &NeverDigests,
+    reference: &str,
+) -> Option<&'s CounterRow> {
+    let reference = reference.strip_prefix('c')?;
+    let (seq, tag) = parse_listed_reference(&format!("t{reference}"))?;
+    if tag != store_tag_of(key, store) {
+        return None;
+    }
+    store.spawned.values().find_map(|child| {
+        let parent = store.rows.get(&child.parent)?;
+        (child.row.seq == seq && is_listed(parent, never) && !never.contains(&child.row.project))
+            .then_some(&child.row)
+    })
 }
 
 /// Age out and cap the route tallies against the rows the store keeps.
@@ -5188,12 +5436,33 @@ pub(crate) fn skills_usage(shared: &DaemonShared) -> serde_json::Value {
     } else {
         NeverFolders::NONE
     };
-    let value = shared.insights_counter.skill_usage_value(enabled, &never);
+    let (opencode, opencode_partial, opencode_completed_at) =
+        super::insights_skills::opencode::snapshot(shared);
+    let mut value = shared.insights_counter.skill_usage_value_with_opencode(
+        enabled,
+        &never,
+        opencode,
+        opencode_partial,
+    );
+    if let Some(completed) = opencode_completed_at {
+        let counter_completed = value["usage"]["last_analysis_at"]
+            .as_str()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        if counter_completed.is_none_or(|at| completed > at) && value.get("usage").is_some() {
+            value["usage"]["last_analysis_at"] = serde_json::json!(completed);
+        }
+    }
     // A live disable while the aggregation ran hides even cached evidence.
     if !shared
-        .feature_flags
-        .snapshot()
-        .is_enabled("insights_skills")
+        .settings
+        .lock()
+        .map(|s| s.insights_counter_pass)
+        .unwrap_or(false)
+        || !shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills")
     {
         serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS})
     } else {
@@ -5591,6 +5860,71 @@ mod tests {
     }
 
     #[test]
+    fn skill_windows_exclude_undated_and_old_events_and_count_sessions_once() {
+        let f = Fixture::new();
+        let mut bytes = claude_bytes();
+        let time = Utc::now();
+        for (id, at) in [
+            ("recent", Some(time - Duration::days(1))),
+            ("recent2", Some(time - Duration::days(2))),
+            ("older", Some(time - Duration::days(20))),
+            ("old", Some(time - Duration::days(100))),
+            ("undated", None),
+        ] {
+            let line = serde_json::json!({"type":"assistant","timestamp":at,"message":{"content":[{"type":"tool_use","id":id,"name":"Skill","input":{"skill":"review"}}]}});
+            bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
+        }
+        let path = f.write("windows.jsonl", &bytes);
+        let candidate = candidate(SOURCE_CLAUDE_CODE, &path);
+        f.run_skills(std::slice::from_ref(&candidate));
+        let value = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        let row = &value["usage"]["skills"][0];
+        assert_eq!(row["invocations"], 5);
+        assert_eq!(row["undated_events"], 1);
+        assert_eq!(row["windows"][0]["invocations"], 2);
+        assert_eq!(row["windows"][0]["sessions"], 1);
+        assert_eq!(row["windows"][1]["invocations"], 3);
+        assert_eq!(row["windows"][2]["invocations"], 3);
+        assert_eq!(row["daily"].as_array().unwrap().len(), 3);
+        assert_eq!(f.run_skills(&[candidate]).read, 0);
+        assert_eq!(
+            f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"]["skills"][0]["invocations"],
+            5
+        );
+    }
+
+    #[test]
+    fn opencode_skill_rows_keep_source_and_unknown_lineage_out_of_direct_counts() {
+        let f = Fixture::new();
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        scan.observe(&serde_json::json!({
+            "type":"assistant", "timestamp": Utc::now(),
+            "message":{"content":[{"type":"tool_use","id":"call", "name":"Skill", "input":{"skill":"review"}}]}
+        }));
+        let value = f.pass.skill_usage_value_with_opencode(
+            true,
+            &NeverFolders::NONE,
+            vec![super::super::insights_skills::opencode::OpenCodeSkillRow {
+                reference: "os.opaque".into(),
+                evidence: scan.finish(),
+                population: "unknown",
+                parent_reference: None,
+            }],
+            false,
+        );
+        assert_eq!(value["usage"]["sessions_observed"], 0);
+        assert_eq!(value["usage"]["delegated_sessions_observed"], 0);
+        assert_eq!(value["usage"]["unclassified_sessions_observed"], 1);
+        assert_eq!(value["usage"]["partial"], true);
+        let row = &value["usage"]["skills"][0];
+        assert_eq!(row["agent"], "opencode");
+        assert_eq!(row["population"], "unknown");
+        assert_eq!(row["invocations"], 1);
+        assert_eq!(row["evidence"][0]["session_ref"], "os.opaque");
+        assert!(f.pass.load_cached().unwrap().is_none());
+    }
+
+    #[test]
     fn skill_usage_excludes_automated_rows() {
         let f = Fixture::new();
         let path = f.write("skills.jsonl", &claude_bytes());
@@ -5599,7 +5933,7 @@ mod tests {
         let row = store.rows.values_mut().next().unwrap();
         row.automation = Automation::Automated;
         row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
-            schema_version: 1,
+            schema_version: SKILL_USAGE_VERSION,
             coverage: crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations,
             partial: false,
             skills: vec![crate::insights::skill_usage::SkillUsageCount {
@@ -5607,6 +5941,7 @@ mod tests {
                 invocations: 1,
                 loads: 0,
                 last_seen: None,
+                events: Vec::new(),
             }],
         });
         f.pass.save(store).unwrap();
@@ -5750,7 +6085,9 @@ mod tests {
 
     #[test]
     fn skill_usage_live_disable_during_pass_drops_new_evidence_and_backfills_once() {
-        for (disable_after, reenable_between_reads) in [(1, false), (1, true), (2, false)] {
+        for (disable_after, reenable_between_reads) in
+            [(1, false), (1, true), (2, false), (3, false)]
+        {
             let (_dir, flag_dir, shared) = shared_with_skills_flag();
             set_skills_flag(&shared, 1, true);
             let mut records: Vec<serde_json::Value> = String::from_utf8(claude_bytes())
@@ -5781,6 +6118,14 @@ mod tests {
                 std::fs::write(&path, &bytes).unwrap();
                 candidates.push(candidate(SOURCE_CLAUDE_CODE, &path));
             }
+            let child_path = flag_dir.path().join("child.jsonl");
+            std::fs::write(&child_path, &bytes).unwrap();
+            candidates[0].group_member_count = 1;
+            let child = SpawnedCandidate {
+                parent: 0,
+                kind: SpawnedBy::Agent,
+                candidate: candidate(SOURCE_CLAUDE_CODE, &child_path),
+            };
             let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let weak = Arc::downgrade(&shared);
             let reads_after = Arc::clone(&reads);
@@ -5810,7 +6155,7 @@ mod tests {
                     &shared,
                     CounterJob {
                         candidates: candidates.clone(),
-                        spawned: Vec::new(),
+                        spawned: vec![child.clone()],
                         never_project_keys: NeverFolders::NONE,
                         now: now(),
                         quiescence_secs: QUIET,
@@ -5827,21 +6172,29 @@ mod tests {
             );
             assert_eq!(
                 rows.iter().filter(|row| row.skill_usage.is_some()).count(),
-                usize::from(reenable_between_reads),
-                "evidence finishing after disable is dropped even if re-enabled before persistence"
+                0,
+                "a changed flag generation invalidates all evidence from the old pass"
             );
             assert!(
                 rows.iter()
                     .filter(|row| row.skill_usage.is_none())
                     .all(|row| row.skill_usage_version == 0)
             );
-            if !reenable_between_reads {
-                assert!(
-                    !std::fs::read_to_string(shared.store.daemon_path(COUNTER_ROWS_FILE))
-                        .unwrap()
-                        .contains("private-mid-pass")
-                );
-            }
+            let store = shared.insights_counter.load_cached().unwrap().unwrap();
+            assert_eq!(
+                store.spawned.len(),
+                1,
+                "delegated counters also finish the pass"
+            );
+            let child_row = &store.spawned.values().next().unwrap().row;
+            assert!(matches!(child_row.body, RowBody::Claude { .. }));
+            assert!(child_row.skill_usage.is_none());
+            assert_eq!(child_row.skill_usage_version, 0);
+            assert!(
+                !std::fs::read_to_string(shared.store.daemon_path(COUNTER_ROWS_FILE))
+                    .unwrap()
+                    .contains("private-mid-pass")
+            );
             *shared
                 .insights_counter
                 .test_seams
@@ -5860,6 +6213,16 @@ mod tests {
                 stored_rows(&shared.insights_counter)
                     .iter()
                     .all(|row| row.skill_usage_version == SKILL_USAGE_VERSION)
+            );
+            assert!(
+                shared
+                    .insights_counter
+                    .load_cached()
+                    .unwrap()
+                    .unwrap()
+                    .spawned
+                    .values()
+                    .all(|child| child.row.skill_usage_version == SKILL_USAGE_VERSION)
             );
             let writes = shared.insights_counter.writes_for_test().0;
             submit();
@@ -6683,6 +7046,7 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_children_expected: 0,
                     skill_usage: None,
                     skill_usage_version: SKILL_USAGE_VERSION,
                     automation: Automation::Unknown,
@@ -6760,6 +7124,7 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_children_expected: 0,
                     skill_usage: None,
                     skill_usage_version: SKILL_USAGE_VERSION,
                     automation: Automation::Unknown,
@@ -6849,6 +7214,7 @@ mod tests {
             streamed: true,
             facts: None,
             facts_version: SESSION_FACTS_VERSION,
+            skill_children_expected: 0,
             skill_usage: None,
             skill_usage_version: SKILL_USAGE_VERSION,
             automation: Automation::Unknown,

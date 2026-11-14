@@ -11,13 +11,21 @@ enum SkillsSection: String, CaseIterable, Hashable {
 /// Skills are observed and followed here; publisher instructions own setup.
 struct InsightsSkillsTab: View {
     let model: InsightsSkillsModel
+    let reviewSettings: (() -> Void)?
+    @State private var evidenceOpen = false
     @State private var catalogQuery = ""
     @State private var inventoryQuery = ""
+    @State private var inventoryAgent = ""
+    @State private var inventoryAvailability = ""
+    @State private var inventorySort = "name"
+    @State private var usageDays = 30
+    @State private var selectedSkillID: String?
     @State private var selectedSection: SkillsSection
     @Environment(\.scenePhase) private var scenePhase
 
-    init(model: InsightsSkillsModel, initialSection: SkillsSection = .inventory) {
+    init(model: InsightsSkillsModel, reviewSettings: (() -> Void)? = nil, initialSection: SkillsSection = .inventory) {
         self.model = model
+        self.reviewSettings = reviewSettings
         _selectedSection = State(initialValue: initialSection)
     }
 
@@ -37,6 +45,32 @@ struct InsightsSkillsTab: View {
                                segments: SkillsSection.allCases.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
+            if evidenceOpen {
+                HStack {
+                    Text(model.text("skills_evidence_title")).insightsHeading()
+                    Spacer()
+                    Button(model.text("skills_close")) { evidenceOpen = false; model.invalidateDetails() }
+                }
+                if model.evidenceFailure { Text(model.text("skills_evidence_unavailable")).insightsNote() }
+                else if let session = model.evidence?.session {
+                    if let source = session.source { Text(model.agentLabel(source)) }
+                    if let date = session.date { Text(date) }
+                    if let turns = session.turns { Text(model.text("skills_evidence_turns", values: ["count": String(turns)])) }
+                    if let tokens = session.tokens { Text(model.text("skills_evidence_tokens", values: ["count": String(tokens)])) }
+                } else if let observations = model.evidence?.skillUsage {
+                    if let agent = model.evidence?.agent { Text(model.agentLabel(agent)).insightsCaption() }
+                    Text(model.populationLabel(model.evidence?.population ?? "unknown")).insightsCaption()
+                    Text(model.text("skills_coverage_" + observations.coverage)).insightsCaption()
+                    if observations.partial { Text(model.text("skills_partial_usage")).insightsNote() }
+                    ForEach(observations.skills, id: \.name) { count in
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text(count.name).insightsHeading()
+                            Text(model.text("skills_invocations", values: ["count": String(count.invocations)]))
+                            Text(model.text("skills_loads", values: ["count": String(count.loads)]))
+                        }
+                    }
+                } else { Text(model.text("skills_loading")).insightsNote() }
+            }
             if let failure = model.failureKey { Text(model.text(failure)).insightsError() }
             InsightsTabPage(getStarted: nil) {
                 if let snapshot = model.shown {
@@ -62,6 +96,9 @@ struct InsightsSkillsTab: View {
         }
         .padding(.top, GlassTokens.Space.s7)
         .insightsSurface()
+        .onDisappear { model.invalidateDetails() }
+        .onChange(of: selectedSkillID) { _, _ in model.invalidateDetails() }
+        .onChange(of: selectedSection) { _, _ in model.invalidateDetails() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await model.observe()
@@ -78,35 +115,110 @@ struct InsightsSkillsTab: View {
     }
 
     private func inventory(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
-        let skills = model.inventorySkills(in: snapshot, matching: inventoryQuery)
+        let skills = model.inventorySkills(in: snapshot, matching: inventoryQuery, agent: inventoryAgent,
+                                          availability: inventoryAvailability, sort: inventorySort, days: usageDays)
         return section("skills_inventory") {
             LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                if snapshot.inventory.partial { Text(model.text("skills_partial_inventory")).insightsNote() }
                 GlassTextField(model.text("skills_search"), text: $inventoryQuery,
                                prompt: model.text("skills_search"), showsLabel: false)
                     .accessibilityLabel(model.text("skills_search"))
+                HStack {
+                    Picker(model.text("skills_filter_agent"), selection: $inventoryAgent) {
+                        Text(model.text("skills_all_agents")).tag("")
+                        ForEach(Array(Set(snapshot.inventory.skills.map(\.agent))).sorted(), id: \.self) {
+                            Text(model.agentLabel($0)).tag($0)
+                        }
+                    }
+                    Picker(model.text("skills_filter_availability"), selection: $inventoryAvailability) {
+                        Text(model.text("skills_all_availability")).tag("")
+                        ForEach(["available", "disabled", "cached", "missing", "unknown"], id: \.self) {
+                            Text(model.text("skills_availability_" + $0)).tag($0)
+                        }
+                    }
+                }
+                HStack {
+                    Picker(model.text("skills_window"), selection: $usageDays) {
+                        ForEach([7, 30, 90], id: \.self) { Text(model.text("skills_days", values: ["count": String($0)])).tag($0) }
+                    }
+                    Picker(model.text("skills_sort"), selection: $inventorySort) {
+                        ForEach(["name", "sessions", "recent"], id: \.self) { Text(model.text("skills_sort_" + $0)).tag($0) }
+                    }
+                }
                 if skills.isEmpty {
-                    Text(model.text(snapshot.inventory.skills.isEmpty ? "skills_inventory_empty" : "skills_search_empty"))
-                        .insightsNote()
+                    Text(model.text(snapshot.refreshing ? "skills_loading" : snapshot.inventory.skills.isEmpty ? "skills_inventory_empty" : "skills_search_empty")).insightsNote()
+                }
+                if !snapshot.usage.enabled {
+                    Text(model.text("skills_analysis_off")).insightsNote()
+                    if let reviewSettings { Button(model.text("skills_review_settings")) { model.invalidateDetails(); reviewSettings() } }
                 }
                 ForEach(skills) { skill in
                     VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Text(skill.name).insightsHeading()
+                        Button { selectedSkillID = selectedSkillID == skill.id ? nil : skill.id } label: {
+                            HStack {
+                                Text(skill.name).insightsHeading()
+                                Spacer()
+                                Image(systemName: selectedSkillID == skill.id ? "chevron.up" : "chevron.down")
+                            }
+                        }.buttonStyle(.plain)
+                        .accessibilityLabel(model.text("skills_inspect", values: ["name": skill.name]))
                         if !skill.description.isEmpty { Text(skill.description) }
-                        Text([model.agentLabel(skill.agent), model.scopeLabel(skill.scope)].joined(separator: " · ")).insightsCaption()
-                        Text(skill.location).insightsMono().textSelection(.enabled)
-                        if let update = snapshot.updates.first(where: { $0.installedID == skill.id }) {
-                            status(update.status)
+                        Text(model.agentLabel(skill.agent)).insightsCaption()
+                        Text(model.text("skills_availability_" + (snapshot.inventory.details[skill.id]?.availability ?? "unknown"))).insightsCaption()
+                        if let definitionStatus = snapshot.inventory.details[skill.id]?.definitionStatus,
+                           ["invalid", "unreadable"].contains(definitionStatus) {
+                            Text(model.text("skills_definition_status_" + definitionStatus)).insightsNote()
                         }
-                        if let matched = model.catalogMatch(for: skill, in: snapshot) {
-                            instructions(matched.instructionsURL, name: skill.name)
+                        let usageRows = model.usageRows(for: skill, in: snapshot).filter { $0.windows.contains { $0.days == usageDays } }
+                        if !usageRows.isEmpty && snapshot.usage.enabled {
+                          ForEach(usageRows, id: \.identity) { row in
+                           if let window = row.windows.first(where: { $0.days == usageDays }) {
+                            Text(model.agentLabel(row.agent)).insightsCaption()
+                            Text(model.populationLabel(row.population)).insightsCaption()
+                            Text(model.text("skills_coverage_name_only")).insightsCaption()
+                            Text(model.text("skills_sessions", values: ["count": String(window.sessions)]))
+                            Text(model.text("skills_invocations", values: ["count": String(window.invocations)]))
+                            if let date = row.lastSeen { Text(model.text("skills_last_seen", values: ["date": model.timestamp(date)])).insightsCaption() }
+                            if selectedSkillID == skill.id {
+                                Text(model.text("skills_loads", values: ["count": String(window.loads)]))
+                                Text(model.text("skills_undated", values: ["count": String(row.undatedEvents)])).insightsCaption()
+                                evidenceLinks(row)
+                                Text(model.text("skills_daily_retained")).insightsCaption()
+                                ForEach(row.daily, id: \.day) { day in
+                                    HStack {
+                                        Text(day.day)
+                                        Text(model.text("skills_invocations", values: ["count": String(day.invocations)]))
+                                        Text(model.text("skills_loads", values: ["count": String(day.loads)]))
+                                    }.insightsCaption()
+                                }
+                            }
+                           }
+                          }
+                        } else { Text(model.text(model.usageState(for: skill, in: snapshot))).insightsNote() }
+                        if selectedSkillID == skill.id {
+                            Text(skill.location).insightsMono().textSelection(.enabled)
+                            Text(model.scopeLabel(skill.scope)).insightsCaption()
+                            Group {
+                                if model.definition?.skillID == skill.id, let body = model.definition?.definition {
+                                    Text(body).insightsMono().textSelection(.enabled)
+                                } else if model.definitionFailure {
+                                    Text(model.text("skills_definition_unavailable")).insightsNote()
+                                } else { Text(model.text("skills_loading")).insightsNote() }
+                            }.task(id: "\(skill.id):\(model.detailEpoch)") { await model.loadDefinition(skill.id) }
+
                         }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityElement(children: .contain)
+                    }.accessibilityElement(children: .contain)
                 }
-                ForEach(snapshot.inventory.coverage, id: \.location) { coverage in
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                DisclosureGroup(model.text("skills_coverage")) {
+                    Text(model.text("skills_usage_semantics")).insightsNote()
+                    if snapshot.inventory.partial { Text(model.text("skills_partial_inventory")).insightsNote() }
+                    if snapshot.usage.partial { Text(model.text("skills_partial_usage")).insightsNote() }
+                    if let date = snapshot.usage.lastAnalysisAt { Text(model.text("skills_checked_at", values: ["date": model.timestamp(date)])) }
+                    if let date = snapshot.usage.earliestEvidence { Text(model.text("skills_earliest", values: ["date": model.timestamp(date)])) }
+                    observationCoverage(snapshot.usage)
+                    ForEach(snapshot.usage.coverage, id: \.agent) { coverage in
+                        Text(model.agentLabel(coverage.agent) + " · " + model.text("skills_coverage_" + coverage.status))
+                    }
+                    ForEach(snapshot.inventory.coverage, id: \.location) { coverage in
                         Text(coverage.location).insightsMono()
                         status(coverage.status)
                     }
@@ -118,12 +230,7 @@ struct InsightsSkillsTab: View {
     private func usage(_ usage: DaemonData.SkillsUsage) -> some View {
         section("skills_usage") {
             LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                Text(model.text("skills_sessions_observed", values: ["count": String(usage.sessionsObserved)]))
-                    .insightsNote()
-                if usage.sessionsUnknown > 0 {
-                    Text(model.text("skills_sessions_unknown", values: ["count": String(usage.sessionsUnknown)]))
-                        .insightsNote()
-                }
+                observationCoverage(usage)
                 if usage.partial { Text(model.text("skills_partial_usage")).insightsNote() }
                 ForEach(usage.coverage, id: \.agent) { coverage in
                     HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
@@ -138,12 +245,70 @@ struct InsightsSkillsTab: View {
                             Text(row.name).insightsHeading()
                             Text(model.agentLabel(row.agent)).insightsCaption()
                         }
+                        Text(model.populationLabel(row.population)).insightsCaption()
                         Text(model.usageSummary(row, coverage: usage.coverage)).insightsNote()
+                        Text(model.text("skills_coverage_name_only")).insightsCaption()
+                        evidenceLinks(row)
                         if let date = row.lastSeen {
                             Text(model.text("skills_last_seen", values: ["date": model.timestamp(date)])).insightsCaption()
                         }
                     }
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: .contain)
+                }
+            }
+        }
+    }
+
+    private func observationCoverage(_ usage: DaemonData.SkillsUsage) -> some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+            Text(model.text("skills_population_direct")).insightsCaption()
+            Text(model.text("skills_sessions_observed", values: ["count": String(usage.sessionsObserved)]))
+                .insightsNote()
+            if usage.sessionsUnknown > 0 {
+                Text(model.text("skills_sessions_unknown", values: ["count": String(usage.sessionsUnknown)]))
+                    .insightsNote()
+            }
+            Text(model.text("skills_population_delegated")).insightsCaption()
+            if let observed = usage.delegatedSessionsObserved {
+                Text(model.text("skills_sessions_observed", values: ["count": String(observed)])).insightsNote()
+            } else {
+                Text(model.text("skills_usage_pending")).insightsNote()
+            }
+            if let unknown = usage.delegatedSessionsUnknown, unknown > 0 {
+                Text(model.text("skills_sessions_unknown", values: ["count": String(unknown)])).insightsNote()
+            }
+            if (usage.unclassifiedSessionsObserved ?? 0) > 0 || (usage.unclassifiedSessionsUnknown ?? 0) > 0 {
+                Text(model.text("skills_population_unknown")).insightsCaption()
+                if let observed = usage.unclassifiedSessionsObserved {
+                    Text(model.text("skills_sessions_observed", values: ["count": String(observed)])).insightsNote()
+                }
+                if let unknown = usage.unclassifiedSessionsUnknown, unknown > 0 {
+                    Text(model.text("skills_sessions_unknown", values: ["count": String(unknown)])).insightsNote()
+                }
+            }
+        }
+    }
+
+    private func evidenceLinks(_ row: DaemonData.SkillsUsageRow) -> some View {
+        DisclosureGroup(model.text("skills_evidence_links")) {
+            let links = model.evidenceLinks(for: row)
+            if links.isEmpty { Text(model.text("skills_evidence_unavailable")).insightsNote() }
+            ForEach(Array(links.enumerated()), id: \.element.sessionRef) { index, link in
+                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    Button(model.text(row.population == "delegated" ? "skills_evidence_child" : "skills_evidence_session",
+                                      values: ["count": String(index + 1)])) {
+                        evidenceOpen = true
+                        Task { await model.loadEvidence(link.sessionRef) }
+                    }
+                    .accessibilityLabel(model.text(row.population == "delegated" ? "skills_evidence_child_accessibility" : "skills_evidence_accessibility",
+                                                   values: ["name": row.name + " · " + model.agentLabel(row.agent), "count": String(index + 1)]))
+                    if let parent = link.parentSessionRef {
+                        Button(model.text("skills_evidence_parent")) {
+                            evidenceOpen = true
+                            Task { await model.loadEvidence(parent) }
+                        }
+                        .accessibilityLabel(model.text("skills_evidence_parent_accessibility", values: ["name": row.name + " · " + model.agentLabel(row.agent), "count": String(index + 1)]))
+                    }
                 }
             }
         }
@@ -252,8 +417,4 @@ struct InsightsSkillsTab: View {
                 .accessibilityLabel(model.text("skills_instructions_accessibility", values: ["name": name]))
         }
     }
-}
-
-private extension DaemonData.SkillsUsageRow {
-    var identity: String { agent + "\u{0}" + name }
 }

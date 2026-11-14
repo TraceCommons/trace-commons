@@ -347,6 +347,9 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
+                                 }, openSkillsSettings: {
+                                     navigation.requestSettings(at: .insights)
+                                     openWindow(id: WindowID.settings)
                                  }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
                 }
             } footer: {

@@ -213,11 +213,13 @@ struct Runtime {
     last_attempt: Option<Instant>,
     error: Option<&'static str>,
     inventory: Option<(Instant, InventoryPolicy, Inventory)>,
+    inventory_scanned_at: Option<DateTime<Utc>>,
 }
 
 /// A leaf lock: never held while taking daemon settings, policy, or counter locks.
 #[derive(Default)]
 pub(crate) struct SkillsService {
+    opencode: Mutex<opencode::State>,
     runtime: Mutex<Runtime>,
 }
 
@@ -685,9 +687,12 @@ pub(crate) fn skills_flag_on(shared: &DaemonShared) -> bool {
     !shared.dev_dry_run && shared.feature_flags.is_enabled(INSIGHTS_SKILLS_FLAG)
 }
 
+fn feature_enabled(shared: &DaemonShared) -> bool {
+    skills_flag_on(shared)
+}
+
 fn enabled(shared: &DaemonShared) -> bool {
-    !shared.dev_dry_run
-        && skills_flag_on(shared)
+    feature_enabled(shared)
         && shared
             .settings
             .lock()
@@ -727,11 +732,8 @@ fn inventory_policy(shared: &DaemonShared) -> Result<InventoryPolicy, ()> {
                 .collect::<Result<Vec<_>, _>>()?
         }
     };
-    let queue = shared.queue.lock().map_err(|_| ())?;
-    let mut keys = super::policy::known_keys(
-        &policy,
-        queue.all().iter().map(|entry| entry.project_key.clone()),
-    );
+    // A transcript or upload queue entry cannot expand filesystem scope.
+    let mut keys: Vec<_> = policy.projects.keys().cloned().collect();
     if let Some(grant) = &policy.automatic_grant {
         keys.extend(grant.projects_on_disk.iter().cloned());
     }
@@ -753,10 +755,50 @@ fn inventory_policy(shared: &DaemonShared) -> Result<InventoryPolicy, ()> {
     })
 }
 
+pub(crate) struct SnapshotScope {
+    flags: u64,
+    cleared: u64,
+    analysis: bool,
+    policy: super::policy::ProjectPolicy,
+}
+
+impl SnapshotScope {
+    pub(crate) fn capture(shared: &DaemonShared) -> Option<Self> {
+        // Each guard ends before acquiring the next daemon lock.
+        let flags = shared.feature_flags.generation();
+        let cleared = shared.insights_counter.clear_generation();
+        let analysis = shared.settings.lock().ok()?.insights_counter_pass;
+        let policy = shared.policy.lock().ok()?.clone();
+        Some(Self {
+            flags,
+            cleared,
+            analysis,
+            policy,
+        })
+    }
+
+    pub(crate) fn is_current(&self, shared: &DaemonShared) -> bool {
+        feature_enabled(shared)
+            && self.flags == shared.feature_flags.generation()
+            && self.cleared == shared.insights_counter.clear_generation()
+            && shared
+                .settings
+                .lock()
+                .is_ok_and(|settings| self.analysis == settings.insights_counter_pass)
+            && shared
+                .policy
+                .lock()
+                .is_ok_and(|policy| self.policy == *policy)
+    }
+}
+
 fn snapshot(shared: &DaemonShared) -> Value {
-    if !enabled(shared) {
+    if !feature_enabled(shared) {
         return json!({"enabled":false,"copy":copy()});
     }
+    let Some(scope) = SnapshotScope::capture(shared) else {
+        return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-unavailable","copy":copy()});
+    };
     let policy = match inventory_policy(shared) {
         Ok(policy) => policy,
         Err(()) => {
@@ -777,19 +819,14 @@ fn snapshot(shared: &DaemonShared) -> Value {
                 .map(|(_, _, inventory)| inventory.clone())
         });
     let inventory = cached.unwrap_or_else(|| {
-        let mut extra = Vec::new();
-        // Explicit environment roots only; tests use the same isolated home as
-        // session discovery and never inherit a developer's configured roots.
-        if !cfg!(any(test, feature = "test-credential-store")) {
-            if let Some(path) = std::env::var_os("SKILLS_HOME").filter(|path| !path.is_empty()) {
-                extra.push(("shared".into(), PathBuf::from(path)));
-            }
-            if let Some(path) = std::env::var_os("CODEX_HOME").filter(|path| !path.is_empty()) {
-                extra.push(("codex".into(), PathBuf::from(path).join("skills")));
-            }
-        }
+        let extra = if cfg!(any(test, feature = "test-credential-store")) {
+            Vec::new()
+        } else {
+            crate::insights::skills::configured_global_roots()
+        };
         let inventory = if policy.all_local_excluded {
             Inventory {
+                details: Default::default(),
                 skills: Vec::new(),
                 partial: true,
                 coverage: vec![crate::insights::skills::ScanCoverage {
@@ -809,10 +846,14 @@ fn snapshot(shared: &DaemonShared) -> Value {
             if !skills_flag_on(shared) {
                 return inventory;
             }
-            runtime.inventory = Some((Instant::now(), policy, inventory.clone()));
+            runtime.inventory_scanned_at = Some(Utc::now());
+            runtime.inventory = Some((Instant::now(), policy.clone(), inventory.clone()));
         }
         inventory
     });
+    if inventory_policy(shared).ok().as_ref() != Some(&policy) {
+        return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-changed","copy":copy()});
+    }
     let usage_response = super::insights_week::skills_usage(shared);
     if usage_response.get("readable").and_then(Value::as_bool) == Some(false) {
         return json!({"enabled":true,"readable":false,"reason":usage_response.get("reason"),"copy":copy()});
@@ -821,6 +862,10 @@ fn snapshot(shared: &DaemonShared) -> Value {
         .get("usage")
         .cloned()
         .unwrap_or_else(|| json!({"partial":true,"skills":[]}));
+    usage["enabled"] = usage_response
+        .get("enabled")
+        .cloned()
+        .unwrap_or(json!(false));
     usage["coverage"] = Value::Array(
         usage_response
             .get("coverage")
@@ -848,6 +893,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
         json!({"publisher_id":publisher.id,"status":status,"checked_at":state.and_then(|state| state.checked_at)})
     }).collect();
     let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
+    let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
     let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
     let (catalog, catalog_partial) = bounded_rows(runtime.public.skills.iter(), 180 * 1024);
     let (updates, updates_partial) =
@@ -867,13 +913,56 @@ fn snapshot(shared: &DaemonShared) -> Value {
             usage["partial"] = true.into();
         }
     }
-    json!({
-        "enabled":true,"readable":true,"inventory":{"skills":installed,"coverage":coverage,"partial":inventory.partial || installed_partial || coverage_partial || updates_partial},
+    let value = json!({
+        "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
         "catalog":{"publishers":publishers(),"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states},
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
-    })
+    });
+    drop(runtime);
+    if !scope.is_current(shared) {
+        return json!({"enabled":feature_enabled(shared),"readable":false,"reason":"insights-skills-policy-changed","copy":copy()});
+    }
+    value
+}
+
+/// Only emit metadata belonging to an emitted installation. Serialize through
+/// the typed model so ephemeral canonical paths cannot cross IPC; account for
+/// escaped JSON keys as well as values in this independent response budget.
+fn bounded_inventory_details(
+    inventory: &Inventory,
+    installed: &[Value],
+    limit: usize,
+) -> (BTreeMap<String, Value>, bool) {
+    let mut result = BTreeMap::new();
+    let mut bytes = 2usize;
+    for id in installed
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+    {
+        let Some(details) = inventory.details.get(id) else {
+            continue;
+        };
+        let Ok(value) = serde_json::to_value(details) else {
+            return (result, true);
+        };
+        let Ok(encoded) = serde_json::to_vec(&value) else {
+            return (result, true);
+        };
+        let Ok(key) = serde_json::to_vec(id) else {
+            return (result, true);
+        };
+        bytes = bytes
+            .saturating_add(encoded.len())
+            .saturating_add(key.len())
+            .saturating_add(2);
+        if bytes > limit {
+            return (result, true);
+        }
+        result.insert(id.to_owned(), value);
+    }
+    (result, false)
 }
 
 fn bounded_rows<T: Serialize>(
@@ -917,13 +1006,22 @@ fn updates(inventory: &Inventory, state: &PublicState, now: DateTime<Utc>) -> Ve
     }).collect()
 }
 
+mod detail;
+pub(crate) mod opencode;
+
 pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
+    if req.params.get("session_ref").is_some() {
+        return super::run_blocking(|| opencode::detail(shared, req));
+    }
+    if req.params.get("skill_id").is_some() {
+        return super::run_blocking(|| detail::handle(shared, req));
+    }
     let force = match req.params.get("refresh") {
         None => false,
         Some(Value::Bool(value)) => *value,
         _ => return Response::err(req.id, ERR_BAD_PARAMS, "insights-skills-refresh-invalid"),
     };
-    if force && enabled(shared) {
+    if force && feature_enabled(shared) {
         if let Ok(mut runtime) = shared.insights_skills.runtime.lock() {
             runtime.inventory = None;
         }
@@ -935,7 +1033,7 @@ pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
             value["refreshing"] = runtime.refreshing.into();
         }
     }
-    if !enabled(shared) {
+    if !feature_enabled(shared) {
         value = json!({"enabled":false,"copy":copy()});
     }
     Response::ok(req.id, value)

@@ -136,6 +136,7 @@ pub async fn tick(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<Tick
         return Ok(TickReport::default());
     }
     super::insights_skills::maybe_refresh_public(shared);
+    super::insights_skills::opencode::schedule(shared);
     super::run_blocking(|| tick_blocking(shared, now))
 }
 

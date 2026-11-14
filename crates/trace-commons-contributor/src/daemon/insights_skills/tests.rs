@@ -166,14 +166,15 @@ fn response_rows_observe_encoded_bytes_and_report_partial() {
 }
 
 #[test]
-fn disabled_skills_never_opens_the_cache_or_scans_local_roots() {
+fn inventory_remains_available_when_usage_analysis_is_disabled() {
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
     set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = false;
     let value = snapshot(&shared);
-    assert_eq!(value["enabled"], false);
-    assert!(!shared.insights_skills.runtime.lock().unwrap().loaded);
+    assert_eq!(value["enabled"], true);
+    assert_eq!(value["usage"]["enabled"], false);
+    assert!(!enabled(&shared));
     assert!(!shared.store.dir().join(STATE_FILE).exists());
 }
 
@@ -463,6 +464,200 @@ fn a_missing_registry_flag_cannot_enable_skills() {
     maybe_refresh_public(&shared);
     assert_eq!(snapshot(&shared)["enabled"], false);
     assert!(!shared.insights_skills.runtime.lock().unwrap().loaded);
+}
+
+#[test]
+fn snapshot_emits_bounded_details_without_canonical_paths_or_orphan_ids() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let policy = inventory_policy(&shared).unwrap();
+    let mut inventory: Inventory = serde_json::from_value(json!({
+        "skills":[{"id":"installed","name":"Review","description":"Test","agent":"codex","scope":"global","location":"~/.codex/skills/review/SKILL.md","sha256":"a".repeat(64),"source":null}],
+        "details":{
+            "installed":{"aliases":["~/.codex/skills/review/SKILL.md"],"availability":"unknown","definition_status":"valid"},
+            "orphan":{"aliases":[],"availability":"unknown","definition_status":"valid"}
+        },
+        "partial":false,"coverage":[]
+    })).unwrap();
+    inventory
+        .details
+        .get_mut("installed")
+        .unwrap()
+        .canonical_path = PathBuf::from("/private/sensitive/canonical/SKILL.md");
+    shared
+        .insights_skills
+        .state(shared.store.dir())
+        .unwrap()
+        .inventory = Some((Instant::now(), policy.clone(), inventory.clone()));
+    let value = snapshot(&shared);
+    assert_eq!(
+        value["inventory"]["details"]["installed"]["availability"],
+        "unknown"
+    );
+    assert_eq!(value["inventory"]["details"].as_object().unwrap().len(), 1);
+    assert!(!value.to_string().contains("/private/sensitive"));
+    assert!(
+        value["inventory"]["details"]["installed"]
+            .get("canonical_path")
+            .is_none()
+    );
+    let installed = value["inventory"]["skills"].as_array().unwrap();
+    let (bounded, partial) = bounded_inventory_details(&inventory, installed, 2);
+    assert!(partial);
+    assert!(bounded.is_empty());
+    inventory.details.get_mut("installed").unwrap().aliases = vec!["x".repeat(65 * 1024)];
+    shared
+        .insights_skills
+        .state(shared.store.dir())
+        .unwrap()
+        .inventory = Some((Instant::now(), policy, inventory));
+    let truncated = snapshot(&shared);
+    assert_eq!(truncated["inventory"]["partial"], true);
+    assert_eq!(truncated["inventory"]["details"], json!({}));
+    assert!(serde_json::to_vec(&truncated).unwrap().len() < super::super::ipc::MAX_LINE_BYTES);
+}
+
+#[test]
+fn snapshot_scope_rejects_late_clear_feature_aba_and_policy_changes() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let scope = SnapshotScope::capture(&shared).unwrap();
+    assert!(scope.is_current(&shared));
+    shared.insights_counter.clear().unwrap();
+    assert!(!scope.is_current(&shared));
+    let scope = SnapshotScope::capture(&shared).unwrap();
+    set_skills_flag(&shared, 2, false);
+    set_skills_flag(&shared, 3, true);
+    assert!(!scope.is_current(&shared));
+    let scope = SnapshotScope::capture(&shared).unwrap();
+    shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(
+            "/private/test-project",
+            super::super::policy::ProjectMode::Ignore,
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(!scope.is_current(&shared));
+}
+
+#[test]
+fn opencode_only_empty_completed_scan_is_checked_not_pending() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(with_feature_runtime(DaemonShared::load(store).unwrap()));
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    assert!(
+        super::super::insights_week::skills_usage(&shared)["usage"]["last_analysis_at"].is_null()
+    );
+    let before = Utc::now();
+    // No runtime: the real coalescing worker completes synchronously. No
+    // ordinary counter pass runs, and the isolated source roots are empty.
+    opencode::schedule(&shared);
+    let value = super::super::insights_week::skills_usage(&shared);
+    assert!(value["usage"]["skills"].as_array().unwrap().is_empty());
+    let completed =
+        DateTime::parse_from_rfc3339(value["usage"]["last_analysis_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+    assert!(completed >= before && completed <= Utc::now());
+    set_skills_flag(&shared, 2, false);
+    set_skills_flag(&shared, 3, true);
+    assert!(
+        super::super::insights_week::skills_usage(&shared)["usage"]["last_analysis_at"].is_null()
+    );
+}
+
+#[test]
+fn configured_opencode_export_worker_counts_drills_and_invalidates_real_evidence() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(with_feature_runtime(DaemonShared::load(store).unwrap()));
+    let exports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cwd = project.path().canonicalize().unwrap();
+    let mut export: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/opencode/completed.json"
+    ))
+    .unwrap();
+    export["info"]["directory"] = json!(cwd);
+    export["messages"][1]["info"]["path"]["cwd"] = json!(cwd);
+    export["messages"][1]["info"]["path"]["root"] = json!(cwd);
+    let tool = &mut export["messages"][1]["parts"][1];
+    tool["tool"] = json!("skill");
+    tool["state"]["input"] = json!({"name":"review"});
+    tool["state"]["output"] = json!("PRIVATE_DEFINITION_BYTES");
+    let observed_at = Utc::now() - chrono::Duration::seconds(10);
+    tool["state"]["time"]["start"] = json!(observed_at.timestamp_millis());
+    tool["state"]["time"]["end"] = json!(observed_at.timestamp_millis());
+    std::fs::write(
+        exports.path().join("trace.json"),
+        serde_json::to_vec(&export).unwrap(),
+    )
+    .unwrap();
+    {
+        let mut settings = shared.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.opencode_source = Some(crate::source::SourceDeclaration::Watch {
+            path: exports.path().canonicalize().unwrap(),
+        });
+    }
+    set_skills_flag(&shared, 1, true);
+    let before = Utc::now();
+    opencode::schedule(&shared);
+    let (rows, partial, completed) = opencode::snapshot(&shared);
+    assert!(!partial);
+    assert!(completed.is_some_and(|at| at >= before));
+    assert_eq!(
+        rows.len(),
+        1,
+        "configured export must survive discover/load/session_at"
+    );
+    let row = &rows[0];
+    assert_eq!(row.population, "unknown");
+    assert_eq!(row.evidence.skills.len(), 1);
+    assert_eq!(row.evidence.skills[0].name, "review");
+    assert_eq!(row.evidence.skills[0].invocations, 1);
+    assert_eq!(row.evidence.skills[0].loads, 0);
+    assert_eq!(
+        row.evidence.skills[0].last_seen.unwrap().timestamp_millis(),
+        observed_at.timestamp_millis()
+    );
+    let request = Request {
+        id: 1,
+        method: "insights_skills".into(),
+        params: json!({"session_ref":row.reference}),
+    };
+    let detail = opencode::detail(&shared, &request).result.unwrap();
+    assert_eq!(detail["skill_usage"]["skills"][0]["invocations"], 1);
+    assert!(!detail.to_string().contains("PRIVATE_DEFINITION_BYTES"));
+    assert!(!detail.to_string().contains(cwd.to_str().unwrap()));
+    // Clear rejects the issued capability before another worker poll.
+    shared.insights_counter.clear().unwrap();
+    assert!(opencode::rows(&shared).0.is_empty());
+    assert_eq!(
+        opencode::detail(&shared, &request).result.unwrap()["status"],
+        "unavailable"
+    );
+    opencode::schedule(&shared);
+    assert_eq!(opencode::rows(&shared).0.len(), 1);
+    // A Never folder invalidates immediately and remains excluded on reread.
+    shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(
+            cwd.to_str().unwrap(),
+            super::super::policy::ProjectMode::Ignore,
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(opencode::rows(&shared).0.is_empty());
+    opencode::schedule(&shared);
+    assert!(opencode::rows(&shared).0.is_empty());
 }
 
 #[test]

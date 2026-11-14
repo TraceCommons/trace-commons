@@ -15,6 +15,7 @@ final class InsightsSkillsRenderTests: XCTestCase {
         let required = SkillsSection.allCases.map(\.copyKey) + ["skills_title", "skills_inventory", "skills_usage", "skills_catalog", "skills_publishers",
             "skills_feed", "skills_partial_catalog", "skills_partial_feed", "skills_status_complete", "skills_status_current", "skills_status_update_available",
             "skills_feed_updated", "skills_scope_global", "skills_agent_codex", "skills_coverage_loads_only",
+            "skills_population_direct", "skills_population_delegated", "skills_evidence_links", "skills_evidence_parent",
             "skills_coverage_explicit_invocations", "skills_coverage_unsupported", "skills_search", "skills_search_empty"]
         for key in required { XCTAssertFalse((copy[key] ?? "").isEmpty, "Missing shared copy: \(key)") }
         let model = InsightsSkillsModel(reader: { _ in snapshot }, copy: copy)
@@ -76,9 +77,12 @@ final class InsightsSkillsRenderTests: XCTestCase {
                          observedAt: "2026-11-05T18:00:00Z")], feedPartial: true,
             usage: .init(sessionsObserved: 12, sessionsUnknown: 3, partial: true,
                 skills: [.init(name: "test-driven-development", agent: "codex", invocations: 0, loads: 4,
-                    sessions: 3, lastSeen: "2026-11-05T17:42:00Z")],
+                    sessions: 3, lastSeen: "2026-11-05T17:42:00Z"),
+                    .init(name: "test-driven-development", agent: "claude_code", invocations: 2, loads: 0, sessions: 1,
+                          population: "delegated", evidence: [.init(sessionRef: "child", parentSessionRef: "parent")]),
+                    .init(name: "review", agent: "opencode", invocations: 1, loads: 0, sessions: 1, population: "unknown")],
                 coverage: [.init(agent: "claude_code", status: "explicit_invocations"),
                            .init(agent: "codex", status: "loads_only"),
-                           .init(agent: "opencode", status: "unsupported")]), copy: copy)
+                           .init(agent: "opencode", status: "explicit_invocations")], delegatedSessionsObserved: 2, delegatedSessionsUnknown: 1, unclassifiedSessionsObserved: 1, unclassifiedSessionsUnknown: 1), copy: copy)
     }
 }
