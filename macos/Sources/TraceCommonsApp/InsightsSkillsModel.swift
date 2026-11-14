@@ -169,6 +169,11 @@ final class InsightsSkillsModel {
         return links.filter { seen.insert($0.sessionRef).inserted }
     }
 
+    func usageEvidenceLinks(_ rows: [DaemonData.SkillsUsageRow]) -> [DaemonData.SkillsUsageEvidence] {
+        var seen = Set<String>()
+        return rows.flatMap { evidenceLinks(for: $0) }.filter { seen.insert($0.sessionRef).inserted }
+    }
+
     func usageSummary(_ row: DaemonData.SkillsUsageRow, coverage: [DaemonData.SkillsUsageCoverage]) -> String {
         let observation = coverage.first { $0.agent == row.agent }?.status
         var figures: [String] = []

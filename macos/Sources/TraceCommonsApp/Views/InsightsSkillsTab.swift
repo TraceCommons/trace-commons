@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -20,6 +21,7 @@ struct InsightsSkillsTab: View {
     @State private var inventorySort = "name"
     @State private var usageDays = 30
     @State private var selectedSkillID: String?
+    @State private var selectedUsageID: String?
     @State private var selectedSection: SkillsSection
     @Environment(\.scenePhase) private var scenePhase
 
@@ -79,7 +81,7 @@ struct InsightsSkillsTab: View {
                         case .inventory:
                             inventory(snapshot)
                         case .usage:
-                            usage(snapshot.usage)
+                            usage(snapshot)
                         case .catalog:
                             publishers(snapshot)
                             catalog(snapshot)
@@ -160,7 +162,7 @@ struct InsightsSkillsTab: View {
                                 Image(systemName: selectedSkillID == skill.id ? "chevron.up" : "chevron.down")
                             }
                         }.buttonStyle(.plain)
-                        .accessibilityLabel(model.text("skills_inspect", values: ["name": skill.name]))
+                        .accessibilityLabel(model.text("skills_inspect", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
                         if !skill.description.isEmpty { Text(skill.description) }
                         Text(model.agentLabel(skill.agent)).insightsCaption()
                         Text(model.text("skills_availability_" + (snapshot.inventory.details[skill.id]?.availability ?? "unknown"))).insightsCaption()
@@ -176,13 +178,14 @@ struct InsightsSkillsTab: View {
                             Text(model.populationLabel(row.population)).insightsCaption()
                             Text(model.text("skills_coverage_name_only")).insightsCaption()
                             Text(model.text("skills_sessions", values: ["count": String(window.sessions)]))
-                            Text(model.text("skills_invocations", values: ["count": String(window.invocations)]))
+                            if snapshot.usage.coverage.contains(where: { $0.agent == row.agent && $0.status == "explicit_invocations" }) {
+                                Text(model.text("skills_invocations", values: ["count": String(window.invocations)]))
+                            }
                             if let date = row.lastSeen { Text(model.text("skills_last_seen", values: ["date": model.timestamp(date)])).insightsCaption() }
                             if selectedSkillID == skill.id {
                                 Text(model.text("skills_loads", values: ["count": String(window.loads)]))
                                 Text(model.text("skills_undated", values: ["count": String(row.undatedEvents)])).insightsCaption()
                                 evidenceLinks(row)
-                                Text(model.text("skills_daily_retained")).insightsCaption()
                                 ForEach(row.daily, id: \.day) { day in
                                     HStack {
                                         Text(day.day)
@@ -209,7 +212,6 @@ struct InsightsSkillsTab: View {
                     }.accessibilityElement(children: .contain)
                 }
                 DisclosureGroup(model.text("skills_coverage")) {
-                    Text(model.text("skills_usage_semantics")).insightsNote()
                     if snapshot.inventory.partial { Text(model.text("skills_partial_inventory")).insightsNote() }
                     if snapshot.usage.partial { Text(model.text("skills_partial_usage")).insightsNote() }
                     if let date = snapshot.usage.lastAnalysisAt { Text(model.text("skills_checked_at", values: ["date": model.timestamp(date)])) }
@@ -227,34 +229,133 @@ struct InsightsSkillsTab: View {
         }
     }
 
-    private func usage(_ usage: DaemonData.SkillsUsage) -> some View {
-        section("skills_usage") {
-            LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                observationCoverage(usage)
-                if usage.partial { Text(model.text("skills_partial_usage")).insightsNote() }
-                ForEach(usage.coverage, id: \.agent) { coverage in
-                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                        Text(model.agentLabel(coverage.agent)).insightsCaption()
-                        Text(model.text("skills_coverage_\(coverage.status)")).insightsNote()
-                    }
+    private func usage(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
+        let ranked = InsightsSkillsUsage.ranked(snapshot.usage, days: usageDays)
+        let picked = ranked.first { $0.id == selectedUsageID } ?? ranked.first
+        let candidates = InsightsSkillsUsage.removalCandidates(snapshot, days: usageDays, model: model)
+        return VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+            Picker(model.text("skills_usage_period_label"), selection: $usageDays) {
+                ForEach([7, 30, 90], id: \.self) { days in
+                    Text(model.text("skills_days", values: ["count": String(days)])).tag(days)
                 }
-                if usage.skills.isEmpty { Text(model.text("skills_usage_empty")).insightsNote() }
-                ForEach(usage.skills, id: \.identity) { row in
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(row.name).insightsHeading()
-                            Text(model.agentLabel(row.agent)).insightsCaption()
-                        }
-                        Text(model.populationLabel(row.population)).insightsCaption()
-                        Text(model.usageSummary(row, coverage: usage.coverage)).insightsNote()
-                        Text(model.text("skills_coverage_name_only")).insightsCaption()
-                        evidenceLinks(row)
-                        if let date = row.lastSeen {
-                            Text(model.text("skills_last_seen", values: ["date": model.timestamp(date)])).insightsCaption()
+            }.pickerStyle(.segmented)
+            section("skills_most_used") {
+                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    if snapshot.usage.partial { Text(model.text("skills_partial_usage")).insightsNote() }
+                    if ranked.isEmpty {
+                        Text(model.text(InsightsSkillsUsage.emptyState(snapshot.usage, days: usageDays))).insightsNote()
+                        if !snapshot.usage.enabled, let reviewSettings {
+                            Button(model.text("skills_review_settings")) {
+                                model.invalidateDetails()
+                                reviewSettings()
+                            }
                         }
                     }
-                    .accessibilityElement(children: .contain)
+                    ForEach(ranked) { skill in
+                        Button {
+                            selectedUsageID = skill.id
+                            model.invalidateDetails()
+                        } label: {
+                            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                                HStack {
+                                    Text(skill.name).insightsHeading()
+                                    Spacer()
+                                    Text(model.text("skills_invocations", values: ["count": String(skill.uses)]))
+                                }
+                                Text(model.agentLabel(skill.agent)).insightsCaption()
+                                GeometryReader { geometry in
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(GlassTokens.Color.chartSeries1.color)
+                                        .frame(width: geometry.size.width * CGFloat(skill.uses) / CGFloat(max(1, ranked.first?.uses ?? 1)))
+                                }.frame(height: 6)
+                            }.padding(GlassTokens.Space.s2)
+                                .background(picked?.id == skill.id ? GlassTokens.Color.chartGrid.color : .clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                        }.buttonStyle(.plain)
+                            .accessibilityLabel(model.text("skills_select_usage_accessibility", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
+                            .accessibilityValue(model.text("skills_invocations", values: ["count": String(skill.uses)]))
+                            .accessibilityAddTraits(picked?.id == skill.id ? [.isSelected] : [])
+                    }
                 }
+            }
+            if !candidates.isEmpty {
+                section("skills_removal_candidates") {
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        Text(model.text("skills_no_use_period", values: ["count": String(usageDays)])).insightsCaption()
+                        ForEach(candidates) { skill in
+                            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                                Text(skill.name).insightsHeading()
+                                Text(model.agentLabel(skill.agent)).insightsCaption()
+                                Text(skill.location).insightsMono().textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+            if let picked {
+                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    HStack {
+                        Text(picked.name).insightsHeading()
+                        Spacer()
+                        Text(model.text("skills_invocations", values: ["count": String(picked.uses)])).insightsNote()
+                    }
+                    Text(model.agentLabel(picked.agent)).insightsCaption()
+                    if !picked.daily.isEmpty { usageChart(picked) }
+                    Text(model.text("skills_related_traces")).insightsHeading()
+                    usageEvidenceLinks(picked)
+
+                }.insightsCard()
+            }
+        }
+    }
+
+    private func usageChart(_ skill: InsightsSkillsUsage.Skill) -> some View {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return Chart(skill.daily) { day in
+            if let date = formatter.date(from: day.id) {
+                BarMark(x: .value(model.text("skills_usage_period_label"), date, unit: .day),
+                        y: .value(model.text("skills_uses"), day.uses), width: .ratio(0.56))
+                    .foregroundStyle(GlassTokens.Color.chartSeries1.color)
+                    .accessibilityLabel(day.id)
+                    .accessibilityValue(model.text("skills_invocations", values: ["count": String(day.uses)]))
+            }
+        }
+        // A continuous axis preserves gaps where no daily evidence exists.
+        .chartXScale(domain: skill.start...skill.end)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine().foregroundStyle(GlassTokens.Color.chartGrid.color)
+                AxisValueLabel {
+                    if let count = value.as(Int.self) { Text(String(count)).insightsTick() }
+                }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 3)) { value in
+                AxisValueLabel {
+                    if let date = value.as(Date.self) {
+                        Text(date, format: .dateTime.month(.abbreviated).day()).insightsTick()
+                    }
+                }
+            }
+        }
+        .frame(height: 120)
+        .insightsPlot()
+        .accessibilityLabel(model.text("skills_usage_chart_accessibility", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
+    }
+
+    private func usageEvidenceLinks(_ skill: InsightsSkillsUsage.Skill) -> some View {
+        let links = model.usageEvidenceLinks(skill.sources)
+        return VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+            if links.isEmpty { Text(model.text("skills_evidence_unavailable")).insightsNote() }
+            ForEach(Array(links.enumerated()), id: \.element.sessionRef) { index, link in
+                Button(model.text("skills_evidence_session", values: ["count": String(index + 1)])) {
+                    evidenceOpen = true
+                    Task { await model.loadEvidence(link.sessionRef) }
+                }.accessibilityLabel(model.text("skills_evidence_accessibility",
+                    values: ["name": skill.name + " · " + model.agentLabel(skill.agent), "count": String(index + 1)]))
             }
         }
     }
