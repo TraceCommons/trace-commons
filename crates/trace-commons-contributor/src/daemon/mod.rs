@@ -2603,10 +2603,14 @@ fn compare_send_priority(
             if !left.approved_unattended {
                 return std::cmp::Ordering::Equal;
             }
-            (left.attempts > 0)
-                .cmp(&(right.attempts > 0))
+            // A retry is an attempted entry still waiting on its deadline.
+            // `attempts` alone never resets, so a reapproved or pinned trace
+            // would otherwise sort behind fresh work for good.
+            let retry = |e: &queue::QueueEntry| e.attempts > 0 && e.retry_after.is_some();
+            retry(left)
+                .cmp(&retry(right))
                 .then_with(|| {
-                    if left.attempts > 0 && right.attempts > 0 {
+                    if retry(left) && retry(right) {
                         left.retry_after.cmp(&right.retry_after)
                     } else {
                         std::cmp::Ordering::Equal
@@ -6845,6 +6849,36 @@ mod tests {
                 .map(|e| e.entry_id.as_u128())
                 .collect::<Vec<_>>(),
             vec![3, 2, 4, 1]
+        );
+    }
+
+    /// `attempts` never resets, so it cannot say whether an entry is waiting
+    /// on a retry now. An automatic trace whose earlier attempts were cleared
+    /// by a fresh approval or a pinned review (no `retry_after`) is fresh work
+    /// again, and must not sort behind every newer automatic trace for good.
+    #[test]
+    fn an_attempted_trace_with_no_pending_retry_sorts_as_fresh_work() {
+        let now = Utc::now();
+        let entry = |n, attempts, retry_after: Option<i64>, age: i64| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: true,
+            retry_after: retry_after.map(|wait| now + chrono::Duration::seconds(wait)),
+            last_modified_at: Some(now - chrono::Duration::seconds(age)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 0, None, 10),
+            // Reapproved after a 429: attempts kept, retry cleared, oldest.
+            entry(2, 3, None, 100),
+            entry(3, 2, Some(-50), 1000),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3]
         );
     }
 

@@ -829,6 +829,9 @@ mod retry_tests {
             state: QueueState::Approved,
             approved_unattended: !manual,
             attempts,
+            // A retry the daemon recorded always carries its deadline; give
+            // attempted fixtures one that is already due.
+            retry_after: (attempts > 0).then(|| Utc::now() - chrono::Duration::minutes(1)),
             ..Default::default()
         }
     }

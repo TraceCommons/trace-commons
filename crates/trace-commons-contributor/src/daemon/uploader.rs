@@ -395,7 +395,8 @@ fn decision_for(
 /// - `busy`: the witness was at capacity (`503 witness_saturated`).
 /// - `timed_out`: `witness_timeout`, this client's deadline or the
 ///   witness's own `504 witness_request_timed_out`.
-/// - `unreachable`: `witness_unreachable` (no connection at all) and
+/// - `unreachable`: `witness_unreachable` (no connection at all),
+///   `witness_classifier_unavailable`, `witness_redaction_failed` and
 ///   `witness_attestation_unavailable`. The quote fetch is the first request
 ///   to the witness, so a gateway in front of it that answers with an error
 ///   page instead of passing the request on surfaces there.
@@ -411,7 +412,13 @@ pub fn witness_blocked_label(
         UploadDecision::WitnessSaturated { .. } => Some(WitnessBlockedLabel::Busy),
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "witness_timeout" => Some(WitnessBlockedLabel::TimedOut),
-            "witness_unreachable" | "witness_attestation_unavailable" => {
+            // The classifier and redaction labels were reported as
+            // `witness_unreachable` until they were given their own names;
+            // the witness still could not review, so they still count here.
+            "witness_unreachable"
+            | "witness_attestation_unavailable"
+            | trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE
+            | trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED => {
                 Some(WitnessBlockedLabel::Unreachable)
             }
             _ => None,
@@ -1184,6 +1191,16 @@ mod tests {
             )),
             Some(WitnessBlockedLabel::Unreachable)
         );
+        for blocked in [
+            crate::witness::WitnessTrustError::WitnessClassifierUnavailable.refusal_label(),
+            crate::witness::WitnessTrustError::WitnessRedactionFailed.refusal_label(),
+        ] {
+            assert_eq!(
+                witness_blocked_label(&failed(blocked)),
+                Some(WitnessBlockedLabel::Unreachable),
+                "{blocked}"
+            );
+        }
         for other in [
             "witness_collateral_unavailable",
             "witness_quote_unverified",
