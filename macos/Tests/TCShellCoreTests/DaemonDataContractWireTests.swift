@@ -485,6 +485,8 @@ final class DaemonDataContractWireTests: XCTestCase {
             "second-look-review-required",
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
             "witness-not-trusted",

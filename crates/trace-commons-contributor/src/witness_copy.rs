@@ -745,7 +745,9 @@ pub fn witness_refusal_line(label: Option<&str>) -> &'static str {
         | Some("witness_collateral_unavailable")
         | Some("witness_response_malformed")
         | Some("witness_timeout")
-        | Some("witness_unreachable") => copy.failed_unreachable,
+        | Some("witness_unreachable")
+        | Some("witness_classifier_unavailable")
+        | Some("witness_redaction_failed") => copy.failed_unreachable,
         Some("witness_quote_unverified")
         | Some("witness_quote_replayed")
         | Some("witness_signer_unexpected")

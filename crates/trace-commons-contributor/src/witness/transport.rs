@@ -908,6 +908,18 @@ fn refusal_from_parts_with(
     {
         return WitnessTrustError::WitnessAdmissionEvidenceRefused;
     }
+    // These exact pairs say the witness received the job but could not
+    // complete its privacy work. Preserve the cause through the queue;
+    // treating them as a failed connection hides why a retry is needed.
+    match (status, label) {
+        (503, Some(trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE)) => {
+            return WitnessTrustError::WitnessClassifierUnavailable;
+        }
+        (503, Some(trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED)) => {
+            return WitnessTrustError::WitnessRedactionFailed;
+        }
+        _ => {}
+    }
     match classify_witness_refusal(status, label) {
         // Capacity, and only on the exact pair: a witness that is busy
         // judged nothing and names its own delay.
@@ -919,8 +931,8 @@ fn refusal_from_parts_with(
         // The witness, or the gateway in front of it, cannot serve right
         // now: a 5xx, or a gateway 404 with no instance behind it. Nothing
         // was judged, so it is the label the daemon already retries on the
-        // transient backoff (`submit::witness_failure_is_transient`), and
-        // holds for a person once that budget is spent. Never a refusal.
+        // transient backoff (`submit::witness_failure_is_transient`).
+        // Never a final refusal of the trace.
         WitnessRefusalClass::Unavailable => WitnessTrustError::WitnessUnreachable,
         // The witness's own size bound: the same instruction as this
         // client's local one.
@@ -2793,13 +2805,17 @@ mod tests {
             (413, Some(WITNESS_REQUEST_TOO_LARGE), WitnessPayloadTooLarge),
             (413, None, WitnessPayloadTooLarge),
             // A crashed or oversized job's sealed answer.
-            (503, Some("witness_redaction_failed"), WitnessUnreachable),
+            (
+                503,
+                Some("witness_redaction_failed"),
+                WitnessRedactionFailed,
+            ),
             // The witness's classifier stayed unavailable through its
             // retries: retried exactly as a redaction failure is.
             (
                 503,
                 Some("witness_classifier_unavailable"),
-                WitnessUnreachable,
+                WitnessClassifierUnavailable,
             ),
             // Gateway answers while the witness VM is down.
             (404, None, WitnessUnreachable),
@@ -2833,7 +2849,18 @@ mod tests {
             ),
         ];
         for label in WITNESS_UNAVAILABLE_REFUSALS {
-            table.push((503, Some(label), WitnessUnreachable));
+            let expected = match label {
+                "witness_classifier_unavailable" => WitnessClassifierUnavailable,
+                "witness_redaction_failed" => WitnessRedactionFailed,
+                _ => WitnessUnreachable,
+            };
+            table.push((503, Some(label), expected));
+        }
+        // A matching label under another status must not invent a precise
+        // cause. Unknown 5xx remains unavailable; 4xx stays terminal.
+        for label in ["witness_classifier_unavailable", "witness_redaction_failed"] {
+            table.push((500, Some(label), WitnessUnreachable));
+            table.push((400, Some(label), WitnessResponseMalformed));
         }
         for label in WITNESS_INFERENCE_REFUSALS {
             table.push((403, Some(label), WitnessAdmissionEvidenceRefused));
@@ -4694,6 +4721,8 @@ mod tests {
         /// unavailable, `503 witness_classifier_unavailable` with a
         /// `Retry-After`.
         ClassifierUnavailable,
+        /// The job failed during redaction after it had been accepted.
+        RedactionFailed,
     }
 
     #[derive(Default)]
@@ -4811,11 +4840,14 @@ mod tests {
                                     })),
                                 )
                                     .into_response(),
-                                PollScript::ClassifierUnavailable => (
+                                PollScript::ClassifierUnavailable | PollScript::RedactionFailed => (
                                     StatusCode::SERVICE_UNAVAILABLE,
                                     [(axum::http::header::RETRY_AFTER, "60")],
                                     axum::Json(serde_json::json!({
-                                        "error": "witness_classifier_unavailable"
+                                        "error": match script {
+                                            PollScript::ClassifierUnavailable => "witness_classifier_unavailable",
+                                            _ => "witness_redaction_failed",
+                                        }
                                     })),
                                 )
                                     .into_response(),
@@ -4906,22 +4938,32 @@ mod tests {
         assert_eq!(log.lock().unwrap().submits, 2);
     }
 
-    /// A job the witness finished as `witness_classifier_unavailable` is the
-    /// witness's own answer: final for this review, not resubmitted, and read
-    /// as unreachable -- which the daemon retries on its own backoff -- not
-    /// as saturation, whatever its `Retry-After` says.
+    /// A job's classifier or redaction failure is the witness's own answer:
+    /// preserve its cause and leave retrying to the caller, without repeating
+    /// the raw POST or mistaking its Retry-After for saturation.
     #[tokio::test]
-    async fn a_job_finished_as_classifier_unavailable_is_unreachable_and_not_resubmitted() {
-        let (result, log) =
-            review_against(PollScript::ClassifierUnavailable, Duration::from_secs(5)).await;
-        let err = result.unwrap_err();
-        assert_eq!(err, WitnessTrustError::WitnessUnreachable);
-        assert!(crate::submit::witness_failure_is_transient(
-            err.refusal_label()
-        ));
-        let log = log.lock().unwrap();
-        assert_eq!(log.submits, 1);
-        assert_eq!(log.polls, 1);
+    async fn a_finished_job_preserves_classifier_or_redaction_failure_without_resubmitting() {
+        for (script, expected, label) in [
+            (
+                PollScript::ClassifierUnavailable,
+                WitnessTrustError::WitnessClassifierUnavailable,
+                "witness_classifier_unavailable",
+            ),
+            (
+                PollScript::RedactionFailed,
+                WitnessTrustError::WitnessRedactionFailed,
+                "witness_redaction_failed",
+            ),
+        ] {
+            let (result, log) = review_against(script, Duration::from_secs(5)).await;
+            let err = result.unwrap_err();
+            assert_eq!(err, expected);
+            assert_eq!(err.refusal_label(), label);
+            assert!(crate::submit::witness_failure_is_transient(label));
+            let log = log.lock().unwrap();
+            assert_eq!(log.submits, 1);
+            assert_eq!(log.polls, 1);
+        }
     }
 
     /// A job the witness finished as too large to review is a final refusal
