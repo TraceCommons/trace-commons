@@ -151,7 +151,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     public func failureLine(forLabel label: String) -> String? {
         switch label {
         case "witness-review-required": return needsPrivacyCheck
-        case "preview-timed-out", "witness_timeout", "witness_unreachable": return privacyCheckNoAnswer
+        case "preview-timed-out", "witness_timeout", "witness_unreachable",
+             "witness_classifier_unavailable", "witness_redaction_failed": return privacyCheckNoAnswer
         default: return nil
         }
     }

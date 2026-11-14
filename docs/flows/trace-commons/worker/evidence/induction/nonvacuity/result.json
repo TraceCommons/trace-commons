@@ -1,0 +1,38 @@
+{
+  "phase": "nonvacuity",
+  "status": "counterexample",
+  "command": [
+    "quint",
+    "verify",
+    "/Users/zakimanian/code/tc-wt-witness-retry-fairness/docs/flows/trace-commons/worker/witness_worker_induction.qnt",
+    "--main",
+    "witness_worker_induction",
+    "--init",
+    "arbitraryInit",
+    "--step",
+    "originalStep",
+    "--invariant",
+    "false",
+    "--max-steps",
+    "0",
+    "--server-endpoint",
+    "localhost:8899",
+    "--verbosity",
+    "3"
+  ],
+  "modelSha256": "d492d791f4fbea6ba78296d45a88286cbde300345572476e29c6e6efd9f28512",
+  "harnessSha256": "2a8434fdda4b38ac44fe72457a2ce40eff0d7b7a571763e829836529ef293fac",
+  "exitCode": 1,
+  "timedOut": false,
+  "artifactsChanged": false,
+  "logPath": "/private/tmp/tc-worker-induction-reviewed/nonvacuity/check.log",
+  "logSha256": "e7a8dbe6d53a2f50c6b33841b34e5dc1b6a951416bd368249b18aa818ac92487",
+  "cwd": "/private/tmp/tc-worker-induction-reviewed/nonvacuity",
+  "budgetSeconds": 240,
+  "environment": {
+    "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
+    "JDK_JAVA_OPTIONS": "-Xmx3g",
+    "serverEndpoint": "localhost:8899"
+  },
+  "seconds": 13.959
+}

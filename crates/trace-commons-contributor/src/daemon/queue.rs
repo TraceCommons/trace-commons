@@ -1053,6 +1053,8 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // not held; only the spent budget leaves it `Pending` under it.
     "witness_timeout",
     "witness_unreachable",
+    "witness_classifier_unavailable",
+    "witness_redaction_failed",
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
     "witness_collateral_unavailable",
     // A witness whose evidence did not verify (`submit::witness_trust_hold`):
