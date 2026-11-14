@@ -212,11 +212,13 @@ fn ignoring_unknown_sessions_keeps_known_skill_inventory_readable() {
         .set_mode(UNKNOWN_PROJECT_KEY, ProjectMode::Ignore, Utc::now())
         .unwrap();
 
+    let private = std::fs::canonicalize(projects.path().join("private")).unwrap();
     assert!(
         inventory_policy(&shared)
             .unwrap()
             .denied_roots
-            .contains(&std::fs::canonicalize(projects.path().join("private")).unwrap())
+            .iter()
+            .any(|root| std::fs::canonicalize(root).unwrap() == private)
     );
     let value = snapshot(&shared);
     assert_eq!(value["readable"], true, "reason: {}", value["reason"]);
