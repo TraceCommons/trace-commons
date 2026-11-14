@@ -6853,6 +6853,70 @@ mod tests {
         );
     }
 
+    /// The transient witness labels are mapped by name in five places, and
+    /// the sets differ on purpose. This table is the one statement of what
+    /// each place does with each label; a label added to
+    /// `submit::WITNESS_TRANSIENT_LABELS` fails here until it has a row.
+    #[test]
+    fn every_transient_witness_label_has_an_answer_at_every_site() {
+        use trace_commons_protocol::witness_blocked::WitnessBlockedLabel as B;
+        // (label, witness-blocked report, stops a CLI batch, monitor line)
+        let table: [(&str, Option<B>, bool, bool); 6] = [
+            ("witness_timeout", Some(B::TimedOut), true, true),
+            ("witness_unreachable", Some(B::Unreachable), true, true),
+            (
+                "witness_classifier_unavailable",
+                Some(B::Unreachable),
+                true,
+                true,
+            ),
+            ("witness_redaction_failed", Some(B::Unreachable), true, true),
+            // The quote fetch is the first request to the witness.
+            (
+                "witness_attestation_unavailable",
+                Some(B::Unreachable),
+                false,
+                false,
+            ),
+            // The collateral is Intel's, fetched by ingest: not the witness.
+            ("witness_collateral_unavailable", None, false, false),
+        ];
+        let mut labels: Vec<&str> = table.iter().map(|row| row.0).collect();
+        labels.sort_unstable();
+        let mut expected = crate::submit::WITNESS_TRANSIENT_LABELS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(labels, expected, "one row per transient witness label");
+
+        let unreachable = crate::witness_copy::witness_copy()
+            .review
+            .failed_unreachable;
+        for (label, blocked, stops, monitor) in table {
+            let failed = uploader::UploadDecision::Failed {
+                reason_label: label.to_string(),
+            };
+            assert_eq!(uploader::witness_blocked_label(&failed), blocked, "{label}");
+            assert_eq!(
+                crate::submit::WITNESS_BATCH_STOP_LABELS.contains(&label),
+                stops,
+                "{label}"
+            );
+            assert_eq!(
+                crate::preview_copy::monitor_failure_line(label).is_some(),
+                monitor,
+                "{label}"
+            );
+            assert_eq!(
+                crate::witness_copy::witness_refusal_line(Some(label)),
+                unreachable,
+                "{label}"
+            );
+            assert!(
+                queue::REASONS_NEEDING_A_PERSON.contains(&label),
+                "{label} must hold for a person once its budget is spent"
+            );
+        }
+    }
+
     /// `attempts` never resets, so it cannot say whether an entry is waiting
     /// on a retry now. An automatic trace whose earlier attempts were cleared
     /// by a fresh approval or a pinned review (no `retry_after`) is fresh work

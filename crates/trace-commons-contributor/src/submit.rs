@@ -682,16 +682,21 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 5] = [
 /// verified witness either way.
 #[must_use]
 pub fn witness_failure_is_transient(label: &str) -> bool {
-    matches!(
-        label,
-        "witness_timeout"
-            | "witness_unreachable"
-            | "witness_classifier_unavailable"
-            | "witness_redaction_failed"
-            | "witness_attestation_unavailable"
-            | "witness_collateral_unavailable"
-    )
+    WITNESS_TRANSIENT_LABELS.contains(&label)
 }
+
+/// The labels [`witness_failure_is_transient`] accepts. Several places map
+/// each of them by name (copy, holds, the witness-blocked report, batch
+/// stops); `every_transient_witness_label_has_an_answer_at_every_site`
+/// fails until a label added here is given one at each.
+pub const WITNESS_TRANSIENT_LABELS: [&str; 6] = [
+    "witness_timeout",
+    "witness_unreachable",
+    trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE,
+    trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED,
+    "witness_attestation_unavailable",
+    "witness_collateral_unavailable",
+];
 
 /// The label to hold a session for a person under when the witness's
 /// evidence was fetched and did not verify, or `None` for any other label.
