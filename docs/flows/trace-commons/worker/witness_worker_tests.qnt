@@ -114,6 +114,13 @@ module witness_worker_tests {
   run freshAutomaticWorkPrecedesQueuedRetriesTest = init.then(failTrace(0, 30)).then(tick(30))
     .then(enqueue(0)).then(enqueue(1)).expect(safety and best(s, 1))
 
+  // Trace 1 failed once, then was cancelled and reapproved: its attempts remain but
+  // its deadline is cleared, so it is fresh work and precedes trace 2 by source age.
+  run reapprovedTraceWithEarlierAttemptsSortsAsFreshWorkTest = init.then(failTrace(1, 30))
+    .then(cancel(1)).then(approve(1, false)).then(failTrace(0, 30)).then(tick(30))
+    .then(enqueue(0)).then(enqueue(1)).then(enqueue(2))
+    .expect(safety and s.entries.get(1).attempts == 1 and s.entries.get(1).due == 0 and best(s, 1))
+
   run olderRetryDeadlinePrecedesSourceAgeTest = init.then(failTrace(0, 60)).then(failTrace(1, 30))
     .then(tick(60)).then(enqueue(0)).then(enqueue(1)).expect(safety and best(s, 1))
 

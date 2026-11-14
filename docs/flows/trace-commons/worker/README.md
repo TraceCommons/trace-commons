@@ -1,9 +1,10 @@
 # Background witness worker model
 
-This companion models the queue/worker policy of branch `witness-circuit-followups`:
-commit `7be2c37ba` (identical to the working tree the evidence was recorded from) on
-top of origin/main `453522e60c4785a4f944356c4695c5e58c5b9c34`. The earlier
-evidence for PR #2138 used baseline `fb16129e4`. It supplements the
+This companion models the queue/worker policy at origin/main
+`f785452ae54d2732ac623f4f9be65c4984b9fc74` (#2139). The Rust files it projects
+are unchanged since; the evidence was recorded on branch
+`witness-model-retry-order`, which changes only the model. Earlier evidence
+used baselines `fb16129e4` (#2138) and `7be2c37ba` (#2139). It supplements the
 [two-trace contribution lifecycle](../models/client_contribution.md); it does
 not change that model, its selected P2/P3/P4/P12 properties, or their existing
 induction certificates. There is no composed refinement proof between the two
@@ -26,7 +27,7 @@ transition.
 | --- | --- |
 | Latest queued snapshot; in-flight dedup; full-queue displacement | `daemon/witness_worker.rs:246-285` |
 | Probe selection and available slots; dispatch time recorded on the job | `daemon/witness_worker.rs:186-190,344-378` |
-| Manual/fresh/retry ordering (see the ordering limitation below) | `daemon/mod.rs:2589-2625` |
+| Manual/fresh/retry ordering; a retry is an attempted entry holding a deadline | `daemon/mod.rs:2589-2625` |
 | Six transient labels share a per-entry retry path | `submit.rs:684-699`, `daemon/mod.rs:2099-2134` |
 | Jittered nominal 60/120/300/900/3600-second delays | `daemon/witness_retry.rs:16-25` |
 | Failure run reset by a quiet gap (latest failure end to next failing dispatch); shared pause; probe ownership | `daemon/witness_retry.rs:7-14,37-112` |
@@ -37,7 +38,7 @@ transition.
 | Readiness depends on the retry reason, not just a timestamp | `daemon/queue.rs:808-833,2722-2725` |
 
 Anchors are relative to `crates/trace-commons-contributor/src/` at commit
-`7be2c37ba`. The validation report records hashes of these source files as well
+`f785452ae`. The validation report records hashes of these source files as well
 as the Quint model and tests.
 
 `checked` is an observation-only record. It records illegal dispatch order or
@@ -86,13 +87,6 @@ pause ladder, and pin/approval identity.
   configuration a trust hold requires manual reapproval.
 - Poisoned locks, panic backoff, interactive slots and operating-system
   execution failures are not represented as separate transitions.
-- **Ordering drift.** On origin/main `453522e60`, `compare_send_priority`
-  treats an entry as a retry only when `attempts > 0` and `retry_after` is set;
-  the model's `less` still orders by `attempts > 0` alone. A reapproved
-  automatic trace with earlier attempts therefore sorts as fresh work in Rust
-  but as a retry in the model. This projection was not updated for that
-  change (it interacts with the watchdog deadline below), so the ordering row
-  is not exact at this baseline.
 - The six transient labels are represented by two transitions: `transient`
   (the five outage labels, which feed the circuit) and `redactionFailed`
   (`witness_redaction_failed`, which takes the same per-trace retry but
