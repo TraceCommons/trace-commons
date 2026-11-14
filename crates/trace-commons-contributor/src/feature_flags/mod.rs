@@ -197,6 +197,13 @@ impl Runtime {
             .snapshot
             .clone()
     }
+    /// Read one decision without cloning the public snapshot.
+    pub(crate) fn is_enabled(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.snapshot.is_enabled(id))
+            .unwrap_or(false)
+    }
     pub fn request_refresh(&self) {
         self.wake.notify_one();
     }

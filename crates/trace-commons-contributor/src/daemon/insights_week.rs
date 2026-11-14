@@ -1055,7 +1055,6 @@ pub(crate) struct CounterJob {
 struct QueuedJob {
     job: CounterJob,
     cleared: u64,
-    skills_enabled: bool,
 }
 
 /// A ledger fold to run on the worker: the ledger's window as the refresh
@@ -1099,11 +1098,6 @@ pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
     let queued = QueuedJob {
         job,
         cleared: counter.cleared.load(Ordering::SeqCst),
-        skills_enabled: !shared.dev_dry_run
-            && shared
-                .feature_flags
-                .snapshot()
-                .is_enabled("insights_skills"),
     };
     let start = {
         let mut slot = counter.worker_slot();
@@ -1192,17 +1186,8 @@ fn run_counter_jobs(shared: &DaemonShared) {
 /// recorded as `last_pass_at`, as it was when the pass ran in the tick.
 fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     let counter = &shared.insights_counter;
-    let QueuedJob {
-        job,
-        cleared,
-        skills_enabled,
-    } = queued;
-    let skills_enabled = skills_enabled
-        && !shared.dev_dry_run
-        && shared
-            .feature_flags
-            .snapshot()
-            .is_enabled("insights_skills");
+    let QueuedJob { job, cleared } = queued;
+    let skills_enabled = || super::insights_skills::skills_flag_on(shared);
     let should_stop = || {
         shared.shutdown.load(Ordering::Relaxed)
             // A poisoned lock reads as off: fail closed.
@@ -1233,7 +1218,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
         quiescence_secs,
         &mut project_of,
         cleared,
-        skills_enabled,
+        &skills_enabled,
         &should_stop,
     );
 }
@@ -1500,6 +1485,7 @@ pub struct CounterPass {
 #[derive(Default)]
 struct TestSeams {
     before_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    after_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     passes_started: std::sync::atomic::AtomicUsize,
     detached: std::sync::atomic::AtomicBool,
     /// Store files written, and how many of them with the cache lock held.
@@ -1660,7 +1646,7 @@ impl CounterPass {
             quiescence_secs,
             project_of,
             cleared,
-            false,
+            &|| false,
             &|| false,
         )
         .map(Option::unwrap_or_default)
@@ -1687,7 +1673,7 @@ impl CounterPass {
             quiescence_secs,
             project_of,
             cleared,
-            false,
+            &|| false,
             &|| false,
         )
         .map(Option::unwrap_or_default)
@@ -1704,7 +1690,9 @@ impl CounterPass {
     /// moves it, the pass writes nothing and keeps no key. `should_stop` is
     /// asked before each file read and before the write; once it answers
     /// true the pass is abandoned and writes nothing. `Ok(None)` is an
-    /// abandoned pass.
+    /// abandoned pass. `skills_enabled` is live: it is checked before and
+    /// after each read and before staging its skill evidence. Turning Skills
+    /// off never abandons ordinary counters.
     #[allow(clippy::too_many_arguments)]
     fn run_pass_from(
         &self,
@@ -1715,7 +1703,7 @@ impl CounterPass {
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
         cleared: u64,
-        skills_enabled: bool,
+        skills_enabled: &dyn Fn() -> bool,
         should_stop: &dyn Fn() -> bool,
     ) -> Result<Option<PassSummary>, &'static str> {
         #[cfg(test)]
@@ -1798,7 +1786,7 @@ impl CounterPass {
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
         cleared: u64,
-        skills_enabled: bool,
+        skills_enabled: &dyn Fn() -> bool,
         should_stop: &dyn Fn() -> bool,
     ) -> Result<Option<PassSummary>, &'static str> {
         let key = self.keys.load_or_create().map_err(|_| UNREADABLE_KEY)?;
@@ -1954,7 +1942,7 @@ impl CounterPass {
                     && row.harness_session_read
                     && row.event_span_read
                     && row.facts_version == SESSION_FACTS_VERSION
-                    && (!skills_enabled || row.skill_usage_version == SKILL_USAGE_VERSION)
+                    && (!skills_enabled() || row.skill_usage_version == SKILL_USAGE_VERSION)
                     && !row.awaiting_classification()
                     && (row.streamed
                         || !matches!(
@@ -2018,7 +2006,21 @@ impl CounterPass {
             removals.remove(&session);
             #[cfg(test)]
             self.run_before_read_hook();
-            let read = read_body(source, candidate, &key, skills_enabled);
+            let collect_skills = skills_enabled();
+            let mut read = read_body(source, candidate, &key, collect_skills);
+            #[cfg(test)]
+            {
+                let hook = self.test_seams.after_read.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // A read already in flight may finish after the live flag goes
+            // off. Keep its counters, but leave Skills eligible for backfill.
+            let keep_skills = collect_skills && skills_enabled();
+            if !keep_skills {
+                read.skill_usage = None;
+            }
             match read.compressed_failure {
                 Some(crate::source::compressed::CompressedFailure::Undecodable) => {
                     summary.compressed_unreadable += 1;
@@ -2047,11 +2049,7 @@ impl CounterPass {
                     facts: read.facts,
                     facts_version: SESSION_FACTS_VERSION,
                     skill_usage: read.skill_usage,
-                    skill_usage_version: if skills_enabled {
-                        SKILL_USAGE_VERSION
-                    } else {
-                        0
-                    },
+                    skill_usage_version: if keep_skills { SKILL_USAGE_VERSION } else { 0 },
                     automation: read.automation,
                     automation_read: true,
                     not_analyzable: read.not_analyzable,
@@ -2234,7 +2232,15 @@ impl CounterPass {
                 }
             }
         }
+        // A disable after an earlier read also prevents that pass from
+        // persisting new skill evidence. Existing stored observations stay
+        // hidden by the RPC gate; ordinary counter rows still advance.
+        let keep_skills = skills_enabled();
         for (session, mut row) in reads {
+            if !keep_skills {
+                row.skill_usage = None;
+                row.skill_usage_version = 0;
+            }
             row.seq = store.next_seq;
             store.next_seq += 1;
             store.evicted.remove(&session);
@@ -5409,7 +5415,7 @@ mod tests {
                     QUIET,
                     &mut |_| (PROJECT.to_string(), false),
                     self.pass.cleared.load(Ordering::SeqCst),
-                    true,
+                    &|| true,
                     &|| false,
                 )
                 .unwrap()
@@ -5609,9 +5615,8 @@ mod tests {
         assert!(usage["usage"]["skills"].as_array().unwrap().is_empty());
     }
 
-    #[test]
-    fn skill_usage_live_flag_off_on_off_preserves_counters_and_backfills_once() {
-        let (_dir, mut shared) = shared();
+    fn shared_with_skills_flag() -> (tempfile::TempDir, tempfile::TempDir, Arc<DaemonShared>) {
+        let (dir, mut shared) = shared();
         let flag_dir = tempfile::tempdir().unwrap();
         let registry = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "registry_version": 1,
@@ -5632,7 +5637,25 @@ mod tests {
         )
         .unwrap();
         shared.settings.lock().unwrap().insights_counter_pass = true;
-        let shared = Arc::new(shared);
+        (dir, flag_dir, Arc::new(shared))
+    }
+
+    fn set_skills_flag(shared: &DaemonShared, revision: u64, on: bool) {
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "environment": "staging", "revision": revision,
+            "issued_at": now(), "expires_at": now() + Duration::hours(1),
+            "flags": {"insights_skills": on}
+        }))
+        .unwrap();
+        shared
+            .feature_flags
+            .accept(&crate::feature_flags::test_signing::sign(&manifest), now())
+            .unwrap();
+    }
+
+    #[test]
+    fn skill_usage_live_flag_off_on_off_preserves_counters_and_backfills_once() {
+        let (_dir, flag_dir, shared) = shared_with_skills_flag();
         let mut inserted = false;
         let mut bytes = String::from_utf8(claude_bytes()).unwrap().lines().map(|line| {
             let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -5659,18 +5682,7 @@ mod tests {
                 },
             )
         };
-        let accept = |revision, on| {
-            let manifest = serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1, "environment": "staging", "revision": revision,
-                "issued_at": now(), "expires_at": now() + Duration::hours(1),
-                "flags": {"insights_skills": on}
-            }))
-            .unwrap();
-            shared
-                .feature_flags
-                .accept(&crate::feature_flags::test_signing::sign(&manifest), now())
-                .unwrap();
-        };
+        let accept = |revision, on| set_skills_flag(&shared, revision, on);
 
         assert!(
             !shared
@@ -5734,6 +5746,129 @@ mod tests {
                 .unwrap()
                 .contains("private-new-skill")
         );
+    }
+
+    #[test]
+    fn skill_usage_live_disable_during_pass_drops_new_evidence_and_backfills_once() {
+        for (disable_after, reenable_between_reads) in [(1, false), (1, true), (2, false)] {
+            let (_dir, flag_dir, shared) = shared_with_skills_flag();
+            set_skills_flag(&shared, 1, true);
+            let mut records: Vec<serde_json::Value> = String::from_utf8(claude_bytes())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let assistant = records
+                .iter_mut()
+                .find(|record| record["type"] == "assistant")
+                .unwrap();
+            assistant["message"]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "type": "tool_use", "id": "mid-pass-skill", "name": "Skill",
+                    "input": {"skill": "private-mid-pass"}
+                }));
+            let bytes = records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            let mut candidates = Vec::new();
+            for name in ["first.jsonl", "second.jsonl"] {
+                let path = flag_dir.path().join(name);
+                std::fs::write(&path, &bytes).unwrap();
+                candidates.push(candidate(SOURCE_CLAUDE_CODE, &path));
+            }
+            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let weak = Arc::downgrade(&shared);
+            let reads_after = Arc::clone(&reads);
+            *shared
+                .insights_counter
+                .test_seams
+                .after_read
+                .lock()
+                .unwrap() = Some(Arc::new(move || {
+                if reads_after.fetch_add(1, Ordering::SeqCst) + 1 == disable_after {
+                    set_skills_flag(&weak.upgrade().unwrap(), 2, false);
+                }
+            }));
+            if reenable_between_reads {
+                let weak = Arc::downgrade(&shared);
+                let reads_before = Arc::clone(&reads);
+                shared
+                    .insights_counter
+                    .set_before_read_for_test(Arc::new(move || {
+                        if reads_before.load(Ordering::SeqCst) == 1 {
+                            set_skills_flag(&weak.upgrade().unwrap(), 3, true);
+                        }
+                    }));
+            }
+            let submit = || {
+                submit_counter_pass(
+                    &shared,
+                    CounterJob {
+                        candidates: candidates.clone(),
+                        spawned: Vec::new(),
+                        never_project_keys: NeverFolders::NONE,
+                        now: now(),
+                        quiescence_secs: QUIET,
+                        project_of: Box::new(|_, _| (PROJECT.to_string(), false)),
+                    },
+                )
+            };
+            submit();
+            let rows = stored_rows(&shared.insights_counter);
+            assert_eq!(rows.len(), 2, "ordinary counters finish the pass");
+            assert!(
+                rows.iter()
+                    .all(|row| matches!(row.body, RowBody::Claude { .. }))
+            );
+            assert_eq!(
+                rows.iter().filter(|row| row.skill_usage.is_some()).count(),
+                usize::from(reenable_between_reads),
+                "evidence finishing after disable is dropped even if re-enabled before persistence"
+            );
+            assert!(
+                rows.iter()
+                    .filter(|row| row.skill_usage.is_none())
+                    .all(|row| row.skill_usage_version == 0)
+            );
+            if !reenable_between_reads {
+                assert!(
+                    !std::fs::read_to_string(shared.store.daemon_path(COUNTER_ROWS_FILE))
+                        .unwrap()
+                        .contains("private-mid-pass")
+                );
+            }
+            *shared
+                .insights_counter
+                .test_seams
+                .after_read
+                .lock()
+                .unwrap() = None;
+            *shared
+                .insights_counter
+                .test_seams
+                .before_read
+                .lock()
+                .unwrap() = None;
+            set_skills_flag(&shared, 4, true);
+            submit();
+            assert!(
+                stored_rows(&shared.insights_counter)
+                    .iter()
+                    .all(|row| row.skill_usage_version == SKILL_USAGE_VERSION)
+            );
+            let writes = shared.insights_counter.writes_for_test().0;
+            submit();
+            assert_eq!(
+                shared.insights_counter.writes_for_test().0,
+                writes,
+                "re-enabling backfills each unchanged session once"
+            );
+        }
     }
 
     #[test]

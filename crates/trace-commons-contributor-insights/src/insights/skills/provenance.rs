@@ -52,6 +52,20 @@ pub fn normalize_skill_path(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Translate an already resolved native relative path into repository syntax.
+/// Do not apply this conversion to untrusted manifest/lockfile strings: those
+/// must pass the strict slash-only normalizer above without reinterpretation.
+pub(super) fn native_skill_path(path: &Path) -> Option<String> {
+    let parts: Option<Vec<_>> = path
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    normalize_skill_path(&parts?.join("/"))
+}
+
 pub(super) fn lock_sources(
     home: &Path,
     projects: &[std::path::PathBuf],
@@ -142,8 +156,7 @@ pub(super) fn git_source(path: &Path, bytes: &[u8]) -> Option<SkillSource> {
     let mut current = path.parent()?;
     for _ in 0..12 {
         if current.join(".git").exists() {
-            let relative = path.strip_prefix(current).ok()?.to_str()?;
-            let relative = normalize_skill_path(relative)?;
+            let relative = native_skill_path(path.strip_prefix(current).ok()?)?;
             git(current, &["ls-files", "--error-unmatch", "--", &relative])?;
             let repository = normalize_repository(
                 git(
@@ -260,7 +273,7 @@ pub(super) fn plugin_source(path: &Path, policy: &ReadPolicy) -> (Option<SkillSo
     let Ok(relative) = canonical_document.strip_prefix(&canonical_package) else {
         return (None, false);
     };
-    let Some(relative) = relative.to_str().and_then(normalize_skill_path) else {
+    let Some(relative) = native_skill_path(relative) else {
         return (None, false);
     };
     let mut partial = false;

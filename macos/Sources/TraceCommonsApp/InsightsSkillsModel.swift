@@ -91,7 +91,8 @@ final class InsightsSkillsModel {
                 shown = snapshot
                 failureKey = snapshot.error == nil ? nil : "skills_refresh_failed"
             } else {
-                failureKey = shown == nil ? "skills_unavailable" : "skills_refresh_failed"
+                shown = nil
+                failureKey = "skills_unavailable"
             }
         } catch {
             guard !Task.isCancelled else { return }
@@ -106,7 +107,7 @@ final class InsightsSkillsModel {
         do {
             let snapshot = try await writer(publisherID, followed)
             guard !Task.isCancelled else { return }
-            guard snapshot.readable else { failureKey = "skills_follow_failed"; return }
+            guard snapshot.readable else { shown = nil; failureKey = "skills_follow_failed"; return }
             shown = snapshot
             failureKey = snapshot.error == nil ? nil : "skills_follow_failed"
         } catch {

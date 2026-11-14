@@ -18,21 +18,23 @@ async fn live_public_catalog_has_parseable_skills_and_valid_cache() {
         .iter()
         .filter(|publisher| !publisher.repository.is_empty())
     {
-        let skills = tokio::time::timeout(REFRESH_TOTAL, fetch_publisher(&client, publisher))
-            .await
-            .expect("public publisher fetch timed out")
-            .expect("public publisher catalog could not be fetched and parsed");
+        let skills =
+            tokio::time::timeout(REFRESH_TOTAL, fetch_publisher(&client, publisher, &|| true))
+                .await
+                .expect("public publisher fetch timed out")
+                .expect("public publisher catalog could not be fetched and parsed");
         assert!(
-            !skills.is_empty(),
+            !skills.skills.is_empty(),
             "publisher {} has no catalog entries",
             publisher.id
         );
         eprintln!(
             "{}: {} verified public skill documents",
             publisher.id,
-            skills.len()
+            skills.skills.len()
         );
-        state.accept(publisher.id, skills, Utc::now());
+        eprintln!("{}: complete={}", publisher.id, skills.complete);
+        state.accept_fetched(publisher.id, skills, Utc::now());
     }
     validate_state(&state).expect("real public snapshot must survive cache validation");
     if let Some(path) = std::env::var_os("TC_SKILLS_SMOKE_OUTPUT") {
@@ -79,8 +81,7 @@ fn feed_dates_are_observations_and_history_requires_a_prior_version() {
     let at = Utc::now();
     let mut skill = catalog_skill("obra", "skills/one/SKILL.md", "a");
     state.accept("obra", vec![skill.clone()], at);
-    assert_eq!(state.feed[0].kind, "added");
-    assert_eq!(state.feed[0].observed_at, at);
+    assert!(state.feed.is_empty(), "first catalog is a baseline");
     assert!(!state.history.contains_key(&skill.id));
     skill.sha256 = "b".repeat(64);
     state.accept(
@@ -91,7 +92,7 @@ fn feed_dates_are_observations_and_history_requires_a_prior_version() {
     assert_eq!(state.feed[0].kind, "updated");
     assert_eq!(state.history[&skill.id], vec!["a".repeat(64)]);
     state.accept("obra", vec![skill], at + chrono::Duration::seconds(2));
-    assert_eq!(state.feed.len(), 2);
+    assert_eq!(state.feed.len(), 1);
 }
 
 #[test]
@@ -128,7 +129,10 @@ fn catalog_skill(publisher: &str, path: &str, hash: &str) -> CatalogSkill {
         path: path.into(),
         revision: "a".repeat(40),
         sha256: hash.repeat(64),
-        source_url: "https://github.com/obra/superpowers/blob/main/skills/one/SKILL.md".into(),
+        source_url: format!(
+            "https://github.com/obra/superpowers/blob/{}/{path}",
+            "a".repeat(40)
+        ),
         instructions_url: "https://github.com/obra/superpowers#installation".into(),
     }
 }
@@ -377,6 +381,7 @@ async fn live_flag_off_on_off_gates_inventory_follow_and_proactive_refresh() {
     assert!(!shared.store.dir().join(STATE_FILE).exists());
 
     set_skills_flag(&shared, 1, true);
+    assert!(handle_follow(&shared, &follow).error.is_none());
     maybe_refresh_public(&shared);
     assert!(
         shared
@@ -458,4 +463,275 @@ fn a_missing_registry_flag_cannot_enable_skills() {
     maybe_refresh_public(&shared);
     assert_eq!(snapshot(&shared)["enabled"], false);
     assert!(!shared.insights_skills.runtime.lock().unwrap().loaded);
+}
+
+#[test]
+fn initial_catalog_is_a_baseline_and_later_new_skills_are_added() {
+    let mut state = PublicState::default();
+    let at = Utc::now();
+    state.failed("obra");
+    state.accept(
+        "obra",
+        vec![catalog_skill("obra", "skills/one/SKILL.md", "a")],
+        at,
+    );
+    assert!(state.feed.is_empty());
+    state.accept(
+        "obra",
+        vec![
+            catalog_skill("obra", "skills/one/SKILL.md", "a"),
+            catalog_skill("obra", "skills/two/SKILL.md", "a"),
+        ],
+        at,
+    );
+    assert_eq!(state.feed.len(), 1);
+    assert_eq!(state.feed[0].skill_id, "obra:skills/two/SKILL.md");
+    assert_eq!(state.feed[0].kind, "added");
+}
+
+#[test]
+fn background_refresh_requires_follow_but_opening_tab_can_fetch() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    maybe_refresh_public(&shared);
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .last_attempt
+            .is_none()
+    );
+    shared.insights_skills.start_refresh(&shared, false);
+    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
+    assert!(attempt.is_some());
+    shared.insights_skills.start_refresh(&shared, true);
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().last_attempt,
+        attempt
+    );
+}
+
+#[test]
+fn malformed_cache_recovers_and_follow_can_persist_again() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    std::fs::write(shared.store.dir().join(STATE_FILE), b"not json").unwrap();
+    {
+        let runtime = shared.insights_skills.state(shared.store.dir()).unwrap();
+        assert!(runtime.public.skills.is_empty());
+        assert!(runtime.public.followed.is_empty());
+        assert_eq!(runtime.error, Some(ERROR_CACHE));
+    }
+    shared.insights_skills.start_refresh(&shared, true);
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .last_attempt
+            .is_some()
+    );
+    let request = Request {
+        id: 1,
+        method: "insights_skills_follow".into(),
+        params: json!({"publisher_id":"obra","followed":true}),
+    };
+    assert!(handle_follow(&shared, &request).error.is_none());
+    assert!(load(shared.store.dir()).unwrap().followed.contains("obra"));
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .error
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_cache_write_can_be_retried_after_destination_is_repaired() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    let target = shared.store.dir().join("untouched");
+    std::fs::write(&target, b"secret").unwrap();
+    let cache = shared.store.dir().join(STATE_FILE);
+    std::os::unix::fs::symlink(&target, &cache).unwrap();
+    let request = Request {
+        id: 1,
+        method: "insights_skills_follow".into(),
+        params: json!({"publisher_id":"obra","followed":true}),
+    };
+    assert!(handle_follow(&shared, &request).error.is_some());
+    assert!(
+        !shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .public
+            .followed
+            .contains("obra")
+    );
+    std::fs::remove_file(cache).unwrap();
+    assert!(handle_follow(&shared, &request).error.is_none());
+    assert!(load(shared.store.dir()).unwrap().followed.contains("obra"));
+    assert_eq!(std::fs::read(target).unwrap(), b"secret");
+}
+
+#[tokio::test]
+async fn malformed_document_keeps_other_catalog_entries_and_marks_partial() {
+    let publisher = &publishers()[1];
+    let fetched = fetch_publisher_with(publisher, &|| true, |url, _| async move {
+        Ok(if url.contains("/git/ref/") {
+            serde_json::to_vec(&json!({"object":{"type":"commit","sha":"a".repeat(40)}})).unwrap()
+        } else if url.contains("/git/trees/") {
+            serde_json::to_vec(&json!({"truncated":false,"tree":[
+                {"path":"skills/one/SKILL.md","type":"blob","mode":"100644"},
+                {"path":"skills/two/SKILL.md","type":"blob","mode":"100644"}
+            ]}))
+            .unwrap()
+        } else if url.ends_with("skills/one/SKILL.md") {
+            b"---\nname: One\ndescription: Valid fixture\n---\n".to_vec()
+        } else {
+            b"invalid frontmatter".to_vec()
+        })
+    })
+    .await
+    .unwrap();
+    assert!(!fetched.complete);
+    assert_eq!(fetched.skills.len(), 1);
+    let mut state = PublicState::default();
+    state.accept(
+        "obra",
+        vec![catalog_skill("obra", "skills/two/SKILL.md", "a")],
+        Utc::now(),
+    );
+    state.accept_fetched("obra", fetched, Utc::now());
+    assert_eq!(
+        state.skills.len(),
+        2,
+        "partial fetch retains unrefreshed entries"
+    );
+    assert_eq!(state.publisher_states["obra"].status, "unknown");
+}
+
+#[tokio::test]
+async fn live_disable_stops_fetch_before_next_document_request() {
+    let on = std::cell::Cell::new(true);
+    let calls = std::cell::Cell::new(0);
+    let fetched = fetch_publisher_with(&publishers()[1], &|| on.get(), |url, _| {
+        calls.set(calls.get() + 1);
+        let response = if url.contains("/git/ref/") {
+            json!({"object":{"type":"commit","sha":"a".repeat(40)}})
+        } else {
+            on.set(false);
+            json!({"truncated":false,"tree":[{"path":"skills/one/SKILL.md","type":"blob","mode":"100644"}]})
+        };
+        std::future::ready(Ok(serde_json::to_vec(&response).unwrap()))
+    }).await;
+    assert!(fetched.is_err());
+    assert_eq!(calls.get(), 2);
+}
+
+#[test]
+fn observed_version_history_is_bounded_without_network_history() {
+    let mut state = PublicState::default();
+    for n in 0..12 {
+        state.accept(
+            "obra",
+            vec![catalog_skill(
+                "obra",
+                "skills/one/SKILL.md",
+                &format!("{n:x}"),
+            )],
+            Utc::now(),
+        );
+    }
+    assert_eq!(state.history["obra:skills/one/SKILL.md"].len(), 8);
+    assert_eq!(state.history["obra:skills/one/SKILL.md"][0], "3".repeat(64));
+    assert_eq!(state.history["obra:skills/one/SKILL.md"][7], "a".repeat(64));
+}
+
+#[test]
+fn disabled_refresh_discards_results_without_resetting_throttle() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    set_skills_flag(&shared, 1, true);
+    shared.insights_skills.start_refresh(&shared, true);
+    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
+    set_skills_flag(&shared, 2, false);
+    shared.insights_skills.finish_refresh(
+        &shared,
+        shared.store.dir(),
+        vec![(
+            "obra",
+            Ok(FetchedCatalog {
+                skills: vec![catalog_skill("obra", "skills/one/SKILL.md", "a")],
+                complete: true,
+            }),
+        )],
+    );
+    {
+        let runtime = shared.insights_skills.runtime.lock().unwrap();
+        assert!(!runtime.refreshing);
+        assert!(runtime.public.skills.is_empty());
+        assert_eq!(runtime.last_attempt, attempt);
+    }
+    assert!(!shared.store.dir().join(STATE_FILE).exists());
+    set_skills_flag(&shared, 3, true);
+    shared.insights_skills.start_refresh(&shared, true);
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().last_attempt,
+        attempt
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_refresh_persistence_does_not_latch_out_future_refreshes() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    set_skills_flag(&shared, 1, true);
+    shared.insights_skills.start_refresh(&shared, true);
+    let target = shared.store.dir().join("untouched");
+    std::fs::write(&target, b"secret").unwrap();
+    let cache = shared.store.dir().join(STATE_FILE);
+    std::os::unix::fs::symlink(&target, &cache).unwrap();
+    shared
+        .insights_skills
+        .finish_refresh(&shared, shared.store.dir(), vec![]);
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().error,
+        Some(ERROR_CACHE)
+    );
+    std::fs::remove_file(cache).unwrap();
+    let old = Instant::now() - REFRESH_DEBOUNCE;
+    shared.insights_skills.runtime.lock().unwrap().last_attempt = Some(old);
+    shared.insights_skills.start_refresh(&shared, true);
+    assert_ne!(
+        shared.insights_skills.runtime.lock().unwrap().last_attempt,
+        Some(old)
+    );
+    shared
+        .insights_skills
+        .finish_refresh(&shared, shared.store.dir(), vec![]);
+    assert!(load(shared.store.dir()).is_ok());
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().error,
+        Some(ERROR_REFRESH)
+    );
+    assert_eq!(std::fs::read(target).unwrap(), b"secret");
 }
