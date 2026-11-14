@@ -3,6 +3,9 @@ module witness_worker_tests {
 
   action review(i: int): bool = enqueue(i).then(dispatch(i)).then(begin(i))
   action failTrace(i: int, wait: int): bool = review(i).then(transient(i, wait))
+  // Dispatch at the current time, run for `seconds`, then fail with an outage label.
+  action slowFail(i: int, seconds: int, wait: int): bool = review(i).then(tick(seconds)).then(transient(i, wait))
+  action redact(i: int, wait: int): bool = review(i).then(redactionFailed(i, wait))
   action trip = failTrace(0, 30).then(failTrace(1, 30)).then(failTrace(2, 30))
   action warm = review(3).then(success(3)).then(cancel(3)).then(approve(3, false))
   action twoRunning = warm.then(enqueue(0)).then(enqueue(1)).then(dispatch(0)).then(begin(0))
@@ -25,11 +28,48 @@ module witness_worker_tests {
     .then(success(3)).then(enqueue(0)).then(enqueue(1)).then(dispatch(0)).then(dispatch(1))
     .expect(safety and s.answering and running(s).size() == 2 and s.circuit.reopen < 0)
 
-  run expiredDistinctFailuresDoNotTripTest = init.then(failTrace(0, 30)).then(tick(301))
-    .then(failTrace(1, 30)).then(failTrace(2, 30)).expect(safety and s.circuit.reopen < 0)
+  // Chain rule: the gap runs from the latest failure's end to the next failing dispatch.
+  // Each request here lasts 100 s, so end-to-end distances exceed 300 s in both tests.
+  run quietGapOfJustOverFiveMinutesStartsNewRunTest = init.then(slowFail(0, 100, 30)).then(tick(301))
+    .then(slowFail(1, 100, 30)).then(slowFail(2, 100, 30))
+    .expect(safety and s.circuit.reopen < 0 and Ids.filter(i => s.circuit.seen.get(i) >= 0) == Set(1, 2))
 
-  run failureWindowIncludesExactlyFiveMinutesTest = init.then(failTrace(0, 30)).then(tick(300))
-    .then(failTrace(1, 30)).then(failTrace(2, 30)).expect(safety and s.circuit.reopen == 330)
+  run quietGapOfExactlyFiveMinutesKeepsRunTest = init.then(slowFail(0, 100, 30)).then(tick(300))
+    .then(slowFail(1, 100, 30)).then(slowFail(2, 100, 30)).expect(safety and s.circuit.reopen == 630)
+
+  // A hung witness: every request times out after 570 s and the next is dispatched at once.
+  run backToBackTimeoutsLongerThanTheGapOpenTheCircuitTest = init.then(slowFail(0, 570, 30))
+    .then(slowFail(1, 570, 30)).then(require(s.circuit.reopen < 0)).then(slowFail(2, 570, 30))
+    .expect(safety and s.circuit.reopen == 1740 and s.circuit.delay == 30 and not(laneReady(s)))
+
+  run quietGapAfterLongTimeoutsStartsNewRunTest = init.then(slowFail(0, 570, 30)).then(slowFail(1, 570, 30))
+    .then(tick(301)).then(slowFail(2, 59, 30))
+    .then(require(s.circuit.reopen < 0 and Ids.filter(i => s.circuit.seen.get(i) >= 0) == Set(2)))
+    .then(slowFail(3, 10, 30)).then(require(s.circuit.reopen < 0))
+    .then(slowFail(0, 10, 60)).expect(safety and s.circuit.reopen == 1550)
+
+  run successBetweenLongTimeoutsEndsTheRunTest = init.then(slowFail(0, 570, 30)).then(slowFail(1, 570, 30))
+    .then(review(3)).then(success(3)).then(slowFail(2, 570, 30))
+    .expect(safety and s.circuit.reopen < 0 and Ids.filter(i => s.circuit.seen.get(i) >= 0) == Set(2))
+
+  // witness_redaction_failed retries per trace but never feeds the shared circuit.
+  run redactionFailedOutageOfThreeDistinctTracesDoesNotOpenCircuitTest = init.then(redact(0, 30))
+    .then(redact(1, 30)).then(redact(2, 30))
+    .expect(safety and s.circuit == emptyCircuit and laneReady(s) and
+      Ids.filter(i => s.entries.get(i).retrying and s.entries.get(i).failures == 1 and
+        s.entries.get(i).attempts == 1 and s.entries.get(i).due == 30) == Set(0, 1, 2))
+
+  run redactionFailureNeitherCountsNorBreaksAnOutageRunTest = init.then(failTrace(0, 30)).then(failTrace(1, 30))
+    .then(redact(2, 30)).then(require(s.circuit.reopen < 0)).then(failTrace(3, 30))
+    .expect(safety and s.circuit.reopen == 30 and s.circuit.seen.get(2) < 0)
+
+  run redactionFailedProbeReleasesSlotWithoutExtendingPauseTest = init.then(trip).then(tick(30))
+    .then(review(3)).then(redactionFailed(3, 30))
+    .expect(safety and s.circuit.probe < 0 and s.circuit.reopen == 30 and s.circuit.delay == 30 and
+      not(s.answering) and laneReady(s))
+
+  run redactionFailureClosesSecondSlotTest = init.then(twoRunning).then(redactionFailed(0, 30))
+    .expect(safety and not(s.answering) and running(s) == Set(1) and not(laneReady(s)))
 
   run differentProbeOutranksManualRetryOfLastFailureTest = init.then(trip).then(tick(30))
     .then(cancel(2)).then(approve(2, true)).then(enqueue(2)).then(enqueue(0)).then(dispatch(0))

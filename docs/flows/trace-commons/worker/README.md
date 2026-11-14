@@ -1,7 +1,9 @@
 # Background witness worker model
 
-This companion models the queue/worker policy in PR #2138, source baseline
-`fb16129e425752565fbfb43ed4ddd38a3cd27959`. It supplements the
+This companion models the queue/worker policy of branch `witness-circuit-followups`:
+commit `7be2c37ba` (identical to the working tree the evidence was recorded from) on
+top of origin/main `453522e60c4785a4f944356c4695c5e58c5b9c34`. The earlier
+evidence for PR #2138 used baseline `fb16129e4`. It supplements the
 [two-trace contribution lifecycle](../models/client_contribution.md); it does
 not change that model, its selected P2/P3/P4/P12 properties, or their existing
 induction certificates. There is no composed refinement proof between the two
@@ -15,26 +17,27 @@ automatic traces; discovery, enrollment and grant issuance belong to the
 existing lifecycle projection. Each durable entry has approval terms, manual/automatic
 origin, a manual-review hold, attempts, a saturated transient-failure count, an effective retry
 marker/deadline, and a certified pin. Queued snapshots and in-flight requests
-are separate maps. Dispatch and actual request start are separate transitions,
+are separate maps; an in-flight request records the time it was dispatched. Dispatch and actual request start are separate transitions,
 so cancellation, pause and reapproval can intervene. Completion must match the
 current terms before it can pin a review. Upload is a later, separately gated
 transition.
 
 | Model behavior | Rust anchor |
 | --- | --- |
-| Latest queued snapshot; in-flight dedup; full-queue displacement | `daemon/witness_worker.rs:241-280` |
-| Probe selection and available slots | `daemon/witness_worker.rs:339-373` |
-| Manual/fresh/retry ordering | `daemon/mod.rs:2588-2620` |
-| Six transient labels share a per-entry retry path | `submit.rs:684-693`, `daemon/mod.rs:2098-2133` |
-| Jittered nominal 60/120/300/900/3600-second delays | `daemon/witness_retry.rs:12-20` |
-| Distinct failure window; shared pause; probe ownership | `daemon/witness_retry.rs:35-90` |
-| Successful completion and saturation overlap | `daemon/witness_worker.rs:385-420` |
-| Saturation drains hints, retains approvals and spreads due times | `daemon/witness_worker.rs:743-767`, `daemon/mod.rs:2147-2164,2279-2290` |
-| Recheck captured approval; persist before pinning | `daemon/witness_worker.rs:530-558,679-721` |
+| Latest queued snapshot; in-flight dedup; full-queue displacement | `daemon/witness_worker.rs:246-285` |
+| Probe selection and available slots; dispatch time recorded on the job | `daemon/witness_worker.rs:186-190,344-378` |
+| Manual/fresh/retry ordering (see the ordering limitation below) | `daemon/mod.rs:2589-2625` |
+| Six transient labels share a per-entry retry path | `submit.rs:684-699`, `daemon/mod.rs:2099-2134` |
+| Jittered nominal 60/120/300/900/3600-second delays | `daemon/witness_retry.rs:16-25` |
+| Failure run reset by a quiet gap (latest failure end to next failing dispatch); shared pause; probe ownership | `daemon/witness_retry.rs:7-14,37-112` |
+| `witness_redaction_failed` retries per trace but ends the job as `Done` for the circuit | `daemon/witness_retry.rs:27-35`, `daemon/witness_worker.rs:404-408,734-738,776-781` |
+| Successful completion and saturation overlap | `daemon/witness_worker.rs:390-427` |
+| Saturation drains hints, retains approvals and spreads due times | `daemon/witness_worker.rs:754-780`, `daemon/mod.rs:2148-2165,2280-2291` |
+| Recheck captured approval; persist before pinning | `daemon/witness_worker.rs:539-567,688-730` |
 | Readiness depends on the retry reason, not just a timestamp | `daemon/queue.rs:808-833,2722-2725` |
 
-Anchors are relative to `crates/trace-commons-contributor/src/` at the pinned
-baseline. The validation report records hashes of these source files as well
+Anchors are relative to `crates/trace-commons-contributor/src/` at commit
+`7be2c37ba`. The validation report records hashes of these source files as well
 as the Quint model and tests.
 
 `checked` is an observation-only record. It records illegal dispatch order or
@@ -83,6 +86,18 @@ pause ladder, and pin/approval identity.
   configuration a trust hold requires manual reapproval.
 - Poisoned locks, panic backoff, interactive slots and operating-system
   execution failures are not represented as separate transitions.
+- **Ordering drift.** On origin/main `453522e60`, `compare_send_priority`
+  treats an entry as a retry only when `attempts > 0` and `retry_after` is set;
+  the model's `less` still orders by `attempts > 0` alone. A reapproved
+  automatic trace with earlier attempts therefore sorts as fresh work in Rust
+  but as a retry in the model. This projection was not updated for that
+  change (it interacts with the watchdog deadline below), so the ordering row
+  is not exact at this baseline.
+- The six transient labels are represented by two transitions: `transient`
+  (the five outage labels, which feed the circuit) and `redactionFailed`
+  (`witness_redaction_failed`, which takes the same per-trace retry but
+  releases a probe slot like a cancellation and records nothing in the
+  failure run). Both close the second slot.
 
 Two limitations are modeled deliberately rather than silently repaired:
 
@@ -107,8 +122,14 @@ an otherwise unreachable background interleaving to demonstrate them.
 
 ## Checked behavior and progress limits
 
-The regression suite includes failure-window boundaries, a repeated single
-failure, the three-ID threshold, single/different recovery probes, capped
+The regression suite includes failure-run gap boundaries (a quiet gap of
+exactly 300 seconds keeps a run, 301 seconds starts a new one, with 100-second
+requests so end-to-end distances exceed 300 seconds), back-to-back 570-second
+timeouts opening the circuit, a quiet gap after long timeouts starting a new
+run, a success ending a run, redaction failures of three distinct traces not
+opening the circuit and neither counting toward nor breaking an outage run,
+a redaction-failed probe releasing its slot without extending the pause, a
+repeated single failure, the three-ID threshold, single/different recovery probes, capped
 shared pauses, retained approvals, late capacity completions, manual reapproval,
 queue displacement, fresh/retry order, restart, pause, enrollment and permanent
 refusals. Six test-only mutations reproduce the old global pause, late-success
@@ -117,8 +138,10 @@ pinning. Each must make `safety` false. These mutations are excluded from the
 production `step` and the sampled/symbolic checks.
 
 The induction theorem is for the stated `safety` predicate. The three-distinct
-threshold, inclusive five-minute window and exact backoff progression have
-explicit regression coverage; they are not separate conjuncts of that theorem.
+threshold, the failure-run rule (a run resets only when the failing request was
+dispatched more than 300 seconds after the latest recorded failure ended), the
+exclusion of redaction failures from the circuit and the exact backoff
+progression have explicit regression coverage; they are not separate conjuncts of that theorem.
 
 **No unconditional fairness or eventual-upload theorem is claimed.** Infinite
 manual arrivals can starve automatic work; infinite fresh work can starve
@@ -155,8 +178,8 @@ sampling and regression tests remain distinct evidence.
 
 `witness_worker_induction.qnt` imports the unchanged original `init` and the
 complete original `step`. Its generated arbitrary initializer independently
-covers every field of both `State` and the observation record `Checks`: 151
-scalar leaves and four exact four-key maps. Integers and strings are not
+covers every field of both `State` and the observation record `Checks`: 159
+scalar leaves (including each job's `dispatched` time) and four exact four-key maps. Integers and strings are not
 clipped to a finite numeric/string list. The domain requires the original map
 keys; that domain's closure is part of the proof, not an exploration filter.
 
@@ -168,8 +191,10 @@ implication checks the original model's `safety`, and the expected
 counterexample to `false` checks that the arbitrary initializer admits a
 state. No production transition is removed or replaced.
 
-All four obligations completed successfully. This is safety for arbitrary-length
+All four obligations completed successfully for the current model; the full
+step has 25 extracted transitions. This is safety for arbitrary-length
 executions of the stated four-identity, queue-bound-three model; it remains
 separate from fairness, production-size generalization and source equivalence.
 See [retained validation evidence](evidence/README.md) for hashes, commands,
-terminal results and the earlier bounded searches that timed out.
+terminal results and the earlier bounded searches that timed out. Those
+bounded searches ran on a pre-review model and do not cover this one.

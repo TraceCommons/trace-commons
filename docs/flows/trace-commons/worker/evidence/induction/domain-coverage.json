@@ -1,6 +1,6 @@
 {
-  "modelSha256": "d492d791f4fbea6ba78296d45a88286cbde300345572476e29c6e6efd9f28512",
-  "harnessSha256": "2a8434fdda4b38ac44fe72457a2ce40eff0d7b7a571763e829836529ef293fac",
+  "modelSha256": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+  "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
   "coverage": [
     {
       "path": "c.dispatch",
@@ -485,6 +485,12 @@
       "arbitraryValue": "a14.started"
     },
     {
+      "path": "t.queued.get(0).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a14.dispatched"
+    },
+    {
       "path": "t.queued.get(0).key.revision",
       "type": "int",
       "domain": "unrestricted int",
@@ -537,6 +543,12 @@
       "type": "bool",
       "domain": "unrestricted bool",
       "arbitraryValue": "a16.started"
+    },
+    {
+      "path": "t.queued.get(1).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a16.dispatched"
     },
     {
       "path": "t.queued.get(1).key.revision",
@@ -593,6 +605,12 @@
       "arbitraryValue": "a18.started"
     },
     {
+      "path": "t.queued.get(2).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a18.dispatched"
+    },
+    {
       "path": "t.queued.get(2).key.revision",
       "type": "int",
       "domain": "unrestricted int",
@@ -645,6 +663,12 @@
       "type": "bool",
       "domain": "unrestricted bool",
       "arbitraryValue": "a20.started"
+    },
+    {
+      "path": "t.queued.get(3).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a20.dispatched"
     },
     {
       "path": "t.queued.get(3).key.revision",
@@ -711,6 +735,12 @@
       "arbitraryValue": "a22.started"
     },
     {
+      "path": "t.running.get(0).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a22.dispatched"
+    },
+    {
       "path": "t.running.get(0).key.revision",
       "type": "int",
       "domain": "unrestricted int",
@@ -763,6 +793,12 @@
       "type": "bool",
       "domain": "unrestricted bool",
       "arbitraryValue": "a24.started"
+    },
+    {
+      "path": "t.running.get(1).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a24.dispatched"
     },
     {
       "path": "t.running.get(1).key.revision",
@@ -819,6 +855,12 @@
       "arbitraryValue": "a26.started"
     },
     {
+      "path": "t.running.get(2).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a26.dispatched"
+    },
+    {
       "path": "t.running.get(2).key.revision",
       "type": "int",
       "domain": "unrestricted int",
@@ -871,6 +913,12 @@
       "type": "bool",
       "domain": "unrestricted bool",
       "arbitraryValue": "a28.started"
+    },
+    {
+      "path": "t.running.get(3).dispatched",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a28.dispatched"
     },
     {
       "path": "t.running.get(3).key.revision",

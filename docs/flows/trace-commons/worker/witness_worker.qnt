@@ -1,4 +1,5 @@
-// Background-worker projection of fb16129e4. See README.md for bounds/omissions.
+// Background-worker projection of the witness-circuit-followups working tree on 453522e60.
+// See README.md for bounds/omissions.
 module witness_worker {
   pure val Ids = Set(0, 1, 2, 3)
   pure val QueueBound = 3 // production MAX_QUEUED=64; fourth identity exercises displacement
@@ -6,7 +7,7 @@ module witness_worker {
   type Entry = {state: str, held: bool, revision: int, key: Key, attempts: int, failures: int,
     retrying: bool, due: int, pinned: bool, pinKey: Key}
   type Job = {present: bool, key: Key, attempts: int, retrying: bool, due: int,
-    order: int, started: bool}
+    order: int, started: bool, dispatched: int}
   type Circuit = {seen: int -> int, reopen: int, probe: int, delay: int, last: int}
   type State = {now: int, entries: int -> Entry, queued: int -> Job, running: int -> Job,
     serial: int, circuit: Circuit, hold: int, answering: bool, paused: bool, enrolled: bool}
@@ -16,7 +17,7 @@ module witness_worker {
   var checked: Checks
   pure val emptyKey: Key = {revision: 0, manual: false, approvedAt: -1}
   pure val emptyJob: Job = {present: false, key: emptyKey, attempts: 0, retrying: false,
-    due: 0, order: 0, started: false}
+    due: 0, order: 0, started: false, dispatched: 0}
   pure val emptyCircuit: Circuit = {seen: Ids.mapBy(_ => -1), reopen: -1, probe: -1, delay: 0, last: -1}
   pure val initialEntry: Entry = {state: "approved", held: false, revision: 0, key: emptyKey, attempts: 0, failures: 0,
     retrying: false, due: 0, pinned: false, pinKey: emptyKey}
@@ -26,7 +27,7 @@ module witness_worker {
   pure def current(t: State, i: int): bool = t.entries.get(i).state == "approved" and
     not(t.entries.get(i).pinned) and t.entries.get(i).key == t.running.get(i).key
   pure def snapshot(e: Entry, order: int): Job = {present: true, key: e.key, attempts: e.attempts,
-    retrying: e.retrying, due: e.due, order: order, started: false}
+    retrying: e.retrying, due: e.due, order: order, started: false, dispatched: 0}
   // Manual ties retain queue order. Automatic source age/UUID are represented by ID.
   pure def less(a: Job, ai: int, b: Job, bi: int): bool =
     if (a.key.manual != b.key.manual) a.key.manual
@@ -52,9 +53,12 @@ module witness_worker {
     eligible(t).forall(j => not(preferred(t, j, i)))
   pure def nominal(failures: int): int = if (failures <= 1) 60 else if (failures == 2) 120
     else if (failures == 3) 300 else if (failures == 4) 900 else 3600
-  pure def failed(c: Circuit, i: int, now: int): Circuit = {
-    val recent = Ids.mapBy(j => if (j == i) now else
-      if (c.seen.get(j) >= 0 and now - c.seen.get(j) <= 300) c.seen.get(j) else -1)
+  // `started` is the failing request's dispatch time, `now` its end. A run resets when
+  // the request was dispatched more than 300 s after the latest recorded failure ended.
+  pure def failed(c: Circuit, i: int, started: int, now: int): Circuit = {
+    val quiet = Ids.exists(j => c.seen.get(j) >= 0) and
+      Ids.forall(j => c.seen.get(j) < 0 or started - c.seen.get(j) > 300)
+    val recent = Ids.mapBy(j => if (j == i) now else if (quiet) -1 else c.seen.get(j))
     if (c.reopen >= 0) {
       val delay = if (c.delay * 2 > 300) 300 else c.delay * 2
       if (c.probe != i) c else {...c, reopen: now + delay, probe: -1, delay: delay, last: i}
@@ -76,13 +80,14 @@ module witness_worker {
      pin: old.pin and (not(firstPin) or (event == "success" and matching and a.running.get(i).started)),
      upload: old.upload and (event != "upload" or (a.enrolled and not(a.paused) and
        a.entries.get(i).pinned and a.entries.get(i).pinKey == a.entries.get(i).key)),
-     approval: old.approval and (not(Set("transient", "busy").contains(event) and matching) or
+     approval: old.approval and (not(Set("transient", "redaction", "busy").contains(event) and matching) or
        (b.entries.get(i).state == "approved" and b.entries.get(i).key == a.entries.get(i).key)) and
        (event != "enqueue" or a.entries == b.entries) and
        (not(event == "approve" and a.entries.get(i).held) or b.entries.get(i).key.manual),
-     isolated: old.isolated and (not(event == "transient" and matching and
+     isolated: old.isolated and (not(Set("transient", "redaction").contains(event) and matching and
        a.circuit.reopen < 0 and b.circuit.reopen < 0) or (a.hold == b.hold and a.queued == b.queued)),
-     late: old.late and (not(Set("success", "transient").contains(event) and matching and late) or a.circuit == b.circuit),
+     late: old.late and (not(Set("success", "transient", "redaction").contains(event) and matching and late) or
+       a.circuit == b.circuit),
      capacity: old.capacity and (not(event == "success" and a.hold >= 0) or not(b.answering)),
      refreshed: old.refreshed and (not(event == "enqueue" and waiting(a).contains(i)) or
        b.queued.get(i).key == a.entries.get(i).key)}
@@ -118,7 +123,7 @@ module witness_worker {
   // Unsafe helper exists for negative tests; step calls only guarded dispatch.
   action dispatchUnchecked(i: int): bool = commit({...s, hold: -1,
     circuit: if (s.circuit.reopen >= 0) {...s.circuit, probe: i} else s.circuit,
-    running: s.running.set(i, s.queued.get(i)), queued: s.queued.set(i, emptyJob)}, "dispatch", i)
+    running: s.running.set(i, {...s.queued.get(i), dispatched: s.now}), queued: s.queued.set(i, emptyJob)}, "dispatch", i)
   action dispatch(i: int): bool = all {laneReady(s), best(s, i), dispatchUnchecked(i)}
   action begin(i: int): bool = all {running(s).contains(i), not(s.running.get(i).started),
     s.enrolled, not(s.paused), current(s, i), ready(s.entries.get(i), s.now),
@@ -137,16 +142,22 @@ module witness_worker {
       else drop(i)
     }
   }
-  action transient(i: int, wait: int): bool = {
+  // Every transient label retries per trace. Only outage labels feed the circuit;
+  // witness_redaction_failed ends the job as Done for the lane (probe released).
+  action transientEnd(i: int, wait: int, outage: bool): bool = {
     val e = s.entries.get(i)
     val n = if (e.failures >= 5) 5 else e.failures + 1
     all {s.running.get(i).started, wait >= nominal(n) / 2, wait <= nominal(n),
       if (current(s, i) and s.enrolled) commit({...s,
         entries: s.entries.set(i, {...e, failures: n, attempts: e.attempts + 1, retrying: true, due: s.now + wait}),
-        running: s.running.set(i, emptyJob), answering: false, circuit: failed(s.circuit, i, s.now)}, "transient", i)
+        running: s.running.set(i, emptyJob), answering: false,
+        circuit: if (outage) failed(s.circuit, i, s.running.get(i).dispatched, s.now) else cancelled(s.circuit, i)},
+        if (outage) "transient" else "redaction", i)
       else drop(i)
     }
   }
+  action transient(i: int, wait: int): bool = transientEnd(i, wait, true)
+  action redactionFailed(i: int, wait: int): bool = transientEnd(i, wait, false)
   action busy(i: int, hint: int): bool = {
     val deadline = s.now + hint
     val e = s.entries.get(i)
@@ -204,7 +215,8 @@ module witness_worker {
     nondet hint = Set(1, 45, 120, 300, 3600).oneOf()
     val n = if (s.entries.get(i).failures >= 5) 5 else s.entries.get(i).failures + 1
     nondet wait = (nominal(n) / 2).to(nominal(n)).oneOf()
-    any {enqueue(i), dispatch(i), begin(i), drop(i), success(i), transient(i, wait), busy(i, hint),
+    any {enqueue(i), dispatch(i), begin(i), drop(i), success(i), transient(i, wait),
+      redactionFailed(i, wait), busy(i, hint),
       permanent(i, manual), watchdog(i), cancel(i), approve(i, manual), termsChanged(i), upload(i), tick(seconds),
       pause(manual), enrollment(manual), restart}
   }

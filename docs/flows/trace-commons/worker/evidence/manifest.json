@@ -1,18 +1,27 @@
 {
-  "sourceBaseline": "fb16129e425752565fbfb43ed4ddd38a3cd27959",
+  "sourceBaseline": "7be2c37bad3d7be86087ca530c03dfd4e1bc9746",
+  "sourceBaselineNote": "branch witness-circuit-followups (working tree, identical to 7be2c37ba for the hashed Rust files) on top of origin/main 453522e60c4785a4f944356c4695c5e58c5b9c34",
   "modelProof": "full-step safety induction; not liveness or Rust equivalence",
+  "currentEvidence": [
+    "validation/",
+    "induction/"
+  ],
+  "historicEvidence": {
+    "bounded-5-incomplete/": "incomplete; older pre-review model; does not cover the current model",
+    "bounded-8-incomplete/": "incomplete; older pre-review model; does not cover the current model"
+  },
   "hashes": {
-    "docs/flows/trace-commons/worker/witness_worker.qnt": "d492d791f4fbea6ba78296d45a88286cbde300345572476e29c6e6efd9f28512",
-    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "932a92398fb381533fad2cba327b29237e7090902f9bc291ab443c44c3c90ad9",
-    "docs/flows/trace-commons/worker/witness_worker_induction.qnt": "2a8434fdda4b38ac44fe72457a2ce40eff0d7b7a571763e829836529ef293fac",
+    "docs/flows/trace-commons/worker/witness_worker.qnt": "2568f35984b9d01be783126899144317ab3dde15232f5ca5eec087b560935707",
+    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "39f9e6e7bf76b59edb7ea6db7ea7d7f73287fe39596c7d050eb2f90762cb27ed",
+    "docs/flows/trace-commons/worker/witness_worker_induction.qnt": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
     "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
     "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
     "docs/flows/trace-commons/worker/induction.py": "c3a308ea54b2a82d7dedccee5483a7f763038d1711353845eb1186805227aea2",
     "docs/flows/trace-commons/scripts/induction_checks.py": "34681ad1cdde91689a7525400fd09d498b66585cebbea1e82be892802f879c92",
-    "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "3d5357ca9e9e70e62a731a5845d3d2358277b212b4195e23f797c88349487efa",
-    "crates/trace-commons-contributor/src/daemon/witness_retry.rs": "2eafacf8ba634cc171e3122be5c3c00bbc2a33177ac303a3c5b3c9559247f3dc",
-    "crates/trace-commons-contributor/src/daemon/mod.rs": "bb5022d7fe2f47d83231fef3e7511f971597493d9974bb419c34c9523e0227b0",
+    "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
+    "crates/trace-commons-contributor/src/daemon/witness_retry.rs": "ed7867633aae78494644fcf03e3187942cec3b4429173ac6ba56246096c20b5f",
+    "crates/trace-commons-contributor/src/daemon/mod.rs": "0d596a2828a1c1849030d9aa7bb55c23842f53270e4b644d6bdb08bd6478e7c6",
     "crates/trace-commons-contributor/src/daemon/queue.rs": "86c1a8be3d4ea253873ca1451bdcca26c8a328ff5b4d1b52be6a1e834b5e5325",
-    "crates/trace-commons-contributor/src/submit.rs": "dc3dc164073bf2e02c01728dc6a905dc20b9d34b47960ad952c8f9ab8dd72c4e"
+    "crates/trace-commons-contributor/src/submit.rs": "e05d99e2714d79842428b832465a43b5c053bf95f11f50d2ea381c68bec8f903"
   }
 }
