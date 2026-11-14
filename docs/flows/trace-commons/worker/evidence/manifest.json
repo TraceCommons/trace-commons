@@ -1,6 +1,6 @@
 {
-  "sourceBaseline": "f785452ae54d2732ac623f4f9be65c4984b9fc74",
-  "sourceBaselineNote": "origin/main f785452ae (#2139); evidence recorded on branch witness-model-retry-order, which changes only the model",
+  "sourceBaseline": "618150bd2548670cbab2d98f8815d0bbfb89383e",
+  "sourceBaselineNote": "branch fix-watchdog-retry-deadline on origin/main 04dd50563 (#2141); readiness honors any deadline",
   "modelProof": "full-step safety induction; not liveness or Rust equivalence",
   "currentEvidence": [
     "validation/",
@@ -11,8 +11,8 @@
     "bounded-8-incomplete/": "incomplete; older pre-review model; does not cover the current model"
   },
   "hashes": {
-    "docs/flows/trace-commons/worker/witness_worker.qnt": "3bd778ab8596ba374768a796d973a7e45d5df14102383e56900ec8f39be99021",
-    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "f6a7c08cb41c30caae7380ca1d545d3bcb84b7419ae4e5a3631d60ba8dc50eb6",
+    "docs/flows/trace-commons/worker/witness_worker.qnt": "dd75140072f703b70d2b26277b1df7ffc2ff088dc7b3f9d431c3b8ee8d406d9f",
+    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "8da1af94dff31e4ec601e44ecf801c8d5574201ad9e37ae6966b23319584447e",
     "docs/flows/trace-commons/worker/witness_worker_induction.qnt": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
     "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
     "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
@@ -20,8 +20,8 @@
     "docs/flows/trace-commons/scripts/induction_checks.py": "34681ad1cdde91689a7525400fd09d498b66585cebbea1e82be892802f879c92",
     "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
     "crates/trace-commons-contributor/src/daemon/witness_retry.rs": "ed7867633aae78494644fcf03e3187942cec3b4429173ac6ba56246096c20b5f",
-    "crates/trace-commons-contributor/src/daemon/mod.rs": "0d596a2828a1c1849030d9aa7bb55c23842f53270e4b644d6bdb08bd6478e7c6",
-    "crates/trace-commons-contributor/src/daemon/queue.rs": "86c1a8be3d4ea253873ca1451bdcca26c8a328ff5b4d1b52be6a1e834b5e5325",
+    "crates/trace-commons-contributor/src/daemon/mod.rs": "85c888fde7b69a5dde906d1244244a3f855c07700120220c8e35a7f44ddd556b",
+    "crates/trace-commons-contributor/src/daemon/queue.rs": "177367e1a334872cea00d8402aa1763ebb7e4254908ed87df3000cc7c12b2a1e",
     "crates/trace-commons-contributor/src/submit.rs": "e05d99e2714d79842428b832465a43b5c053bf95f11f50d2ea381c68bec8f903"
   }
 }

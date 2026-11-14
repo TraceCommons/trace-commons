@@ -1,8 +1,8 @@
 # Witness worker validation results
 
-Recorded on 2026-11-14 for the source projection at origin/main `f785452ae`
-(#2139), on branch `witness-model-retry-order`, which changes only the model:
-retries are ordered by a live deadline, as `compare_send_priority` does. The model
+Recorded on 2026-11-14 on branch `fix-watchdog-retry-deadline` over origin/main
+`04dd50563` (#2141): readiness honors any retry deadline, so the hung-job
+watchdog's deadline applies to a fresh trace. The model
 now has the failure-run chain rule and the non-outage `witness_redaction_failed`
 ending. The exact model, harness, checker and Rust source hashes are in
 [manifest.json](manifest.json).
