@@ -184,6 +184,11 @@ impl Clock {
         }
     }
 
+    /// When the job was dispatched.
+    fn started(&self) -> DateTime<Utc> {
+        self.base
+    }
+
     fn now(&self) -> DateTime<Utc> {
         // Instant may stop during sleep. Keep injected test clocks relative,
         // while accounting for wall time that passed since the job started.
@@ -396,11 +401,11 @@ impl WitnessWorker {
             JobEnd::Dropped => {}
             _ => s.answering = false,
         }
-        if !matches!(end, JobEnd::Witnessed | JobEnd::Transient) {
+        if !matches!(end, JobEnd::Witnessed | JobEnd::Transient { .. }) {
             s.circuit.cancelled(entry_id);
         }
         match end {
-            JobEnd::Transient => s.circuit.failed(entry_id, now),
+            JobEnd::Transient { started } => s.circuit.failed(entry_id, *started, now),
             JobEnd::Busy(until) => {
                 s.held_until = Some(s.held_until.map_or(*until, |held| held.max(*until)));
             }
@@ -433,8 +438,12 @@ enum JobEnd {
     Dropped,
     /// The witness answered busy; the lane rests until then.
     Busy(DateTime<Utc>),
-    /// Only this trace failed; the circuit decides whether failures correlate.
-    Transient,
+    /// Only this trace failed, in a way that may be a witness outage; the
+    /// circuit decides whether failures correlate. `started` is when the
+    /// request was dispatched.
+    Transient {
+        started: DateTime<Utc>,
+    },
     Panicked,
     Poisoned,
 }
@@ -722,9 +731,11 @@ fn record(
         }
         super::uploader::WitnessJobOutcome::Decision(decision) => {
             let observed_at = || clock.now();
+            // Only failures that can mean the witness is down feed the
+            // shared circuit; the entry's own retry is decided by its label.
             let transient = matches!(&decision,
                 super::uploader::UploadDecision::Failed { reason_label }
-                if crate::submit::witness_failure_is_transient(reason_label));
+                if super::witness_retry::counts_toward_outage(reason_label));
             let applied = super::apply_upload_decision(
                 shared,
                 q,
@@ -763,7 +774,9 @@ fn record(
             }
             match applied.witness_busy_until {
                 Some((until, _)) => JobEnd::Busy(until),
-                None if transient => JobEnd::Transient,
+                None if transient => JobEnd::Transient {
+                    started: clock.started(),
+                },
                 None => JobEnd::Done,
             }
         }
@@ -844,7 +857,11 @@ mod retry_tests {
             w.enqueue(entry(n, 0, false), now);
         }
         let first = w.take_next(now).unwrap();
-        w.finish(first.entry.entry_id, &JobEnd::Transient, now);
+        w.finish(
+            first.entry.entry_id,
+            &JobEnd::Transient { started: now },
+            now,
+        );
         assert_eq!(w.queued(), 3);
         assert_eq!(w.take_next(now).unwrap().entry.entry_id, Uuid::from_u128(2));
     }
@@ -858,7 +875,7 @@ mod retry_tests {
         }
         for _ in 0..3 {
             let job = w.take_next(now).unwrap();
-            w.finish(job.entry.entry_id, &JobEnd::Transient, now);
+            w.finish(job.entry.entry_id, &JobEnd::Transient { started: now }, now);
         }
         assert!(w.take_next(now).is_none());
         // Even a manual retry of the last failure is not the recovery probe
