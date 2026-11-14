@@ -156,6 +156,13 @@ fn permitted(scope: &SnapshotScope, cwd: Option<&str>) -> bool {
 }
 
 fn scan(shared: &DaemonShared) {
+    scan_with_sources(shared, all_sources);
+}
+
+fn scan_with_sources(
+    shared: &DaemonShared,
+    sources: impl FnOnce(&crate::source::SourceRoots) -> Vec<Box<dyn crate::source::TraceSource>>,
+) {
     if !enabled(shared) {
         return;
     }
@@ -191,7 +198,7 @@ fn scan(shared: &DaemonShared) {
                 .is_none_or(|root| Path::new(&root).canonicalize().is_err())
         }),
     };
-    for source in all_sources(&roots)
+    for source in sources(&roots)
         .into_iter()
         .filter(|source| source.name() == SOURCE_OPENCODE)
     {
@@ -245,6 +252,12 @@ fn scan(shared: &DaemonShared) {
                 partial = true;
                 continue;
             };
+            // Loading can block while the flag, local analysis, clear
+            // generation or folder policy changes. Do not inspect or extract
+            // the loaded transcript under a scope that is no longer current.
+            if !scope.is_current(shared) || !enabled(shared) {
+                return;
+            }
             if !permitted(&scope, transcript.cwd.as_deref()) {
                 files.remove(&reference.path);
                 continue;
@@ -443,6 +456,174 @@ mod tests {
             },
         }
     }
+    // Delegate real parsing, then change the daemon scope at the return from
+    // a potentially slow load. Follow-up I/O must not run under that old scope.
+    struct ChangingSource {
+        inner: Box<dyn crate::source::TraceSource>,
+        after_load: Arc<dyn Fn() + Send + Sync>,
+        loads: Arc<std::sync::atomic::AtomicUsize>,
+        followups: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::source::TraceSource for ChangingSource {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+            self.inner.discover()
+        }
+
+        fn load(&self, reference: &SessionRef) -> anyhow::Result<crate::source::SessionTranscript> {
+            let transcript = self.inner.load(reference)?;
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.after_load)();
+            Ok(transcript)
+        }
+
+        fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+            self.followups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.session_at(path)
+        }
+    }
+
+    #[test]
+    fn scope_change_during_load_stops_before_extraction_and_followup_io() {
+        fn accept(shared: &DaemonShared, revision: u64, on: bool) {
+            let now = Utc::now();
+            let manifest = serde_json::to_vec(&json!({
+                "schema_version":1,"environment":"testing","revision":revision,
+                "issued_at":now,"expires_at":now+chrono::Duration::hours(1),
+                "flags":{"insights_skills":on}
+            }))
+            .unwrap();
+            shared
+                .feature_flags
+                .accept(&crate::feature_flags::test_signing::sign(&manifest), now)
+                .unwrap();
+        }
+
+        for change in [
+            "unchanged",
+            "disabled",
+            "reenabled",
+            "cleared",
+            "analysis",
+            "policy",
+        ] {
+            let (_dir, store) = crate::config::tests_support::temp_store();
+            let mut shared = DaemonShared::load(store).unwrap();
+            let registry = serde_json::from_value(json!({
+                "schema_version":1,"registry_version":1,
+                "flags":{"insights_skills":{"description":"Skills","owner":"tests","class":"product",
+                    "default":false,"required_capabilities":[],"timing":"live"}}
+            })).unwrap();
+            let profile = serde_json::from_value(json!({
+                "schema_version":1,"registry_version":1,"environment":"testing",
+                "capabilities":[],"remote_enable":["insights_skills"],"signing_keys":[]
+            }))
+            .unwrap();
+            shared.feature_flags = crate::feature_flags::Runtime::open(
+                registry,
+                crate::feature_flags::test_signing::pin(profile),
+                shared.store.dir(),
+                Utc::now(),
+            )
+            .unwrap();
+            accept(&shared, 1, true);
+            let shared = Arc::new(shared);
+            let exports = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let cwd = project.path().canonicalize().unwrap();
+            let mut export: Value = serde_json::from_slice(include_bytes!(
+                "../../../tests/fixtures/opencode/completed.json"
+            ))
+            .unwrap();
+            export["info"]["directory"] = json!(cwd);
+            export["messages"][1]["info"]["path"]["cwd"] = json!(cwd);
+            export["messages"][1]["info"]["path"]["root"] = json!(cwd);
+            let tool = &mut export["messages"][1]["parts"][1];
+            tool["tool"] = json!("skill");
+            tool["state"]["input"] = json!({"name":"review"});
+            std::fs::write(
+                exports.path().join("trace.json"),
+                serde_json::to_vec(&export).unwrap(),
+            )
+            .unwrap();
+            {
+                let mut settings = shared.settings.lock().unwrap();
+                settings.insights_counter_pass = true;
+                settings.opencode_source = Some(crate::source::SourceDeclaration::Watch {
+                    path: exports.path().canonicalize().unwrap(),
+                });
+            }
+            let changing = Arc::clone(&shared);
+            let after_load: Arc<dyn Fn() + Send + Sync> = Arc::new(move || match change {
+                "disabled" => accept(&changing, 2, false),
+                "reenabled" => {
+                    accept(&changing, 2, false);
+                    accept(&changing, 3, true);
+                }
+                "cleared" => changing.insights_counter.clear().unwrap(),
+                "analysis" => changing.settings.lock().unwrap().insights_counter_pass = false,
+                "policy" => changing
+                    .policy
+                    .lock()
+                    .unwrap()
+                    .set_mode(
+                        cwd.to_str().unwrap(),
+                        super::super::super::policy::ProjectMode::Ignore,
+                        Utc::now(),
+                    )
+                    .unwrap(),
+                _ => {}
+            });
+            let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let followups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            scan_with_sources(&shared, |roots| {
+                all_sources(roots)
+                    .into_iter()
+                    .map(|inner| {
+                        Box::new(ChangingSource {
+                            inner,
+                            after_load: Arc::clone(&after_load),
+                            loads: Arc::clone(&loads),
+                            followups: Arc::clone(&followups),
+                        }) as Box<dyn crate::source::TraceSource>
+                    })
+                    .collect()
+            });
+            assert_eq!(
+                loads.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{change}: real export loaded"
+            );
+            assert_eq!(
+                followups.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(change == "unchanged"),
+                "{change}: stale scope must abort immediately after load, before metadata I/O or extraction"
+            );
+            let state = shared.insights_skills.opencode.lock().unwrap();
+            assert_eq!(
+                state.completed_at.is_some(),
+                change == "unchanged",
+                "{change}"
+            );
+            assert_eq!(
+                state.files.len(),
+                usize::from(change == "unchanged"),
+                "{change}"
+            );
+            if change == "unchanged" {
+                assert_eq!(
+                    state.files.values().next().unwrap().row.evidence.skills[0].name,
+                    "review"
+                );
+            }
+        }
+    }
+
     #[test]
     fn copies_deduplicate_by_native_identity_and_event_freshness() {
         let mut files = BTreeMap::new();
