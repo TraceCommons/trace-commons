@@ -173,7 +173,9 @@ pub fn monitor_failure_line(label: &str) -> Option<&'static str> {
         crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED => Some(MONITOR_NEEDS_PRIVACY_CHECK),
         crate::daemon::preview::REASON_PREVIEW_TIMED_OUT
         | "witness_timeout"
-        | "witness_unreachable" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
+        | "witness_unreachable"
+        | "witness_classifier_unavailable"
+        | "witness_redaction_failed" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
         _ => None,
     }
 }
@@ -2027,6 +2029,8 @@ mod tests {
             crate::daemon::preview::REASON_PREVIEW_TIMED_OUT,
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
         ] {
             assert_eq!(
                 monitor_failure_line(label),

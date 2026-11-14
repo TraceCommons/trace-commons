@@ -80,3 +80,11 @@ See the Rust source-helper replay in [client proof notes](../proofs/client-notes
 ## Complete selected-property induction
 
 The final model has a complete, independently reviewed P2/P3/P4/P12 induction certificate over all 76 original transitions. The proof-only harness imports the full step and checks domain closure, strengthening initiation/preservation, implication and nonvacuity. See [client proof notes](../proofs/client-notes.md) for exact hashes, commands, callback multiplicity abstraction, historical counterexamples and source limits. Earlier sampled/capped results are not the final verdict.
+
+## Background witness scheduling companion
+
+The [worker model](../worker/README.md) now models the background queue, four
+trace identities, two in-flight jobs, independent retries and shared outage
+recovery. This lifecycle model and its original proof hashes are unchanged.
+The companion has separate validation and explicit timing/fairness limits;
+there is no combined lifecycle/worker refinement proof.

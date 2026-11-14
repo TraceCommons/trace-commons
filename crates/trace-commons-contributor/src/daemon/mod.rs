@@ -139,6 +139,7 @@ pub mod watcher;
 #[cfg(windows)]
 pub mod win_pipe;
 pub mod withdraw;
+mod witness_retry;
 pub(crate) mod witness_worker;
 
 use std::sync::Arc;
@@ -2119,30 +2120,20 @@ fn apply_upload_decision(
                         Some(reason_label),
                     );
                 } else {
-                    // Ingest's `Retry-After` says nothing about the
-                    // witness, so it does not stretch a witness wait.
-                    let hint = match kind {
-                        TransientUpload::Witness => None,
-                        _ => unavailable_retry_after,
+                    let random = crate::retry_jitter::random_u64();
+                    let wait = if kind == TransientUpload::Witness {
+                        witness_retry::retry_wait(failures, random)
+                    } else {
+                        transient_upload_retry_wait(failures, unavailable_retry_after, random)
                     };
-                    q.record_attempt(
-                        entry.entry_id,
-                        Some(
-                            observed_at
-                                + transient_upload_retry_wait(
-                                    failures,
-                                    hint,
-                                    crate::retry_jitter::random_u64(),
-                                ),
-                        ),
-                    );
+                    q.record_attempt(entry.entry_id, Some(observed_at + wait));
                     q.set_state(
                         entry.entry_id,
                         queue::QueueState::Approved,
                         Some(reason_label),
                     );
                 }
-                if matches!(kind, TransientUpload::Outage | TransientUpload::Witness) {
+                if kind == TransientUpload::Outage {
                     applied.outage = true;
                 }
             } else {
@@ -2157,15 +2148,11 @@ fn apply_upload_decision(
         uploader::UploadDecision::WitnessSaturated { retry_after_secs } => {
             // Nothing was judged, so nothing is refused: the entry keeps
             // its approval and is not claimable again until the witness
-            // has had the time it asked for, doubling while it stays
-            // busy. Never a per-session attempt limit, for the reason
-            // the transient classifier retry has none.
-            let attempt = q
-                .get(entry.entry_id)
-                .map(|e| e.attempts.saturating_add(1))
-                .unwrap_or(1);
+            // has had the time it asked for. Prior failures of this trace
+            // must not multiply a server-wide capacity delay. There is no
+            // per-session attempt limit: saturation judged nothing.
             let observed_at = observed_at();
-            let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
+            let until = observed_at + witness_capacity_retry_delay(retry_after_secs);
             q.record_attempt(
                 entry.entry_id,
                 Some(until + witness_capacity_jitter(entry.entry_id, retry_after_secs)),
@@ -2184,8 +2171,7 @@ fn apply_upload_decision(
             // passed. No per-session attempt limit, for the reason the
             // witness capacity retry has none. A server `429` records an
             // attempt; this daemon's own burst guard (`Paced`) does not,
-            // since it sent nothing, and the witness and classifier
-            // backoffs grow with `attempts`.
+            // since it sent nothing, and classifier backoff grows with attempts.
             let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
             // A server `429` hint is a floor with a random extra on top,
             // so contributors told the same wait do not return together.
@@ -2289,14 +2275,10 @@ fn sync_witness_capacity_health(shared: &ipc::DaemonShared, now: chrono::DateTim
     }
 }
 
-/// How long to leave a saturated witness alone after the `attempts`-th time
-/// it refused: its own `Retry-After`, doubling per consecutive refusal and
-/// capped at an hour. The witness's delay is the floor, never shortened.
-fn witness_capacity_retry_delay(retry_after_secs: u32, attempts: u32) -> chrono::Duration {
-    let base = i64::from(retry_after_secs.max(1));
-    let exponent = attempts.saturating_sub(1).min(7);
-    let cap = i64::from(crate::witness::transport::MAX_WITNESS_RETRY_AFTER_SECS).max(base);
-    chrono::Duration::seconds((base * (1_i64 << exponent)).min(cap))
+/// The witness's explicit capacity delay, independent of a trace's retry
+/// history. The transport already bounds this server-controlled hint.
+fn witness_capacity_retry_delay(retry_after_secs: u32) -> chrono::Duration {
+    chrono::Duration::seconds(i64::from(retry_after_secs.max(1)))
 }
 
 /// A per-session spread of up to half the witness's delay, so every
@@ -2365,9 +2347,9 @@ enum TransientUpload {
     /// holds the lease. About this entry only, so the pass goes on.
     Lease,
     /// The witness did not answer in time or could not be reached
-    /// (`submit::witness_failure_is_transient`). One witness serves every
-    /// session, so the pass stops at the first, as a `submit` batch does
-    /// (`submit::WITNESS_BATCH_STOP_LABELS`). It has no budget: the entry
+    /// (`submit::witness_failure_is_transient`). This entry backs off; the
+    /// worker detects correlated failures before pausing other traces.
+    /// It has no budget: the entry
     /// keeps its approval and is retried at most an hour apart for as long
     /// as the witness cannot review (owner, 2026-11-12).
     Witness,
@@ -2599,10 +2581,16 @@ pub fn credential_store_self_check() -> i32 {
 /// trace the contributor sent by hand waited behind all of it, at that many
 /// per poll. The contributor is waiting on theirs; the backlog is not.
 fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
+    approved.sort_by(compare_send_priority);
+    approved
+}
+
+/// Shared by the producer and worker so queued jobs cannot defeat fairness.
+fn compare_send_priority(
+    left: &queue::QueueEntry,
+    right: &queue::QueueEntry,
+) -> std::cmp::Ordering {
     let age = |entry: &queue::QueueEntry| {
-        // Match discovery's conversation start where available. The durable
-        // source-write time survives re-offers; the observation is a fallback
-        // for queue files written before that provenance was recorded.
         entry
             .shape
             .as_ref()
@@ -2610,24 +2598,31 @@ fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
             .or(entry.last_modified_at)
             .or(entry.observed_modified_at)
     };
-    approved.sort_by(|left, right| {
-        left.approved_unattended
-            .cmp(&right.approved_unattended)
-            .then_with(|| {
-                if !left.approved_unattended {
-                    // Stable sort preserves the person's existing queue order.
-                    return std::cmp::Ordering::Equal;
-                }
-                let left_age = age(left);
-                let right_age = age(right);
-                (left_age.is_none(), left_age, left.entry_id).cmp(&(
-                    right_age.is_none(),
-                    right_age,
-                    right.entry_id,
-                ))
-            })
-    });
-    approved
+    left.approved_unattended
+        .cmp(&right.approved_unattended)
+        .then_with(|| {
+            if !left.approved_unattended {
+                return std::cmp::Ordering::Equal;
+            }
+            // A retry is an attempted entry still waiting on its deadline.
+            // `attempts` alone never resets, so a reapproved or pinned trace
+            // would otherwise sort behind fresh work for good.
+            let retry = |e: &queue::QueueEntry| e.attempts > 0 && e.retry_after.is_some();
+            retry(left)
+                .cmp(&retry(right))
+                .then_with(|| {
+                    if retry(left) && retry(right) {
+                        left.retry_after.cmp(&right.retry_after)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    let l = age(left);
+                    let r = age(right);
+                    (l.is_none(), l, left.entry_id).cmp(&(r.is_none(), r, right.entry_id))
+                })
+        })
 }
 
 /// Every source's sessions, listed once per upload pass and looked up by
@@ -6752,10 +6747,10 @@ mod tests {
 
     /// A witness that cannot be reached judged nothing. The session keeps
     /// its approval and is tried again on the transient-upload backoff,
-    /// never refused, and the pass stops there: one witness serves every
-    /// session, so the next would meet the same wall.
+    /// never refused. Two distinct failures are not enough evidence to
+    /// stop other traces; the shared circuit requires three.
     #[tokio::test]
-    async fn an_unreachable_witness_is_retried_and_stops_the_pass() {
+    async fn isolated_witness_failures_back_off_each_trace_without_stopping_the_pass() {
         let h = TransientRetryHarness::build_with(true, true).await;
         h.add_session(
             "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
@@ -6774,9 +6769,118 @@ mod tests {
             .iter()
             .filter(|e| e.reason_label.as_deref() == Some("witness_unreachable"))
             .collect();
-        assert_eq!(tried.len(), 1, "the pass stopped at the first: {entries:?}");
+        assert_eq!(
+            tried.len(),
+            2,
+            "each trace gets an independent attempt: {entries:?}"
+        );
         assert!(tried[0].retry_after.is_some());
         assert_eq!(tried[0].transient_upload_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn one_failed_witness_trace_does_not_starve_a_healthy_trace() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.add_session(
+            "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
+            "a different approved trace, mail alice.smith@example.org",
+        )
+        .await;
+        h.witness_unavailable.store(true, Ordering::SeqCst);
+        h.witness_delay_ms.store(100, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_calls.lock().unwrap().len() == 1
+        })
+        .await;
+        // The first request captured the error. Every later trace succeeds.
+        h.witness_unavailable.store(false, Ordering::SeqCst);
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        let entries = h.entries();
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.holds_witness_certificate())
+                .count(),
+            1
+        );
+        let failed = entries
+            .iter()
+            .find(|e| !e.holds_witness_certificate())
+            .unwrap();
+        assert_eq!(failed.state, queue::QueueState::Approved);
+        assert_eq!(failed.transient_upload_failures, 1);
+        assert!(failed.retry_after.unwrap() > now);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        // Only the independently certified trace uploads on the next pass.
+        drain_approved_once_for_test(&h.shared, now + chrono::Duration::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.entries()
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_automatic_traces_precede_retries_but_manual_approvals_come_first() {
+        let now = Utc::now();
+        let entry = |n, attempts, manual: bool, wait| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: !manual,
+            retry_after: Some(now + chrono::Duration::seconds(wait)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 17, false, -10),
+            entry(2, 0, false, 0),
+            entry(3, 17, true, 0),
+            entry(4, 2, false, -100),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![3, 2, 4, 1]
+        );
+    }
+
+    /// `attempts` never resets, so it cannot say whether an entry is waiting
+    /// on a retry now. An automatic trace whose earlier attempts were cleared
+    /// by a fresh approval or a pinned review (no `retry_after`) is fresh work
+    /// again, and must not sort behind every newer automatic trace for good.
+    #[test]
+    fn an_attempted_trace_with_no_pending_retry_sorts_as_fresh_work() {
+        let now = Utc::now();
+        let entry = |n, attempts, retry_after: Option<i64>, age: i64| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: true,
+            retry_after: retry_after.map(|wait| now + chrono::Duration::seconds(wait)),
+            last_modified_at: Some(now - chrono::Duration::seconds(age)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 0, None, 10),
+            // Reapproved after a 429: attempts kept, retry cleared, oldest.
+            entry(2, 3, None, 100),
+            entry(3, 2, Some(-50), 1000),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3]
+        );
     }
 
     /// A witness that is up but cannot do its job right now (`503
@@ -6865,6 +6969,8 @@ mod tests {
         for fetch in [
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ] {
@@ -6942,6 +7048,22 @@ mod tests {
             .find(|row| row.entry_id == Some(entry_id))
             .unwrap_or_else(|| panic!("the session is still listed: {rows:?}"));
         assert_eq!(row.state, past_sessions::PastSessionState::Approved);
+    }
+
+    #[tokio::test]
+    async fn saturation_respects_the_server_delay_independently_of_prior_trace_failures() {
+        let h = TransientRetryHarness::with_witness().await;
+        let id = h.entry().entry_id;
+        for _ in 0..17 {
+            h.shared.queue.lock().unwrap().record_attempt(id, None);
+        }
+        *h.witness_saturated.lock().unwrap() = Some("45");
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved);
+        assert!(entry.retry_after.unwrap() >= now + chrono::Duration::seconds(45));
+        assert!(entry.retry_after.unwrap() < now + chrono::Duration::seconds(70));
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage
