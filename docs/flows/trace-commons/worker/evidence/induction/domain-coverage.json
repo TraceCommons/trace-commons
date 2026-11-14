@@ -1,0 +1,957 @@
+{
+  "modelSha256": "d492d791f4fbea6ba78296d45a88286cbde300345572476e29c6e6efd9f28512",
+  "harnessSha256": "2a8434fdda4b38ac44fe72457a2ce40eff0d7b7a571763e829836529ef293fac",
+  "coverage": [
+    {
+      "path": "c.dispatch",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.dispatch"
+    },
+    {
+      "path": "c.request",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.request"
+    },
+    {
+      "path": "c.pin",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.pin"
+    },
+    {
+      "path": "c.upload",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.upload"
+    },
+    {
+      "path": "c.approval",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.approval"
+    },
+    {
+      "path": "c.isolated",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.isolated"
+    },
+    {
+      "path": "c.late",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.late"
+    },
+    {
+      "path": "c.capacity",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.capacity"
+    },
+    {
+      "path": "c.refreshed",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a0.refreshed"
+    },
+    {
+      "path": "t.now",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a1.now"
+    },
+    {
+      "path": "t.serial",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a1.serial"
+    },
+    {
+      "path": "t.hold",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a1.hold"
+    },
+    {
+      "path": "t.answering",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a1.answering"
+    },
+    {
+      "path": "t.paused",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a1.paused"
+    },
+    {
+      "path": "t.enrolled",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a1.enrolled"
+    },
+    {
+      "path": "t.entries",
+      "type": "map",
+      "keys": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "path": "t.entries.get(0).state",
+      "type": "str",
+      "domain": "unrestricted str",
+      "arbitraryValue": "a2.state"
+    },
+    {
+      "path": "t.entries.get(0).held",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a2.held"
+    },
+    {
+      "path": "t.entries.get(0).revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a2.revision"
+    },
+    {
+      "path": "t.entries.get(0).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a2.attempts"
+    },
+    {
+      "path": "t.entries.get(0).failures",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a2.failures"
+    },
+    {
+      "path": "t.entries.get(0).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a2.retrying"
+    },
+    {
+      "path": "t.entries.get(0).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a2.due"
+    },
+    {
+      "path": "t.entries.get(0).pinned",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a2.pinned"
+    },
+    {
+      "path": "t.entries.get(0).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a3.revision"
+    },
+    {
+      "path": "t.entries.get(0).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a3.manual"
+    },
+    {
+      "path": "t.entries.get(0).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a3.approvedAt"
+    },
+    {
+      "path": "t.entries.get(0).pinKey.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a4.revision"
+    },
+    {
+      "path": "t.entries.get(0).pinKey.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a4.manual"
+    },
+    {
+      "path": "t.entries.get(0).pinKey.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a4.approvedAt"
+    },
+    {
+      "path": "t.entries.get(1).state",
+      "type": "str",
+      "domain": "unrestricted str",
+      "arbitraryValue": "a5.state"
+    },
+    {
+      "path": "t.entries.get(1).held",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a5.held"
+    },
+    {
+      "path": "t.entries.get(1).revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a5.revision"
+    },
+    {
+      "path": "t.entries.get(1).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a5.attempts"
+    },
+    {
+      "path": "t.entries.get(1).failures",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a5.failures"
+    },
+    {
+      "path": "t.entries.get(1).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a5.retrying"
+    },
+    {
+      "path": "t.entries.get(1).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a5.due"
+    },
+    {
+      "path": "t.entries.get(1).pinned",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a5.pinned"
+    },
+    {
+      "path": "t.entries.get(1).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a6.revision"
+    },
+    {
+      "path": "t.entries.get(1).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a6.manual"
+    },
+    {
+      "path": "t.entries.get(1).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a6.approvedAt"
+    },
+    {
+      "path": "t.entries.get(1).pinKey.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a7.revision"
+    },
+    {
+      "path": "t.entries.get(1).pinKey.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a7.manual"
+    },
+    {
+      "path": "t.entries.get(1).pinKey.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a7.approvedAt"
+    },
+    {
+      "path": "t.entries.get(2).state",
+      "type": "str",
+      "domain": "unrestricted str",
+      "arbitraryValue": "a8.state"
+    },
+    {
+      "path": "t.entries.get(2).held",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a8.held"
+    },
+    {
+      "path": "t.entries.get(2).revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a8.revision"
+    },
+    {
+      "path": "t.entries.get(2).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a8.attempts"
+    },
+    {
+      "path": "t.entries.get(2).failures",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a8.failures"
+    },
+    {
+      "path": "t.entries.get(2).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a8.retrying"
+    },
+    {
+      "path": "t.entries.get(2).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a8.due"
+    },
+    {
+      "path": "t.entries.get(2).pinned",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a8.pinned"
+    },
+    {
+      "path": "t.entries.get(2).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a9.revision"
+    },
+    {
+      "path": "t.entries.get(2).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a9.manual"
+    },
+    {
+      "path": "t.entries.get(2).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a9.approvedAt"
+    },
+    {
+      "path": "t.entries.get(2).pinKey.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a10.revision"
+    },
+    {
+      "path": "t.entries.get(2).pinKey.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a10.manual"
+    },
+    {
+      "path": "t.entries.get(2).pinKey.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a10.approvedAt"
+    },
+    {
+      "path": "t.entries.get(3).state",
+      "type": "str",
+      "domain": "unrestricted str",
+      "arbitraryValue": "a11.state"
+    },
+    {
+      "path": "t.entries.get(3).held",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a11.held"
+    },
+    {
+      "path": "t.entries.get(3).revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a11.revision"
+    },
+    {
+      "path": "t.entries.get(3).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a11.attempts"
+    },
+    {
+      "path": "t.entries.get(3).failures",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a11.failures"
+    },
+    {
+      "path": "t.entries.get(3).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a11.retrying"
+    },
+    {
+      "path": "t.entries.get(3).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a11.due"
+    },
+    {
+      "path": "t.entries.get(3).pinned",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a11.pinned"
+    },
+    {
+      "path": "t.entries.get(3).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a12.revision"
+    },
+    {
+      "path": "t.entries.get(3).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a12.manual"
+    },
+    {
+      "path": "t.entries.get(3).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a12.approvedAt"
+    },
+    {
+      "path": "t.entries.get(3).pinKey.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a13.revision"
+    },
+    {
+      "path": "t.entries.get(3).pinKey.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a13.manual"
+    },
+    {
+      "path": "t.entries.get(3).pinKey.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a13.approvedAt"
+    },
+    {
+      "path": "t.queued",
+      "type": "map",
+      "keys": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "path": "t.queued.get(0).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a14.present"
+    },
+    {
+      "path": "t.queued.get(0).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a14.attempts"
+    },
+    {
+      "path": "t.queued.get(0).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a14.retrying"
+    },
+    {
+      "path": "t.queued.get(0).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a14.due"
+    },
+    {
+      "path": "t.queued.get(0).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a14.order"
+    },
+    {
+      "path": "t.queued.get(0).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a14.started"
+    },
+    {
+      "path": "t.queued.get(0).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a15.revision"
+    },
+    {
+      "path": "t.queued.get(0).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a15.manual"
+    },
+    {
+      "path": "t.queued.get(0).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a15.approvedAt"
+    },
+    {
+      "path": "t.queued.get(1).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a16.present"
+    },
+    {
+      "path": "t.queued.get(1).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a16.attempts"
+    },
+    {
+      "path": "t.queued.get(1).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a16.retrying"
+    },
+    {
+      "path": "t.queued.get(1).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a16.due"
+    },
+    {
+      "path": "t.queued.get(1).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a16.order"
+    },
+    {
+      "path": "t.queued.get(1).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a16.started"
+    },
+    {
+      "path": "t.queued.get(1).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a17.revision"
+    },
+    {
+      "path": "t.queued.get(1).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a17.manual"
+    },
+    {
+      "path": "t.queued.get(1).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a17.approvedAt"
+    },
+    {
+      "path": "t.queued.get(2).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a18.present"
+    },
+    {
+      "path": "t.queued.get(2).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a18.attempts"
+    },
+    {
+      "path": "t.queued.get(2).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a18.retrying"
+    },
+    {
+      "path": "t.queued.get(2).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a18.due"
+    },
+    {
+      "path": "t.queued.get(2).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a18.order"
+    },
+    {
+      "path": "t.queued.get(2).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a18.started"
+    },
+    {
+      "path": "t.queued.get(2).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a19.revision"
+    },
+    {
+      "path": "t.queued.get(2).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a19.manual"
+    },
+    {
+      "path": "t.queued.get(2).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a19.approvedAt"
+    },
+    {
+      "path": "t.queued.get(3).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a20.present"
+    },
+    {
+      "path": "t.queued.get(3).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a20.attempts"
+    },
+    {
+      "path": "t.queued.get(3).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a20.retrying"
+    },
+    {
+      "path": "t.queued.get(3).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a20.due"
+    },
+    {
+      "path": "t.queued.get(3).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a20.order"
+    },
+    {
+      "path": "t.queued.get(3).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a20.started"
+    },
+    {
+      "path": "t.queued.get(3).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a21.revision"
+    },
+    {
+      "path": "t.queued.get(3).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a21.manual"
+    },
+    {
+      "path": "t.queued.get(3).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a21.approvedAt"
+    },
+    {
+      "path": "t.running",
+      "type": "map",
+      "keys": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "path": "t.running.get(0).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a22.present"
+    },
+    {
+      "path": "t.running.get(0).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a22.attempts"
+    },
+    {
+      "path": "t.running.get(0).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a22.retrying"
+    },
+    {
+      "path": "t.running.get(0).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a22.due"
+    },
+    {
+      "path": "t.running.get(0).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a22.order"
+    },
+    {
+      "path": "t.running.get(0).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a22.started"
+    },
+    {
+      "path": "t.running.get(0).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a23.revision"
+    },
+    {
+      "path": "t.running.get(0).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a23.manual"
+    },
+    {
+      "path": "t.running.get(0).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a23.approvedAt"
+    },
+    {
+      "path": "t.running.get(1).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a24.present"
+    },
+    {
+      "path": "t.running.get(1).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a24.attempts"
+    },
+    {
+      "path": "t.running.get(1).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a24.retrying"
+    },
+    {
+      "path": "t.running.get(1).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a24.due"
+    },
+    {
+      "path": "t.running.get(1).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a24.order"
+    },
+    {
+      "path": "t.running.get(1).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a24.started"
+    },
+    {
+      "path": "t.running.get(1).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a25.revision"
+    },
+    {
+      "path": "t.running.get(1).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a25.manual"
+    },
+    {
+      "path": "t.running.get(1).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a25.approvedAt"
+    },
+    {
+      "path": "t.running.get(2).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a26.present"
+    },
+    {
+      "path": "t.running.get(2).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a26.attempts"
+    },
+    {
+      "path": "t.running.get(2).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a26.retrying"
+    },
+    {
+      "path": "t.running.get(2).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a26.due"
+    },
+    {
+      "path": "t.running.get(2).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a26.order"
+    },
+    {
+      "path": "t.running.get(2).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a26.started"
+    },
+    {
+      "path": "t.running.get(2).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a27.revision"
+    },
+    {
+      "path": "t.running.get(2).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a27.manual"
+    },
+    {
+      "path": "t.running.get(2).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a27.approvedAt"
+    },
+    {
+      "path": "t.running.get(3).present",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a28.present"
+    },
+    {
+      "path": "t.running.get(3).attempts",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a28.attempts"
+    },
+    {
+      "path": "t.running.get(3).retrying",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a28.retrying"
+    },
+    {
+      "path": "t.running.get(3).due",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a28.due"
+    },
+    {
+      "path": "t.running.get(3).order",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a28.order"
+    },
+    {
+      "path": "t.running.get(3).started",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a28.started"
+    },
+    {
+      "path": "t.running.get(3).key.revision",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a29.revision"
+    },
+    {
+      "path": "t.running.get(3).key.manual",
+      "type": "bool",
+      "domain": "unrestricted bool",
+      "arbitraryValue": "a29.manual"
+    },
+    {
+      "path": "t.running.get(3).key.approvedAt",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a29.approvedAt"
+    },
+    {
+      "path": "t.circuit.reopen",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a30.reopen"
+    },
+    {
+      "path": "t.circuit.probe",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a30.probe"
+    },
+    {
+      "path": "t.circuit.delay",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a30.delay"
+    },
+    {
+      "path": "t.circuit.last",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a30.last"
+    },
+    {
+      "path": "t.circuit.seen",
+      "type": "map",
+      "keys": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "path": "t.circuit.seen.get(0)",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a31"
+    },
+    {
+      "path": "t.circuit.seen.get(1)",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a32"
+    },
+    {
+      "path": "t.circuit.seen.get(2)",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a33"
+    },
+    {
+      "path": "t.circuit.seen.get(3)",
+      "type": "int",
+      "domain": "unrestricted int",
+      "arbitraryValue": "a34"
+    }
+  ],
+  "linkage": "originalInit = init; originalStep = step; imported unchanged witness_worker",
+  "domain": "exact original four-key maps; unrestricted typed integer, string and boolean scalar values",
+  "closure": "domainFor is included in strengthened; no state/transition exploration constraints",
+  "conclusion": "original safety",
+  "limits": "Four identities, QueueBound=3, original modeled nondeterministic choices; no liveness or source equivalence"
+}
