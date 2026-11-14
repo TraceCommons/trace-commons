@@ -1558,6 +1558,7 @@ impl DaemonShared {
         if store.remove_retired_files().is_err() {
             tracing::warn!("could not remove a retired daemon file");
         }
+        super::first_trace::observe(&store, std::iter::empty());
         let mut queue = Queue::load(&store)?;
         // `Uploading` is a transient, in-pass claim. A daemon that died
         // mid-upload leaves entries in it, and nothing else would ever move
@@ -2827,6 +2828,7 @@ impl DaemonShared {
             .as_ref()
             .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
         let cfg = self.store.load_config().ok().flatten();
+        let first_trace_at = super::first_trace::read(&self.store, cfg.as_ref());
         // No credential-store read and no write (`account_attention`'s doc).
         // `holds_near_ai_key` takes the settings lock, before the locks below.
         let account_attention = super::account_attention::account_attention(
@@ -3071,6 +3073,8 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Enrollment-owned observation date, independent of history pages.
+            "first_trace_at": first_trace_at,
             // Additive (#1836 F1). `ok`, or `needs_attention` while this
             // app's account is locally broken in a way signing in again does
             // not fix; then `account_state_reason` is
@@ -3840,6 +3844,17 @@ pub fn entry_value_with(
     // shares; `trimmed-to-fit` is known from discovery and can appear before
     // any preview.
     super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped, witness);
+    // A session the witness refused as too large to review: how many
+    // classifier requests it needed and the most one review allows. Absent
+    // on every other entry, and on one refused before the counts were kept.
+    if e.state == super::queue::QueueState::Refused
+        && e.reason_label.as_deref()
+            == Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW)
+        && let (Some(needed), Some(allowed)) = (e.review_windows_needed, e.review_windows_allowed)
+    {
+        value["windows_needed"] = serde_json::Value::from(needed);
+        value["windows_allowed"] = serde_json::Value::from(allowed);
+    }
     value
 }
 
@@ -8621,6 +8636,32 @@ fn witness_review_response(mut response: Response) -> Response {
     response
 }
 
+/// The refusal for a review the witness found too large, with its own
+/// view: the sentence filled in with the witness's two counts, and the
+/// counts beside it. `None` for any other failure. Written by the handler,
+/// like a busy witness's view, because only the typed error has the counts.
+fn witness_review_too_large(id: u64, error: &anyhow::Error) -> Option<Response> {
+    let Some(crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+        windows_needed,
+        windows_allowed,
+    }) = error.downcast_ref::<crate::witness::WitnessTrustError>()
+    else {
+        return None;
+    };
+    let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+    super::preview::report_failure_label(label);
+    let mut response = Response::err(id, ERR_UNAVAILABLE, label);
+    response.result = Some(serde_json::json!({
+        "view": {
+            "state": "Refused",
+            "message": crate::witness_copy::witness_too_long_line(*windows_needed, *windows_allowed),
+            "windows_needed": windows_needed,
+            "windows_allowed": windows_allowed,
+        }
+    }));
+    Some(response)
+}
+
 /// How long a busy witness asked a person to wait before reviewing again,
 /// or `None` when this failure is not a busy witness.
 ///
@@ -8824,6 +8865,9 @@ async fn handle_witness_preview_request_inner(
         Err(error) => {
             if let Some(secs) = witness_review_busy_secs(&error) {
                 return witness_review_busy(req.id, secs);
+            }
+            if let Some(response) = witness_review_too_large(req.id, &error) {
+                return response;
             }
             return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
         }
@@ -11369,6 +11413,9 @@ mod tests {
             ("witness_body_not_stripped", review.failed_bodies_returned),
             ("witness_quote_replayed", review.failed_unproven),
             ("witness_attestation_unavailable", review.failed_unreachable),
+            // By label alone, with no counts: the number-less sentence. The
+            // handler writes the filled one when it has them.
+            ("witness_trace_too_large_for_review", review.failed_too_long),
         ] {
             let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
             assert_eq!(
@@ -11456,6 +11503,43 @@ mod tests {
             Some(refusal),
             "the refusal was replaced with a word that names nothing"
         );
+    }
+
+    /// A review the witness refused as too large is a refusal under its own
+    /// label, with the approved sentence filled in with the witness's two
+    /// counts, needed first, and the counts beside it for a shell. Never a
+    /// sentence with its placeholders showing.
+    #[tokio::test]
+    async fn a_too_large_review_carries_its_counts_in_the_sentence() {
+        let (s, id, _dir, _review) = recorded_witness_review().await;
+        let response = witness_review_response(
+            handle_witness_preview_request_inner(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                ),
+                Some(Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                        windows_needed: 1800,
+                        windows_allowed: 720,
+                    },
+                ))),
+            )
+            .await,
+        );
+        assert_eq!(
+            response.error.as_ref().map(|e| e.message.as_str()),
+            Some("witness_trace_too_large_for_review")
+        );
+        let view = &response.result.as_ref().expect("a view")["view"];
+        assert_eq!(view["state"], "Refused", "{view}");
+        assert_eq!(
+            view["message"], "Too long to scan (needs 1800, limit 720).",
+            "{view}"
+        );
+        assert_eq!(view["windows_needed"], 1800);
+        assert_eq!(view["windows_allowed"], 720);
     }
 
     /// A review a person asked for, met by a busy witness, is a busy witness:
@@ -17619,6 +17703,36 @@ mod tests {
     /// relaxation, and it is stated as an equality rather than a substring
     /// check so that a second path appearing on this shape fails here --
     /// `display_path`'s doc comment carries the reasoning.
+    /// A listing shows the two counts on a session the witness refused as
+    /// too large to review, and on no other entry.
+    #[test]
+    fn a_too_large_refusal_lists_its_counts() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let refused = super::super::queue::QueueEntry {
+            state: super::super::queue::QueueState::Refused,
+            reason_label: Some(label.to_string()),
+            review_windows_needed: Some(1800),
+            review_windows_allowed: Some(208),
+            ..Default::default()
+        };
+        let v = entry_value(&refused, None);
+        assert_eq!(v["reason_label"], label);
+        assert_eq!(v["windows_needed"], 1800);
+        assert_eq!(v["windows_allowed"], 208);
+
+        let elsewhere = super::super::queue::QueueEntry {
+            reason_label: Some("redaction-failed".to_string()),
+            ..refused.clone()
+        };
+        let v = entry_value(&elsewhere, None);
+        assert!(v.get("windows_needed").is_none(), "{v}");
+        let pending = super::super::queue::QueueEntry {
+            state: super::super::queue::QueueState::Pending,
+            ..refused
+        };
+        assert!(entry_value(&pending, None).get("windows_allowed").is_none());
+    }
+
     #[test]
     fn a_queue_entry_on_the_wire_carries_no_session_file_path() {
         use crate::daemon::queue::{QueueEntry, entry_id_for};

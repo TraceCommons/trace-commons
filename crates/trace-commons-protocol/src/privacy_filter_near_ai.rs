@@ -663,9 +663,12 @@ fn split_point(text: &str) -> Option<usize> {
 }
 
 const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
 
-/// Fail closed unless every span's reported `text` is exactly the request
-/// input's codepoints `[start, end)`, then return the spans without it.
+/// Fail closed unless every span lies inside the input (the range rule
+/// `apply_spans` applies, [`crate::privacy_filter_spans::span_fits`]) and its
+/// reported `text` is exactly the input's codepoints `[start, end)`, then
+/// return the spans without it, and how many were re-anchored.
 ///
 /// The endpoint reports, with each span, the text it covers (probed live on
 /// 2026-10-11 with ZWJ emoji, accented and CJK text, CRLF and blank lines:
@@ -677,26 +680,140 @@ const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
 /// success. This check turns that into a refusal. A span with no `text`
 /// cannot be checked, so it refuses too.
 ///
-/// Spans whose offsets are out of range are passed through for
-/// `apply_spans`, which refuses them with its own error. Neither the span
-/// text nor the input is ever logged: the failure carries the label and the
-/// input's hash-only fingerprint.
+/// Re-anchoring (owner, 2026-11-13): NEAR AI answered one real session's
+/// window that way on every request, so refusing alone refused it for good.
+/// A slipped span whose `text` occurs exactly once in the whole window --
+/// overlapping occurrences counted -- is moved onto that occurrence, in
+/// codepoints, keeping its category and score, and must still fit. No
+/// further request is made. Zero or several occurrences, empty text or no
+/// text leave the answer refused. Only an answer every span of which then
+/// verifies is returned, so only that can be cached.
+///
+/// A span out of range is refused here, not left for `apply_spans`: an
+/// answer this accepts is cached, and an out-of-range span that reached the
+/// cache was refused on every later request for its window without the
+/// classifier being asked again (a real session, 2026-11-12). Neither the
+/// span text nor the input is ever logged: the failure carries the label and
+/// the input's hash-only fingerprint.
+/// How many spans verification corrected rather than accepted as reported.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpanCorrections {
+    /// Moved onto the one place their reported text occurs.
+    pub(crate) reanchored: usize,
+    /// Left where they were: the offsets were right and only the reported
+    /// text had characters replaced (see
+    /// [`matches_but_for_replacement_characters`]).
+    pub(crate) text_repaired: usize,
+}
+
+impl std::ops::AddAssign for SpanCorrections {
+    fn add_assign(&mut self, other: Self) {
+        self.reanchored += other.reanchored;
+        self.text_repaired += other.text_repaired;
+    }
+}
+
+/// NEAR AI has been seen to report a span's `text` with a character it
+/// could not decode replaced by U+FFFD, one per undecodable piece: a
+/// Private Use Area character such as U+E202 (three UTF-8 bytes) comes
+/// back as two. The offsets are right; only the reported copy is lossy.
+/// True when `text` equals `covered` except that each run of U+FFFD in
+/// `text` stands for exactly one non-ASCII character of `covered` whose
+/// UTF-8 encoding is at least as long as the run. `text` must contain at
+/// least one U+FFFD; every other character must match exactly.
+fn matches_but_for_replacement_characters(text: &str, covered: &str) -> bool {
+    const REPLACEMENT: char = '\u{fffd}';
+    if !text.contains(REPLACEMENT) {
+        return false;
+    }
+    let mut want = covered.chars().peekable();
+    let mut got = text.chars().peekable();
+    while let Some(c) = got.next() {
+        if c == REPLACEMENT {
+            let mut run = 1usize;
+            while got.peek() == Some(&REPLACEMENT) {
+                got.next();
+                run += 1;
+            }
+            match want.next() {
+                Some(original) if !original.is_ascii() && original.len_utf8() >= run => {}
+                _ => return false,
+            }
+        } else if want.next() != Some(c) {
+            return false;
+        }
+    }
+    want.next().is_none()
+}
+
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
-) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+) -> Result<(Vec<ClassifySpan>, SpanCorrections), (diagnostics::BodyShape, String)> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
-    let mismatches = spans
+    let codepoints = boundaries.len() - 1;
+    let out_of_range = spans
         .iter()
-        .filter(|span| {
-            if span.start > span.end || span.end >= boundaries.len() {
-                return false;
-            }
-            let covered = &input[boundaries[span.start]..boundaries[span.end]];
-            span.text.as_deref() != Some(covered)
-        })
+        .filter(|span| !crate::privacy_filter_spans::span_fits(span.start, span.end, codepoints))
         .count();
+    if out_of_range > 0 {
+        let diagnostics = classify_input_diagnostics(&[input]);
+        tracing::warn!(
+            classify_input = %diagnostics,
+            out_of_range_spans = out_of_range,
+            spans = spans.len(),
+            failure = SPAN_OUT_OF_RANGE_LABEL,
+            "near-ai privacy classify failed"
+        );
+        return Err((
+            diagnostics::BodyShape::SpanOutOfRange,
+            format!(
+                "near-ai privacy classifier returned out-of-range span: \
+                 {SPAN_OUT_OF_RANGE_LABEL} out_of_range_spans={out_of_range} spans={} {diagnostics}",
+                spans.len()
+            ),
+        ));
+    }
+    // A span whose text is right and whose offsets are not is moved onto
+    // its text when that text occurs exactly once in the window -- anywhere
+    // in it, overlapping occurrences counted. The answer is otherwise
+    // unchanged, so no further request is made. Zero or several
+    // occurrences, or no text to look for, leave it a mismatch.
+    let mut spans = spans;
+    let mut corrections = SpanCorrections::default();
+    let mut mismatches = 0usize;
+    for span in &mut spans {
+        let covered = &input[boundaries[span.start]..boundaries[span.end]];
+        if span.text.as_deref() == Some(covered) {
+            continue;
+        }
+        // Right offsets, lossy reported text: everything but the replaced
+        // characters must equal what the offsets cover, and the span stays
+        // where it is.
+        if span
+            .text
+            .as_deref()
+            .is_some_and(|text| matches_but_for_replacement_characters(text, covered))
+        {
+            corrections.text_repaired += 1;
+            continue;
+        }
+        match span
+            .text
+            .as_deref()
+            .and_then(|text| sole_occurrence(input, text))
+        {
+            Some((start, end))
+                if crate::privacy_filter_spans::span_fits(start, end, codepoints) =>
+            {
+                span.start = start;
+                span.end = end;
+                corrections.reanchored += 1;
+            }
+            _ => mismatches += 1,
+        }
+    }
     if mismatches > 0 {
         let diagnostics = classify_input_diagnostics(&[input]);
         tracing::warn!(
@@ -706,23 +823,53 @@ fn verify_span_texts(
             failure = SPAN_TEXT_MISMATCH_LABEL,
             "near-ai privacy classify failed"
         );
-        return Err(TraceContributionError::RedactionFailed {
-            reason: format!(
+        return Err((
+            diagnostics::BodyShape::SpanTextMismatch,
+            format!(
                 "near-ai privacy classifier span offsets disagree with span text: \
                  {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
                 spans.len()
             ),
-        });
+        ));
     }
-    Ok(spans
-        .into_iter()
-        .map(|span| ClassifySpan {
-            category: span.category,
-            start: span.start,
-            end: span.end,
-            score: span.score,
-        })
-        .collect())
+    Ok((
+        spans
+            .into_iter()
+            .map(|span| ClassifySpan {
+                category: span.category,
+                start: span.start,
+                end: span.end,
+                score: span.score,
+            })
+            .collect(),
+        corrections,
+    ))
+}
+
+/// The codepoint range of `text` in `input` when it occurs there exactly
+/// once, overlapping occurrences counted; `None` for empty text, or for
+/// zero or several occurrences.
+fn sole_occurrence(input: &str, text: &str) -> Option<(usize, usize)> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    let mut from = 0usize;
+    while let Some(offset) = input[from..].find(text) {
+        let at = from + offset;
+        if found.replace(at).is_some() {
+            return None;
+        }
+        // Step one character, not the match, so an overlapping second
+        // occurrence is seen.
+        from = at + input[at..].chars().next().map_or(1, char::len_utf8);
+        if from > input.len() {
+            break;
+        }
+    }
+    let at = found?;
+    let start = input[..at].chars().count();
+    Some((start, start + text.chars().count()))
 }
 
 #[async_trait]
@@ -744,6 +891,35 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
 
     fn preferred_batch_inputs(&self) -> usize {
         self.max_batch_inputs
+    }
+
+    /// One request per distinct window not already in the window cache,
+    /// windowed exactly as [`Self::redact_text`] windows. Blank text and
+    /// text over the input limit send nothing. A 413 split or a retry would
+    /// send more, never fewer, so this is a floor. With batching on, texts
+    /// share requests in a way this does not model, so it declines.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        if self.max_batch_inputs > 1 {
+            return None;
+        }
+        let budget = self.max_input_json_bytes();
+        let mut windows = std::collections::HashSet::new();
+        for text in texts {
+            if text.trim().is_empty() || text.len() > self.max_input_bytes {
+                continue;
+            }
+            for range in window_ranges(text, budget) {
+                let key = window_key(&text[range]);
+                if !self.window_is_cached(&key) {
+                    windows.insert(key);
+                }
+            }
+        }
+        Some(windows.len())
+    }
+
+    fn request_interval(&self) -> Option<Duration> {
+        self.pacer.as_ref().map(|pacer| pacer.interval())
     }
 
     async fn redact_texts(&self, texts: &[&str]) -> Vec<Answer> {
@@ -928,7 +1104,7 @@ impl NearAiPrivacyFilterAdapter {
                 Ok(WindowAnswer::Spans(all)) => {
                     for (&index, spans) in batch.iter().zip(all) {
                         let text = texts[index];
-                        self.remember_window(window_key(text), &spans);
+                        self.remember_window(text, &spans);
                         answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]));
                     }
                 }
@@ -991,8 +1167,30 @@ impl NearAiPrivacyFilterAdapter {
         hit
     }
 
+    /// Whether `key` is in the window cache, without counting a hit or a
+    /// miss: a prediction is not a lookup.
+    fn window_is_cached(&self, key: &[u8; 32]) -> bool {
+        match self.window_cache.lock() {
+            Ok(cache) => cache.entries.contains_key(key),
+            Err(poisoned) => poisoned.into_inner().entries.contains_key(key),
+        }
+    }
+
     /// Record a successful classification for reuse within this tick.
-    fn remember_window(&self, key: [u8; 32], spans: &[ClassifySpan]) {
+    /// Cache `spans` as `window`'s verified answer. Spans that do not fit
+    /// the window are never stored: verification refuses them first, and
+    /// this guard keeps any later path from caching what `apply_spans` would
+    /// refuse.
+    fn remember_window(&self, window: &str, spans: &[ClassifySpan]) {
+        if !crate::privacy_filter_spans::spans_fit(window, spans) {
+            tracing::warn!(
+                classify_input = %classify_input_diagnostics(&[window]),
+                failure = SPAN_OUT_OF_RANGE_LABEL,
+                "near-ai privacy classify answer not cached"
+            );
+            return;
+        }
+        let key = window_key(window);
         let mut cache = match self.window_cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
@@ -1076,7 +1274,7 @@ impl NearAiPrivacyFilterAdapter {
             };
             // Verified before it is remembered (in `send_window`, per
             // half): a refused response is never served from the cache.
-            self.remember_window(key, &spans);
+            self.remember_window(text, &spans);
             Ok(spans)
         })
     }
@@ -1179,39 +1377,14 @@ impl NearAiPrivacyFilterAdapter {
                 Ok(response) => response,
                 Err(err) => {
                     in_flight.take();
-                    self.diagnostics.record(
-                        if err.is_timeout() {
-                            diagnostics::Outcome::Timeout
-                        } else {
-                            diagnostics::Outcome::Transport
-                        },
-                        body.len(),
-                        started.elapsed(),
-                    );
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
                     let wait = Duration::from_millis(backoff_ms(attempt));
                     if may_retry(attempt, wait, full_attempt, deadline) {
                         tokio::time::sleep(wait).await;
                         continue;
                     }
-                    // Retries are spent and the request never reached the
-                    // classifier: the upstream is down, the trace is fine.
-                    // The input fingerprint rides along hash-only so a
-                    // repeatedly-failing window is identifiable in the logs.
-                    let diagnostics = classify_input_diagnostics(inputs);
-                    // The driver logs only a hash of the error, so emit the
-                    // input fingerprint here where it is provably hash-only.
-                    tracing::warn!(
-                        classify_input = %diagnostics,
-                        attempts = attempt,
-                        failure = "transport",
-                        "near-ai privacy classify failed"
-                    );
-                    return Err(TraceContributionError::TransientRedactionFailed {
-                        reason: format!(
-                            "near-ai privacy classifier transport error: {} attempts={} {}",
-                            err, attempt, diagnostics
-                        ),
-                    });
+                    return Err(transport_failure(&err, inputs, attempt));
                 }
             };
 
@@ -1281,54 +1454,151 @@ impl NearAiPrivacyFilterAdapter {
                 });
             }
 
-            let answer = async {
-                let parsed: ClassifyResponse = response.json().await.map_err(|err| {
-                    TraceContributionError::RedactionFailed {
-                        reason: format!("near-ai privacy classifier response parse error: {}", err),
-                    }
-                })?;
-                // One entry per input, in input order. A single-input request
-                // reads the first entry, as it always has; a batch must
-                // account for every input exactly, or none of it is used.
-                if parsed.data.is_empty() {
-                    return Err(TraceContributionError::RedactionFailed {
-                        reason: "near-ai privacy classifier returned empty data array".to_string(),
-                    });
-                }
-                if inputs.len() > 1 && parsed.data.len() != inputs.len() {
-                    return Err(TraceContributionError::RedactionFailed {
-                        reason: format!(
-                            "near-ai privacy classifier returned {} entries for {} inputs",
-                            parsed.data.len(),
-                            inputs.len()
-                        ),
-                    });
-                }
-                // Verified before anything is remembered: a refused response
-                // must never be served from the cache.
-                inputs
-                    .iter()
-                    .zip(parsed.data)
-                    .map(|(input, entry)| verify_span_texts(input, entry.spans))
-                    .collect::<Result<Vec<_>, _>>()
-            }
-            .await;
-            // One request, one outcome, batched or not: a malformed answer --
-            // unparseable, empty, the wrong number of entries, a span that
-            // does not match its input -- is `body_shape`.
+            // The whole body first. A body that never finished arriving is
+            // the connection failing (a timeout or transport outcome), not a
+            // malformed answer: `parse_error` means bytes arrived and were
+            // not the expected JSON.
+            let read = response.bytes().await;
             in_flight.take();
-            self.diagnostics.record(
-                if answer.is_ok() {
-                    diagnostics::Outcome::Ok
-                } else {
-                    diagnostics::Outcome::BodyShape
-                },
-                body.len(),
-                started.elapsed(),
-            );
-            return answer.map(WindowAnswer::Spans);
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
+                    let wait = Duration::from_millis(backoff_ms(attempt));
+                    if may_retry(attempt, wait, full_attempt, deadline) {
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    return Err(transport_failure(&err, inputs, attempt));
+                }
+            };
+
+            // One request, one outcome, batched or not. A malformed answer
+            // -- unparseable, empty, the wrong number of entries, a span
+            // out of range or not matching its input -- is `body_shape`,
+            // counted under which check it failed. Nothing from it is
+            // applied or cached.
+            return match parse_classify_answer(inputs, &bytes) {
+                Ok((spans, corrections)) => {
+                    self.diagnostics.record_reanchored(corrections.reanchored);
+                    self.diagnostics
+                        .record_text_repaired(corrections.text_repaired);
+                    self.diagnostics.record(
+                        diagnostics::Outcome::Ok,
+                        body.len(),
+                        started.elapsed(),
+                    );
+                    Ok(WindowAnswer::Spans(spans))
+                }
+                Err((kind, reason)) => {
+                    self.diagnostics
+                        .record_body_shape(kind, body.len(), started.elapsed());
+                    let reason = format!("{reason} body_shape={}", kind.label());
+                    // A span answer that could not be verified or
+                    // re-anchored is about the text: NEAR AI answers it the
+                    // same way every time. A body that does not parse, is
+                    // empty or has the wrong entry count is the classifier
+                    // misbehaving, which says nothing about the text.
+                    Err(match kind {
+                        diagnostics::BodyShape::SpanTextMismatch
+                        | diagnostics::BodyShape::SpanOutOfRange => {
+                            TraceContributionError::UnclassifiableText { reason }
+                        }
+                        diagnostics::BodyShape::ParseError
+                        | diagnostics::BodyShape::EmptyData
+                        | diagnostics::BodyShape::EntryCountMismatch => {
+                            TraceContributionError::RedactionFailed { reason }
+                        }
+                    })
+                }
+            };
         }
     }
+}
+
+/// The outcome kind of a request that failed on the wire.
+fn transport_outcome(err: &reqwest::Error) -> diagnostics::Outcome {
+    if err.is_timeout() {
+        diagnostics::Outcome::Timeout
+    } else {
+        diagnostics::Outcome::Transport
+    }
+}
+
+/// A request that failed on the wire after its retries: the upstream is
+/// down, the trace is fine. The input fingerprint rides along hash-only so a
+/// repeatedly-failing window is identifiable in the logs.
+fn transport_failure(
+    err: &reqwest::Error,
+    inputs: &[&str],
+    attempt: usize,
+) -> TraceContributionError {
+    let diagnostics = classify_input_diagnostics(inputs);
+    // The driver logs only a hash of the error, so emit the input
+    // fingerprint here where it is provably hash-only.
+    tracing::warn!(
+        classify_input = %diagnostics,
+        attempts = attempt,
+        failure = "transport",
+        "near-ai privacy classify failed"
+    );
+    TraceContributionError::TransientRedactionFailed {
+        reason: format!(
+            "near-ai privacy classifier transport error: {} attempts={} {}",
+            err, attempt, diagnostics
+        ),
+    }
+}
+
+/// Read a 200's body into verified spans per input, in input order, or say
+/// which way it was malformed.
+///
+/// One entry per input, in input order. A single-input request reads the
+/// first entry, as it always has; a batch must account for every input
+/// exactly, or none of it is used. Every span is verified before anything
+/// is returned, so a refused answer can never reach the cache.
+///
+/// The reasons are label-only: a JSON error's own text can quote the body,
+/// so only its category is kept.
+fn parse_classify_answer(
+    inputs: &[&str],
+    body: &[u8],
+) -> Result<(Vec<Vec<ClassifySpan>>, SpanCorrections), (diagnostics::BodyShape, String)> {
+    let parsed: ClassifyResponse = serde_json::from_slice(body).map_err(|err| {
+        (
+            diagnostics::BodyShape::ParseError,
+            format!(
+                "near-ai privacy classifier response parse error: category={:?} body_len={}",
+                err.classify(),
+                body.len()
+            ),
+        )
+    })?;
+    if parsed.data.is_empty() {
+        return Err((
+            diagnostics::BodyShape::EmptyData,
+            "near-ai privacy classifier returned empty data array".to_string(),
+        ));
+    }
+    if inputs.len() > 1 && parsed.data.len() != inputs.len() {
+        return Err((
+            diagnostics::BodyShape::EntryCountMismatch,
+            format!(
+                "near-ai privacy classifier returned {} entries for {} inputs",
+                parsed.data.len(),
+                inputs.len()
+            ),
+        ));
+    }
+    let mut corrections = SpanCorrections::default();
+    let mut answers = Vec::with_capacity(inputs.len());
+    for (input, entry) in inputs.iter().zip(parsed.data) {
+        let (spans, corrected) = verify_span_texts(input, entry.spans)?;
+        corrections += corrected;
+        answers.push(spans);
+    }
+    Ok((answers, corrections))
 }
 
 /// What one classify request answered.
@@ -1509,6 +1779,153 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    // ---- What may be cached. An answer that verification accepts is cached
+    // and later applied without asking again, so anything `apply_spans`
+    // would refuse must be refused here first.
+
+    fn near_span(start: usize, end: usize, text: Option<&str>) -> NearAiSpan {
+        NearAiSpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+            text: text.map(str::to_string),
+        }
+    }
+
+    /// Every single-span answer over every offset pair around each text's
+    /// end, reporting either the true covered text or a wrong one: whatever
+    /// verification accepts, `apply_spans` applies. Two-span answers with
+    /// one bad span are refused whole.
+    #[test]
+    fn every_answer_verification_accepts_applies_cleanly() {
+        let texts = [
+            "",
+            "a",
+            "hi Zo\u{eb} \u{1f600} \u{674e}\r\n ok",
+            "plain ascii text",
+        ];
+        let (mut accepted, mut refused) = (0usize, 0usize);
+        for text in texts {
+            let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            boundaries.push(text.len());
+            let codepoints = boundaries.len() - 1;
+            for start in 0..=codepoints + 2 {
+                for end in 0..=codepoints + 2 {
+                    let covered = (start <= end && end <= codepoints)
+                        .then(|| &text[boundaries[start]..boundaries[end]]);
+                    for reported in [covered, Some("not the text"), None] {
+                        match verify_span_texts(text, vec![near_span(start, end, reported)]) {
+                            Ok((spans, _)) => {
+                                accepted += 1;
+                                assert!(
+                                    crate::privacy_filter_spans::apply_spans(
+                                        "near-ai", text, &spans
+                                    )
+                                    .is_ok(),
+                                    "accepted but not applicable: {start}..{end} in {:?}",
+                                    text.len()
+                                );
+                            }
+                            Err(_) => refused += 1,
+                        }
+                    }
+                    if let Some(covered) = covered {
+                        let bad = near_span(start, codepoints + 1, Some(covered));
+                        let pair = vec![near_span(start, end, Some(covered)), bad];
+                        assert!(verify_span_texts(text, pair).is_err());
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && refused > 0, "{accepted} {refused}");
+    }
+
+    /// NEAR AI reports a Private Use Area character it could not decode as
+    /// two U+FFFD (seen 2026-11-13 on Codex transcripts carrying U+E202).
+    /// The offsets are right: the span is accepted where it is, counted as
+    /// repaired, and not moved.
+    #[test]
+    fn a_span_whose_text_replaced_a_private_use_character_is_accepted_in_place() {
+        let input = "see \u{e202}turn0 for Zoe now";
+        // "\u{e202}turn0" is codepoints 4..10.
+        let reported = "\u{fffd}\u{fffd}turn0";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(4, 10, Some(reported))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (4, 10));
+        assert_eq!(corrections.text_repaired, 1);
+        assert_eq!(corrections.reanchored, 0);
+    }
+
+    /// One U+FFFD for one non-ASCII character, lengths equal.
+    #[test]
+    fn a_single_replacement_character_for_one_non_ascii_character_is_accepted() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(8, 11, Some("Zo\u{fffd}"))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (8, 11));
+        assert_eq!(corrections.text_repaired, 1);
+    }
+
+    /// Accepted only when everything but the replaced characters matches
+    /// exactly, each run stands for one non-ASCII character, and the run is
+    /// no longer than that character's UTF-8 encoding.
+    #[test]
+    fn replacement_characters_never_stand_for_ascii_or_hide_other_differences() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let reject = |reported: &str| {
+            assert!(
+                verify_span_texts(input, vec![near_span(8, 11, Some(reported))]).is_err(),
+                "{reported:?}"
+            )
+        };
+        reject("Z\u{fffd}\u{fffd}"); // a run standing for ASCII "o" then more
+        reject("\u{fffd}o\u{eb}"); // stands for ASCII "Z"
+        reject("Zo\u{fffd}\u{fffd}\u{fffd}"); // longer than U+00EB's two bytes
+        reject("Za\u{fffd}"); // another character differs
+        reject("Zo\u{fffd}x"); // trailing extra character
+        reject("Zq"); // no replacement character, not the text, not in the window
+    }
+
+    /// Plain ASCII mismatches are untouched: no replacement character, so
+    /// the answer stays a mismatch (or re-anchors as before).
+    #[test]
+    fn an_ascii_mismatch_is_not_repaired() {
+        let input = "Contact Zoe Smith now and Zoe again";
+        assert!(verify_span_texts(input, vec![near_span(0, 3, Some("Bob"))]).is_err());
+        let (_, corrections) =
+            verify_span_texts(input, vec![near_span(0, 3, Some("Con"))]).unwrap();
+        assert_eq!(corrections.text_repaired, 0);
+    }
+
+    /// The cache's own guard: spans that do not fit the window they would be
+    /// cached under are never stored, whoever asks.
+    #[test]
+    fn the_window_cache_never_holds_spans_that_do_not_fit_their_window() {
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            "http://127.0.0.1:1",
+            DEFAULT_MODEL,
+            "stub-not-a-key",
+            Duration::from_secs(1),
+            1_000_000,
+        )
+        .unwrap();
+        let window = "say hi to Zo\u{eb}";
+        let codepoints = window.chars().count();
+        let span = |start, end| ClassifySpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+        };
+        adapter.remember_window(window, &[span(10, codepoints + 1)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(12, 10)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(10, codepoints)]);
+        assert!(adapter.cached_window(&window_key(window)).is_some());
     }
 
     // ---- Pacing (owner, 2026-11-12: NEAR AI allows 30 classify requests a
@@ -1724,6 +2141,8 @@ mod tests {
                 let input = body["input"].as_str().unwrap();
                 // Every "Ada" found, reported one codepoint late with the
                 // right text: an offset slip the range check cannot see.
+                // "Ada" occurs twice in its event, so the slip cannot be
+                // re-anchored to one place and the answer stays invalid.
                 let spans: Vec<serde_json::Value> = input
                     .match_indices("Ada")
                     .map(|(byte, _)| {
@@ -1781,7 +2200,7 @@ mod tests {
             },
             "events": [
                 event("nothing here"),
-                event("Ada reviewed the change"),
+                event("Ada reviewed Ada's change"),
                 event("ran the tests"),
             ],
             "outcome": {"task_success": "unknown", "user_feedback": "none"},
@@ -1821,7 +2240,7 @@ mod tests {
                 .expect_err("a span text mismatch must fail closed");
         assert!(matches!(
             error,
-            TraceContributionError::RedactionFailed { .. }
+            TraceContributionError::UnclassifiableText { .. }
         ));
         assert!(error.to_string().contains(SPAN_TEXT_MISMATCH_LABEL));
         assert!(!error.to_string().contains("Ada"), "never echo the text");
@@ -2254,8 +2673,60 @@ pub mod diagnostics {
         /// Any other non-2xx.
         OtherClientError,
         /// 200 whose body did not parse, had no entry, or whose spans did not
-        /// match the text sent.
+        /// match the text sent. [`BodyShape`] says which; this is their total.
         BodyShape,
+    }
+
+    /// Which way a 200 answer was malformed. Each one is also counted as
+    /// [`Outcome::BodyShape`], which stays the total.
+    ///
+    /// Label-only: which check failed, never what the answer or the input
+    /// held.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum BodyShape {
+        /// The body arrived and was not the expected JSON.
+        ParseError,
+        /// The body parsed and its `data` array was empty.
+        EmptyData,
+        /// A batch was answered with a different number of entries than it
+        /// carried inputs.
+        EntryCountMismatch,
+        /// A span's reported `text` was not the input's codepoints at its
+        /// offsets, or it reported no `text`.
+        SpanTextMismatch,
+        /// A span's offsets were reversed or ran past the end of the input.
+        SpanOutOfRange,
+    }
+
+    impl BodyShape {
+        /// Every kind, in the order a snapshot lists them.
+        pub const ALL: [BodyShape; 5] = [
+            BodyShape::ParseError,
+            BodyShape::EmptyData,
+            BodyShape::EntryCountMismatch,
+            BodyShape::SpanTextMismatch,
+            BodyShape::SpanOutOfRange,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                BodyShape::ParseError => "parse_error",
+                BodyShape::EmptyData => "empty_data",
+                BodyShape::EntryCountMismatch => "entry_count_mismatch",
+                BodyShape::SpanTextMismatch => "span_text_mismatch",
+                BodyShape::SpanOutOfRange => "span_out_of_range",
+            }
+        }
+
+        fn index(self) -> usize {
+            match self {
+                BodyShape::ParseError => 0,
+                BodyShape::EmptyData => 1,
+                BodyShape::EntryCountMismatch => 2,
+                BodyShape::SpanTextMismatch => 3,
+                BodyShape::SpanOutOfRange => 4,
+            }
+        }
     }
 
     impl Outcome {
@@ -2321,6 +2792,9 @@ pub mod diagnostics {
     #[derive(Default)]
     pub struct Recorder {
         counts: [AtomicU64; 9],
+        body_shapes: [AtomicU64; 5],
+        spans_reanchored: AtomicU64,
+        spans_text_repaired: AtomicU64,
         in_flight: AtomicUsize,
         latency_ms: Mutex<[VecDeque<u64>; 4]>,
     }
@@ -2362,15 +2836,56 @@ pub mod diagnostics {
             samples.push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         }
 
+        /// A request ended in a malformed answer of kind `kind`: counted as
+        /// [`Outcome::BodyShape`] and under its kind.
+        pub fn record_body_shape(&self, kind: BodyShape, body_bytes: usize, elapsed: Duration) {
+            self.body_shapes[kind.index()].fetch_add(1, Ordering::Relaxed);
+            self.record(Outcome::BodyShape, body_bytes, elapsed);
+        }
+
         /// A count of outcome `outcome` so far.
         pub fn count(&self, outcome: Outcome) -> u64 {
             self.counts[outcome.index()].load(Ordering::Relaxed)
+        }
+
+        /// `spans` spans were moved onto the one place their reported text
+        /// occurs, in an answer that was then accepted.
+        pub fn record_reanchored(&self, spans: usize) {
+            self.spans_reanchored
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans re-anchored so far.
+        pub fn spans_reanchored(&self) -> u64 {
+            self.spans_reanchored.load(Ordering::Relaxed)
+        }
+
+        /// `spans` spans were accepted where they were although their
+        /// reported text had characters replaced, in an answer that was
+        /// then accepted.
+        pub fn record_text_repaired(&self, spans: usize) {
+            self.spans_text_repaired
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans whose reported text was repaired so far.
+        pub fn spans_text_repaired(&self) -> u64 {
+            self.spans_text_repaired.load(Ordering::Relaxed)
+        }
+
+        /// A count of malformed answers of kind `kind` so far.
+        pub fn body_shape_count(&self, kind: BodyShape) -> u64 {
+            self.body_shapes[kind.index()].load(Ordering::Relaxed)
         }
 
         pub fn snapshot(&self) -> Snapshot {
             let outcomes = Outcome::ALL
                 .iter()
                 .map(|outcome| (outcome.label(), self.count(*outcome)))
+                .collect();
+            let body_shapes = BodyShape::ALL
+                .iter()
+                .map(|kind| (kind.label(), self.body_shape_count(*kind)))
                 .collect();
             let latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
             let latency_ms = BUCKETS
@@ -2380,6 +2895,9 @@ pub mod diagnostics {
                 .collect();
             Snapshot {
                 outcomes,
+                body_shapes,
+                spans_reanchored: self.spans_reanchored(),
+                spans_text_repaired: self.spans_text_repaired(),
                 in_flight: self.in_flight.load(Ordering::Relaxed),
                 latency_ms,
             }
@@ -2397,6 +2915,19 @@ pub mod diagnostics {
         /// Requests by outcome, since the process started. Every attempt
         /// counts, retries included.
         pub outcomes: BTreeMap<&'static str, u64>,
+        /// The `body_shape` outcomes by which check failed, every retry
+        /// counted. Sums to `outcomes.body_shape`; kept apart from
+        /// `outcomes` so a reader summing that map does not count twice.
+        pub body_shapes: BTreeMap<&'static str, u64>,
+        /// Spans whose offsets disagreed with their text and were moved onto
+        /// the one place in the window that text occurs, in answers then
+        /// accepted. Counted apart from `span_text_mismatch`, which counts
+        /// only answers that could not be corrected.
+        pub spans_reanchored: u64,
+        /// Spans whose offsets were right but whose reported text had
+        /// non-ASCII characters replaced by U+FFFD; accepted where they
+        /// were. Also apart from `span_text_mismatch`.
+        pub spans_text_repaired: u64,
         /// Requests on the wire right now.
         pub in_flight: usize,
         /// Successful requests' latency by request-body size, over the last
@@ -2473,6 +3004,39 @@ pub mod diagnostics {
             assert_eq!(snapshot.outcomes["ok"], 301);
             assert_eq!(snapshot.outcomes["timeout"], 1);
             assert_eq!(snapshot.latency_ms["4_to_32_kib"].p50, None);
+        }
+
+        #[test]
+        fn body_shapes_are_counted_by_kind_and_in_the_total() {
+            let recorder = Recorder::default();
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                for _ in 0..=times {
+                    recorder.record_body_shape(kind, 100, Duration::from_millis(5));
+                }
+            }
+            let snapshot = recorder.snapshot();
+            assert_eq!(
+                snapshot.body_shapes.keys().copied().collect::<Vec<_>>(),
+                [
+                    "empty_data",
+                    "entry_count_mismatch",
+                    "parse_error",
+                    "span_out_of_range",
+                    "span_text_mismatch",
+                ]
+            );
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                assert_eq!(snapshot.body_shapes[kind.label()], times as u64 + 1);
+            }
+            assert_eq!(
+                snapshot.outcomes["body_shape"],
+                snapshot.body_shapes.values().sum::<u64>()
+            );
+            assert_eq!(snapshot.outcomes["ok"], 0, "a malformed answer is not ok");
+            assert_eq!(
+                snapshot.latency_ms["under_4_kib"].samples, 0,
+                "a malformed answer contributes no latency"
+            );
         }
 
         #[test]

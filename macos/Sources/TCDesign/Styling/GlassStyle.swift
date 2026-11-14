@@ -222,7 +222,7 @@ public enum GlassTier: Sendable, Equatable {
         case .control where ground == .selection:
             shape.fill(GlassTokens.Color.controlOnSelection.color)
         case .control:
-            shape.fill(GlassTokens.Gradient.controlFill.linear)
+            shape.fill(ground.controlFill().linear)
         case .controlSelected:
             shape.fill(GlassTokens.Color.controlSelected.color)
         case .popover:
@@ -253,15 +253,30 @@ public enum GlassGround: Sendable, Equatable {
         self == .selection ? GlassTokens.Color.textOnAccent : GlassTokens.Color.textPrimary
     }
 
+    /// Only flat Light needs a slate control on a card. Keep the original
+    /// gradient (including both Classic stops) everywhere else, and derive
+    /// Dark from controlFill rather than copying its values into another token.
+    func controlFill(theme: GlassTheme = .current) -> GlassGradient {
+        let fill = GlassTokens.Gradient.controlFill
+        guard self == .card, theme == .flat else { return fill }
+        return GlassGradient(angle: fill.angle, stops: fill.stops.map {
+            GlassStop($0.color.rgb, alpha: $0.color.alpha, at: $0.location,
+                      light: GlassTokens.Color.controlOnCard.light)
+        })
+    }
+
     /// The hover fill a tier takes on this ground: a control's hover
     /// follows its fill onto a menu or a selection. Any other hover is the
     /// caller's own and stays.
-    public func hover(_ hover: GlassRGBA, tier: GlassTier) -> GlassRGBA {
+    public func hover(_ hover: GlassRGBA, tier: GlassTier, theme: GlassTheme = .current) -> GlassRGBA {
         guard tier == .control, hover == GlassTokens.Color.controlHover else { return hover }
         switch self {
         case .menu: return GlassTokens.Color.controlOnMenuHover
         case .selection: return GlassTokens.Color.controlOnSelectionHover
-        case .pane, .card: return hover
+        case .card:
+            guard theme == .flat else { return hover }
+            return GlassRGBA(hover.rgb, alpha: hover.alpha, light: GlassTokens.Color.controlOnCardHover.light)
+        case .pane: return hover
         }
     }
 }

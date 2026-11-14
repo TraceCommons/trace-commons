@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.8" date="2026-11-13">
+      <description>
+        <p>A trace too long for the privacy scan now says so and how far over the limit it is, instead of waiting as if the scan were down. Text the scan cannot read no longer holds a trace as a scan outage.</p>
+      </description>
+    </release>
     <release version="1.0.7" date="2026-11-12">
       <description>
         <p>Quitting now asks first only when it would stop compute or Private AI, and says why in one sentence. Traces you approved stay approved while the privacy check is unavailable, and review picks up sooner once it answers again.</p>

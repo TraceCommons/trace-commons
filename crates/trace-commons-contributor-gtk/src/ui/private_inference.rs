@@ -779,7 +779,10 @@ pub fn wire(app: &Rc<App>) {
 pub fn refresh(app: &Rc<App>) {
     super::managed_sessions::refresh(app);
     app.call("get_settings", serde_json::json!({}), |app, result| {
-        let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>) else {
+        let result = result.map(serde_json::from_value::<crate::model::Settings>);
+        app.home
+            .render_inference(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+        let Ok(Ok(settings)) = result else {
             return;
         };
         render(app, &settings);

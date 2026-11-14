@@ -852,7 +852,22 @@ async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
             return send_failure(&error, refusal_from_parts(status, retry_after_secs, None));
         }
     };
-    refusal_from_parts(status, retry_after_secs, refusal_label(&body).as_deref())
+    refusal_from_body(status, retry_after_secs, &body)
+}
+
+/// [`refusal_from_parts`] for a refusal whose body was read: the label, and
+/// for a trace too large to review, the two counts beside it.
+fn refusal_from_body(status: u16, retry_after_secs: u32, body: &[u8]) -> WitnessTrustError {
+    let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+    let limits = serde_json::from_slice::<serde_json::Value>(head)
+        .ok()
+        .and_then(|value| trace_commons_protocol::witness_refusal::review_limits(&value));
+    refusal_from_parts_with(
+        status,
+        retry_after_secs,
+        refusal_label(body).as_deref(),
+        limits,
+    )
 }
 
 /// The bound on how much of a refusal body is read.
@@ -866,11 +881,23 @@ fn refusal_label(body: &[u8]) -> Option<String> {
         .and_then(|value| value.get("error")?.as_str().map(str::to_string))
 }
 
-/// [`refusal_from`], once the status, the delay and the label are read.
+/// [`refusal_from`], once the status, the delay and the label are read, for
+/// a caller that has no body to read counts from.
 fn refusal_from_parts(
     status: u16,
     retry_after_secs: u32,
     label: Option<&str>,
+) -> WitnessTrustError {
+    refusal_from_parts_with(status, retry_after_secs, label, None)
+}
+
+/// [`refusal_from_parts`], with the `(windows_needed, windows_allowed)` a
+/// too-large refusal carries in its body.
+fn refusal_from_parts_with(
+    status: u16,
+    retry_after_secs: u32,
+    label: Option<&str>,
+    review_limits: Option<(u64, u64)>,
 ) -> WitnessTrustError {
     use trace_commons_protocol::admission::AdmissionRefusal;
     use trace_commons_protocol::witness_refusal::{WitnessRefusalClass, classify_witness_refusal};
@@ -904,6 +931,22 @@ fn refusal_from_parts(
         WitnessRefusalClass::InferenceDeclined => {
             WitnessTrustError::WitnessAdmissionEvidenceRefused
         }
+        // Too large to review in time: final for this session, never the
+        // transient backoff, or it would be resubmitted forever. Without
+        // both counts the answer is not the one the contract describes.
+        WitnessRefusalClass::TraceTooLargeForReview => match review_limits {
+            Some((windows_needed, windows_allowed)) => {
+                WitnessTrustError::WitnessTraceTooLargeForReview {
+                    windows_needed,
+                    windows_allowed,
+                }
+            }
+            None => WitnessTrustError::WitnessResponseMalformed,
+        },
+        // About this session's content, not the witness being down: a final
+        // refusal of the session, so the upload pass goes on to the next
+        // one instead of stopping as it does for an outage.
+        WitnessRefusalClass::TextUnclassifiable => WitnessTrustError::WitnessTextUnclassifiable,
         // A client error this build does not recognise. Terminal, as before.
         WitnessRefusalClass::Unrecognised => WitnessTrustError::WitnessResponseMalformed,
     }
@@ -1523,10 +1566,10 @@ impl HttpWitnessTransport {
                 }
                 // The witness's own answer for this job: the same refusal
                 // the single request used to give.
-                Some(label) => Err(PollMiss::Final(refusal_from_parts(
+                Some(_) => Err(PollMiss::Final(refusal_from_body(
                     status.as_u16(),
                     retry_after_secs,
-                    Some(label),
+                    &body,
                 ))),
                 // No label from a gateway that cannot serve (a 5xx, or a
                 // 404 with no instance behind it): something other than
@@ -1627,22 +1670,38 @@ async fn token_review_refusal(response: reqwest::Response) -> WitnessTrustError 
     const REFUSAL_BODY_BOUND: usize = 4096;
     let status = response.status().as_u16();
     let retry_after_secs = saturation_retry_after(response.headers());
-    let label = match response.bytes().await {
+    let body = match response.bytes().await {
         Ok(body) => {
             serde_json::from_slice::<serde_json::Value>(&body[..body.len().min(REFUSAL_BODY_BOUND)])
                 .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_string))
         }
         Err(_) => None,
     };
+    let label = body
+        .as_ref()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_string));
     let saturated = label.as_deref().is_some_and(|label| {
         trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
     });
     let timed_out = label.as_deref() == Some(WITNESS_REQUEST_TIMED_OUT);
+    let too_large = status == 422
+        && label.as_deref()
+            == Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW);
     if saturated {
         WitnessTrustError::WitnessSaturated { retry_after_secs }
     } else if status == 504 && timed_out {
         WitnessTrustError::WitnessTimeout
+    } else if let Some((windows_needed, windows_allowed)) = too_large
+        .then_some(body.as_ref())
+        .flatten()
+        .and_then(trace_commons_protocol::witness_refusal::review_limits)
+    {
+        // The same final refusal as on the ordinary route: the session is
+        // too large to review, not declined for its receipt.
+        WitnessTrustError::WitnessTraceTooLargeForReview {
+            windows_needed,
+            windows_allowed,
+        }
     } else {
         WitnessTrustError::WitnessAdmissionEvidenceRefused
     }
@@ -2735,6 +2794,13 @@ mod tests {
             (413, None, WitnessPayloadTooLarge),
             // A crashed or oversized job's sealed answer.
             (503, Some("witness_redaction_failed"), WitnessUnreachable),
+            // The witness's classifier stayed unavailable through its
+            // retries: retried exactly as a redaction failure is.
+            (
+                503,
+                Some("witness_classifier_unavailable"),
+                WitnessUnreachable,
+            ),
             // Gateway answers while the witness VM is down.
             (404, None, WitnessUnreachable),
             (502, None, WitnessUnreachable),
@@ -2758,6 +2824,11 @@ mod tests {
             (
                 404,
                 Some("witness_redaction_failed"),
+                WitnessResponseMalformed,
+            ),
+            (
+                404,
+                Some("witness_classifier_unavailable"),
                 WitnessResponseMalformed,
             ),
         ];
@@ -2784,6 +2855,8 @@ mod tests {
         for (status, label) in [
             (503, Some("witness_signing_unavailable")),
             (503, Some("witness_contribution_path_unavailable")),
+            (503, Some("witness_redaction_failed")),
+            (503, Some("witness_classifier_unavailable")),
             (502, None),
             (404, None),
             (504, None),
@@ -2795,6 +2868,7 @@ mod tests {
             );
         }
         for (status, label) in [
+            (422, Some("witness_text_unclassifiable")),
             (413, Some("witness_request_too_large")),
             (403, Some("witness_inference_receipt_unverified")),
             (400, Some("witness_request_malformed")),
@@ -4612,6 +4686,14 @@ mod tests {
         DropsConnectionOnce,
         /// `pending` forever.
         NeverDone,
+        /// The job's sealed answer: too large to review, with its counts.
+        TooLargeForReview,
+        /// The job's sealed answer: text the classifier could not classify.
+        TextUnclassifiable,
+        /// The job's sealed answer: the witness's classifier stayed
+        /// unavailable, `503 witness_classifier_unavailable` with a
+        /// `Retry-After`.
+        ClassifierUnavailable,
     }
 
     #[derive(Default)]
@@ -4713,6 +4795,30 @@ mod tests {
                                     panic!("test double: drop the connection");
                                 }
                                 PollScript::NeverDone => pending,
+                                PollScript::TextUnclassifiable => (
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_text_unclassifiable"
+                                    })),
+                                )
+                                    .into_response(),
+                                PollScript::TooLargeForReview => (
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_trace_too_large_for_review",
+                                        "windows_needed": 1800,
+                                        "windows_allowed": 208,
+                                    })),
+                                )
+                                    .into_response(),
+                                PollScript::ClassifierUnavailable => (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [(axum::http::header::RETRY_AFTER, "60")],
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_classifier_unavailable"
+                                    })),
+                                )
+                                    .into_response(),
                                 _ => witness_answer(Some((
                                     answer.certificate_json.clone(),
                                     answer.signature_hex.clone(),
@@ -4798,6 +4904,123 @@ mod tests {
         let (result, log) = review_against(PollScript::AlwaysGone, Duration::from_secs(5)).await;
         assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessUnreachable);
         assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    /// A job the witness finished as `witness_classifier_unavailable` is the
+    /// witness's own answer: final for this review, not resubmitted, and read
+    /// as unreachable -- which the daemon retries on its own backoff -- not
+    /// as saturation, whatever its `Retry-After` says.
+    #[tokio::test]
+    async fn a_job_finished_as_classifier_unavailable_is_unreachable_and_not_resubmitted() {
+        let (result, log) =
+            review_against(PollScript::ClassifierUnavailable, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(err, WitnessTrustError::WitnessUnreachable);
+        assert!(crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// A job the witness finished as too large to review is a final refusal
+    /// of the session, with the witness's counts: not resubmitted, not
+    /// transient, so the daemon refuses it instead of retrying it forever.
+    #[tokio::test]
+    async fn a_job_finished_as_too_large_for_review_is_a_final_refusal_with_its_counts() {
+        let (result, log) =
+            review_against(PollScript::TooLargeForReview, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            }
+        );
+        assert_eq!(err.refusal_label(), "witness_trace_too_large_for_review");
+        assert!(!crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// A job the witness finished as `witness_text_unclassifiable` is a final
+    /// refusal of this session -- not the witness being down -- so the
+    /// upload pass goes on to the next session instead of stopping.
+    #[tokio::test]
+    async fn a_job_finished_as_text_unclassifiable_is_a_final_refusal() {
+        let (result, log) =
+            review_against(PollScript::TextUnclassifiable, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(err, WitnessTrustError::WitnessTextUnclassifiable);
+        assert_eq!(err.refusal_label(), "witness_text_unclassifiable");
+        assert!(!crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// What a build from before this label reads the same answer as: an
+    /// unknown `422` label is `witness_response_malformed` -- terminal too,
+    /// and offered again on a newer build when it was approved. Documented
+    /// here so the fallback cannot change unnoticed.
+    #[test]
+    fn an_unknown_422_label_reads_as_a_malformed_answer() {
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("a_label_from_a_newer_witness")),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert!(!crate::submit::witness_failure_is_transient(
+            "witness_response_malformed"
+        ));
+        assert!(
+            crate::daemon::queue::REOFFERED_ON_A_NEWER_BUILD
+                .contains(&"witness_response_malformed")
+        );
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("witness_text_unclassifiable")),
+            WitnessTrustError::WitnessTextUnclassifiable
+        );
+    }
+
+    /// The exact pair with both counts is the refusal; without them, or on
+    /// another status, it is not the answer the contract describes.
+    #[test]
+    fn a_too_large_refusal_needs_its_status_label_and_counts() {
+        let label = Some("witness_trace_too_large_for_review");
+        assert_eq!(
+            refusal_from_parts_with(422, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            }
+        );
+        assert_eq!(
+            refusal_from_parts_with(422, 0, label, None),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_body(
+                422,
+                0,
+                br#"{"error":"witness_trace_too_large_for_review","windows_needed":"many","windows_allowed":208}"#,
+            ),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_parts_with(413, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_parts_with(503, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessUnreachable
+        );
     }
 
     #[tokio::test]

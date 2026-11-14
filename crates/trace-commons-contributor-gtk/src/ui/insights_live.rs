@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, sync::OnceLock};
 use trace_commons_contributor::insights::{service, week_glance::WeekOverview, week_rollup::Feed};
 
-fn text(key: &str) -> String {
+pub(super) fn text(key: &str) -> String {
     static COPY: OnceLock<BTreeMap<String, String>> = OnceLock::new();
     COPY.get_or_init(service::ui_copy)
         .get(key)
@@ -68,7 +68,7 @@ struct Work {
 /// Match native precision without floating-point money arithmetic. Values under
 /// one cent retain up to four decimals; under 100 microdollars keep one
 /// significant digit. Currency is USD, as the daemon's pricing basis specifies.
-fn dollars(micros: u64) -> String {
+pub(super) fn dollars(micros: u64) -> String {
     if micros >= 10_000 {
         let cents = (u128::from(micros) + 5_000) / 10_000;
         return format!("${}.{:02}", cents / 100, cents % 100);
@@ -142,14 +142,14 @@ fn api_prices(work: &Work) -> String {
     })
 }
 
-fn label(value: &str, class: &str) -> gtk::Label {
+pub(super) fn label(value: &str, class: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(value));
     label.set_xalign(0.0);
     label.set_wrap(true);
     label.add_css_class(class);
     label
 }
-fn card(title: &str) -> gtk::Box {
+pub(super) fn card(title: &str) -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, metrics::HEADING_GAP);
     card.add_css_class("tc-insights-card");
     card.append(&label(title, "heading"));

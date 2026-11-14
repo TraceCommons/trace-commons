@@ -76,7 +76,7 @@ final class SettingsModalTests: XCTestCase {
     /// scrim over the Monitor.
     func test_theWindowIsOpaque() throws {
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertTrue(modal.contains(".background(GlassTokens.Color.paneOpaque.color)"), "Settings is not on the opaque base")
+        XCTAssertTrue(modal.contains(".background(GlassTokens.Color.settingsGround.color)"), "Settings is not on the opaque base")
         XCTAssertTrue(modal.contains(".environment(\\.glassPaneIsContent, true)"))
         XCTAssertFalse(modal.contains("GlassPane("), "a pane framed within the Settings window")
         XCTAssertEqual(GlassMaterial.current(content: true), .opaque)

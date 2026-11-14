@@ -59,6 +59,7 @@ pub(crate) mod credential_store {
 }
 pub mod eligibility;
 pub mod enroll;
+pub(crate) mod first_trace;
 pub mod grant_terms;
 pub mod harness;
 pub mod health;
@@ -1728,7 +1729,7 @@ async fn drain_approved(
         // `Failed`. `Refused` carries no rule-3 label today, but the two
         // arms are read alike below for admission refusals, so they are
         // here too: one call, which neither arm can lose.
-        if let uploader::UploadDecision::Refused { reason_label }
+        if let uploader::UploadDecision::Refused { reason_label, .. }
         | uploader::UploadDecision::Failed { reason_label } = &decision
         {
             cancel_account_admission_on_refusal(shared, reason_label);
@@ -1941,7 +1942,10 @@ fn apply_upload_decision(
                 let _ = q.upsert(fresh, max);
             }
         }
-        uploader::UploadDecision::Refused { reason_label } => {
+        uploader::UploadDecision::Refused {
+            reason_label,
+            review_limits,
+        } => {
             // Decision 1: a refusal for an admission reason is evidence
             // about the entry, and the entry stops claiming otherwise.
             // Every other refusal label says nothing about
@@ -1962,6 +1966,9 @@ fn apply_upload_decision(
                 queue::QueueState::Refused,
                 Some(reason_label),
             );
+            // Kept only for a session too large to review; cleared for
+            // every other refusal.
+            q.note_review_limits(entry.entry_id, review_limits);
             // A no-op unless the refusal was a caught panic, which a
             // newer build offers again.
             q.note_refusal_version(entry.entry_id, env!("CARGO_PKG_VERSION"));

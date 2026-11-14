@@ -39,7 +39,7 @@ services:
     # By digest, never a tag: a tag is a moving target and a measurement
     # pinned over one is pinning nothing.
     #
-    # Built by the `witness-image` workflow from commit 3644ca0 -- natively
+    # Built by the `witness-image` workflow from commit f872913 -- natively
     # amd64, because TDX is Intel, and in CI rather than on a developer
     # machine because this image is not reproducibly buildable. A measurement
     # therefore pins a specific artifact only its builder can produce, which
@@ -48,7 +48,7 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:15d6c664589ccb42593fd0cbd686bfdf8221110d8f3efd2612591b1169aca21b
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:45bd44bb34a698faeeeb86ba894432aa30c823b6369221ccc1ad87387e93ad51
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
@@ -240,22 +240,28 @@ services:
       # verbatim and is uploaded to the deployer.
       TRACE_NEAR_AI_PRIVACY_API_KEY: ${TRACE_NEAR_AI_PRIVACY_API_KEY:?set at deploy time}
 
-      # 1 MiB. The client refuses a trace over 256 KB of raw contribution
-      # before sending it (owner decision 2026-11-05); 1 MiB holds that as
-      # JSON, escaping included, with room. Sixteen slots at this cap are on
-      # the order of 100 MiB of memory.
-      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "1048576"
+      # The largest request body, in bytes. Injected encrypted at deploy time
+      # and declared in `allowed_envs`, like the pace above (owner,
+      # 2026-11-13): the NAME is measured, the VALUE is not, so the bound can
+      # follow real trace sizes without a new measurement. Set to 16 MiB
+      # (16777216) on 2026-11-13: 1 MiB refused traces with a 4 MiB median,
+      # and 16 MiB roughly matches what one review can classify (the up-front
+      # too-large-to-review refusal covers the rest). Sixteen slots at 16 MiB
+      # are on the order of 256 MiB of request bodies. Required: a deploy
+      # that forgets it fails to start, and so does one above the binary's
+      # compiled ceiling of 32 MiB, which the measurement does cover.
+      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: ${TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES:?set at deploy time}
 
       # THE BOUND ON UNAUTHENTICATED WORK. The routes are unauthenticated, so
       # anyone who can reach `POST /v1/witness/jobs` can spend this CVM's cores and,
       # in `full-pipeline`, the NEAR AI capacity billed to the key above. The
-      # 1 MiB cap above is per request; it says nothing about how many arrive
+      # body cap above is per request; it says nothing about how many arrive
       # at once. These two say that.
       #
-      # Both are MEASURED, like everything else here: a contributor who has
-      # pinned this measurement can verify that the witness they are sending a
-      # raw transcript to has a bound at all, and what it is. An operator
-      # cannot quietly widen it without moving the measurement.
+      # Both are MEASURED: a contributor who has pinned this measurement can
+      # verify how many requests run at once and for how long. The per-request
+      # body cap above is a sealed deploy-time value since 2026-11-13, so its
+      # VALUE is not part of the measurement (only that one is required).
       #
       # Sixteen at once (owner decision 2026-11-05; was four). Classifier
       # calls are bounded separately, process-wide, at two
@@ -283,11 +289,18 @@ services:
       # Submit-then-poll (docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md).
       # POST /v1/witness is retired: a job is accepted at once and polled, so
       # no connection is held for the length of a review. Finished results
-      # are sealed here, at most 256 of them at 4 MiB each (1 GiB worst case
-      # on disk). A full store answers busy.
+      # are sealed here, at most 256 of them. A full store answers busy.
+      #
+      # The largest sealed result, in bytes: a sealed deploy-time value like
+      # the request cap (owner, 2026-11-13), kept above it so a redacted
+      # result of a maximal request still fits. Set to 20 MiB (20971520) on
+      # 2026-11-13: 256 results at that size is 5 GiB worst case on the
+      # CVM's encrypted data disk. Required: a deploy that forgets it fails
+      # to start, and so does one above the binary's compiled ceiling of
+      # 40 MiB.
       TRACE_COMMONS_WITNESS_RESULTS_DIR: "/var/lib/trace-commons-witness/results"
       TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS: "256"
-      TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES: "4194304"
+      TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES: ${TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES:?set at deploy time}
 
       # Path prefixes the deterministic pass treats as known, so they are not
       # reported as findings. Empty reports more, never less.

@@ -3,6 +3,7 @@
   "logged_in": false,
   "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "first_trace_at": null,
   "account_state": "ok",
   "account_state_reason": null,
   "near_ai_login_unconfirmed": false,
