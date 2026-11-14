@@ -34,8 +34,9 @@
 //!   background lane until the witness's own delay. A witness whose evidence
 //!   could not be fetched (`submit::witness_failure_is_transient`: timeout,
 //!   unreachable, attestation or collateral unavailable) keeps the approval
-//!   and is retried on the transient-upload backoff, and the lane rests
-//!   until that retry, as the pass once stopped at the first. The entry
+//!   and is retried on its own backoff. Other traces continue unless three
+//!   distinct traces fail within five minutes; then one recovery probe follows
+//!   a short shared pause (see `witness_retry`). The entry
 //!   keeps its approval for as long as that lasts, with no budget (owner,
 //!   2026-11-12).
 //!   Evidence that was fetched and did not verify
@@ -171,6 +172,7 @@ fn still_current(current: Option<&QueueEntry>, snapshot: &QueueEntry) -> bool {
 struct Clock {
     base: DateTime<Utc>,
     at: std::time::Instant,
+    wall_at: DateTime<Utc>,
 }
 
 impl Clock {
@@ -178,11 +180,15 @@ impl Clock {
         Self {
             base,
             at: std::time::Instant::now(),
+            wall_at: Utc::now(),
         }
     }
 
     fn now(&self) -> DateTime<Utc> {
-        self.base + chrono::Duration::from_std(self.at.elapsed()).unwrap_or_default()
+        // Instant may stop during sleep. Keep injected test clocks relative,
+        // while accounting for wall time that passed since the job started.
+        let elapsed = chrono::Duration::from_std(self.at.elapsed()).unwrap_or_default();
+        self.base + elapsed.max(Utc::now() - self.wall_at)
     }
 }
 
@@ -202,6 +208,7 @@ struct WorkerState {
     /// The background lane takes nothing new before this: the witness's own
     /// delay after it answered busy, or a panic backoff.
     held_until: Option<DateTime<Utc>>,
+    circuit: super::witness_retry::Circuit,
     /// The next panic backoff.
     panic_backoff: Option<std::time::Duration>,
     /// The last background call certified a review, so every slot is open.
@@ -233,12 +240,38 @@ impl WitnessWorker {
     /// already queued or in flight, or the queue is full.
     pub(crate) fn enqueue(&self, entry: QueueEntry, now: DateTime<Utc>) -> bool {
         let mut s = self.lock();
-        if s.stopped
-            || s.in_flight.contains(&entry.entry_id)
-            || s.queued.iter().any(|j| j.entry.entry_id == entry.entry_id)
-            || s.queued.len() >= MAX_QUEUED
-        {
+        if s.stopped || s.in_flight.contains(&entry.entry_id) {
             return false;
+        }
+        if let Some(job) = s
+            .queued
+            .iter_mut()
+            .find(|j| j.entry.entry_id == entry.entry_id)
+        {
+            // The producer re-vetted this approval. A cancel and manual
+            // reapproval must replace the obsolete snapshot and priority,
+            // without duplicating a queued or already-running request.
+            job.entry = entry;
+            return false;
+        }
+        if s.queued.len() >= MAX_QUEUED {
+            let worst = s
+                .queued
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| {
+                    super::compare_send_priority(&left.entry, &right.entry)
+                })
+                .map(|(index, job)| (index, &job.entry));
+            let Some((index, worst)) = worst else {
+                return false;
+            };
+            if !super::compare_send_priority(&entry, worst).is_lt() {
+                return false;
+            }
+            // Displacement only removes the in-memory scheduling hint. The
+            // entry remains approved in the durable queue for a later pass.
+            s.queued.remove(index);
         }
         s.queued.push_back(Job {
             entry,
@@ -267,7 +300,11 @@ impl WitnessWorker {
     /// nothing queued, or the lane is held or stopped.
     pub(crate) fn idle(&self) -> bool {
         let s = self.lock();
-        s.in_flight.is_empty() && (s.queued.is_empty() || s.held_until.is_some() || s.stopped)
+        s.in_flight.is_empty()
+            && (s.queued.is_empty()
+                || s.held_until.is_some()
+                || s.circuit.recovering()
+                || s.stopped)
     }
 
     /// Claim the interactive lane for a person's review of `entry_id`.
@@ -302,13 +339,36 @@ impl WitnessWorker {
     fn take_next(&self, now: DateTime<Utc>) -> Option<Job> {
         let mut s = self.lock();
         if s.stopped
-            || s.in_flight.len() >= if s.answering { BACKGROUND_SLOTS } else { 1 }
+            || s.in_flight.len()
+                >= if s.answering && !s.circuit.recovering() {
+                    BACKGROUND_SLOTS
+                } else {
+                    1
+                }
             || s.held_until.is_some_and(|until| now < until)
+            || !s.circuit.can_start(now)
         {
             return None;
         }
         s.held_until = None;
-        let job = s.queued.pop_front()?;
+        // Re-sort at dispatch, too: a manual approval can arrive behind an
+        // already populated background queue. An outage probe prefers a trace
+        // other than the one that last failed, without changing approvals.
+        let avoid = s.circuit.avoid_probe();
+        let index = s
+            .queued
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| job.entry.ready_for_upload(now))
+            .min_by(|(_, left), (_, right)| {
+                (Some(left.entry.entry_id) == avoid)
+                    .cmp(&(Some(right.entry.entry_id) == avoid))
+                    .then_with(|| super::compare_send_priority(&left.entry, &right.entry))
+            })
+            .map(|(index, _)| index)?;
+        let mut job = s.queued.remove(index)?;
+        job.clock = Clock::starting(now);
+        s.circuit.started(job.entry.entry_id);
         s.in_flight.insert(job.entry.entry_id);
         Some(job)
     }
@@ -328,11 +388,19 @@ impl WitnessWorker {
         // Only a certified review opens the second slot; a failure, a busy
         // answer or a panic closes it. A dropped job says nothing either way.
         match end {
-            JobEnd::Witnessed => s.answering = true,
+            JobEnd::Witnessed => {
+                // A request dispatched before a capacity/panic pause is
+                // not its recovery probe, even if it finishes after expiry.
+                s.answering = s.circuit.succeeded(entry_id) && s.held_until.is_none();
+            }
             JobEnd::Dropped => {}
             _ => s.answering = false,
         }
+        if !matches!(end, JobEnd::Witnessed | JobEnd::Transient) {
+            s.circuit.cancelled(entry_id);
+        }
         match end {
+            JobEnd::Transient => s.circuit.failed(entry_id, now),
             JobEnd::Busy(until) => {
                 s.held_until = Some(s.held_until.map_or(*until, |held| held.max(*until)));
             }
@@ -365,6 +433,8 @@ enum JobEnd {
     Dropped,
     /// The witness answered busy; the lane rests until then.
     Busy(DateTime<Utc>),
+    /// Only this trace failed; the circuit decides whether failures correlate.
+    Transient,
     Panicked,
     Poisoned,
 }
@@ -652,6 +722,9 @@ fn record(
         }
         super::uploader::WitnessJobOutcome::Decision(decision) => {
             let observed_at = || clock.now();
+            let transient = matches!(&decision,
+                super::uploader::UploadDecision::Failed { reason_label }
+                if crate::submit::witness_failure_is_transient(reason_label));
             let applied = super::apply_upload_decision(
                 shared,
                 q,
@@ -667,28 +740,12 @@ fn record(
                 let mut state = shared.state.lock().expect("state lock");
                 let _ = state.save(&shared.store);
             }
-            // A busy witness is asked once, not once per waiting session:
-            // everything queued behind this job is held until the witness's
-            // own delay, with the same per-session spread the pass used.
-            // So is one that did not answer at all: the rest of the queue
-            // would meet the same wall. They are dropped from the worker,
-            // not deferred, and later passes enqueue them once the lane
-            // reopens at this entry's retry.
-            let held = if applied.witness_busy_until.is_some() || applied.outage {
+            // Explicit saturation pauses the lane. Other transient failures
+            // belong to this entry; do not discard healthy work behind it.
+            let held = if applied.witness_busy_until.is_some() {
                 shared.witness_worker.take_queued()
             } else {
                 Vec::new()
-            };
-            let retry_at = if applied.outage {
-                shared
-                    .queue
-                    .lock()
-                    .expect("queue lock")
-                    .get(entry.entry_id)
-                    .filter(|e| e.state == QueueState::Approved)
-                    .and_then(|e| e.retry_after)
-            } else {
-                None
             };
             {
                 let mut q = shared.queue.lock().expect("queue lock");
@@ -704,10 +761,10 @@ fn record(
                 }
                 let _ = super::approved_envelope::sweep(&shared.store, &q.pinned_entry_ids());
             }
-            match (applied.witness_busy_until, retry_at) {
-                (Some((until, _)), _) => JobEnd::Busy(until),
-                (None, Some(until)) => JobEnd::Busy(until),
-                (None, None) => JobEnd::Done,
+            match applied.witness_busy_until {
+                Some((until, _)) => JobEnd::Busy(until),
+                None if transient => JobEnd::Transient,
+                None => JobEnd::Done,
             }
         }
     };
@@ -758,4 +815,176 @@ pub(crate) fn set_test_hook(dir: &std::path::Path, hook: TestHook) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_or_insert_with(std::collections::HashMap::new)
         .insert(dir.to_path_buf(), hook);
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+    fn entry(n: u128, attempts: u32, manual: bool) -> QueueEntry {
+        QueueEntry {
+            entry_id: Uuid::from_u128(n),
+            state: QueueState::Approved,
+            approved_unattended: !manual,
+            attempts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_isolated_failure_does_not_drop_or_delay_healthy_queued_jobs() {
+        let w = WitnessWorker::default();
+        let now = now();
+        for n in 1..=4 {
+            w.enqueue(entry(n, 0, false), now);
+        }
+        let first = w.take_next(now).unwrap();
+        w.finish(first.entry.entry_id, &JobEnd::Transient, now);
+        assert_eq!(w.queued(), 3);
+        assert_eq!(w.take_next(now).unwrap().entry.entry_id, Uuid::from_u128(2));
+    }
+
+    #[test]
+    fn a_shared_pause_recovers_on_one_different_trace_and_then_opens_two_slots() {
+        let w = WitnessWorker::default();
+        let now = now();
+        for n in 1..=7 {
+            w.enqueue(entry(n, 0, false), now);
+        }
+        for _ in 0..3 {
+            let job = w.take_next(now).unwrap();
+            w.finish(job.entry.entry_id, &JobEnd::Transient, now);
+        }
+        assert!(w.take_next(now).is_none());
+        // Even a manual retry of the last failure is not the recovery probe
+        // while another approved trace is available.
+        w.enqueue(entry(3, 1, true), now);
+        let later = now + chrono::Duration::seconds(30);
+        let probe = w.take_next(later).unwrap();
+        assert_ne!(probe.entry.entry_id, Uuid::from_u128(3));
+        assert!(w.take_next(later).is_none());
+        w.finish(probe.entry.entry_id, &JobEnd::Witnessed, later);
+        assert!(w.take_next(later).is_some());
+        assert!(w.take_next(later).is_some());
+        assert!(w.take_next(later).is_none());
+    }
+
+    #[test]
+    fn late_manual_approval_preempts_a_full_background_queue() {
+        let w = WitnessWorker::default();
+        let now = now();
+        for n in 1..=MAX_QUEUED {
+            assert!(w.enqueue(entry(n as u128, 1, false), now));
+        }
+        assert!(w.enqueue(entry(999, 0, true), now));
+        assert_eq!(w.queued(), MAX_QUEUED);
+        assert_eq!(
+            w.take_next(now).unwrap().entry.entry_id,
+            Uuid::from_u128(999)
+        );
+    }
+
+    #[test]
+    fn cancelling_then_manually_reapproving_refreshes_a_queued_automatic_snapshot() {
+        let w = WitnessWorker::default();
+        let now = now();
+        let mut q = queue::Queue::new();
+        let original = entry(2, 0, false);
+        let id = original.entry_id;
+        q.push_for_test(original.clone());
+        w.enqueue(entry(1, 0, false), now);
+        w.enqueue(original.clone(), now);
+        q.cancel(id).unwrap();
+        assert!(q.approve(id, &[], None, None, None, Some(now)));
+        let renewed = q.get(id).unwrap().clone();
+        assert!(!still_current(Some(&renewed), &original));
+        assert!(!w.enqueue(renewed.clone(), now));
+        assert_eq!(w.queued(), 2);
+        let job = w.take_next(now).unwrap();
+        assert_eq!(job.entry.entry_id, id);
+        assert!(still_current(Some(&renewed), &job.entry));
+        assert!(!job.entry.approved_unattended);
+        assert!(
+            !w.enqueue(renewed, now),
+            "in-flight jobs remain deduplicated"
+        );
+    }
+
+    #[test]
+    fn new_work_precedes_retries_already_waiting_in_the_worker() {
+        let w = WitnessWorker::default();
+        let now = now();
+        w.enqueue(entry(1, 17, false), now);
+        w.enqueue(entry(2, 0, false), now);
+        assert_eq!(w.take_next(now).unwrap().entry.entry_id, Uuid::from_u128(2));
+    }
+
+    #[test]
+    fn saturation_deadline_survives_a_late_success_and_restarts_with_one_job() {
+        let w = WitnessWorker::default();
+        let now = now();
+        w.finish(Uuid::from_u128(90), &JobEnd::Witnessed, now);
+        for n in 1..=5 {
+            w.enqueue(entry(n, 0, false), now);
+        }
+        let a = w.take_next(now).unwrap();
+        let b = w.take_next(now).unwrap();
+        w.finish(
+            a.entry.entry_id,
+            &JobEnd::Busy(now + chrono::Duration::seconds(120)),
+            now,
+        );
+        w.finish(b.entry.entry_id, &JobEnd::Witnessed, now);
+        assert!(w.take_next(now + chrono::Duration::seconds(119)).is_none());
+        assert!(w.take_next(now + chrono::Duration::seconds(120)).is_some());
+        assert!(w.take_next(now + chrono::Duration::seconds(120)).is_none());
+    }
+
+    #[test]
+    fn a_pre_pause_success_after_expiry_still_requires_one_fresh_recovery_job() {
+        let w = WitnessWorker::default();
+        let now = now();
+        w.finish(Uuid::from_u128(90), &JobEnd::Witnessed, now);
+        for n in 1..=6 {
+            w.enqueue(entry(n, 0, false), now);
+        }
+        let a = w.take_next(now).unwrap();
+        let b = w.take_next(now).unwrap();
+        w.finish(
+            a.entry.entry_id,
+            &JobEnd::Busy(now + chrono::Duration::seconds(120)),
+            now,
+        );
+        assert!(w.take_next(now + chrono::Duration::seconds(119)).is_none());
+        let after = now + chrono::Duration::seconds(121);
+        w.finish(b.entry.entry_id, &JobEnd::Witnessed, after);
+        let probe = w.take_next(after).unwrap();
+        assert!(w.take_next(after).is_none());
+        w.finish(probe.entry.entry_id, &JobEnd::Witnessed, after);
+        assert!(w.take_next(after).is_some());
+        assert!(w.take_next(after).is_some());
+        assert!(w.take_next(after).is_none());
+    }
+
+    #[test]
+    fn a_future_entry_deadline_remains_in_force_after_worker_restart() {
+        let w = WitnessWorker::default();
+        let now = now();
+        let mut retry = entry(1, 17, false);
+        retry.reason_label = Some("witness_unreachable".into());
+        retry.retry_after = Some(now + chrono::Duration::hours(1));
+        w.enqueue(retry, now);
+        assert!(w.take_next(now).is_none());
+        assert!(w.take_next(now + chrono::Duration::hours(1)).is_some());
+    }
+
+    #[test]
+    fn wall_time_after_sleep_advances_the_job_clock() {
+        let base = now();
+        let mut clock = Clock::starting(base);
+        clock.wall_at -= chrono::Duration::hours(2);
+        assert!(clock.now() >= base + chrono::Duration::hours(2));
+    }
 }

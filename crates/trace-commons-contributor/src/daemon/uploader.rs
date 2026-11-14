@@ -440,7 +440,7 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             // The privacy witness could not review the trace: unreachable,
             // past its deadline, or its own classifier failed (`503
             // witness_classifier_unavailable` or `503
-            // witness_redaction_failed`, both read as `witness_unreachable`).
+            // witness_redaction_failed`, preserved as distinct queue labels).
             // That is the privacy scan waiting, not the upload server down,
             // so it takes the scan's line rather than the catch-all below.
             label if crate::submit::witness_failure_is_transient(label) => {
@@ -1359,13 +1359,15 @@ mod tests {
     /// A privacy witness that could not review a trace is not the upload
     /// server being down. Every transient witness label fell through to
     /// `ingest-unreachable`, so a witness whose classifier failed
-    /// (`503 witness_redaction_failed`, read as `witness_unreachable`) told
+    /// (`503 witness_redaction_failed`) told
     /// the contributor "Can't reach the upload server" while ingest was up.
     #[test]
     fn a_witness_that_could_not_review_is_not_an_upload_outage() {
         for label in [
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ] {

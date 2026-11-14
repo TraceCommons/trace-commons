@@ -646,15 +646,18 @@ pub async fn submit_sessions(
 /// The witness labels after which a batch stops contacting the witness.
 ///
 /// Each says the witness cannot take work right now -- it did not answer in
-/// time, could not be reached, or asked to be left alone -- and the next
-/// session would meet the same answer only after waiting for it again: up
+/// time, could not be reached, could not complete a review, or asked to be
+/// left alone -- and the next session would meet the same answer only after
+/// waiting for it again: up
 /// to `WITNESS_REVIEW_TIMEOUT` each, which across a `--since 48h` batch was
 /// an hour of silence. A session skipped this way is `Failed` under the same
 /// label, never sent anywhere and never refused: running `submit` again
 /// tries it.
-pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
+pub const WITNESS_BATCH_STOP_LABELS: [&str; 5] = [
     "witness_timeout",
     "witness_unreachable",
+    trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE,
+    trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED,
     REASON_WITNESS_SATURATED,
 ];
 
@@ -662,14 +665,15 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 /// so nothing was judged: the witness ran past its deadline
 /// (`witness_timeout`), could not be reached or answered that it cannot
 /// serve right now (`witness_unreachable`: a `5xx` such as `503
-/// witness_signing_unavailable`, or a gateway with nothing behind it), or did
-/// not hand over its attestation (`witness_attestation_unavailable`: a
-/// non-success answer, a body with no quote, a broken connection) or Intel's
+/// witness_signing_unavailable`, or a gateway with nothing behind it), could
+/// not complete classification or redaction (`witness_classifier_unavailable`
+/// or `witness_redaction_failed`), or did not hand over its attestation
+/// (`witness_attestation_unavailable`: a non-success answer, a body with no
+/// quote, a broken connection) or Intel's
 /// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
-/// never refused, and the daemon retries it with the transient-upload
-/// backoff, holding it for a person under the same label once that budget is
-/// spent. A busy witness (`witness_saturated`) is not covered: it names its
-/// own retry delay and has its own path.
+/// never refused, and the daemon retries it with a per-trace backoff while
+/// preserving its approval. A busy witness (`witness_saturated`) is not
+/// covered: it names its own retry delay and has its own path.
 ///
 /// Fetching or serving is the only thing these labels say failed. Evidence that was
 /// fetched and did not verify has labels of its own
@@ -682,6 +686,8 @@ pub fn witness_failure_is_transient(label: &str) -> bool {
         label,
         "witness_timeout"
             | "witness_unreachable"
+            | "witness_classifier_unavailable"
+            | "witness_redaction_failed"
             | "witness_attestation_unavailable"
             | "witness_collateral_unavailable"
     )
@@ -4962,6 +4968,8 @@ mod tests {
         let fetch = [
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ];

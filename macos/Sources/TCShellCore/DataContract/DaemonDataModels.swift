@@ -417,6 +417,8 @@ extension DaemonData {
         public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
         public static let witnessTimeout = "witness_timeout"
         public static let witnessUnreachable = "witness_unreachable"
+        public static let witnessClassifierUnavailable = "witness_classifier_unavailable"
+        public static let witnessRedactionFailed = "witness_redaction_failed"
         public static let witnessAttestationUnavailable = "witness_attestation_unavailable"
         public static let witnessCollateralUnavailable = "witness_collateral_unavailable"
         public static let witnessNotTrusted = "witness-not-trusted"
@@ -430,6 +432,8 @@ extension DaemonData {
             secondLookReviewRequired,
             witnessTimeout,
             witnessUnreachable,
+            witnessClassifierUnavailable,
+            witnessRedactionFailed,
             witnessAttestationUnavailable,
             witnessCollateralUnavailable,
             witnessNotTrusted,
