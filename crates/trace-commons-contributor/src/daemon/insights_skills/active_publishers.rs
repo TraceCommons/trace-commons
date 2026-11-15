@@ -86,27 +86,41 @@ pub(crate) fn skills<'a>(
     found
 }
 
-/// The snapshot's rows: the first [`MAX_PUBLISHERS`] ranked publishers that
-/// have a skill the snapshot carries, each with up to [`MAX_SKILLS`] of
-/// those. `emitted` answers the id of the catalog row sent for a skill, or
-/// `None` when the snapshot's size cap cut it: a row never names a skill the
-/// app was not also given.
-pub(crate) fn rows(
+/// The publishers to show and the skills to show for each: the first
+/// [`MAX_PUBLISHERS`] ranked, each with its [`MAX_SKILLS`] latest. Chosen
+/// from the document alone, before the snapshot decides which catalog rows
+/// fit, so the choice cannot depend on what an install holds.
+pub(crate) fn selected(
     document: &CatalogDocument,
     now: DateTime<Utc>,
-    emitted: impl Fn(&CatalogSkill) -> Option<String>,
-) -> Vec<Value> {
+) -> Vec<(&CatalogPublisher, Vec<&CatalogSkill>)> {
     ranked(document, now)
         .into_iter()
-        .filter_map(|publisher| {
-            let ids: Vec<String> = skills(document, &publisher.id)
-                .into_iter()
-                .filter_map(&emitted)
-                .take(MAX_SKILLS)
-                .collect();
+        .take(MAX_PUBLISHERS)
+        .map(|publisher| {
+            let mut found = skills(document, &publisher.id);
+            found.truncate(MAX_SKILLS);
+            (publisher, found)
+        })
+        .collect()
+}
+
+/// The snapshot's rows for a selection. `emitted` answers the id of the
+/// catalog row sent for a skill. The snapshot sends the selected skills'
+/// rows before any other, so each has one; were a row missing all the same,
+/// its skill is left out, and a publisher left with none is left out too. A
+/// row never names a skill the app was not also given, and no other
+/// publisher takes the place.
+pub(crate) fn rows(
+    selection: &[(&CatalogPublisher, Vec<&CatalogSkill>)],
+    emitted: impl Fn(&CatalogSkill) -> Option<String>,
+) -> Vec<Value> {
+    selection
+        .iter()
+        .filter_map(|(publisher, skills)| {
+            let ids: Vec<String> = skills.iter().copied().filter_map(&emitted).collect();
             (!ids.is_empty()).then(|| json!({"publisher_id": publisher.id, "skill_ids": ids}))
         })
-        .take(MAX_PUBLISHERS)
         .collect()
 }
 
@@ -245,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_carry_three_publishers_and_their_three_latest_emitted_skills() {
+    fn rows_carry_three_publishers_and_their_three_latest_skills() {
         let catalog = document(
             vec![
                 publisher("a", "list", signals(100, 9)),
@@ -267,7 +281,8 @@ mod tests {
                 skill("e", "one", 1),
             ],
         );
-        let all = rows(&catalog, now(), |skill| Some(skill.id.clone()));
+        let selection = selected(&catalog, now());
+        let all = rows(&selection, |skill| Some(skill.id.clone()));
         assert_eq!(
             all,
             vec![
@@ -276,11 +291,12 @@ mod tests {
                 json!({"publisher_id": "c", "skill_ids": ["c:cut/SKILL.md", "c:kept/SKILL.md"]}),
             ]
         );
-        // The snapshot's size cap cut every row named "cut": a publisher
-        // left with no skill gives its place to the next, and a skill id is
-        // the id of the row that was sent, which for a seed is not the
-        // document's.
-        let bounded = rows(&catalog, now(), |skill| {
+        // The choice is made before any row is sent, so a missing row can
+        // only shrink it: the fourth publisher never takes a place, which
+        // would make the card depend on which rows an install was sent. A
+        // skill id is the id of the row that was sent, which for a seed is
+        // not the document's.
+        let bounded = rows(&selection, |skill| {
             (skill.name != "cut").then(|| format!("sent:{}", skill.name))
         });
         assert_eq!(
@@ -288,15 +304,11 @@ mod tests {
             vec![
                 json!({"publisher_id": "a", "skill_ids": ["sent:newest", "sent:newer", "sent:new"]}),
                 json!({"publisher_id": "c", "skill_ids": ["sent:kept"]}),
-                json!({"publisher_id": "d", "skill_ids": ["sent:one"]}),
             ]
         );
-        assert!(rows(&catalog, now(), |_| None).is_empty());
-        assert!(
-            rows(&document(vec![], vec![]), now(), |skill| Some(
-                skill.id.clone()
-            ))
-            .is_empty()
-        );
+        assert!(rows(&selection, |_| None).is_empty());
+        let empty = document(vec![], vec![]);
+        assert!(selected(&empty, now()).is_empty());
+        assert!(rows(&selected(&empty, now()), |skill| Some(skill.id.clone())).is_empty());
     }
 }

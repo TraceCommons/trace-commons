@@ -240,9 +240,9 @@ extension DaemonData {
         /// Publishers the daemon ranked as recently active from the server
         /// catalog's public repository signals, most active first. Empty
         /// for `github`, from older daemons, and when malformed.
-        public let trending: [SkillsTrendingPublisher]
+        public let activePublishers: [SkillsActivePublisher]
 
-        public init(publishers: [SkillsPublisher] = [], skills: [CatalogSkill] = [], checkedAt: String? = nil, publisherStates: [SkillsPublisherState] = [], partial: Bool = false, source: String? = nil, revision: Int? = nil, issuedAt: String? = nil, expiresAt: String? = nil, totalSkills: Int? = nil, trending: [SkillsTrendingPublisher] = []) {
+        public init(publishers: [SkillsPublisher] = [], skills: [CatalogSkill] = [], checkedAt: String? = nil, publisherStates: [SkillsPublisherState] = [], partial: Bool = false, source: String? = nil, revision: Int? = nil, issuedAt: String? = nil, expiresAt: String? = nil, totalSkills: Int? = nil, activePublishers: [SkillsActivePublisher] = []) {
             self.publishers = publishers
             self.skills = skills
             self.checkedAt = checkedAt
@@ -253,7 +253,7 @@ extension DaemonData {
             self.issuedAt = issuedAt
             self.expiresAt = expiresAt
             self.totalSkills = totalSkills
-            self.trending = trending
+            self.activePublishers = activePublishers
         }
 
         enum CodingKeys: String, CodingKey {
@@ -267,7 +267,7 @@ extension DaemonData {
             case issuedAt = "issued_at"
             case expiresAt = "expires_at"
             case totalSkills = "total_skills"
-            case trending
+            case activePublishers = "active_publishers"
         }
 
         public init(from decoder: Decoder) throws {
@@ -283,13 +283,13 @@ extension DaemonData {
             expiresAt = try values.decodeIfPresent(String.self, forKey: .expiresAt)
             totalSkills = try values.decodeIfPresent(Int.self, forKey: .totalSkills)
             // Decorative data: a malformed list is none and never fails the snapshot.
-            trending = (try? values.decodeIfPresent([SkillsTrendingPublisher].self, forKey: .trending)) ?? []
+            activePublishers = (try? values.decodeIfPresent([SkillsActivePublisher].self, forKey: .activePublishers)) ?? []
         }
     }
 
     /// One recently active publisher and the catalog rows to show for it,
     /// by id. Both ids name rows in the same snapshot.
-    public struct SkillsTrendingPublisher: Codable, Equatable, Sendable {
+    public struct SkillsActivePublisher: Codable, Equatable, Sendable {
         public let publisherID: String
         public let skillIDs: [String]
 

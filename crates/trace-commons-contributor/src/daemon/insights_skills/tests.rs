@@ -1110,6 +1110,11 @@ fn set_catalog_flags(shared: &DaemonShared, revision: u64, server: bool, suggest
 /// key that only this test pins, with an installed copy of the catalog's
 /// non-seeded skill.
 fn with_server_catalog() -> (tempfile::TempDir, DaemonShared) {
+    with_catalog(|_| {})
+}
+
+/// The same, with the fixture document changed by `edit` before signing.
+fn with_catalog(edit: impl FnOnce(&mut Value)) -> (tempfile::TempDir, DaemonShared) {
     use super::server_catalog::tests::{document, key, public, signed};
     let (dir, store) = crate::config::tests_support::temp_store();
     let shared = with_catalog_flags(DaemonShared::load(store).unwrap());
@@ -1118,11 +1123,20 @@ fn with_server_catalog() -> (tempfile::TempDir, DaemonShared) {
     let signer = key();
     *shared.insights_skills.catalog_keys.lock().unwrap() = Some(vec![public(&signer)]);
     let now = Utc::now();
+    let mut value = document(now);
+    edit(&mut value);
+    // A document lists its publishers and its skills in id order.
+    for list in ["publishers", "skills"] {
+        value[list]
+            .as_array_mut()
+            .unwrap()
+            .sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    }
     let document = server_catalog::accept(
         shared.store.dir(),
         trace_commons_protocol::skills_catalog::Environment::Testing,
         &[public(&signer)],
-        &signed(&signer, &document(now)),
+        &signed(&signer, &value),
         now,
     )
     .unwrap();
@@ -1217,7 +1231,7 @@ fn recently_active_publishers_come_from_the_verified_catalog_alone() {
     // acme has stars and a commit in the measured week; obra's activity is
     // unknown, which is not zero and ranks nowhere.
     assert_eq!(
-        first["catalog"]["trending"],
+        first["catalog"]["active_publishers"],
         json!([{"publisher_id": "gh.acme.skills", "skill_ids": ["gh.acme.skills:lint/SKILL.md"]}])
     );
     // Every id names a row and a publisher this same snapshot carries.
@@ -1234,17 +1248,157 @@ fn recently_active_publishers_come_from_the_verified_catalog_alone() {
 
     // Nothing local takes part: with no installed skill and local analysis
     // off, the same document names the same publishers and skills.
-    {
-        let mut runtime = shared.insights_skills.runtime.lock().unwrap();
-        let (at, policy, _) = runtime.inventory.take().unwrap();
-        let empty: Inventory =
-            serde_json::from_value(json!({"skills":[],"partial":false,"coverage":[]})).unwrap();
-        runtime.inventory = Some((at, policy, empty));
-    }
+    set_inventory(&shared, json!([]));
     shared.settings.lock().unwrap().insights_counter_pass = false;
     let second = snapshot(&shared);
     assert!(second["updates"].as_array().unwrap().is_empty());
-    assert_eq!(second["catalog"]["trending"], first["catalog"]["trending"]);
+    assert_eq!(
+        second["catalog"]["active_publishers"],
+        first["catalog"]["active_publishers"]
+    );
+}
+
+/// Replace the installed skills the snapshot reads.
+fn set_inventory(shared: &DaemonShared, skills: Value) {
+    let mut runtime = shared.insights_skills.runtime.lock().unwrap();
+    let (at, policy, _) = runtime.inventory.take().unwrap();
+    let inventory: Inventory =
+        serde_json::from_value(json!({"skills": skills, "partial": false, "coverage": []}))
+            .unwrap();
+    runtime.inventory = Some((at, policy, inventory));
+}
+
+#[test]
+fn the_active_publishers_do_not_depend_on_which_rows_an_install_is_sent() {
+    // A catalog far past the snapshot's 180 KiB of rows. The most active
+    // publisher has few stars, so by stars alone its row is cut; before the
+    // rows of the active publishers were sent first, only an install holding
+    // its skill was sent the row, and so only that install was shown it.
+    let (_dir, shared) = with_catalog(|document| {
+        let issued = document["issued_at"].clone();
+        let template = document["skills"][0].clone();
+        let mut skill = |publisher: &str, repository: &str, path: &str, description: String| {
+            let mut row = template.clone();
+            row["id"] = format!("{publisher}:{path}").into();
+            row["publisher_id"] = publisher.into();
+            row["repository"] = repository.into();
+            row["path"] = path.into();
+            row["description"] = description.into();
+            row["source_url"] = format!(
+                "https://github.com/{repository}/blob/{}/{path}",
+                row["revision"].as_str().unwrap()
+            )
+            .into();
+            document["skills"].as_array_mut().unwrap().push(row);
+        };
+        skill(
+            "gh.small.skills",
+            "small/skills",
+            "tidy/SKILL.md",
+            "Tidies.".into(),
+        );
+        for publisher in 0..60 {
+            for index in 0..6 {
+                skill(
+                    &format!("gh.big{publisher}.skills"),
+                    &format!("big{publisher}/skills"),
+                    &format!("s{index}/SKILL.md"),
+                    "x".repeat(900),
+                );
+            }
+        }
+        let publishers = document["publishers"].as_array_mut().unwrap();
+        publishers.push(json!({"id": "gh.small.skills", "name": "small/skills", "repository": "small/skills",
+            "url": "https://github.com/small/skills", "instructions_url": "https://github.com/small/skills",
+            "source_kind": "list",
+            "signals": {"stars": 10, "commits_7d": 15, "commits_28d": 40, "checked_at": issued}}));
+        for publisher in 0..60 {
+            publishers.push(json!({"id": format!("gh.big{publisher}.skills"), "name": format!("big{publisher}/skills"),
+                "repository": format!("big{publisher}/skills"),
+                "url": format!("https://github.com/big{publisher}/skills"),
+                "instructions_url": format!("https://github.com/big{publisher}/skills"),
+                "source_kind": "list",
+                "signals": {"stars": 10_000 + publisher, "checked_at": issued}}));
+        }
+    });
+    let expected = json!([
+        {"publisher_id": "gh.small.skills", "skill_ids": ["gh.small.skills:tidy/SKILL.md"]},
+        {"publisher_id": "gh.acme.skills", "skill_ids": ["gh.acme.skills:lint/SKILL.md"]},
+    ]);
+    let installed = |repository: &str, path: &str| {
+        json!([{"id":"held","name":"held","description":"Test","agent":"codex","scope":"global",
+                "location":"~/.codex/skills/held/SKILL.md","sha256":"b".repeat(64),
+                "source":{"repository":repository,"path":path,"revision":null}}])
+    };
+    for inventory in [
+        json!([]),
+        installed("small/skills", "tidy/SKILL.md"),
+        installed("big7/skills", "s0/SKILL.md"),
+    ] {
+        set_inventory(&shared, inventory.clone());
+        let value = snapshot(&shared);
+        let catalog = &value["catalog"];
+        assert_eq!(catalog["total_skills"], 363);
+        assert_eq!(
+            catalog["partial"], true,
+            "the fixture must overflow the cap"
+        );
+        let rows = catalog["skills"].as_array().unwrap();
+        assert!(rows.len() < 363);
+        assert_eq!(catalog["active_publishers"], expected, "{inventory}");
+        // Each named skill and publisher is in this same snapshot.
+        for id in [
+            "gh.small.skills:tidy/SKILL.md",
+            "gh.acme.skills:lint/SKILL.md",
+        ] {
+            assert!(rows.iter().any(|row| row["id"] == id), "{id} {inventory}");
+        }
+        for id in ["gh.small.skills", "gh.acme.skills"] {
+            assert!(
+                catalog["publisher_states"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["publisher_id"] == id && row["signals"]["stars"].is_u64()),
+                "{id} {inventory}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_active_fixed_publisher_is_named_by_its_own_row_ids() {
+    let (_dir, shared) = with_catalog(|document| {
+        let issued = document["issued_at"].clone();
+        document["publishers"][1]["signals"] =
+            json!({"stars": 900, "commits_7d": 6, "commits_28d": 20, "checked_at": issued});
+    });
+    let value = snapshot(&shared);
+    let catalog = &value["catalog"];
+    assert_eq!(
+        catalog["active_publishers"],
+        json!([
+            {"publisher_id": "obra", "skill_ids": ["obra:skills/plan/SKILL.md"]},
+            {"publisher_id": "gh.acme.skills", "skill_ids": ["gh.acme.skills:lint/SKILL.md"]},
+        ])
+    );
+    // The id is the one the fixed publisher's row carries in this snapshot,
+    // the row follows and updates already use.
+    let row = catalog["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "obra:skills/plan/SKILL.md")
+        .unwrap();
+    assert_eq!(row["publisher_id"], "obra");
+    assert_eq!(row["repository"], "obra/superpowers");
+    let state = catalog["publisher_states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["publisher_id"] == "obra")
+        .unwrap();
+    assert_eq!(state["signals"]["commits_7d"], 6);
 }
 
 #[test]
@@ -1254,7 +1408,7 @@ fn no_publisher_is_named_without_a_current_verified_catalog() {
     set_catalog_flags(&shared, 2, false, false);
     let off = snapshot(&shared);
     assert_eq!(off["catalog"]["source"], "github");
-    assert!(off["catalog"]["trending"].is_null());
+    assert!(off["catalog"]["active_publishers"].is_null());
 
     // No pinned key (the shipped state): the cached document does not load.
     let (_dir, shared) = with_server_catalog();
@@ -1266,11 +1420,11 @@ fn no_publisher_is_named_without_a_current_verified_catalog() {
     }
     let unpinned = snapshot(&shared);
     assert_eq!(unpinned["catalog"]["source"], "github");
-    assert!(unpinned["catalog"]["trending"].is_null());
+    assert!(unpinned["catalog"]["active_publishers"].is_null());
 
     // A document held past its expiry is no longer the catalog.
     let (_dir, shared) = with_server_catalog();
-    assert!(snapshot(&shared)["catalog"]["trending"].is_array());
+    assert!(snapshot(&shared)["catalog"]["active_publishers"].is_array());
     {
         let mut runtime = shared.insights_skills.runtime.lock().unwrap();
         let document = runtime.server.as_mut().unwrap();
@@ -1278,7 +1432,7 @@ fn no_publisher_is_named_without_a_current_verified_catalog() {
     }
     let expired = snapshot(&shared);
     assert_eq!(expired["catalog"]["source"], "github");
-    assert!(expired["catalog"]["trending"].is_null());
+    assert!(expired["catalog"]["active_publishers"].is_null());
 }
 
 #[test]

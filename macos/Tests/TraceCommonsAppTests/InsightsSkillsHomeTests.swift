@@ -285,14 +285,14 @@ final class InsightsSkillsHomeTests: XCTestCase {
     /// catalog skills, all named by the daemon as recently active.
     private func serverSnapshot(publishers count: Int = 2, skills: Int = 2, source: String? = "server",
                                 signals: (Int) -> DaemonData.SkillsRepositorySignals? = { .init(stars: 1_000 * ($0 + 1), commits7d: 5 + $0, commits28d: 20) },
-                                named: [DaemonData.SkillsTrendingPublisher]? = nil) -> DaemonData.SkillsSnapshot {
+                                named: [DaemonData.SkillsActivePublisher]? = nil) -> DaemonData.SkillsSnapshot {
         let publishers = (0 ..< count).map { DaemonData.SkillsPublisher(id: "gh.p\($0)", name: "owner\($0)/skills", repository: "owner\($0)/skills", skillsRoot: "", instructionsURL: "https://example.com", url: "https://github.com/owner\($0)/skills", sourceKind: "list") }
         let catalogSkills = publishers.flatMap { publisher in
             (0 ..< skills).map { DaemonData.CatalogSkill(id: "\(publisher.id):s\($0)/SKILL.md", publisherID: publisher.id, name: "s\($0)", description: "", repository: publisher.repository, path: "s\($0)/SKILL.md", revision: "main", sha256: String(repeating: "c", count: 64), sourceURL: "https://example.com/source", instructionsURL: "https://example.com") }
         }
         let states = publishers.enumerated().map { DaemonData.SkillsPublisherState(publisherID: $0.element.id, status: "current", checkedAt: "2026-11-15T11:00:00Z", signals: signals($0.offset)) }
-        let trending = named ?? publishers.map { publisher in .init(publisherID: publisher.id, skillIDs: catalogSkills.filter { $0.publisherID == publisher.id }.map(\.id)) }
-        return .init(enabled: true, catalog: .init(publishers: publishers, skills: catalogSkills, publisherStates: states, source: source, trending: trending))
+        let active = named ?? publishers.map { publisher in .init(publisherID: publisher.id, skillIDs: catalogSkills.filter { $0.publisherID == publisher.id }.map(\.id)) }
+        return .init(enabled: true, catalog: .init(publishers: publishers, skills: catalogSkills, publisherStates: states, source: source, activePublishers: active))
     }
 
     func testRecentlyActivePublishersAreDrawnOnlyFromAVerifiedServerCatalog() {
@@ -321,7 +321,7 @@ final class InsightsSkillsHomeTests: XCTestCase {
         XCTAssertTrue(project(serverSnapshot { _ in .init(stars: -1, commits7d: 2, commits28d: 2) }).active.isEmpty)
         // Ids that name nothing here, or another publisher's skill, are dropped;
         // a publisher left with no skill is not drawn.
-        let named: [DaemonData.SkillsTrendingPublisher] = [
+        let named: [DaemonData.SkillsActivePublisher] = [
             .init(publisherID: "gh.p0", skillIDs: ["missing", "gh.p1:s0/SKILL.md", "gh.p0:s1/SKILL.md", "gh.p0:s1/SKILL.md"]),
             .init(publisherID: "gh.unknown", skillIDs: ["gh.p0:s0/SKILL.md"]),
             .init(publisherID: "gh.p1", skillIDs: ["missing"]),

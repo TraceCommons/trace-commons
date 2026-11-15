@@ -222,7 +222,7 @@ enum InsightsSkillsHome {
     private static func activePublishers(_ catalog: DaemonData.SkillsCatalog) -> [Active] {
         guard catalog.source == "server" else { return [] }
         var seen = Set<String>()
-        let found = catalog.trending.compactMap { entry -> Active? in
+        let found = catalog.activePublishers.compactMap { entry -> Active? in
             guard !seen.contains(entry.publisherID),
                   let publisher = catalog.publishers.first(where: { $0.id == entry.publisherID }),
                   let signals = catalog.publisherStates.first(where: { $0.publisherID == entry.publisherID })?.signals,
