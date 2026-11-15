@@ -17385,3 +17385,6 @@ async fn large_envelope_pipeline_receipt_probe() {
     );
     cleanup_pg_trace_tenant(&backend, "tenant-a").await;
 }
+
+#[path = "pipeline_review_recheck_http_tests.rs"]
+mod pipeline_review_recheck_http_tests;

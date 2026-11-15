@@ -4694,9 +4694,11 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 
 // Declared after every `macro_rules!` above, so the child modules see them.
 mod pg_store;
+mod review_recheck;
 mod service;
 mod types;
 
+pub use self::review_recheck::*;
 pub use self::types::*;
 
 #[cfg(test)]

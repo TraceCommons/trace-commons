@@ -657,6 +657,7 @@ pub struct SubmissionReceiptPrivacy {
 /// escalated (critique 1 (2), decision P9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredReviewAssessment {
+    pub recheck: Option<PipelineReviewRecheck>,
     pub assessment: HumanReviewAssessment,
     pub recorded_at: DateTime<Utc>,
 }
@@ -1131,6 +1132,8 @@ pub enum PipelineAttemptArtifact {
     ScoreNeighbors,
     /// The Review-start privacy pass's output (`record_privacy_pass`).
     PrivacyPass,
+    /// A separately retained corrected privacy version, under a reviewer claim.
+    ReviewRecheck,
 }
 
 impl PipelineAttemptArtifact {
@@ -1140,6 +1143,7 @@ impl PipelineAttemptArtifact {
             Self::IndexCommand => "index-command",
             Self::ScoreNeighbors => "score-neighbors",
             Self::PrivacyPass => "privacy-pass",
+            Self::ReviewRecheck => "review-recheck",
         }
     }
 
@@ -1149,13 +1153,16 @@ impl PipelineAttemptArtifact {
             "index-command" => Some(Self::IndexCommand),
             "score-neighbors" => Some(Self::ScoreNeighbors),
             "privacy-pass" => Some(Self::PrivacyPass),
+            "review-recheck" => Some(Self::ReviewRecheck),
             _ => None,
         }
     }
 
     pub(super) fn store_kind(&self) -> TraceArtifactKind {
         match self {
-            Self::Approved | Self::PrivacyPass => TraceArtifactKind::ContributionEnvelope,
+            Self::Approved | Self::PrivacyPass | Self::ReviewRecheck => {
+                TraceArtifactKind::ContributionEnvelope
+            }
             Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
         }
     }

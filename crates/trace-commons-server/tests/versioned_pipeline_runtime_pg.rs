@@ -10166,7 +10166,9 @@ async fn stage_and_publish_attempt_artifact(
     let object_id = pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
     let kind = if matches!(
         artifact,
-        PipelineAttemptArtifact::Approved | PipelineAttemptArtifact::PrivacyPass
+        PipelineAttemptArtifact::Approved
+            | PipelineAttemptArtifact::PrivacyPass
+            | PipelineAttemptArtifact::ReviewRecheck
     ) {
         TraceArtifactKind::ContributionEnvelope
     } else {
@@ -49757,3 +49759,6 @@ async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
         .expect("the run");
     assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
 }
+
+#[path = "versioned_pipeline/review_recheck_cases.rs"]
+mod review_recheck_cases;

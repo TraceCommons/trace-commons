@@ -2992,7 +2992,8 @@ pub fn privacy_filter_adapter_from_env() -> Result<
 ///
 /// Defaults to `AllEvents`: an operator who has not made this decision keeps
 /// today's behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum PiiClassifyPolicy {
     /// Examine every event. Today's behaviour.
     #[default]
@@ -5494,10 +5495,63 @@ const STRUCTURED_PAYLOAD_MAX_FIELD_BYTES: usize = 32_000;
 const STRUCTURED_PAYLOAD_MAX_NODES: usize = 4_000;
 const STRUCTURED_PAYLOAD_MAX_DEPTH: usize = 24;
 
+#[derive(Clone, Copy)]
+struct ClassifierCoverageLimits {
+    aggregate_bytes: usize,
+    field_bytes: usize,
+    nodes: usize,
+    depth: usize,
+}
+
+impl Default for ClassifierCoverageLimits {
+    fn default() -> Self {
+        Self {
+            aggregate_bytes: STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES,
+            field_bytes: STRUCTURED_PAYLOAD_MAX_FIELD_BYTES,
+            nodes: STRUCTURED_PAYLOAD_MAX_NODES,
+            depth: STRUCTURED_PAYLOAD_MAX_DEPTH,
+        }
+    }
+}
+
+// Fixed operator-review profile, not runtime/user-configurable. The largest
+// measured held traces are under 19 MiB. 32 MiB covers their total classifier
+// input with headroom, below the 256 MiB source cap and residual node bound.
+// The service additionally owns the single permit and deadline; adapters keep
+// their existing window, input and request limits. The depth stays unchanged.
+const REVIEW_CLASSIFIER_MAX_BYTES: usize = 32 * 1024 * 1024;
+const REVIEW_CLASSIFIER_MAX_NODES: usize = REVIEW_CLASSIFIER_MAX_BYTES / 8;
+const _: () = assert!(REVIEW_CLASSIFIER_MAX_BYTES <= MAX_TRACE_ENVELOPE_BYTES);
+const _: () = assert!(REVIEW_CLASSIFIER_MAX_NODES <= RESIDUAL_SCAN_MAX_NODES);
+
 #[derive(Default)]
 struct StructuredPayloadBudget {
     aggregate_bytes: usize,
     nodes: usize,
+    limits: ClassifierCoverageLimits,
+}
+
+impl StructuredPayloadBudget {
+    fn review() -> Self {
+        Self {
+            limits: ClassifierCoverageLimits {
+                aggregate_bytes: REVIEW_CLASSIFIER_MAX_BYTES,
+                field_bytes: REVIEW_CLASSIFIER_MAX_BYTES,
+                nodes: REVIEW_CLASSIFIER_MAX_NODES,
+                depth: STRUCTURED_PAYLOAD_MAX_DEPTH,
+            },
+            ..Self::default()
+        }
+    }
+
+    fn charge_field(&mut self, len: usize) -> bool {
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > self.limits.nodes || len > self.limits.field_bytes {
+            return false;
+        }
+        self.aggregate_bytes = self.aggregate_bytes.saturating_add(len);
+        self.aggregate_bytes <= self.limits.aggregate_bytes
+    }
 }
 
 struct MetadataRedactionContext<'a> {
@@ -5635,27 +5689,27 @@ fn classify_structured_payload_node<'a>(
     depth: usize,
     budget: &'a mut StructuredPayloadBudget,
     report: &'a mut RedactionReport,
+    review_recheck: bool,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'a>,
 > {
     Box::pin(async move {
-        if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+        if depth > budget.limits.depth {
             return Ok(false);
         }
         match value {
             Value::String(text) => {
-                budget.nodes += 1;
-                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
-                    return Ok(false);
-                }
-                if text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
-                    return Ok(false);
-                }
-                budget.aggregate_bytes += text.len();
-                if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                if !budget.charge_field(text.len()) {
                     return Ok(false);
                 }
                 if let Some(redaction) = adapter.redact_text(text).await? {
+                    if review_recheck
+                        && (redaction.summary.decoded_mismatch
+                            || redaction.report.coverage_incomplete)
+                    {
+                        report.coverage_incomplete = true;
+                        return Ok(false);
+                    }
                     report.merge(redaction.report);
                     *text = redaction.redacted_text;
                 }
@@ -5663,8 +5717,15 @@ fn classify_structured_payload_node<'a>(
             }
             Value::Array(items) => {
                 for item in items.iter_mut() {
-                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
-                        .await?
+                    if !classify_structured_payload_node(
+                        adapter,
+                        item,
+                        depth + 1,
+                        budget,
+                        report,
+                        review_recheck,
+                    )
+                    .await?
                     {
                         return Ok(false);
                     }
@@ -5673,18 +5734,24 @@ fn classify_structured_payload_node<'a>(
             }
             Value::Object(entries) => {
                 for (key, item) in entries.iter_mut() {
-                    budget.nodes += 1;
-                    if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
-                        return Ok(false);
-                    }
-                    if key.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
-                        return Ok(false);
-                    }
-                    budget.aggregate_bytes += key.len();
-                    if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                    if !budget.charge_field(key.len()) {
                         return Ok(false);
                     }
                     if let Some(redaction) = adapter.redact_text(key).await? {
+                        if review_recheck {
+                            let misaligned = redaction.summary.decoded_mismatch
+                                || redaction.report.coverage_incomplete;
+                            let finding = redaction.redacted_text != *key
+                                || !redaction.report.counts.is_empty()
+                                || !redaction.report.pii_labels_present.is_empty()
+                                || redaction.report.blocked_secret_detected
+                                || redaction.report.key_finding_detected;
+                            report.coverage_incomplete |= misaligned;
+                            report.key_finding_detected |= finding;
+                            if misaligned || finding {
+                                return Ok(false);
+                            }
+                        }
                         let has_finding = !redaction.report.counts.is_empty()
                             || !redaction.report.pii_labels_present.is_empty()
                             || redaction.report.blocked_secret_detected;
@@ -5692,8 +5759,15 @@ fn classify_structured_payload_node<'a>(
                             report.key_finding_detected = true;
                         }
                     }
-                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
-                        .await?
+                    if !classify_structured_payload_node(
+                        adapter,
+                        item,
+                        depth + 1,
+                        budget,
+                        report,
+                        review_recheck,
+                    )
+                    .await?
                     {
                         return Ok(false);
                     }
@@ -5798,6 +5872,364 @@ pub async fn rescrub_envelope_prose_pii_with(
     envelope: &mut TraceContributionEnvelope,
     policy: PiiClassifyPolicy,
 ) -> Result<Vec<ResidualRiskCondition>, TraceContributionError> {
+    rescrub_envelope_prose_pii_impl(adapter, envelope, policy, false)
+        .await
+        .map(|evidence| evidence.basis)
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+struct ReviewSideProse<'a> {
+    adapter: &'a dyn PrivacyFilterAdapter,
+    budget: StructuredPayloadBudget,
+    report: RedactionReport,
+    summary: Option<SafePrivacyFilterSummary>,
+    sweeper: DeterministicTraceRedactor,
+    state: RedactionState,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+impl<'a> ReviewSideProse<'a> {
+    fn new(adapter: &'a dyn PrivacyFilterAdapter, budget: StructuredPayloadBudget) -> Self {
+        Self {
+            adapter,
+            budget,
+            report: RedactionReport::default(),
+            summary: None,
+            sweeper: DeterministicTraceRedactor::bare(),
+            state: RedactionState::default(),
+        }
+    }
+
+    fn charge(&mut self, text: &str) -> bool {
+        let covered = self.budget.charge_field(text.len());
+        if !covered {
+            self.report.coverage_incomplete = true;
+        }
+        covered
+    }
+
+    async fn redact(&mut self, text: &mut String) -> Result<bool, TraceContributionError> {
+        if text.trim().is_empty() {
+            return Ok(true);
+        }
+        let (local, local_report) = self.sweeper.redact_text_with_state(text, &mut self.state);
+        *text = local;
+        self.report.merge(local_report);
+        if !self.charge(text) {
+            return Ok(false);
+        }
+        if let Some(redaction) = self.adapter.redact_text(text).await? {
+            if redaction.summary.decoded_mismatch || redaction.report.coverage_incomplete {
+                self.report.coverage_incomplete = true;
+                return Ok(false);
+            }
+            merge_privacy_filter_summary(&mut self.summary, &redaction.summary);
+            self.report.merge(redaction.report);
+            *text = redaction.redacted_text;
+        }
+        // A classifier may not recognize patterned secrets, and it may emit
+        // one. This is the same complementary sweep used on event prose.
+        let (redacted, report) = self.sweeper.redact_text_with_state(text, &mut self.state);
+        *text = redacted;
+        self.report.merge(report);
+        Ok(!self.report.coverage_incomplete)
+    }
+
+    async fn inspect_key(&mut self, key: &str) -> Result<bool, TraceContributionError> {
+        if !self.charge(key) {
+            return Ok(false);
+        }
+        let credentials = self.sweeper.detect_correction_credentials(key);
+        let (_, observations) = self.sweeper.redact_text(key);
+        if credentials.blocked_secret_detected
+            || credentials.key_finding_detected
+            || observations
+                .counts
+                .keys()
+                .any(|label| label_bears_severity(label))
+            || observations
+                .pii_labels_present
+                .iter()
+                .any(|label| label_bears_severity(label))
+        {
+            self.report.key_finding_detected = true;
+            return Ok(false);
+        }
+        let mut finding = false;
+        if let Some(redaction) = self.adapter.redact_text(key).await? {
+            finding |= redaction.redacted_text != key
+                || !redaction.report.counts.is_empty()
+                || !redaction.report.pii_labels_present.is_empty()
+                || redaction.report.blocked_secret_detected
+                || redaction.report.key_finding_detected
+                || redaction.summary.decoded_mismatch;
+            self.report.coverage_incomplete |=
+                redaction.report.coverage_incomplete || redaction.summary.decoded_mismatch;
+        }
+        self.report.key_finding_detected |= finding;
+        Ok(!self.report.coverage_incomplete && !finding)
+    }
+
+    fn redact_value<'b>(
+        &'b mut self,
+        value: &'b mut Value,
+        depth: usize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'b>,
+    > {
+        Box::pin(async move {
+            self.budget.nodes = self.budget.nodes.saturating_add(1);
+            if depth > self.budget.limits.depth || self.budget.nodes > self.budget.limits.nodes {
+                self.report.coverage_incomplete = true;
+                return Ok(false);
+            }
+            let mut covered = true;
+            match value {
+                Value::String(text) => covered &= self.redact(text).await?,
+                Value::Array(items) => {
+                    for item in items {
+                        covered &= self.redact_value(item, depth + 1).await?;
+                    }
+                }
+                Value::Object(entries) => {
+                    for (key, item) in entries {
+                        covered &= self.inspect_key(key).await?;
+                        covered &= self.redact_value(item, depth + 1).await?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(covered)
+        })
+    }
+
+    async fn inspect_correction(
+        &mut self,
+        text: Option<&str>,
+    ) -> Result<ReviewCorrectionStatus, TraceContributionError> {
+        let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(ReviewCorrectionStatus::Absent);
+        };
+        if !self.charge(text) {
+            return Ok(ReviewCorrectionStatus::Unresolved);
+        }
+        let credentials = self.sweeper.detect_correction_credentials(text);
+        let (_, observations) = self.sweeper.redact_text(text);
+        let mut unresolved = credentials.blocked_secret_detected
+            || credentials.key_finding_detected
+            || credentials.coverage_incomplete
+            || observations
+                .counts
+                .keys()
+                .any(|label| label_bears_severity(label))
+            || observations
+                .pii_labels_present
+                .iter()
+                .any(|label| label_bears_severity(label));
+        if unresolved {
+            self.report.coverage_incomplete = true;
+            return Ok(ReviewCorrectionStatus::Unresolved);
+        }
+        if let Some(redaction) = self.adapter.redact_text(text).await? {
+            // Detection only. Neither returned text nor its "removed" counts
+            // may enter the corrected artifact: S5 preserves this field.
+            unresolved |= redaction.redacted_text != text
+                || !redaction.report.counts.is_empty()
+                || !redaction.report.pii_labels_present.is_empty()
+                || redaction.report.blocked_secret_detected
+                || redaction.report.key_finding_detected
+                || redaction.report.coverage_incomplete
+                || redaction.summary.decoded_mismatch;
+        }
+        if unresolved {
+            self.report.coverage_incomplete = true;
+            Ok(ReviewCorrectionStatus::Unresolved)
+        } else {
+            Ok(ReviewCorrectionStatus::CheckedUnchanged)
+        }
+    }
+}
+
+/// The review-only treatment of the contributor's immutable correction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewCorrectionStatus {
+    Absent,
+    CheckedUnchanged,
+    Unresolved,
+}
+
+/// Trusted output of a fresh review privacy check, never an envelope claim.
+///
+/// Coverage is under `policy`: `prose-only` retains its documented tool-event
+/// classifier gap. A complete scan is not approval; callers must also inspect
+/// risk, unresolved correction status and exact corrected-version identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewPrivacyRecheckEvidence {
+    pub basis: Vec<ResidualRiskCondition>,
+    pub coverage_complete: bool,
+    pub correction_status: ReviewCorrectionStatus,
+    pub residual_scan_complete: bool,
+    pub useful_classifier_result: bool,
+    pub policy: PiiClassifyPolicy,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn review_original_keys_have_findings(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> Result<bool, ResidualScanError> {
+    fn walk(
+        redactor: &DeterministicTraceRedactor,
+        value: &Value,
+        depth: usize,
+        nodes: &mut usize,
+    ) -> Result<bool, ResidualScanError> {
+        if depth > RESIDUAL_SCAN_MAX_DEPTH {
+            return Err(ResidualScanError::BudgetExceeded);
+        }
+        match value {
+            Value::String(_) => {
+                *nodes = nodes.saturating_add(1);
+                if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                    return Err(ResidualScanError::BudgetExceeded);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    if walk(redactor, item, depth + 1, nodes)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            Value::Object(entries) => {
+                for (key, item) in entries {
+                    *nodes = nodes.saturating_add(1);
+                    if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                        return Err(ResidualScanError::BudgetExceeded);
+                    }
+                    let (_, report) = redactor.redact_text(key);
+                    if report.blocked_secret_detected
+                        || report.key_finding_detected
+                        || report.coverage_incomplete
+                        || report
+                            .counts
+                            .keys()
+                            .any(|label| label_bears_severity(label))
+                        || report
+                            .pii_labels_present
+                            .iter()
+                            .any(|label| label_bears_severity(label))
+                    {
+                        return Ok(true);
+                    }
+                    if walk(redactor, item, depth + 1, nodes)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+    let value =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    walk(redactor, &value, 0, &mut 0)
+}
+
+/// Recheck a held trace for a separately stored reviewed version.
+///
+/// First scrubs mutable fields with the local deterministic detector, then
+/// extends the ordinary prose pass to all deterministic side-channel prose,
+/// replay notes and hindsight. The correction is classified on a copy only: its exact bytes are preserved, and
+/// any detected finding or suggested rewrite keeps it unresolved and High.
+/// One fixed review budget spans event prose, payloads, side prose and the
+/// correction: 32 MiB total/field, 4,194,304 nodes and depth 24. There is no
+/// per-event reset. Adapter window/input limits still apply independently.
+/// Original High is never reset. All mutations occur on a private clone and
+/// are committed to `envelope` only after every awaited call succeeds.
+#[cfg(feature = "near-ai-privacy-filter")]
+pub async fn recheck_envelope_for_review_with(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
+) -> Result<ReviewPrivacyRecheckEvidence, TraceContributionError> {
+    let mut candidate = envelope.clone();
+    // Inspect immutable object keys before the ordinary deterministic pass
+    // could rewrite metadata-map keys. A key finding is held locally, never
+    // handed to an external classifier. This covers nested event payloads,
+    // assertions and every metadata map without changing the legacy helper.
+    let key_scan = residual_secret_labels(&DeterministicTraceRedactor::bare(), &candidate);
+    let risk_keys =
+        review_original_keys_have_findings(&DeterministicTraceRedactor::bare(), &candidate);
+    let key_hold = match (&key_scan, &risk_keys) {
+        (Err(_), _) | (_, Err(_)) => Some(ResidualRiskCondition::ResidualScanUnavailable),
+        (Ok(locations), Ok(risk_key))
+            if *risk_key || locations.keys().any(|location| location.ends_with("#key")) =>
+        {
+            Some(ResidualRiskCondition::KeyFinding)
+        }
+        _ => None,
+    };
+    if let Some(condition) = key_hold {
+        candidate.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        let correction_status = if candidate
+            .outcome
+            .human_correction
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            ReviewCorrectionStatus::Unresolved
+        } else {
+            ReviewCorrectionStatus::Absent
+        };
+        let evidence = ReviewPrivacyRecheckEvidence {
+            basis: vec![condition],
+            coverage_complete: false,
+            correction_status,
+            residual_scan_complete: key_scan.is_ok() && risk_keys.is_ok(),
+            useful_classifier_result: false,
+            policy,
+        };
+        *envelope = candidate;
+        return Ok(evidence);
+    }
+    // Prevent fresh patterned credentials in mutable fields from reaching
+    // an external classifier. Corrections remain immutable and are checked
+    // separately without sending detected credentials to that classifier.
+    // Preserve every dynamic metadata key, including harmless paths. Taking
+    // the maps out avoids lossy restoration after a legacy key rewrite or
+    // collision. ReviewSideProse locally scrubs their values before sending.
+    let flags = std::mem::take(&mut candidate.ironclaw.feature_flags);
+    let manifests = std::mem::take(&mut candidate.replay.tool_manifest_hashes);
+    let deterministic_basis =
+        rescrub_trace_envelope_with(&DeterministicTraceRedactor::bare(), &mut candidate);
+    candidate.ironclaw.feature_flags = flags;
+    candidate.replay.tool_manifest_hashes = manifests;
+    let mut evidence =
+        rescrub_envelope_prose_pii_impl(adapter, &mut candidate, policy, true).await?;
+    for condition in deterministic_basis {
+        // Fresh complete evidence may resolve a pre-classifier survivor or
+        // scan failure. Retain removal annotations, not stale forcing holds.
+        if (!condition.forces_high()
+            || !evidence.coverage_complete
+            || !evidence.residual_scan_complete)
+            && !evidence.basis.contains(&condition)
+        {
+            evidence.basis.push(condition);
+        }
+    }
+    *envelope = candidate;
+    Ok(evidence)
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+async fn rescrub_envelope_prose_pii_impl(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
+    review_recheck: bool,
+) -> Result<ReviewPrivacyRecheckEvidence, TraceContributionError> {
     // Same concordance floor as the sync server re-scrub: under-reported
     // consent must not survive into residual_risk / status decisions.
     reconcile_consent_declarations(envelope);
@@ -5815,6 +6247,12 @@ pub async fn rescrub_envelope_prose_pii_with(
     let mut examined_events: u32 = 0;
     let mut skipped_events: u32 = 0;
 
+    let mut classifier_budget = if review_recheck {
+        StructuredPayloadBudget::review()
+    } else {
+        StructuredPayloadBudget::default()
+    };
+
     for (index, event) in envelope.events.iter().enumerate() {
         if !policy_examines_event(policy, event.event_type) {
             skipped_events += 1;
@@ -5823,8 +6261,20 @@ pub async fn rescrub_envelope_prose_pii_with(
         let Some(content) = event.redacted_content.as_deref() else {
             continue;
         };
+        if review_recheck && !classifier_budget.charge_field(content.len()) {
+            report.coverage_incomplete = true;
+            structured_complete = false;
+            continue;
+        }
         examined_events += 1;
         if let Some(redaction) = adapter.redact_text(content).await? {
+            if review_recheck
+                && (redaction.summary.decoded_mismatch || redaction.report.coverage_incomplete)
+            {
+                report.coverage_incomplete = true;
+                structured_complete = false;
+                continue;
+            }
             merge_privacy_filter_summary(&mut summary, &redaction.summary);
             report.merge(redaction.report);
             // The classifier is trained on prose PII, not credential formats,
@@ -5854,7 +6304,6 @@ pub async fn rescrub_envelope_prose_pii_with(
     // so a mid-traversal adapter error (propagated via `?`) leaves the real
     // envelope untouched, matching the atomicity of the prose passes above.
     {
-        let mut budget = StructuredPayloadBudget::default();
         for (index, event) in envelope.events.iter().enumerate() {
             if !policy_examines_event(policy, event.event_type) {
                 continue;
@@ -5863,15 +6312,110 @@ pub async fn rescrub_envelope_prose_pii_with(
                 continue;
             }
             let mut clone = event.structured_payload.clone();
-            let covered =
-                classify_structured_payload_node(adapter, &mut clone, 0, &mut budget, &mut report)
-                    .await?;
+            let covered = classify_structured_payload_node(
+                adapter,
+                &mut clone,
+                0,
+                &mut classifier_budget,
+                &mut report,
+                review_recheck,
+            )
+            .await?;
             structured_updates.push((index, clone));
             if !covered {
                 structured_complete = false;
                 break;
             }
         }
+    }
+
+    let mut correction_status = ReviewCorrectionStatus::Absent;
+    let mut review_coverage_complete = true;
+    if review_recheck {
+        let mut side = ReviewSideProse::new(adapter, classifier_budget);
+        for (key, value) in &mut envelope.ironclaw.feature_flags {
+            review_coverage_complete &= side.inspect_key(key).await?;
+            review_coverage_complete &= side.redact(value).await?;
+        }
+        if let Some(model) = envelope.ironclaw.model_name.as_mut() {
+            review_coverage_complete &= side.redact(model).await?;
+        }
+        if let Some(conversation) = envelope.conversation_id.as_mut() {
+            review_coverage_complete &= side.redact(conversation).await?;
+        }
+        for explanation in &mut envelope.value.explanation {
+            review_coverage_complete &= side.redact(explanation).await?;
+        }
+        for event in &mut envelope.events {
+            if let Some(tool) = event.tool_name.as_mut() {
+                review_coverage_complete &= side.redact(tool).await?;
+            }
+            for failure in &mut event.failure_modes {
+                if let TraceFailureMode::Other(detail) = failure {
+                    review_coverage_complete &= side.redact(detail).await?;
+                }
+            }
+        }
+        for taxonomy in &mut envelope.outcome.error_taxonomy {
+            review_coverage_complete &= side.redact(taxonomy).await?;
+        }
+        for failure in &mut envelope.outcome.failure_modes {
+            if let TraceFailureMode::Other(detail) = failure {
+                review_coverage_complete &= side.redact(detail).await?;
+            }
+        }
+        for tool in &mut envelope.replay.required_tools {
+            review_coverage_complete &= side.redact(tool).await?;
+        }
+        for note in &mut envelope.replay.replay_notes {
+            review_coverage_complete &= side.redact(note).await?;
+        }
+        for (key, value) in &mut envelope.replay.tool_manifest_hashes {
+            review_coverage_complete &= side.inspect_key(key).await?;
+            review_coverage_complete &= side.redact(value).await?;
+        }
+        for assertion in &mut envelope.replay.expected_assertions {
+            review_coverage_complete &= side.redact_value(assertion, 0).await?;
+        }
+        if let Some(embedding) = envelope.embedding_analysis.as_mut() {
+            for tag in &mut embedding.coverage_tags {
+                review_coverage_complete &= side.redact(tag).await?;
+            }
+        }
+        for category in &mut envelope.trace_card.tool_categories {
+            review_coverage_complete &= side.redact(category).await?;
+        }
+        for limitation in &mut envelope.value_card.limitations {
+            review_coverage_complete &= side.redact(limitation).await?;
+        }
+        for explanation in &mut envelope.value_card.user_visible_explanation {
+            review_coverage_complete &= side.redact(explanation).await?;
+        }
+        if let Some(hindsight) = envelope.hindsight.as_mut() {
+            if let Some(summary) = hindsight.original_goal_summary.as_mut() {
+                review_coverage_complete &= side.redact(summary).await?;
+            }
+            for subgoal in &mut hindsight.achieved_subgoals {
+                review_coverage_complete &= side.redact(subgoal).await?;
+            }
+            if let Some(TraceFailureMode::Other(detail)) = hindsight.failure_type.as_mut() {
+                review_coverage_complete &= side.redact(detail).await?;
+            }
+        }
+        if let Some(process) = envelope.process_evaluation.as_mut() {
+            if let Some(name) = process.evaluator_name.as_mut() {
+                review_coverage_complete &= side.redact(name).await?;
+            }
+        }
+        correction_status = side
+            .inspect_correction(envelope.outcome.human_correction.as_deref())
+            .await?;
+        review_coverage_complete &= correction_status != ReviewCorrectionStatus::Unresolved
+            && !side.report.coverage_incomplete;
+        if let Some(side_summary) = side.summary {
+            merge_privacy_filter_summary(&mut summary, &side_summary);
+        }
+        report.merge(side.report);
     }
 
     // Second pass: no awaits below this line, so the updates collected
@@ -5948,13 +6492,31 @@ pub async fn rescrub_envelope_prose_pii_with(
         }
     });
 
+    let residual_scan_complete = residual.is_ok();
+    let coverage_complete = residual_scan_complete
+        && structured_complete
+        && if review_recheck {
+            review_coverage_complete && !report.coverage_incomplete && !report.key_finding_detected
+        } else {
+            !uncovered_prose_present(envelope)
+        };
     let prior_risk = envelope.privacy.residual_pii_risk;
     let (resolved_risk, basis) = match residual {
         Ok(residual_findings) => {
-            log_residual_secret_locations(&residual_findings);
+            // Legacy location logs can contain contributor-selected keys.
+            // The review path returns fixed basis labels to its caller and
+            // never logs raw residual locations.
+            if !review_recheck {
+                log_residual_secret_locations(&residual_findings);
+            }
             let backstop_pass_risk = residual_risk(&envelope.consent, &report);
+            let residual_findings = if review_recheck {
+                review_severity_residuals(residual_findings)
+            } else {
+                residual_findings
+            };
             let assessment = PostScrubAssessment {
-                complete_coverage: structured_complete && !uncovered_prose_present(envelope),
+                complete_coverage: coverage_complete,
                 useful_classifier_result,
                 findings: report.clone(),
                 residual_findings,
@@ -6006,7 +6568,14 @@ pub async fn rescrub_envelope_prose_pii_with(
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
-    Ok(basis)
+    Ok(ReviewPrivacyRecheckEvidence {
+        basis,
+        coverage_complete,
+        correction_status,
+        residual_scan_complete,
+        useful_classifier_result,
+        policy,
+    })
 }
 
 /// Redact one owned string in place, folding its report into `report`.
@@ -6329,18 +6898,18 @@ fn residual_envelope_scan(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
 ) -> Result<RedactionReport, ResidualScanError> {
-    let mut report = RedactionReport::default();
     let serialized =
         serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    residual_json_scan(redactor, &serialized)
+}
+
+fn residual_json_scan(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+) -> Result<RedactionReport, ResidualScanError> {
+    let mut report = RedactionReport::default();
     let mut nodes = 0usize;
-    scan_json_leaves(
-        redactor,
-        &serialized,
-        &mut report,
-        0,
-        &mut nodes,
-        "envelope",
-    )?;
+    scan_json_leaves(redactor, value, &mut report, 0, &mut nodes, "envelope")?;
     Ok(report)
 }
 
@@ -6459,7 +7028,27 @@ pub fn residual_secret_labels(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
 ) -> Result<BTreeMap<String, u32>, ResidualScanError> {
-    let report = residual_envelope_scan(redactor, envelope)?;
+    let value =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    residual_secret_labels_json(redactor, &value)
+}
+
+/// Detection-only residual secret scan of the exact JSON representation.
+///
+/// Uses the same per-leaf detector, depth and node bounds as the typed
+/// envelope scan, including fields a typed deserializer would discard.
+/// This does not validate an envelope, run a prose-PII classifier, mutate
+/// content, or establish approval eligibility. An empty result only means
+/// this detector found no patterned secret within a complete bounded scan.
+///
+/// Returned location labels can include contributor-controlled object keys.
+/// Treat them as private: hash or otherwise protect labels before logging
+/// or displaying them to operators. Never log raw matched content.
+pub fn residual_secret_labels_json(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+) -> Result<BTreeMap<String, u32>, ResidualScanError> {
+    let report = residual_json_scan(redactor, value)?;
     Ok(report
         .counts
         .into_iter()
@@ -6532,6 +7121,21 @@ fn resolve_post_scrub_risk(
     } else {
         max_residual_risk(prior_risk, derived_risk)
     }
+}
+
+/// For the review-only downgrade decision, ignore exactly the detector
+/// observations the established severity policy says do not bear risk.
+/// A preserved S5 correction can legitimately contain a path; its presence
+/// must not undo otherwise complete, useful fresh classifier evidence.
+/// Unknown and namespaced labels remain conservative, and flags are never
+/// cleared. This is not used by the ordinary scrub entry point.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn review_severity_residuals(mut report: RedactionReport) -> RedactionReport {
+    report.counts.retain(|label, _| label_bears_severity(label));
+    report
+        .pii_labels_present
+        .retain(|label| label_bears_severity(label));
+    report
 }
 
 /// Redaction labels that are recorded but do not, on their own, raise the
@@ -16611,3 +17215,7 @@ mod structural_skip_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "near-ai-privacy-filter"))]
+#[path = "trace_contribution/review_recheck_tests.rs"]
+mod review_recheck_tests;
