@@ -1181,7 +1181,7 @@ fn a_server_catalog_keeps_seed_ids_and_adds_its_own_skills_with_facts() {
     assert_eq!(rows[0]["id"], "gh.acme.skills:lint/SKILL.md");
     assert_eq!(rows[0]["license"]["spdx"], "MIT");
     assert_eq!(rows[0]["checks"]["frontmatter"], "valid");
-    assert_eq!(rows[0]["checks_version"], 1);
+    assert_eq!(rows[0]["checks_version"], 2);
     assert_eq!(rows[1]["id"], "obra:skills/plan/SKILL.md");
     assert_eq!(
         rows[1]["checks"]["document_bytes"], 10,

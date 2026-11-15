@@ -21,7 +21,10 @@ pub use crate::feature_flags::{Environment, key_id_for, parse_public_key_hex};
 pub const CATALOG_SIGNING_DOMAIN: &[u8] = b"trace-commons.skills-catalog.v1\n";
 pub const SCHEMA_VERSION: u32 = 1;
 /// What the facts in `checks` mean. Moves when any rule changes.
-pub const CHECKS_VERSION: u32 = 1;
+/// 2 (owner decision, 2026-11-15): download-and-execute patterns
+/// (`pipe_to_shell`, `remote_script_exec`) block publication, so a published
+/// skill can no longer carry them.
+pub const CHECKS_VERSION: u32 = 2;
 /// The served (signed) document, and so also its payload.
 pub const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PUBLISHERS: usize = 1000;
@@ -41,16 +44,18 @@ pub const MAX_PREVIOUS_HASHES: usize = 8;
 pub const MAX_DOCUMENT_BYTES: u64 = 256 * 1024;
 pub const MAX_DIRECTORY_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_DIRECTORY_FILES: u32 = 500;
-/// Instruction patterns a skill may be annotated with. Facts, not verdicts.
+/// Instruction patterns a published skill may be annotated with. Facts, not
+/// verdicts.
 pub const PATTERN_LABELS: &[&str] = &[
     "credential_paths",
     "encoded_blob",
     "exfiltration_endpoint",
     "instruction_override",
-    "pipe_to_shell",
-    "remote_script_exec",
     "sudo",
 ];
+/// Download-and-execute patterns. A skill whose instructions match one is
+/// not published, so no published skill carries these labels.
+pub const BLOCKING_PATTERN_LABELS: &[&str] = &["pipe_to_shell", "remote_script_exec"];
 /// The anonymous suggestion route on ingest.
 pub const SUGGESTIONS_PATH: &str = "/v1/public/skills-catalog/suggestions";
 pub const MAX_SUGGESTION_BYTES: usize = 2048;

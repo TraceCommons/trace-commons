@@ -106,10 +106,23 @@ network: they use the fixture or a local stub server bound to 127.0.0.1.
 }
 ```
 
-- **Seeded repositories** carry today's four publishers' fixed ids
-  (`poteto`, `obra`, `slack`; Rex has no repository and stays client-side),
-  so existing follows, feed history and app cover art (seeded from catalog
-  id and publisher id) do not change.
+- **Seeded repositories** carry today's publishers' fixed ids (`poteto`,
+  `obra`, `slack`), so existing follows, feed history and app cover art
+  (seeded from catalog id and publisher id) do not change.
+- **Rex is not a seed and cannot be crawled.** Today's fourth publisher,
+  `rex`, is documentation only (empty repository in `insights_skills.rs`,
+  status `unavailable`). Its skill ships inside the Rex app: `rex skill
+  setup` (or "Install Rex for Agents") writes a small stub `SKILL.md` into
+  each agent's skills directory, and the stub tells the agent to run
+  `rex __internal skill`, which prints the guide from the installed CLI.
+  Rex's documentation
+  (superlogical.com/rex/docs/automate/agent-skill, read 2026-11-15) names
+  no public repository, so there is no commit and no file for the crawler
+  to fetch, hash or check. The daemon keeps `rex` as a fixed client-side
+  publisher with its existing id, alongside the server catalog's
+  publishers, so follows and history are unchanged. If Rex later publishes
+  its skill in a public GitHub repository, it can be added to
+  `sources.json` with `publisher_id: "rex"`.
 - **Plugin marketplaces.** Claude Code: `.claude-plugin/marketplace.json`,
   verified against the published marketplace reference
   (code.claude.com/docs/en/plugins/marketplace-reference). Plugin entries are
@@ -181,16 +194,26 @@ document says "safe", "verified" or "passed".
 | Bundled files | counts of `scripts` (by extension: sh, bash, zsh, py, js, mjs, ts, rb, pl, ps1, bat, cmd), `executables` (Git mode 100755) and `binaries` (known binary extensions) in the skill's directory | no |
 | Licence | `license: {status: declared/absent/unknown, spdx}` from frontmatter `license`, a `LICENSE*` file in the skill directory, then the repository's licence | no |
 | Activity | `days_since_push`, `commits_7d`, `commits_28d`; `inactive` label when no push for 365 days | no |
-| Instruction patterns | labels, each a substring/regex family: `pipe_to_shell` (curl/wget piped to sh/bash), `remote_script_exec`, `credential_paths` (~/.ssh, ~/.aws, .env, keychain), `exfiltration_endpoint` (webhook.site, requestbin, ngrok, pastebin-style hosts), `encoded_blob` (base64 run over 200 chars), `instruction_override` ("ignore previous instructions" family), `sudo` | no |
+| Download and execute | label `pipe_to_shell` (curl/wget output piped to a shell or Python) or `remote_script_exec` (`bash <(curl ...)`, `eval`/`sh -c "$(curl ...)"`, PowerShell `irm ... \| iex` and `DownloadString ... iex`) | yes (owner decision, 2026-11-15) |
+| Instruction patterns | labels, each a substring family: `credential_paths` (~/.ssh, ~/.aws, .netrc, keychain), `exfiltration_endpoint` (webhook.site, requestbin, ngrok, pastebin-style hosts), `encoded_blob` (base64 run over 200 chars), `instruction_override` ("ignore previous instructions" family), `sudo` | no |
 
-Only `hidden_text` blocks among instruction patterns: hidden text exists to
-show a reviewer something other than what the agent reads, and has no
-legitimate use in a skill. The others are common in honest skills
-(installation steps use `curl | sh`) and are shown as facts.
+Blocking instruction patterns are `hidden_text` and the two
+download-and-execute patterns. Hidden text exists to show a reviewer
+something other than what the agent reads. Download and execute hands the
+agent code that no check here can see (owner decision, 2026-11-15). Both
+are common enough in honest installation steps that the cost is real: a
+sweep of 1,096 local `SKILL.md` files on 2026-11-15 blocks 6, all
+installer one-liners (5 `pipe_to_shell`, one of them also
+`remote_script_exec`; 1 `remote_script_exec` alone, the Homebrew
+`bash -c "$(curl ...)"` installer). The remaining patterns are shown as
+facts.
 
 Every check is a pure function of fetched bytes and metadata, unit-tested
-with fixtures, and versioned (`checks_version: 1` in the document). A change
-to any rule bumps it.
+with fixtures, and versioned (`checks_version` in the document, now 2: the
+download-and-execute patterns moved from annotating to blocking, so a
+published skill never carries them). A change to any rule bumps it, and the
+exporter also drops a stored row whose patterns block under the current
+rules even if it was crawled under an older version.
 
 ## Storage: V160
 
@@ -248,7 +271,7 @@ Payload:
 ```json
 {
   "schema_version": 1,
-  "checks_version": 1,
+  "checks_version": 2,
   "environment": "staging",
   "revision": 1763251200,
   "issued_at": "2026-11-16T00:00:00Z",
@@ -278,7 +301,7 @@ Payload:
       "frontmatter": "valid",
       "document_bytes": 2048, "directory_bytes": 4096, "directory_files": 2,
       "bundled": {"scripts": 0, "executables": 0, "binaries": 0},
-      "patterns": ["pipe_to_shell"],
+      "patterns": ["sudo"],
       "inactive": false
     }
   }]
@@ -460,8 +483,14 @@ blocks every flag that is not in a profile's `remote_enable`, and the
 validator refuses `privacy_sensitive` in `remote_enable`, so a
 `privacy_sensitive` flag can never be on today. This slice follows the
 owner's wording: `skills_catalog_suggestions` is `product`, default false,
-remote-enable permitted, and it only makes the toggle available; nothing is
-sent until the user opts in. Listed for confirmation.
+and it only makes the toggle available; nothing is sent until the user opts
+in. Listed for confirmation.
+
+Production waits for copy approval (owner decision, 2026-11-15): only the
+staging and testing profiles declare `skills_catalog_suggestions_v1` and
+permit its remote enable. A production build cannot enable the flag by
+manifest or local override; adding it to the production profile, after the
+consent copy is approved, ships through a release.
 
 ### Anonymous vs authenticated
 
@@ -574,9 +603,9 @@ smoke. Wiring it into `operator-smoke` evidence is listed as follow-up.
 ## Choices for the owner to confirm
 
 1. Crawler as an operator binary rather than an ingest worker route.
-2. Blocking vs annotating split in the checks table, in particular that
-   `pipe_to_shell` and the other instruction patterns only annotate, and
-   that `hidden_text` and `archived` block.
+2. Blocking vs annotating split in the checks table. Decided 2026-11-15:
+   `pipe_to_shell` and `remote_script_exec` block; the other instruction
+   patterns annotate; `hidden_text` and `archived` block.
 3. The suggestion provenance threshold (10 stars, 30 days) for
    suggested-only repositories.
 4. Suppressions as a reviewed file (`crates/trace-commons-server/skills-catalog/suppressions.json`)
@@ -585,17 +614,15 @@ smoke. Wiring it into `operator-smoke` evidence is listed as follow-up.
    than `privacy_sensitive` (the registry rule, which today cannot be
    enabled at all).
 6. Anonymous submission (option A) with one suggestion per request.
-7. Catalog validity of up to 30 days (feature manifests: 7), revision equal
-   to `issued_at`.
+7. Decided 2026-11-15: catalog validity 14 days by default, 30 at most
+   (feature manifests: 7); revision equal to `issued_at`.
 8. Same buckets as feature manifests, under `skills-catalog/`.
 9. Codex and Cursor marketplaces not parsed until their formats are
    documented.
 10. Follows stay limited to the four seeded publishers in this slice.
-11. All three profiles, production included, declare
-    `skills_catalog_suggestions_v1` and permit its remote enable, so one
-    signed manifest or one local `near-ai feature-flags set` makes the
-    (unapproved) toggle available on that build. Dropping the capability
-    from the production profile until the copy is approved closes that.
+11. Decided 2026-11-15: the production profile does not declare
+    `skills_catalog_suggestions_v1`; staging and testing do. Production
+    waits for copy approval.
 12. A description over 1024 bytes is shortened with an ellipsis rather
     than blocking the skill (3 of 1,096 local skills swept on 2026-11-15
     would otherwise have been dropped).

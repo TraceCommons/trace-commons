@@ -39,7 +39,7 @@ fn raw() -> Value {
     let issued = now();
     json!({
         "schema_version": 1,
-        "checks_version": 1,
+        "checks_version": 2,
         "environment": "staging",
         "revision": issued.timestamp(),
         "issued_at": issued,
@@ -96,7 +96,7 @@ fn skill(publisher: &str, repository: &str, path: &str) -> Value {
             "directory_bytes": 4096,
             "directory_files": 2,
             "bundled": {"scripts": 1, "executables": 0, "binaries": 0},
-            "patterns": ["pipe_to_shell"],
+            "patterns": ["sudo"],
             "inactive": false
         }
     })
@@ -204,6 +204,10 @@ fn refused(mutate: impl FnOnce(&mut Value)) -> &'static str {
 fn document_identity_rules() {
     assert_eq!(
         refused(|v| v["schema_version"] = json!(2)),
+        "skills-catalog-identity"
+    );
+    assert_eq!(
+        refused(|v| v["checks_version"] = json!(1)),
         "skills-catalog-identity"
     );
     assert_eq!(
@@ -316,7 +320,10 @@ fn skill_rules() {
         ("document_bytes", json!(MAX_DOCUMENT_BYTES + 1)),
         ("directory_files", json!(MAX_DIRECTORY_FILES + 1)),
         ("patterns", json!(["looks_fine"])),
-        ("patterns", json!(["sudo", "pipe_to_shell"])),
+        ("patterns", json!(["sudo", "credential_paths"])),
+        // Download-and-execute patterns block publication (checks version 2).
+        ("patterns", json!(["pipe_to_shell"])),
+        ("patterns", json!(["remote_script_exec"])),
     ] {
         assert_eq!(
             refused(|v| v["skills"][0]["checks"][field] = value.clone()),

@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use trace_commons_protocol::skills_catalog::{
-    CHECKS_VERSION, CatalogDocument, CatalogPublisher, CatalogSkill, Environment, Frontmatter,
-    MAX_CATALOG_BYTES, MAX_PREVIOUS_HASHES, MAX_SKILLS, MAX_VALIDITY_SECONDS, SCHEMA_VERSION,
-    SkillChecks, SourceKind, decode_payload, repository_url, skill_source_url,
+    BLOCKING_PATTERN_LABELS, CHECKS_VERSION, CatalogDocument, CatalogPublisher, CatalogSkill,
+    Environment, Frontmatter, MAX_CATALOG_BYTES, MAX_PREVIOUS_HASHES, MAX_SKILLS,
+    MAX_VALIDITY_SECONDS, SCHEMA_VERSION, SkillChecks, SourceKind, decode_payload, repository_url,
+    skill_source_url,
 };
 
 use super::store::{ExportRepository, ExportSkill};
@@ -149,7 +150,15 @@ pub fn build_document(
         };
         if !row.present {
             summary.absent += 1;
-        } else if !row.blocking.is_empty() {
+        } else if !row.blocking.is_empty()
+            // A row crawled under an older checks version may carry a pattern
+            // that blocks now; it is not published either.
+            || row
+                .checks
+                .patterns
+                .iter()
+                .any(|label| BLOCKING_PATTERN_LABELS.contains(&label.as_str()))
+        {
             summary.blocked += 1;
         } else if suppressions.suppresses(row) || row.publisher_id != repository.publisher_id {
             summary.suppressed += 1;
@@ -407,6 +416,24 @@ mod tests {
             .unwrap_err(),
             "export-empty"
         );
+    }
+
+    #[test]
+    fn a_row_with_a_now_blocking_pattern_is_not_published() {
+        let (repositories, mut skills) = fixture();
+        // Crawled before download-and-execute blocked publication.
+        skills[0].checks.patterns = vec!["pipe_to_shell".into()];
+        let (document, _, summary) = build_document(
+            &repositories,
+            &skills,
+            &Suppressions::default(),
+            Environment::Staging,
+            now(),
+            14,
+        )
+        .unwrap();
+        assert_eq!(summary.blocked, 2);
+        assert!(document.skills.iter().all(|s| s.id != skills[0].skill_id));
     }
 
     #[test]

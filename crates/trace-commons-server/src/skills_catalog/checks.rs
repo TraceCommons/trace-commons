@@ -31,6 +31,10 @@ pub mod blocking {
     pub const REPOSITORY_ARCHIVED: &str = "repository_archived";
     pub const REPOSITORY_NOT_PUBLIC: &str = "repository_not_public";
     pub const SUGGESTION_PROVENANCE: &str = "suggestion_provenance";
+    /// Download-and-execute instructions (owner decision, 2026-11-15). The
+    /// label is the pattern's own.
+    pub const PIPE_TO_SHELL: &str = "pipe_to_shell";
+    pub const REMOTE_SCRIPT_EXEC: &str = "remote_script_exec";
 }
 
 /// A suggested-only repository needs this many stars ...

@@ -9,7 +9,8 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use trace_commons_protocol::skills_catalog::{
-    BundledFiles, License, MAX_DOCUMENT_BYTES, RepositorySignals, SourceKind, safe_skill_path,
+    BLOCKING_PATTERN_LABELS, BundledFiles, License, MAX_DOCUMENT_BYTES, RepositorySignals,
+    SourceKind, safe_skill_path,
 };
 
 use super::checks::{self, DirectoryFile, blocking};
@@ -213,6 +214,13 @@ pub async fn crawl_repository(
         if checks::has_hidden_text(&text) {
             blocked.push(blocking::HIDDEN_TEXT.into());
         }
+        let patterns = checks::instruction_patterns(&text);
+        blocked.extend(
+            patterns
+                .iter()
+                .filter(|label| BLOCKING_PATTERN_LABELS.contains(&label.as_str()))
+                .cloned(),
+        );
         if meta.archived {
             blocked.push(blocking::REPOSITORY_ARCHIVED.into());
         }
@@ -242,7 +250,7 @@ pub async fn crawl_repository(
             directory_bytes,
             directory_files,
             bundled: checks::bundled_files(&files),
-            patterns: checks::instruction_patterns(&text),
+            patterns,
             license,
             inactive,
             blocking: blocked,
@@ -436,7 +444,11 @@ mod tests {
             by_path("skills/install/SKILL.md").patterns,
             ["pipe_to_shell"]
         );
-        assert!(by_path("skills/install/SKILL.md").blocking.is_empty());
+        assert_eq!(
+            by_path("skills/install/SKILL.md").blocking,
+            [blocking::PIPE_TO_SHELL],
+            "download-and-execute blocks publication"
+        );
         assert_eq!(
             by_path("skills/hidden/SKILL.md").blocking,
             [blocking::HIDDEN_TEXT]

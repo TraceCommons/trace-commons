@@ -51,8 +51,10 @@ selection, not a runtime override. Production channel builds reject testing.
 Bundles compare the CLI, FFI and plist feature identities before signing; the
 native application checks its loaded FFI profile against the plist at startup.
 
-Registry version 3 adds two more product flags, both default false and
-permitted for remote enable in every profile:
+Registry version 3 adds two more product flags, both default false.
+`skills_server_catalog` is permitted for remote enable in every profile;
+`skills_catalog_suggestions` only in staging and testing, because its
+consent copy is not yet approved (production waits for that approval):
 
 - `skills_server_catalog`: read the Skills catalog from the operator-signed
   server document ([`skills-catalog.md`](./skills-catalog.md)) instead of

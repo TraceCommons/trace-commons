@@ -307,7 +307,7 @@ pub(crate) mod tests {
             })
         };
         json!({
-            "schema_version": 1, "checks_version": 1, "environment": "testing",
+            "schema_version": 1, "checks_version": 2, "environment": "testing",
             "revision": issued.timestamp(), "issued_at": issued,
             "expires_at": issued + ChronoDuration::days(7),
             "publishers": [

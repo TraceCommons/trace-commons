@@ -106,8 +106,8 @@ final class SkillsWireTests: XCTestCase {
           "publisher_states":[{"publisher_id":"gh.acme.skills","status":"current","checked_at":"2026-11-16T00:00:00Z","signals":{"stars":40,"repository_checked_at":"2026-11-16T00:00:00Z","commits_7d":1,"commits_28d":3,"activity_checked_at":"2026-11-16T00:00:00Z"}},{"publisher_id":"obra","status":"current","signals":{"stars":"many"}}],
           "publishers":[{"id":"gh.acme.skills","name":"acme/skills","repository":"acme/skills","skills_root":"","instructions_url":"https://github.com/acme/skills","url":"https://github.com/acme/skills","source_kind":"marketplace"}],
           "skills":[{"id":"gh.acme.skills:lint/SKILL.md","publisher_id":"gh.acme.skills","name":"lint","description":"Lints.","repository":"acme/skills","path":"lint/SKILL.md","revision":"0123456789abcdef0123456789abcdef01234567","sha256":"aa","source_url":"https://github.com/acme/skills/blob/x/lint/SKILL.md","instructions_url":"https://github.com/acme/skills",
-            "license":{"status":"declared","spdx":"MIT"},"first_seen_at":"2026-11-01T00:00:00Z","last_changed_at":"2026-11-10T00:00:00Z","checks_version":1,
-            "checks":{"frontmatter":"valid","document_bytes":10,"directory_bytes":30,"directory_files":3,"bundled":{"scripts":1,"executables":1,"binaries":0},"patterns":["pipe_to_shell"],"inactive":false}}]},
+            "license":{"status":"declared","spdx":"MIT"},"first_seen_at":"2026-11-01T00:00:00Z","last_changed_at":"2026-11-10T00:00:00Z","checks_version":2,
+            "checks":{"frontmatter":"valid","document_bytes":10,"directory_bytes":30,"directory_files":3,"bundled":{"scripts":1,"executables":1,"binaries":0},"patterns":["sudo"],"inactive":false}}]},
          "suggestions":{"available":true,"opted_in":false,"pending":2,"sent_total":0,"last_sent_at":null}}
         """#
         let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
@@ -121,8 +121,8 @@ final class SkillsWireTests: XCTestCase {
         let skill = try XCTUnwrap(snapshot.catalog.skills.first)
         XCTAssertEqual(skill.license, DaemonData.SkillsLicense(status: "declared", spdx: "MIT"))
         XCTAssertEqual(skill.checks?.bundled.executables, 1)
-        XCTAssertEqual(skill.checks?.patterns, ["pipe_to_shell"])
-        XCTAssertEqual(skill.checksVersion, 1)
+        XCTAssertEqual(skill.checks?.patterns, ["sudo"])
+        XCTAssertEqual(skill.checksVersion, 2)
         XCTAssertEqual(skill.firstSeenAt, "2026-11-01T00:00:00Z")
         XCTAssertTrue(snapshot.suggestions.available)
         XCTAssertFalse(snapshot.suggestions.optedIn)

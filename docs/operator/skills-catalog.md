@@ -25,6 +25,11 @@ publishers from GitHub.
 | Pinned keys (clients) | `crates/trace-commons-contributor/skills-catalog/<env>.json` |
 | Served object | `skills-catalog/<env>.json` in the feature-flag buckets |
 
+The fourth publisher clients know, `rex`, is not in `sources.json`: Rex's
+skill ships inside the Rex app as a stub that defers to the installed CLI,
+with no public repository to crawl. Clients keep it as a fixed,
+documentation-only publisher with the same id.
+
 Both lists are reviewed in Git. Suppressing a skill, publisher or repository
 is a pull request to `suppressions.json`, then an export and a publish.
 
