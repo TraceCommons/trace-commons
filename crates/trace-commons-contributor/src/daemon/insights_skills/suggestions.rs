@@ -557,18 +557,24 @@ mod tests {
             ..State::default()
         };
         assert_eq!(
-            next_candidate(&state, &[candidate.clone()]),
+            next_candidate(&state, std::slice::from_ref(&candidate)),
             Some(candidate.clone())
         );
         state.remembered.insert(
             key(&state.salt, "acme/skills", "skills/x/SKILL.md"),
             Utc::now(),
         );
-        assert_eq!(next_candidate(&state, &[candidate.clone()]), None);
+        assert_eq!(
+            next_candidate(&state, std::slice::from_ref(&candidate)),
+            None
+        );
         state.remembered.clear();
         state.day = Some(today());
         state.sent_today = MAX_PER_DAY;
-        assert_eq!(next_candidate(&state, &[candidate.clone()]), None);
+        assert_eq!(
+            next_candidate(&state, std::slice::from_ref(&candidate)),
+            None
+        );
         state.day = Some("2000-01-01".into());
         assert!(
             next_candidate(&state, &[candidate]).is_some(),

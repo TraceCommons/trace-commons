@@ -534,8 +534,10 @@ mod tests {
             }]
         );
 
-        let mut limited = FixtureFetcher::default();
-        limited.rate_limited = true;
+        let limited = FixtureFetcher {
+            rate_limited: true,
+            ..FixtureFetcher::default()
+        };
         let crawls = crawl_targets(&limited, &targets, 10, now()).await;
         assert_eq!(crawls.len(), 1);
         assert!(crawls[0].rate_limited());

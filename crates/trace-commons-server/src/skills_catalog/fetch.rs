@@ -296,7 +296,7 @@ impl SkillsSourceFetcher for HttpFetcher {
     async fn head(&self, repository: &str, branch: &str) -> Result<String, FetchError> {
         let encoded: String = branch
             .split('/')
-            .map(|part| url_path_segment(part))
+            .map(url_path_segment)
             .collect::<Vec<_>>()
             .join("/");
         parse_ref(
