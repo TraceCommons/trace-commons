@@ -100,6 +100,46 @@ final class SkillsWireTests: XCTestCase {
         XCTAssertEqual(second["followed"] as? Bool, false)
     }
 
+    func testServerCatalogFactsAndSuggestionsDecode() throws {
+        let json = #"""
+        {"enabled":true,"catalog":{"source":"server","revision":1763251200,"issued_at":"2026-11-16T00:00:00Z","expires_at":"2026-11-30T00:00:00Z","total_skills":2,
+          "publishers":[{"id":"gh.acme.skills","name":"acme/skills","repository":"acme/skills","skills_root":"","instructions_url":"https://github.com/acme/skills","url":"https://github.com/acme/skills","source_kind":"marketplace"}],
+          "skills":[{"id":"gh.acme.skills:lint/SKILL.md","publisher_id":"gh.acme.skills","name":"lint","description":"Lints.","repository":"acme/skills","path":"lint/SKILL.md","revision":"0123456789abcdef0123456789abcdef01234567","sha256":"aa","source_url":"https://github.com/acme/skills/blob/x/lint/SKILL.md","instructions_url":"https://github.com/acme/skills",
+            "license":{"status":"declared","spdx":"MIT"},"first_seen_at":"2026-11-01T00:00:00Z","last_changed_at":"2026-11-10T00:00:00Z","checks_version":1,
+            "checks":{"frontmatter":"valid","document_bytes":10,"directory_bytes":30,"directory_files":3,"bundled":{"scripts":1,"executables":1,"binaries":0},"patterns":["pipe_to_shell"],"inactive":false}}]},
+         "suggestions":{"available":true,"opted_in":false,"pending":2,"sent_total":0,"last_sent_at":null}}
+        """#
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.catalog.source, "server")
+        XCTAssertEqual(snapshot.catalog.revision, 1763251200)
+        XCTAssertEqual(snapshot.catalog.totalSkills, 2)
+        XCTAssertEqual(snapshot.catalog.publishers.first?.sourceKind, "marketplace")
+        XCTAssertEqual(snapshot.catalog.publishers.first?.url, "https://github.com/acme/skills")
+        let skill = try XCTUnwrap(snapshot.catalog.skills.first)
+        XCTAssertEqual(skill.license, DaemonData.SkillsLicense(status: "declared", spdx: "MIT"))
+        XCTAssertEqual(skill.checks?.bundled.executables, 1)
+        XCTAssertEqual(skill.checks?.patterns, ["pipe_to_shell"])
+        XCTAssertEqual(skill.checksVersion, 1)
+        XCTAssertEqual(skill.firstSeenAt, "2026-11-01T00:00:00Z")
+        XCTAssertTrue(snapshot.suggestions.available)
+        XCTAssertFalse(snapshot.suggestions.optedIn)
+        XCTAssertEqual(snapshot.suggestions.pending, 2)
+        XCTAssertEqual(try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+    }
+
+    func testGithubCatalogWithoutFactsAndMalformedFactsDecodeAsUnknown() throws {
+        let json = #"""
+        {"enabled":true,"catalog":{"publishers":[{"id":"obra","name":"Obra","repository":"obra/superpowers","skills_root":"skills","instructions_url":"https://x"}],
+          "skills":[{"id":"obra:skills/a/SKILL.md","publisher_id":"obra","name":"a","description":"A","repository":"obra/superpowers","path":"skills/a/SKILL.md","revision":"r","sha256":"s","source_url":"u","instructions_url":"i","checks":{"frontmatter":7},"license":"MIT"}]}}
+        """#
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
+        XCTAssertNil(snapshot.catalog.source)
+        XCTAssertNil(snapshot.catalog.publishers.first?.sourceKind)
+        XCTAssertNil(snapshot.catalog.skills.first?.checks)
+        XCTAssertNil(snapshot.catalog.skills.first?.license)
+        XCTAssertFalse(snapshot.suggestions.available)
+    }
+
     func testOlderClientsRemainUnavailable() async {
         do {
             _ = try await SampleDaemonClient(.normalDay).insightsSkills(refresh: false)

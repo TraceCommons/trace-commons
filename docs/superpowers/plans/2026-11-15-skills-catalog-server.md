@@ -66,7 +66,7 @@ the guard-owned function); `tests/skills_catalog_pg.rs` own `[[test]]`.
 
 `skills_catalog/export.rs` (deterministic payload, suppressions, validate via
 protocol) and `src/bin/trace_commons_skills_catalog.rs` (`crawl`, `export`).
-`config/skills-catalog/{sources.json,suppressions.json}`. Tests: export
+`crates/trace-commons-server/skills-catalog/{sources.json,suppressions.json}`. Tests: export
 determinism, suppression, blocked skills absent, sources file parses.
 
 ## Task 6: ingest suggestion route

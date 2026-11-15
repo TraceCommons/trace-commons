@@ -51,6 +51,22 @@ selection, not a runtime override. Production channel builds reject testing.
 Bundles compare the CLI, FFI and plist feature identities before signing; the
 native application checks its loaded FFI profile against the plist at startup.
 
+Registry version 3 adds two more product flags, both default false and
+permitted for remote enable in every profile:
+
+- `skills_server_catalog`: read the Skills catalog from the operator-signed
+  server document ([`skills-catalog.md`](./skills-catalog.md)) instead of
+  fetching the four publishers from GitHub. GitHub stays the fallback while
+  no verified, current catalog is held, and until a catalog key is pinned.
+- `skills_catalog_suggestions`: offer the opt-in that reports public GitHub
+  skills the catalog lacks. This is the one exception to "catalog requests
+  never depend on installed skills": nothing is sent until the user opts in,
+  only a skill whose git-checkout source GitHub serves anonymously at that
+  commit is eligible, and each report is one anonymous request carrying a
+  repository, a path and a commit. The flag is `product`, not
+  `privacy_sensitive`, by owner decision pending confirmation: the opt-in is
+  the consent, and a `privacy_sensitive` flag cannot be enabled today.
+
 ## Local overrides
 
 Every build profile, including production, supports per-machine product flag

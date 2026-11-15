@@ -15,8 +15,11 @@ extension DaemonData {
         public let feedPartial: Bool
         public let usage: SkillsUsage
         public let copy: [String: String]
+        /// Reporting public skills the catalog lacks. Absent from older
+        /// daemons, which read as unavailable.
+        public let suggestions: SkillsSuggestions
 
-        public init(enabled: Bool = false, readable: Bool = true, refreshing: Bool = false, error: String? = nil, inventory: SkillsInventory = .init(), catalog: SkillsCatalog = .init(), followedPublishers: [String] = [], updates: [SkillsUpdate] = [], feed: [SkillsFeedEvent] = [], feedPartial: Bool = false, usage: SkillsUsage = .init(), copy: [String: String] = [:]) {
+        public init(enabled: Bool = false, readable: Bool = true, refreshing: Bool = false, error: String? = nil, inventory: SkillsInventory = .init(), catalog: SkillsCatalog = .init(), followedPublishers: [String] = [], updates: [SkillsUpdate] = [], feed: [SkillsFeedEvent] = [], feedPartial: Bool = false, usage: SkillsUsage = .init(), copy: [String: String] = [:], suggestions: SkillsSuggestions = .init()) {
             self.enabled = enabled
             self.readable = readable
             self.refreshing = refreshing
@@ -29,6 +32,7 @@ extension DaemonData {
             self.feedPartial = feedPartial
             self.usage = usage
             self.copy = copy
+            self.suggestions = suggestions
         }
 
         enum CodingKeys: String, CodingKey {
@@ -44,6 +48,7 @@ extension DaemonData {
             case feedPartial = "feed_partial"
             case usage
             case copy
+            case suggestions
         }
 
         public init(from decoder: Decoder) throws {
@@ -60,6 +65,42 @@ extension DaemonData {
             feedPartial = try values.decodeIfPresent(Bool.self, forKey: .feedPartial) ?? false
             usage = try values.decodeIfPresent(SkillsUsage.self, forKey: .usage) ?? .init()
             copy = try values.decodeIfPresent([String: String].self, forKey: .copy) ?? [:]
+            suggestions = (try? values.decodeIfPresent(SkillsSuggestions.self, forKey: .suggestions)) ?? .init()
+        }
+    }
+
+    /// Whether the app may offer reporting public skills the catalog lacks,
+    /// and the user's own choice. Never lists a skill.
+    public struct SkillsSuggestions: Codable, Equatable, Sendable {
+        public let available: Bool
+        public let optedIn: Bool
+        public let pending: Int
+        public let sentTotal: Int
+        public let lastSentAt: String?
+
+        public init(available: Bool = false, optedIn: Bool = false, pending: Int = 0, sentTotal: Int = 0, lastSentAt: String? = nil) {
+            self.available = available
+            self.optedIn = optedIn
+            self.pending = pending
+            self.sentTotal = sentTotal
+            self.lastSentAt = lastSentAt
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case available
+            case optedIn = "opted_in"
+            case pending
+            case sentTotal = "sent_total"
+            case lastSentAt = "last_sent_at"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            available = try values.decodeIfPresent(Bool.self, forKey: .available) ?? false
+            optedIn = try values.decodeIfPresent(Bool.self, forKey: .optedIn) ?? false
+            pending = try values.decodeIfPresent(Int.self, forKey: .pending) ?? 0
+            sentTotal = try values.decodeIfPresent(Int.self, forKey: .sentTotal) ?? 0
+            lastSentAt = try values.decodeIfPresent(String.self, forKey: .lastSentAt)
         }
     }
 
@@ -187,13 +228,27 @@ extension DaemonData {
         public let checkedAt: String?
         public let publisherStates: [SkillsPublisherState]
         public let partial: Bool
+        /// `server` (the signed server catalog) or `github` (the four fixed
+        /// publishers). Nil from older daemons.
+        public let source: String?
+        /// The server catalog's identity; nil for `github`.
+        public let revision: Int?
+        public let issuedAt: String?
+        public let expiresAt: String?
+        /// Skills in the whole server catalog; `skills` may hold fewer.
+        public let totalSkills: Int?
 
-        public init(publishers: [SkillsPublisher] = [], skills: [CatalogSkill] = [], checkedAt: String? = nil, publisherStates: [SkillsPublisherState] = [], partial: Bool = false) {
+        public init(publishers: [SkillsPublisher] = [], skills: [CatalogSkill] = [], checkedAt: String? = nil, publisherStates: [SkillsPublisherState] = [], partial: Bool = false, source: String? = nil, revision: Int? = nil, issuedAt: String? = nil, expiresAt: String? = nil, totalSkills: Int? = nil) {
             self.publishers = publishers
             self.skills = skills
             self.checkedAt = checkedAt
             self.publisherStates = publisherStates
             self.partial = partial
+            self.source = source
+            self.revision = revision
+            self.issuedAt = issuedAt
+            self.expiresAt = expiresAt
+            self.totalSkills = totalSkills
         }
 
         enum CodingKeys: String, CodingKey {
@@ -202,6 +257,11 @@ extension DaemonData {
             case checkedAt = "checked_at"
             case publisherStates = "publisher_states"
             case partial
+            case source
+            case revision
+            case issuedAt = "issued_at"
+            case expiresAt = "expires_at"
+            case totalSkills = "total_skills"
         }
 
         public init(from decoder: Decoder) throws {
@@ -211,6 +271,11 @@ extension DaemonData {
             checkedAt = try values.decodeIfPresent(String.self, forKey: .checkedAt)
             publisherStates = try values.decodeIfPresent([SkillsPublisherState].self, forKey: .publisherStates) ?? []
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? false
+            source = try values.decodeIfPresent(String.self, forKey: .source)
+            revision = try values.decodeIfPresent(Int.self, forKey: .revision)
+            issuedAt = try values.decodeIfPresent(String.self, forKey: .issuedAt)
+            expiresAt = try values.decodeIfPresent(String.self, forKey: .expiresAt)
+            totalSkills = try values.decodeIfPresent(Int.self, forKey: .totalSkills)
         }
     }
 
@@ -220,13 +285,19 @@ extension DaemonData {
         public let repository: String
         public let skillsRoot: String
         public let instructionsURL: String
+        /// The repository page; server catalog publishers only.
+        public let url: String?
+        /// `seed`, `list`, `marketplace` or `suggested`; server catalog only.
+        public let sourceKind: String?
 
-        public init(id: String, name: String, repository: String, skillsRoot: String, instructionsURL: String) {
+        public init(id: String, name: String, repository: String, skillsRoot: String, instructionsURL: String, url: String? = nil, sourceKind: String? = nil) {
             self.id = id
             self.name = name
             self.repository = repository
             self.skillsRoot = skillsRoot
             self.instructionsURL = instructionsURL
+            self.url = url
+            self.sourceKind = sourceKind
         }
 
         enum CodingKeys: String, CodingKey {
@@ -235,6 +306,19 @@ extension DaemonData {
             case repository
             case skillsRoot = "skills_root"
             case instructionsURL = "instructions_url"
+            case url
+            case sourceKind = "source_kind"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decode(String.self, forKey: .id)
+            name = try values.decode(String.self, forKey: .name)
+            repository = try values.decode(String.self, forKey: .repository)
+            skillsRoot = try values.decode(String.self, forKey: .skillsRoot)
+            instructionsURL = try values.decode(String.self, forKey: .instructionsURL)
+            url = try values.decodeIfPresent(String.self, forKey: .url)
+            sourceKind = try values.decodeIfPresent(String.self, forKey: .sourceKind)
         }
     }
 
@@ -274,8 +358,15 @@ extension DaemonData {
         public let sha256: String
         public let sourceURL: String
         public let instructionsURL: String
+        /// Facts the server catalog publishes; nil from the GitHub path and
+        /// from older daemons. Facts, never a verdict.
+        public let license: SkillsLicense?
+        public let firstSeenAt: String?
+        public let lastChangedAt: String?
+        public let checks: SkillsChecks?
+        public let checksVersion: Int?
 
-        public init(id: String, publisherID: String, name: String, description: String, repository: String, path: String, revision: String, sha256: String, sourceURL: String, instructionsURL: String) {
+        public init(id: String, publisherID: String, name: String, description: String, repository: String, path: String, revision: String, sha256: String, sourceURL: String, instructionsURL: String, license: SkillsLicense? = nil, firstSeenAt: String? = nil, lastChangedAt: String? = nil, checks: SkillsChecks? = nil, checksVersion: Int? = nil) {
             self.id = id
             self.publisherID = publisherID
             self.name = name
@@ -286,6 +377,11 @@ extension DaemonData {
             self.sha256 = sha256
             self.sourceURL = sourceURL
             self.instructionsURL = instructionsURL
+            self.license = license
+            self.firstSeenAt = firstSeenAt
+            self.lastChangedAt = lastChangedAt
+            self.checks = checks
+            self.checksVersion = checksVersion
         }
 
         enum CodingKeys: String, CodingKey {
@@ -299,6 +395,90 @@ extension DaemonData {
             case sha256
             case sourceURL = "source_url"
             case instructionsURL = "instructions_url"
+            case license
+            case firstSeenAt = "first_seen_at"
+            case lastChangedAt = "last_changed_at"
+            case checks
+            case checksVersion = "checks_version"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decode(String.self, forKey: .id)
+            publisherID = try values.decode(String.self, forKey: .publisherID)
+            name = try values.decode(String.self, forKey: .name)
+            description = try values.decode(String.self, forKey: .description)
+            repository = try values.decode(String.self, forKey: .repository)
+            path = try values.decode(String.self, forKey: .path)
+            revision = try values.decode(String.self, forKey: .revision)
+            sha256 = try values.decode(String.self, forKey: .sha256)
+            sourceURL = try values.decode(String.self, forKey: .sourceURL)
+            instructionsURL = try values.decode(String.self, forKey: .instructionsURL)
+            // Facts are optional: a malformed one is unknown and never fails
+            // the snapshot.
+            license = (try? values.decodeIfPresent(SkillsLicense.self, forKey: .license)) ?? nil
+            firstSeenAt = (try? values.decodeIfPresent(String.self, forKey: .firstSeenAt)) ?? nil
+            lastChangedAt = (try? values.decodeIfPresent(String.self, forKey: .lastChangedAt)) ?? nil
+            checks = (try? values.decodeIfPresent(SkillsChecks.self, forKey: .checks)) ?? nil
+            checksVersion = (try? values.decodeIfPresent(Int.self, forKey: .checksVersion)) ?? nil
+        }
+    }
+
+    /// A catalog skill's licence as the server found it: `declared` (with
+    /// an SPDX identifier when one was given), `absent`, or `unknown`.
+    public struct SkillsLicense: Codable, Equatable, Sendable {
+        public let status: String
+        public let spdx: String?
+
+        public init(status: String, spdx: String? = nil) {
+            self.status = status
+            self.spdx = spdx
+        }
+    }
+
+    /// What the server's automatic checks observed about a published
+    /// skill. Facts to show, never a "safe" verdict.
+    public struct SkillsChecks: Codable, Equatable, Sendable {
+        public let frontmatter: String
+        public let documentBytes: Int
+        public let directoryBytes: Int
+        public let directoryFiles: Int
+        public let bundled: SkillsBundledFiles
+        /// Instruction-pattern labels, such as `pipe_to_shell`.
+        public let patterns: [String]
+        /// No push to the repository for a year.
+        public let inactive: Bool
+
+        public init(frontmatter: String = "valid", documentBytes: Int = 0, directoryBytes: Int = 0, directoryFiles: Int = 0, bundled: SkillsBundledFiles = .init(), patterns: [String] = [], inactive: Bool = false) {
+            self.frontmatter = frontmatter
+            self.documentBytes = documentBytes
+            self.directoryBytes = directoryBytes
+            self.directoryFiles = directoryFiles
+            self.bundled = bundled
+            self.patterns = patterns
+            self.inactive = inactive
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case frontmatter
+            case documentBytes = "document_bytes"
+            case directoryBytes = "directory_bytes"
+            case directoryFiles = "directory_files"
+            case bundled
+            case patterns
+            case inactive
+        }
+    }
+
+    public struct SkillsBundledFiles: Codable, Equatable, Sendable {
+        public let scripts: Int
+        public let executables: Int
+        public let binaries: Int
+
+        public init(scripts: Int = 0, executables: Int = 0, binaries: Int = 0) {
+            self.scripts = scripts
+            self.executables = executables
+            self.binaries = binaries
         }
     }
 

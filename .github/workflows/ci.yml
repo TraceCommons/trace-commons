@@ -159,6 +159,10 @@ jobs:
       # a staging plist with only staging identity and feed.
       - name: Feature profiles and manifest publisher
         run: scripts/ci/test-feature-profiles.sh
+      # Seconds, no build. The Skills catalog publisher's preview, revision
+      # floor, signer requirement and generation precondition, with fakes.
+      - name: Skills catalog publisher
+        run: python3 -m unittest discover -s scripts/skills-catalog -p 'test_*.py'
       - name: macOS Info.plist per bundle channel
         run: scripts/ci/test-macos-channel-plist.sh
       # Seconds, no build. The release workflows scan the shipped dylib and

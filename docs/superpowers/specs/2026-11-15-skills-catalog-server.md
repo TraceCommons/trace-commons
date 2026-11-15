@@ -91,7 +91,7 @@ network: they use the fixture or a local stub server bound to 127.0.0.1.
 
 ### Sources
 
-`config/skills-catalog/sources.json`, reviewed in Git:
+`crates/trace-commons-server/skills-catalog/sources.json`, reviewed in Git:
 
 ```json
 {
@@ -563,7 +563,7 @@ smoke. Wiring it into `operator-smoke` evidence is listed as follow-up.
    that `hidden_text` and `archived` block.
 3. The suggestion provenance threshold (10 stars, 30 days) for
    suggested-only repositories.
-4. Suppressions as a reviewed file (`config/skills-catalog/suppressions.json`)
+4. Suppressions as a reviewed file (`crates/trace-commons-server/skills-catalog/suppressions.json`)
    passed to `export`, rather than a database table.
 5. `skills_catalog_suggestions` as a `product` flag (your wording) rather
    than `privacy_sensitive` (the registry rule, which today cannot be
