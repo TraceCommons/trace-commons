@@ -217,8 +217,8 @@ rules even if it was crawled under an older version.
 
 ## Storage: V160
 
-V159 is taken by open PR #2075; this slice uses V160 (the runner applies
-unrecorded versions in order and allows gaps).
+V159 is `pipeline_review_rechecks` (#2148, on main); this slice is V160,
+the next free number. It depends on nothing V159 adds.
 
 No tenant: catalog data is public and belongs to no account. Following
 V152/V153: forced RLS, PUBLIC has nothing, and one NOLOGIN NOSUPERUSER

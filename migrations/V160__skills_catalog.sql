@@ -4,9 +4,8 @@
 -- The operator binary `trace-commons-skills-catalog` crawls into these
 -- tables and exports one signed document from them.
 --
--- NUMBERING. V159 is taken by open PR #2075 (orgs). This migration depends on
--- nothing V159 adds, and the runner applies every unrecorded version in table
--- order and allows gaps.
+-- NUMBERING. V159 is pipeline_review_rechecks (#2148). This migration depends
+-- on nothing V159 adds.
 --
 -- WHAT A ROW HOLDS. Public GitHub data only: repository names, paths,
 -- commits, hashes, frontmatter text, counts and dates. A suggestion row holds
