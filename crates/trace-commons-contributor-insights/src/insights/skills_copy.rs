@@ -4,10 +4,15 @@ pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "date"];
 
 pub const COPY: &[(&str, &str)] = &[
     ("skills_tab_home", "Home"),
-    ("skills_home_updates", "Updates for you"),
-    ("skills_home_trends", "Usage changes"),
+    ("skills_home_today", "Today"),
+    ("skills_home_this_week", "This week"),
+    ("skills_home_earlier", "Earlier"),
+    ("skills_home_story_update", "{name} has an update"),
+    ("skills_home_story_more", "You used {name} more"),
+    ("skills_home_story_less", "You used {name} less"),
+    ("skills_home_story_added", "{name} was added"),
+    ("skills_home_story_updated", "{name} was updated"),
     ("skills_home_trend_period", "Past 7 days"),
-    ("skills_home_creators", "From creators"),
     ("skills_home_empty", "No updates yet."),
     ("skills_home_view", "View"),
     ("skills_home_browse", "Browse"),
@@ -226,6 +231,24 @@ mod tests {
         {
             assert!(!words.contains("invocation"), "{key}");
             assert!(!words.contains("session"), "{key}");
+        }
+    }
+
+    #[test]
+    fn home_stories_name_their_skill_and_claim_no_first_use_or_author() {
+        let stories: Vec<_> = COPY
+            .iter()
+            .filter(|(key, _)| key.starts_with("skills_home_story_"))
+            .collect();
+        assert_eq!(stories.len(), 5);
+        for (key, words) in stories {
+            // The headline is split at the name to set it in strong type.
+            assert_eq!(words.matches("{name}").count(), 1, "{key}");
+            // A catalog change is not a creator's post.
+            assert!(!words.contains("{publisher}"), "{key}");
+            // Two weeks of history cannot show a first-ever use.
+            assert!(!words.contains("started"), "{key}");
+            assert!(!words.contains("first"), "{key}");
         }
     }
 

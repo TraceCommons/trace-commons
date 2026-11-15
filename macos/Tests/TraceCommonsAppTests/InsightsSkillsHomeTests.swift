@@ -95,6 +95,90 @@ final class InsightsSkillsHomeTests: XCTestCase {
         XCTAssertEqual(project(snapshot(feed:events)).creators.map(\.id),["latest"])
     }
 
+    // MARK: The feed's order and periods
+
+    private func date(_ value: String) -> Date { ISO8601DateFormatter().date(from: value)! }
+    private func update(_ id: String, catalogID: String = "upstream", checked: String) -> InsightsSkillsHome.Update {
+        let skill = catalogSkill(catalogID)
+        return .init(id: "update:" + id, groupID: id, installedID: id, name: id, agents: ["claude_code"], catalogSkill: skill, checkedAt: date(checked))
+    }
+    private func trend(_ name: String, previous: Int, current: Int) -> InsightsSkillsHome.Trend {
+        .init(id: "claude_code\u{0}" + name, name: name, agent: "claude_code", previousUses: previous, currentUses: current,
+              direction: current > previous ? .more : .less, periodEnd: date("2026-11-15T00:00:00Z"))
+    }
+    private func change(_ id: String, catalogID: String, observed: String) -> InsightsSkillsHome.CreatorUpdate {
+        let skill = catalogSkill(catalogID)
+        return .init(id: id, event: .init(id: id, publisherID: "maker", skillID: catalogID, kind: "updated", observedAt: observed),
+                     skill: skill, publisher: publisher, observedAt: date(observed))
+    }
+    private func catalogSkill(_ id: String) -> DaemonData.CatalogSkill {
+        .init(id: id, publisherID: "maker", name: "review", description: "", repository: "maker/skills", path: "skills/review/SKILL.md", revision: "main", sha256: String(repeating: "b", count: 64), sourceURL: "https://example.com/source", instructionsURL: "https://example.com")
+    }
+    private func ids(_ groups: [InsightsSkillsHome.Group]) -> [[String]] { groups.map { $0.stories.map(\.id) } }
+
+    func testTimelineIsOneNewestFirstColumnUnderItsPeriods() {
+        // 2026-11-15 is a Sunday: its ISO week began on Monday the 9th.
+        let feed = InsightsSkillsHome.Snapshot(
+            updates: [update("a", checked: "2026-11-15T11:00:00Z")],
+            trends: [trend("big", previous: 1, current: 9), trend("small", previous: 3, current: 2)],
+            creators: [change("noon", catalogID: "one", observed: "2026-11-15T11:30:00Z"),
+                       change("morning", catalogID: "two", observed: "2026-11-15T08:00:00Z"),
+                       change("yesterday", catalogID: "three", observed: "2026-11-14T23:59:59Z"),
+                       change("monday", catalogID: "four", observed: "2026-11-09T00:00:00Z"),
+                       change("last-week", catalogID: "five", observed: "2026-11-08T23:59:59Z")])
+        let groups = feed.timeline(now: now, calendar: calendar)
+        XCTAssertEqual(groups.map(\.period), [.today, .thisWeek, .earlier])
+        XCTAssertEqual(ids(groups), [
+            ["creator:noon", "update:a", "creator:morning", "trend:claude_code\u{0}big", "trend:claude_code\u{0}small"],
+            ["creator:yesterday", "creator:monday"],
+            ["creator:last-week"]])
+        XCTAssertEqual(Set(groups.flatMap(\.stories).map(\.id)).count, 8, "Story ids are unique across kinds")
+    }
+
+    func testTimelineLeavesOutEmptyPeriodsAndAnEmptyFeed() {
+        XCTAssertTrue(InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: []).timeline(now: now, calendar: calendar).isEmpty)
+        let old = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [change("old", catalogID: "one", observed: "2026-10-20T10:00:00Z")])
+        XCTAssertEqual(old.timeline(now: now, calendar: calendar).map(\.period), [.earlier])
+        // On a Monday nothing can be earlier this week.
+        let monday = date("2026-11-09T12:00:00Z")
+        let sunday = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [change("sunday", catalogID: "one", observed: "2026-11-08T22:00:00Z")])
+        XCTAssertEqual(sunday.timeline(now: monday, calendar: calendar).map(\.period), [.earlier])
+    }
+
+    func testAvailableUpdatesAndUsageChangesAreTodayWheneverTheyWereChecked() {
+        // Just after midnight the last catalog check was yesterday. The
+        // update is still what is true now, so it is not filed as old news.
+        let night = date("2026-11-16T02:00:00Z")
+        let feed = InsightsSkillsHome.Snapshot(
+            updates: [update("late", catalogID: "one", checked: "2026-11-15T23:00:00Z"), update("later", catalogID: "two", checked: "2026-11-15T23:30:00Z")],
+            trends: [trend("big", previous: 1, current: 9)],
+            creators: [change("tonight", catalogID: "three", observed: "2026-11-16T01:00:00Z"),
+                       change("yesterday", catalogID: "four", observed: "2026-11-15T23:45:00Z")])
+        let groups = feed.timeline(now: night, calendar: calendar)
+        XCTAssertEqual(groups.map(\.period), [.today, .earlier])
+        XCTAssertEqual(ids(groups), [["creator:tonight", "update:late", "update:later", "trend:claude_code\u{0}big"], ["creator:yesterday"]])
+    }
+
+    func testACatalogChangeForASkillWithAnUpdateIsNotToldTwice() {
+        let feed = InsightsSkillsHome.Snapshot(
+            updates: [update("a", catalogID: "same", checked: "2026-11-15T11:00:00Z")], trends: [],
+            creators: [change("same-news", catalogID: "same", observed: "2026-11-14T10:00:00Z"),
+                       change("other", catalogID: "other", observed: "2026-11-14T09:00:00Z")])
+        XCTAssertEqual(ids(feed.timeline(now: now, calendar: calendar)), [["update:a"], ["creator:other"]])
+        XCTAssertEqual(feed.creators.count, 2, "The projection itself is unchanged")
+    }
+
+    func testTimelineFollowsTheLocalDayNotUTC() {
+        var tokyo = Calendar(identifier: .gregorian)
+        tokyo.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        // 12:00Z is 21:00 in Tokyo; that local day began at 15:00Z the day before.
+        let feed = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [
+            change("local-today", catalogID: "one", observed: "2026-11-14T16:00:00Z"),
+            change("local-yesterday", catalogID: "two", observed: "2026-11-14T14:00:00Z")])
+        XCTAssertEqual(ids(feed.timeline(now: now, calendar: tokyo)), [["creator:local-today"], ["creator:local-yesterday"]])
+        XCTAssertEqual(feed.timeline(now: now, calendar: tokyo).map(\.period), [.today, .thisWeek])
+    }
+
     func testYesterdayAnalysisCannotTreatTheUnfinishedDayAsComplete() throws {
         let original = snapshot(rows:[try row()])
         var raw = try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as! [String:Any]

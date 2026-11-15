@@ -8,6 +8,46 @@ enum InsightsSkillsHome {
         let trends: [Trend]
         let creators: [CreatorUpdate]
         var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty }
+
+        /// The feed: every item in one column, newest first, under the
+        /// period it falls in. Empty periods are left out.
+        ///
+        /// Only a catalog change has a time of its own (when the catalog
+        /// feed observed it). An available update and a usage change say
+        /// what is true now, so both sit under Today whenever they were
+        /// last checked: an update at its check time, never before the
+        /// day began, and usage changes after everything else today, in
+        /// the order given (largest change first). A catalog change for a
+        /// skill whose update is already in the feed is the same news and
+        /// is left out. This week is the local ISO week, as elsewhere in
+        /// Insights.
+        func timeline(now: Date = Date(), calendar: Calendar = .current) -> [Group] {
+            let today = calendar.startOfDay(for: now)
+            var iso = Calendar(identifier: .iso8601)
+            iso.timeZone = calendar.timeZone
+            let week = iso.dateInterval(of: .weekOfYear, for: now)?.start ?? today
+            let updating = Set(updates.map(\.catalogSkill.id))
+            var entries: [(date: Date, rank: Int, story: Story)] = []
+            entries += updates.map { (min(max($0.checkedAt, today), now), 0, .update($0)) }
+            entries += creators.filter { !updating.contains($0.skill.id) }.map { ($0.observedAt, 1, .creator($0)) }
+            entries += trends.map { (today, 2, .trend($0)) }
+            // Each source array is already in its own order; the index keeps it.
+            let ordered = entries.enumerated().sorted { a, b in
+                if a.element.date != b.element.date { return a.element.date > b.element.date }
+                if a.element.rank != b.element.rank { return a.element.rank < b.element.rank }
+                return a.offset < b.offset
+            }.map(\.element)
+            return Period.allCases.compactMap { period in
+                let stories = ordered.filter { entry in
+                    switch period {
+                    case .today: entry.date >= today
+                    case .thisWeek: entry.date < today && entry.date >= week
+                    case .earlier: entry.date < min(today, week)
+                    }
+                }.map(\.story)
+                return stories.isEmpty ? nil : Group(period: period, stories: stories)
+            }
+        }
     }
     struct Update: Identifiable {
         let id: String
@@ -34,6 +74,38 @@ enum InsightsSkillsHome {
         let skill: DaemonData.CatalogSkill
         let publisher: DaemonData.SkillsPublisher
         let observedAt: Date
+    }
+
+    /// How recent a story is. Headed in the feed in this order.
+    enum Period: CaseIterable {
+        case today, thisWeek, earlier
+
+        var copyKey: String {
+            switch self {
+            case .today: "skills_home_today"
+            case .thisWeek: "skills_home_this_week"
+            case .earlier: "skills_home_earlier"
+            }
+        }
+    }
+
+    /// One item of the feed.
+    enum Story: Identifiable {
+        case update(Update), trend(Trend), creator(CreatorUpdate)
+
+        var id: String {
+            switch self {
+            case .update(let item): item.id
+            case .trend(let item): "trend:" + item.id
+            case .creator(let item): "creator:" + item.id
+            }
+        }
+    }
+
+    struct Group: Identifiable {
+        let period: Period
+        let stories: [Story]
+        var id: Period { period }
     }
 
     @MainActor
