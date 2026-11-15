@@ -119,12 +119,14 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
                        .init(id: earlier.id, event: earlier, skill: added, publisher: publisher, observedAt: now.addingTimeInterval(-12 * 86_400 - 3 * 3600))] + rolled,
             week: [.init(id: "claude_code\u{0}review", name: "systematic-debugging", agent: "claude_code", uses: 7),
                    .init(id: "claude_code\u{0}brainstorming", name: "brainstorming", agent: "claude_code", uses: 4),
-                   .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", uses: 3)])
+                   .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", uses: 3)],
+            active: [.init(publisher: second, stars: 12_400, commits: 31, skills: rolled.map(\.skill)),
+                     .init(publisher: publisher, stars: 1_949, commits: 1, skills: [described, added])])
         let groups = feed.timeline(now: now, calendar: utc)
         XCTAssertEqual(groups.map(\.period), [.today, .thisWeek, .earlier])
         XCTAssertEqual(groups.map { $0.stories.map(\.id) }, [
             ["update-review", "creator:creator-update", "trend:claude_code\u{0}review", "trend:opencode\u{0}planning", "trend:cline\u{0}writing-plans"],
-            ["week", "rollup:thisWeek:anthropic-skills"],
+            ["week", "active", "rollup:thisWeek:anthropic-skills"],
             ["creator:creator-add"]])
         XCTAssertEqual(InsightsSkillsHome.Snapshot.heroID(in: groups), "update-review")
         // Swift reads these through the FFI dylib: a stale one draws blanks.
@@ -133,6 +135,7 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
                     "skills_home_story_added", "skills_home_story_updated",
                     "skills_home_compare_up", "skills_home_compare_down", "skills_home_week", "skills_home_rollup",
                     "skills_home_view", "skills_home_trend_period",
+                    "skills_home_active", "skills_home_stars", "skills_home_recent_commits",
                     // Other tables' words the feed reuses.
                     "skills_invocations", "skills_inspect", "skills_uses", "skills_usage_period_label", "skills_usage_chart_accessibility"] {
             XCTAssertFalse(model.text(key).isEmpty, key)

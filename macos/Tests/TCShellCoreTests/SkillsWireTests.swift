@@ -143,6 +143,25 @@ final class SkillsWireTests: XCTestCase {
         XCTAssertFalse(snapshot.suggestions.available)
     }
 
+    func testRecentlyActivePublishersDecodeAndAMalformedListIsEmpty() throws {
+        let json = #"{"enabled":true,"catalog":{"source":"server","trending":[{"publisher_id":"gh.acme.skills","skill_ids":["gh.acme.skills:lint/SKILL.md","gh.acme.skills:plan/SKILL.md"]},{"publisher_id":"obra","skill_ids":[]}]}}"#
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.catalog.trending.map(\.publisherID), ["gh.acme.skills", "obra"])
+        XCTAssertEqual(snapshot.catalog.trending.first?.skillIDs, ["gh.acme.skills:lint/SKILL.md", "gh.acme.skills:plan/SKILL.md"])
+        XCTAssertEqual(try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+
+        // Absent (an older daemon), null (no verified catalog) and malformed
+        // all read as none, and never fail the snapshot.
+        for body in [#"{"source":"github"}"#, #"{"source":"github","trending":null}"#,
+                     #"{"source":"server","trending":"soon"}"#, #"{"source":"server","trending":[{"publisher_id":7}]}"#,
+                     #"{"source":"server","trending":[{"publisher_id":"a","skill_ids":["x"]},{"skill_ids":["y"]}]}"#] {
+            let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: Data(#"{"enabled":true,"catalog":"# .utf8) + Data(body.utf8) + Data("}".utf8))
+            XCTAssertTrue(snapshot.enabled, body)
+            XCTAssertTrue(snapshot.catalog.trending.isEmpty, body)
+        }
+        XCTAssertTrue(DaemonData.SkillsCatalog().trending.isEmpty)
+    }
+
     func testOlderClientsRemainUnavailable() async {
         do {
             _ = try await SampleDaemonClient(.normalDay).insightsSkills(refresh: false)

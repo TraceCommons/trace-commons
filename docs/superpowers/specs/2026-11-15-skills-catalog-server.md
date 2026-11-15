@@ -435,6 +435,16 @@ is true when rows were cut. New fields, all optional and additive:
   `checks` (the document's object), `checks_version`.
 - `suggestions`: `{available, opted_in, pending, sent_total, last_sent_at}`
   (below).
+- `catalog.trending`: `[{publisher_id, skill_ids}]`, at most three
+  publishers with at most three skills each, most active first; `null`
+  unless a verified, current server catalog is held. Ranked by
+  `insights_skills/trending.rs` from the document's repository signals
+  alone (never from inventory, usage or traces): commits in the measured
+  week, counted up to 20, then stars, then id; at least 10 stars and one
+  commit, signals at most 14 days old, not archived, not `suggested`. Every
+  id names a row this same snapshot carries, so a publisher whose skills the
+  180 KiB cap cut gives its place to the next. Not persisted in
+  `PublicState`.
 
 Updates: an installed skill matching a non-seed server skill gets freshness
 from the server's `previous_sha256` exactly as the four publishers do from

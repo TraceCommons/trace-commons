@@ -1211,6 +1211,77 @@ fn a_server_catalog_keeps_seed_ids_and_adds_its_own_skills_with_facts() {
 }
 
 #[test]
+fn recently_active_publishers_come_from_the_verified_catalog_alone() {
+    let (_dir, shared) = with_server_catalog();
+    let first = snapshot(&shared);
+    // acme has stars and a commit in the measured week; obra's activity is
+    // unknown, which is not zero and ranks nowhere.
+    assert_eq!(
+        first["catalog"]["trending"],
+        json!([{"publisher_id": "gh.acme.skills", "skill_ids": ["gh.acme.skills:lint/SKILL.md"]}])
+    );
+    // Every id names a row and a publisher this same snapshot carries.
+    let has = |list: &str, key: &str, id: &str| {
+        first["catalog"][list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[key] == id)
+    };
+    assert!(has("skills", "id", "gh.acme.skills:lint/SKILL.md"));
+    assert!(has("publishers", "id", "gh.acme.skills"));
+    assert!(has("publisher_states", "publisher_id", "gh.acme.skills"));
+
+    // Nothing local takes part: with no installed skill and local analysis
+    // off, the same document names the same publishers and skills.
+    {
+        let mut runtime = shared.insights_skills.runtime.lock().unwrap();
+        let (at, policy, _) = runtime.inventory.take().unwrap();
+        let empty: Inventory =
+            serde_json::from_value(json!({"skills":[],"partial":false,"coverage":[]})).unwrap();
+        runtime.inventory = Some((at, policy, empty));
+    }
+    shared.settings.lock().unwrap().insights_counter_pass = false;
+    let second = snapshot(&shared);
+    assert!(second["updates"].as_array().unwrap().is_empty());
+    assert_eq!(second["catalog"]["trending"], first["catalog"]["trending"]);
+}
+
+#[test]
+fn no_publisher_is_named_without_a_current_verified_catalog() {
+    // The flag off: the held document is not read.
+    let (_dir, shared) = with_server_catalog();
+    set_catalog_flags(&shared, 2, false, false);
+    let off = snapshot(&shared);
+    assert_eq!(off["catalog"]["source"], "github");
+    assert!(off["catalog"]["trending"].is_null());
+
+    // No pinned key (the shipped state): the cached document does not load.
+    let (_dir, shared) = with_server_catalog();
+    *shared.insights_skills.catalog_keys.lock().unwrap() = Some(vec![]);
+    {
+        let mut runtime = shared.insights_skills.runtime.lock().unwrap();
+        runtime.server = None;
+        runtime.server_loaded = false;
+    }
+    let unpinned = snapshot(&shared);
+    assert_eq!(unpinned["catalog"]["source"], "github");
+    assert!(unpinned["catalog"]["trending"].is_null());
+
+    // A document held past its expiry is no longer the catalog.
+    let (_dir, shared) = with_server_catalog();
+    assert!(snapshot(&shared)["catalog"]["trending"].is_array());
+    {
+        let mut runtime = shared.insights_skills.runtime.lock().unwrap();
+        let document = runtime.server.as_mut().unwrap();
+        document.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    }
+    let expired = snapshot(&shared);
+    assert_eq!(expired["catalog"]["source"], "github");
+    assert!(expired["catalog"]["trending"].is_null());
+}
+
+#[test]
 fn turning_the_server_catalog_flag_off_returns_to_github_rows() {
     let (_dir, shared) = with_server_catalog();
     set_catalog_flags(&shared, 2, false, false);

@@ -13,10 +13,11 @@ Second pass (owner, 2026-11-15, each item approved by name):
 - Your week. The three most-used skills of the past seven days open This week, each row opening its usage. Left out while usage history is partial.
 - Motion. Cards rise slightly under the pointer and ease in on scroll, bars rise once, counts roll, and a story's description opens in place. All of it is off under Reduce Motion.
 
-Not approved, and not built: unread dots, "New" markers, badges, counts on the tab, streaks, milestone celebrations. Trending (public GitHub signals) and Popular this week (a server list) are separate modules that are simply absent without their data.
+Not approved, and not built: unread dots, "New" markers, badges, counts on the tab, streaks, milestone celebrations. A list of what contributors use most, built from traces, was cancelled.
 
-Use existing Insights typography, cards, and agent logos. Keep the shared copy brief. Omit empty periods; when the whole feed is empty, show one neutral empty state with Installed skills and Browse actions. No Activity chart, new selectors, related traces, notices, or automatic installation.
+Active on GitHub (third pass, 2026-11-15). One card in This week, after Your week, for up to three catalog publishers with recent public activity, each with its star count, its recent commit count and up to three of its skills, which open their catalog entries.
 
-Updates require verified installed/catalog source matching and known recent uses. Trends compare the last seven completed local days to the previous seven, combining only disjoint explicit invocation evidence. Incomplete or ambiguous history cannot imply a decrease or a first-ever use. Creator updates are catalog changes, not fabricated creator posts.
-
-All data remains local or from the existing bounded public catalog feed. Feature flags, consent, folder rules, fetching, and backend contracts do not change. A stale target must never open a different skill.
+- The daemon ranks, from the verified server catalog's public repository signals and nothing else: no inventory, usage, follow or trace takes part, so the same document gives the same card on every install. Order: commits in the week the server measured (counted up to 20), then stars, then id. A publisher needs at least 10 stars, a commit in that week, signals no more than 14 days old, and a published skill; one known only from an app's report, or archived, is left out.
+- The signals are for the whole repository, not its skills alone, and the week is the one before the server measured, not before now. The card therefore says "Recent commits", never "this week".
+- With `skills_server_catalog` off, no pinned key, or an expired document, the snapshot carries no list and Home draws nothing in its place: no placeholder and no notice. The app also refuses a list beside a catalog that is not marked as the server's.
+- Showing star counts is approved. The card's three wordings ("Active on GitHub", "{count} stars", "Recent commits: {count}") are not yet approved.
