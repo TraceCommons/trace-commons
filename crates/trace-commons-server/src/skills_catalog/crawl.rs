@@ -335,6 +335,23 @@ pub async fn expand_sources(
     (merge_targets(targets), failures)
 }
 
+/// The order a run crawls in: seeds first, then repositories never crawled,
+/// then the least recently crawled. A run that stops at its bound or a rate
+/// limit therefore reaches different repositories next time instead of the
+/// same alphabetical prefix.
+pub fn order_targets(
+    mut targets: Vec<CrawlTarget>,
+    last_crawled: &std::collections::BTreeMap<String, DateTime<Utc>>,
+) -> Vec<CrawlTarget> {
+    targets.sort_by(|a, b| {
+        let key = |t: &CrawlTarget| (t.seed.is_none(), last_crawled.get(&t.repository).copied());
+        key(a)
+            .cmp(&key(b))
+            .then_with(|| a.repository.cmp(&b.repository))
+    });
+    targets
+}
+
 /// Crawl up to `max_repositories` targets, stopping at the first rate limit.
 pub async fn crawl_targets(
     fetcher: &dyn SkillsSourceFetcher,
@@ -485,6 +502,39 @@ mod tests {
         let crawl = crawl_repository(&fetcher, &target, now()).await;
         assert_eq!(crawl.skills[0].path, "SKILL.md");
         assert_eq!(crawl.skills[0].blocking, [blocking::SUGGESTION_PROVENANCE]);
+    }
+
+    #[test]
+    fn seeds_first_then_never_crawled_then_least_recently_crawled() {
+        let plain = |repository: &str| CrawlTarget {
+            repository: repository.into(),
+            kind: SourceKind::List,
+            seed: None,
+            roots: Vec::new(),
+        };
+        let at = Utc::now();
+        let last: std::collections::BTreeMap<String, DateTime<Utc>> = [
+            ("a/old".to_owned(), at - chrono::Duration::days(3)),
+            ("a/new".to_owned(), at),
+            ("z/seed".to_owned(), at),
+        ]
+        .into();
+        let ordered = order_targets(
+            vec![
+                plain("a/new"),
+                plain("a/old"),
+                plain("m/never"),
+                seed("z/seed", "skills"),
+            ],
+            &last,
+        );
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|t| t.repository.as_str())
+                .collect::<Vec<_>>(),
+            ["z/seed", "m/never", "a/old", "a/new"]
+        );
     }
 
     #[tokio::test]

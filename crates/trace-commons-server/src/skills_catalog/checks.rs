@@ -71,7 +71,11 @@ pub fn parse_frontmatter(bytes: &[u8]) -> Option<Frontmatter> {
         {
             continue;
         }
-        let (key, raw) = line.split_once(':')?;
+        // A top-level line with no key (an unindented sequence item under
+        // the previous key) belongs to a field this parser does not read.
+        let Some((key, raw)) = line.split_once(':') else {
+            continue;
+        };
         let key = key.trim();
         let raw = raw.trim();
         let mut continuation = Vec::new();
@@ -120,13 +124,28 @@ pub fn parse_frontmatter(bytes: &[u8]) -> Option<Frontmatter> {
         *slot = Some(value);
     }
     let name = name.filter(|n| !n.is_empty() && n.len() <= MAX_NAME_BYTES && !n.contains('\n'))?;
-    let description = description.filter(|d| !d.is_empty() && d.len() <= MAX_DESCRIPTION_BYTES)?;
+    // A long description is display text, not a reason to drop the skill:
+    // it is cut at a character boundary and marked.
+    let description = description.filter(|d| !d.is_empty()).map(|d| shorten(&d))?;
     let license = license.filter(|l| !l.is_empty() && l.len() <= 128 && !l.contains('\n'));
     Some(Frontmatter {
         name,
         description,
         license,
     })
+}
+
+/// At most [`MAX_DESCRIPTION_BYTES`], cut at a character boundary with an
+/// ellipsis when cut.
+fn shorten(text: &str) -> String {
+    if text.len() <= MAX_DESCRIPTION_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_DESCRIPTION_BYTES - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", text[..end].trim_end())
 }
 
 fn scalar(raw: &str) -> Option<String> {
@@ -150,20 +169,36 @@ fn scalar(raw: &str) -> Option<String> {
 }
 
 /// Characters that make what an agent reads differ from what a person sees:
-/// bidirectional controls, zero-width characters, a BOM after the start,
-/// Unicode tag characters, and long HTML comments.
+/// bidirectional embeddings, overrides and isolates (the "Trojan Source"
+/// controls), the zero-width space, invisible operators, a BOM after the
+/// start, Unicode tag characters outside an emoji flag sequence, and long
+/// HTML comments.
+///
+/// Not hidden text, because ordinary writing needs them: the zero-width
+/// joiner and non-joiner (compound emoji, Persian and Indic scripts) and the
+/// left-to-right and right-to-left marks (mixed-direction text).
 pub fn has_hidden_text(text: &str) -> bool {
     let body = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let invisible = body.chars().any(|c| {
-        matches!(c,
-            '\u{200b}'..='\u{200f}'
+    // Tag characters spell a subdivision flag after U+1F3F4 (England is
+    // U+1F3F4 then "gbeng" in tags then the cancel tag U+E007F).
+    let mut in_flag = false;
+    for c in body.chars() {
+        let tag = matches!(c, '\u{e0000}'..='\u{e007f}');
+        if tag && !in_flag {
+            return true;
+        }
+        in_flag = c == '\u{1f3f4}' || (in_flag && tag && c != '\u{e007f}');
+        if matches!(c,
+            '\u{200b}'
             | '\u{202a}'..='\u{202e}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
-            | '\u{feff}'
-            | '\u{e0000}'..='\u{e007f}')
-    });
-    invisible || long_html_comment(body)
+            | '\u{feff}')
+        {
+            return true;
+        }
+    }
+    long_html_comment(body)
 }
 
 fn long_html_comment(text: &str) -> bool {
@@ -449,6 +484,22 @@ mod tests {
                 .unwrap();
         assert_eq!(quoted.name, "a \"b\"");
         assert_eq!(quoted.description, "it's fine");
+        let listed =
+            parse_frontmatter(&doc("name: x\ntags:\n- a\n- b\ndescription: y", "")).unwrap();
+        assert_eq!(
+            (listed.name.as_str(), listed.description.as_str()),
+            ("x", "y")
+        );
+        let long = parse_frontmatter(&doc(
+            &format!(
+                "name: x\ndescription: {}",
+                "é".repeat(MAX_DESCRIPTION_BYTES)
+            ),
+            "",
+        ))
+        .unwrap();
+        assert!(long.description.len() <= MAX_DESCRIPTION_BYTES);
+        assert!(long.description.ends_with('…'));
         let crlf = b"\xef\xbb\xbf---\r\nname: x\r\ndescription: y\r\n---\r\n";
         assert_eq!(parse_frontmatter(crlf).unwrap().description, "y");
     }
@@ -461,16 +512,10 @@ mod tests {
             doc("name: \ndescription: y", ""),
             doc("name: [a, b]\ndescription: y", ""),
             doc("name: x\nname: z\ndescription: y", ""),
+            doc("tags:\n- a\nname: x", ""),
             doc("name: x\ndescription: bell\u{7}", ""),
             doc(
                 &format!("name: {}\ndescription: y", "n".repeat(MAX_NAME_BYTES + 1)),
-                "",
-            ),
-            doc(
-                &format!(
-                    "name: x\ndescription: {}",
-                    "d".repeat(MAX_DESCRIPTION_BYTES + 1)
-                ),
                 "",
             ),
             b"name: x\ndescription: y\n".to_vec(),
@@ -491,12 +536,23 @@ mod tests {
     #[test]
     fn hidden_text_is_found() {
         assert!(!has_hidden_text("\u{feff}plain text <!-- short -->"));
+        // Ordinary writing: a ZWJ emoji, Persian with a ZWNJ, an RLM, and
+        // the England flag's tag sequence.
+        for fine in [
+            "family \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            "\u{0645}\u{06cc}\u{200c}\u{062e}\u{0648}\u{0627}\u{0647}\u{0645}",
+            "abc \u{200f}\u{05d0}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f} flag",
+        ] {
+            assert!(!has_hidden_text(fine), "{fine:?}");
+        }
         for hidden in [
             "a\u{200b}b",
             "a\u{202e}b",
             "a\u{2066}b",
             "mid\u{feff}dle",
             "tag\u{e0041}",
+            "\u{1f3f4}\u{e0067}\u{e007f}\u{e0041} after the flag",
             &format!("<!-- {} -->", "x".repeat(201)),
             &format!("<!-- {}", "x".repeat(201)),
         ] {

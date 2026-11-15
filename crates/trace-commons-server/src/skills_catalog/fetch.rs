@@ -163,7 +163,20 @@ async fn read_bounded(
     match status {
         200 | 202 => {}
         404 | 451 => return Err(FetchError::NotFound),
-        403 | 429 => return Err(FetchError::RateLimited),
+        429 => return Err(FetchError::RateLimited),
+        // GitHub answers a spent rate limit with 403 and says so in its
+        // headers; any other 403 is about this one resource and must not
+        // stop the whole run.
+        403 if response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .is_some_and(|v| v.as_bytes() == b"0")
+            || response
+                .headers()
+                .contains_key(reqwest::header::RETRY_AFTER) =>
+        {
+            return Err(FetchError::RateLimited);
+        }
         _ => return Err(FetchError::Http),
     }
     if response.content_length().is_some_and(|n| n > limit as u64) {
@@ -592,7 +605,26 @@ mod tests {
             Participation::Pending
         );
         task.await.unwrap();
+        // A 403 is a rate limit only when GitHub says so.
         let (base, task) = serve(reply("403 Forbidden", "{}")).await;
+        let fetcher = HttpFetcher::new(&base, &base, None).unwrap();
+        assert_eq!(
+            fetcher.repository("acme/skills").await.unwrap_err(),
+            FetchError::Http
+        );
+        task.await.unwrap();
+        let (base, task) = serve(
+            b"HTTP/1.1 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        let fetcher = HttpFetcher::new(&base, &base, None).unwrap();
+        assert_eq!(
+            fetcher.repository("acme/skills").await.unwrap_err(),
+            FetchError::RateLimited
+        );
+        task.await.unwrap();
+        let (base, task) = serve(reply("429 Too Many Requests", "{}")).await;
         let fetcher = HttpFetcher::new(&base, &base, None).unwrap();
         assert_eq!(
             fetcher.repository("acme/skills").await.unwrap_err(),

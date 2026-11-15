@@ -350,6 +350,47 @@ fn catalog_rows(
     ranked.into_iter().map(|(_, row)| row).collect()
 }
 
+type Results = Vec<(&'static str, Result<FetchedCatalog, ()>)>;
+
+/// Where one refresh's catalog comes from. With the server flag on and a key
+/// pinned, the server document is fetched first (one anonymous GET); a
+/// refused or unreachable document falls back to the held cache, and only
+/// when neither verifies is GitHub contacted. With the flag off or no key
+/// pinned, no catalog request is made at all and GitHub answers as before.
+/// The fetchers are injected so tests can see which were called.
+async fn choose_catalog<S, SF, G, GF>(
+    dir: &Path,
+    environment: trace_commons_protocol::skills_catalog::Environment,
+    server_on: bool,
+    keys: &[[u8; 32]],
+    fetch_server: S,
+    fetch_github: G,
+) -> (
+    Option<trace_commons_protocol::skills_catalog::CatalogDocument>,
+    Results,
+)
+where
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<Vec<u8>, ()>>,
+    G: FnOnce() -> GF,
+    GF: std::future::Future<Output = Results>,
+{
+    if server_on && !keys.is_empty() {
+        // A refused or unreachable document is not a Skills error: the held
+        // cache, then GitHub, still answer.
+        let fetched = fetch_server().await.ok().and_then(|bytes| {
+            server_catalog::accept(dir, environment, keys, &bytes, Utc::now()).ok()
+        });
+        let document =
+            fetched.or_else(|| server_catalog::load_cached(dir, environment, keys, Utc::now()));
+        if let Some(document) = document {
+            let results = seed_results(&document);
+            return (Some(document), results);
+        }
+    }
+    (None, fetch_github().await)
+}
+
 /// Every seeded publisher's result from a server catalog. A publisher the
 /// catalog does not list is a failed check, which keeps its last metadata.
 fn seed_results(
@@ -720,13 +761,11 @@ impl SkillsService {
         }
         let service = Arc::clone(self);
         let spawned = shared.spawn_detached(move |shared| async move {
-            // The server catalog first, when enabled and a key is pinned: one
-            // anonymous GET of the same whole object every install fetches.
             let environment = shared.feature_flags.environment();
             let keys = service.catalog_keys(&shared);
-            let mut server = None;
-            if server_flag_on(&shared) && !keys.is_empty() {
-                let fetched = match (
+            let live = &shared;
+            let fetch_server = move || async move {
+                match (
                     server_catalog::client(true),
                     crate::channel::skills_catalog_url(environment),
                 ) {
@@ -736,52 +775,51 @@ impl SkillsService {
                             .unwrap_or(Err(()))
                     }
                     _ => Err(()),
-                };
-                // A refused or unreachable document is not a Skills error: the
-                // held cache, then GitHub, still answer.
-                if let Ok(Ok(document)) = fetched.map(|bytes| {
-                    server_catalog::accept(&dir, environment, &keys, &bytes, Utc::now())
-                }) {
-                    server = Some(document);
                 }
-                if server.is_none() {
-                    server = server_catalog::load_cached(&dir, environment, &keys, Utc::now());
+            };
+            let fetch_github = move || async move {
+                let client = reqwest::Client::builder()
+                    .https_only(true)
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(12))
+                    .user_agent("TraceCommons-Skills/1")
+                    .build();
+                let mut results = Vec::new();
+                if let Ok(client) = client {
+                    let work = async {
+                        for publisher in publishers()
+                            .iter()
+                            .filter(|publisher| !publisher.repository.is_empty())
+                        {
+                            if !enabled(live) {
+                                break;
+                            }
+                            let fetched =
+                                fetch_publisher(&client, publisher, &|| enabled(live)).await;
+                            results.push((publisher.id, fetched));
+                        }
+                    };
+                    let _ = tokio::time::timeout(REFRESH_TOTAL, work).await;
                 }
-            }
+                results
+            };
+            let (server, results) = choose_catalog(
+                &dir,
+                environment,
+                server_flag_on(&shared),
+                &keys,
+                fetch_server,
+                fetch_github,
+            )
+            .await;
             if let Some(document) = server {
-                let results = seed_results(&document);
                 if let Ok(mut runtime) = service.runtime.lock() {
                     if server_flag_on(&shared) {
                         runtime.server = Some(document);
                         runtime.server_loaded = true;
                     }
                 }
-                service.finish_refresh(&shared, &dir, results);
-                return;
-            }
-            let client = reqwest::Client::builder()
-                .https_only(true)
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(12))
-                .user_agent("TraceCommons-Skills/1")
-                .build();
-            let mut results = Vec::new();
-            if let Ok(client) = client {
-                let work = async {
-                    for publisher in publishers()
-                        .iter()
-                        .filter(|publisher| !publisher.repository.is_empty())
-                    {
-                        if !enabled(&shared) {
-                            break;
-                        }
-                        let fetched =
-                            fetch_publisher(&client, publisher, &|| enabled(&shared)).await;
-                        results.push((publisher.id, fetched));
-                    }
-                };
-                let _ = tokio::time::timeout(REFRESH_TOTAL, work).await;
             }
             service.finish_refresh(&shared, &dir, results);
         });

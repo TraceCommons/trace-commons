@@ -27,7 +27,7 @@ use trace_commons_protocol::skills_catalog::Environment;
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::skills_catalog::{
-    crawl::{crawl_targets, expand_sources},
+    crawl::{crawl_targets, expand_sources, order_targets},
     export::{DEFAULT_VALIDITY_DAYS, Suppressions, build_document},
     fetch::HttpFetcher,
     sources::SourcesFile,
@@ -134,6 +134,7 @@ async fn main() -> Result<()> {
             let fetcher = HttpFetcher::github(token).map_err(|e| anyhow::anyhow!(e.label()))?;
             let suggested = store.pending_suggestions(SUGGESTIONS_PER_RUN).await?;
             let (targets, failures) = expand_sources(&fetcher, &sources, &suggested).await;
+            let targets = order_targets(targets, &store.last_crawled().await?);
             for failure in &failures {
                 eprintln!("source not expanded: {}", failure.label);
             }

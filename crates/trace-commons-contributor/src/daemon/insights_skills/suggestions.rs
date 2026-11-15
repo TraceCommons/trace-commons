@@ -294,9 +294,29 @@ fn random_delay() -> Duration {
     MIN_DELAY + Duration::from_secs(raw % span)
 }
 
-/// Record one attempt's outcome: `sent` counts toward the day's budget;
-/// either way the skill is remembered for 30 days.
-fn record(dir: &Path, candidate: &Candidate, sent: bool) {
+/// How one attempt ended. Only a definitive answer is remembered: a skill
+/// GitHub does not serve as installed, or one the server took or refused.
+/// A timeout or a server error is tried again on a later attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// The server took it (202).
+    Sent,
+    /// The server refused it (400).
+    Refused,
+    /// GitHub did not serve these exact bytes anonymously (private,
+    /// unpushed, edited, or gone).
+    NotPublic,
+    /// No definitive answer.
+    Unknown,
+}
+
+/// Record one attempt: `Sent` counts toward the day's budget; a definitive
+/// outcome is remembered for 30 days; `Unknown` changes nothing.
+fn record(dir: &Path, candidate: &Candidate, attempt: Attempt) {
+    if attempt == Attempt::Unknown {
+        return;
+    }
+    let sent = attempt == Attempt::Sent;
     let mut state = load(dir);
     if state.salt.len() != 64 {
         let _ = persist(dir, &mut state);
@@ -333,46 +353,60 @@ pub(crate) fn raw_client() -> reqwest::Result<reqwest::Client> {
 }
 
 /// Whether GitHub serves exactly the installed bytes at that commit to an
-/// anonymous request.
+/// anonymous request: `Some(true)` it does, `Some(false)` it definitively
+/// does not (404, or other bytes), `None` no definitive answer.
 pub(crate) async fn is_public(
     client: &reqwest::Client,
     raw_base: &str,
     candidate: &Candidate,
-) -> bool {
+) -> Option<bool> {
     let s = &candidate.suggestion;
     let url = format!("{raw_base}/{}/{}/{}", s.repository, s.revision, s.path);
-    let Ok(mut response) = client.get(url).send().await else {
-        return false;
-    };
-    if response.status() != reqwest::StatusCode::OK
-        || response
-            .content_length()
-            .is_some_and(|n| n > MAX_SKILL_BYTES as u64)
+    let mut response = client.get(url).send().await.ok()?;
+    match response.status() {
+        reqwest::StatusCode::OK => {}
+        reqwest::StatusCode::NOT_FOUND => return Some(false),
+        _ => return None,
+    }
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_SKILL_BYTES as u64)
     {
-        return false;
+        return Some(false);
     }
     let mut bytes = Vec::new();
-    while let Ok(Some(chunk)) = response.chunk().await {
-        if bytes.len() + chunk.len() > MAX_SKILL_BYTES {
-            return false;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > MAX_SKILL_BYTES {
+                    return Some(false);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return None,
         }
-        bytes.extend_from_slice(&chunk);
     }
-    hex::encode(Sha256::digest(&bytes)) == candidate.sha256
+    Some(hex::encode(Sha256::digest(&bytes)) == candidate.sha256)
 }
 
-/// One anonymous suggestion. True only when the server took it.
+/// One anonymous suggestion.
 pub(crate) async fn send(
     client: &reqwest::Client,
     origin: &str,
     suggestion: &SkillSuggestion,
-) -> bool {
-    client
+) -> Attempt {
+    match client
         .post(format!("{origin}{SUGGESTIONS_PATH}"))
         .json(suggestion)
         .send()
         .await
-        .is_ok_and(|response| response.status() == reqwest::StatusCode::ACCEPTED)
+        .map(|response| response.status())
+    {
+        Ok(reqwest::StatusCode::ACCEPTED) => Attempt::Sent,
+        Ok(reqwest::StatusCode::BAD_REQUEST) => Attempt::Refused,
+        _ => Attempt::Unknown,
+    }
 }
 
 /// Called on the daemon's periodic tick. Sends at most one suggestion, when
@@ -425,21 +459,25 @@ pub(crate) fn maybe_send(shared: &DaemonShared) {
         runtime.in_flight = true;
     }
     let spawned = shared.spawn_detached(move |shared| async move {
-        let sent = match raw_client() {
-            Ok(client) if available(&shared) && is_public(&client, RAW_BASE, &candidate).await => {
-                // Re-check the gates: the user may have opted out meanwhile.
-                available(&shared)
-                    && load(&dir).opted_in
-                    && send(
-                        &client,
-                        crate::channel::NATIVE_ACCOUNT_ORIGIN,
-                        &candidate.suggestion,
-                    )
-                    .await
+        let attempt = match raw_client() {
+            Ok(client) if available(&shared) => {
+                match is_public(&client, RAW_BASE, &candidate).await {
+                    // Re-check the gates: the user may have opted out meanwhile.
+                    Some(true) if available(&shared) && load(&dir).opted_in => {
+                        send(
+                            &client,
+                            crate::channel::NATIVE_ACCOUNT_ORIGIN,
+                            &candidate.suggestion,
+                        )
+                        .await
+                    }
+                    Some(false) => Attempt::NotPublic,
+                    _ => Attempt::Unknown,
+                }
             }
-            _ => false,
+            _ => Attempt::Unknown,
         };
-        record(&dir, &candidate, sent);
+        record(&dir, &candidate, attempt);
         if let Ok(mut runtime) = shared.insights_skills.suggestions.lock() {
             runtime.in_flight = false;
         }
@@ -593,12 +631,15 @@ mod tests {
             },
             sha256: "a".repeat(64),
         };
-        record(dir.path(), &candidate, false);
+        // No definitive answer: nothing is remembered, so it is tried again.
+        record(dir.path(), &candidate, Attempt::Unknown);
+        assert!(!dir.path().join(STATE_FILE).exists());
+        record(dir.path(), &candidate, Attempt::NotPublic);
         let text = std::fs::read_to_string(dir.path().join(STATE_FILE)).unwrap();
         assert!(!text.contains("secret-org") && !text.contains("private-repo"));
         let state = load(dir.path());
         assert_eq!((state.sent_total, state.remembered.len()), (0, 1));
-        record(dir.path(), &candidate, true);
+        record(dir.path(), &candidate, Attempt::Sent);
         assert_eq!(load(dir.path()).sent_today, 1);
     }
 
@@ -653,7 +694,10 @@ mod tests {
         .into_bytes();
         response.extend_from_slice(body);
         let (base, task) = serve(response).await;
-        assert!(is_public(&raw_client().unwrap(), &base, &candidate).await);
+        assert_eq!(
+            is_public(&raw_client().unwrap(), &base, &candidate).await,
+            Some(true)
+        );
         let request = task.await.unwrap();
         assert!(request.starts_with(&format!("GET /acme/skills/{REV}/skills/x/SKILL.md ")));
         // Different bytes (a private repository's 404 page, an edit) fail.
@@ -661,14 +705,31 @@ mod tests {
             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )
         .await;
-        assert!(!is_public(&raw_client().unwrap(), &base, &candidate).await);
+        assert_eq!(
+            is_public(&raw_client().unwrap(), &base, &candidate).await,
+            Some(false)
+        );
+        task.await.unwrap();
+        // A server error is not an answer about the skill.
+        let (base, task) = serve(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        assert_eq!(
+            is_public(&raw_client().unwrap(), &base, &candidate).await,
+            None
+        );
         task.await.unwrap();
 
         let (origin, task) = serve(
             b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )
         .await;
-        assert!(send(&raw_client().unwrap(), &origin, &candidate.suggestion).await);
+        assert_eq!(
+            send(&raw_client().unwrap(), &origin, &candidate.suggestion).await,
+            Attempt::Sent
+        );
         let request = task.await.unwrap();
         let lower = request.to_lowercase();
         assert!(request.starts_with(&format!("POST {SUGGESTIONS_PATH} ")));

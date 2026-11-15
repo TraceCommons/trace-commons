@@ -1279,3 +1279,94 @@ fn reporting_is_offered_only_under_its_flag_and_the_users_choice() {
     shared.settings.lock().unwrap().insights_counter_pass = false;
     assert_eq!(snapshot(&shared)["suggestions"]["available"], false);
 }
+
+/// Which fetchers one `choose_catalog` call used, and what it chose.
+async fn choice(
+    dir: &Path,
+    server_on: bool,
+    keys: &[[u8; 32]],
+    served: Result<Vec<u8>, ()>,
+) -> (bool, bool, Option<u64>, usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let asked_server = AtomicBool::new(false);
+    let asked_github = AtomicBool::new(false);
+    let (server_flag, github_flag) = (&asked_server, &asked_github);
+    let (document, results) = choose_catalog(
+        dir,
+        trace_commons_protocol::skills_catalog::Environment::Testing,
+        server_on,
+        keys,
+        move || async move {
+            server_flag.store(true, Ordering::SeqCst);
+            served
+        },
+        move || async move {
+            github_flag.store(true, Ordering::SeqCst);
+            vec![("obra", Err(()))]
+        },
+    )
+    .await;
+    (
+        asked_server.load(Ordering::SeqCst),
+        asked_github.load(Ordering::SeqCst),
+        document.map(|d| d.revision),
+        results.len(),
+    )
+}
+
+#[tokio::test]
+async fn the_server_catalog_replaces_github_only_when_enabled_pinned_and_valid() {
+    use super::server_catalog::tests::{document, key, public, signed};
+    let dir = tempfile::tempdir().unwrap();
+    let signer = key();
+    let pinned = [public(&signer)];
+    let now = Utc::now();
+    let good = signed(&signer, &document(now));
+    // Flag off: no catalog request, GitHub as before.
+    assert_eq!(
+        choice(dir.path(), false, &pinned, Ok(good.clone())).await,
+        (false, true, None, 1)
+    );
+    // No pinned key (the shipped state): no catalog request either.
+    assert_eq!(
+        choice(dir.path(), true, &[], Ok(good.clone())).await,
+        (false, true, None, 1)
+    );
+    // A refused document with nothing cached: GitHub.
+    assert_eq!(
+        choice(
+            dir.path(),
+            true,
+            &pinned,
+            Ok(signed(&key(), &document(now)))
+        )
+        .await,
+        (true, true, None, 1)
+    );
+    // A valid document: GitHub is not contacted, and every seed has a result.
+    let revision = Some(now.timestamp() as u64);
+    assert_eq!(
+        choice(dir.path(), true, &pinned, Ok(good)).await,
+        (true, false, revision, 3)
+    );
+    // Unreachable now, but the verified cache still answers.
+    assert_eq!(
+        choice(dir.path(), true, &pinned, Err(())).await,
+        (true, false, revision, 3)
+    );
+    // An expired cache does not: GitHub again.
+    let stale = tempfile::tempdir().unwrap();
+    let old = now - chrono::Duration::days(8);
+    server_catalog::accept(
+        stale.path(),
+        trace_commons_protocol::skills_catalog::Environment::Testing,
+        &pinned,
+        &signed(&signer, &document(old)),
+        old,
+    )
+    .unwrap();
+    assert_eq!(
+        choice(stale.path(), true, &pinned, Err(())).await,
+        (true, true, None, 1)
+    );
+}

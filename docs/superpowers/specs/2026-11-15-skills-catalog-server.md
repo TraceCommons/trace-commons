@@ -143,17 +143,24 @@ A repository found by several sources keeps the most trusted kind, in order
 
 1. `GET /repos/{o}/{r}`: default branch, `archived`, `stargazers_count`,
    `pushed_at`, `created_at`, `private` (must be false), licence SPDX id.
-2. `GET /repos/{o}/{r}/commits/{default_branch}`: the head commit SHA, which
-   pins everything below.
+2. `GET /repos/{o}/{r}/git/ref/heads/{default_branch}`: the head commit
+   SHA (the ref must name a commit object), which pins everything below.
 3. `GET /repos/{o}/{r}/git/trees/{sha}?recursive=1`: refuse a truncated tree.
 4. `GET /repos/{o}/{r}/stats/participation`: commit counts for the last 1
    and 4 weeks. A 202 (GitHub is computing) records "unknown", never zero.
-5. `raw.githubusercontent.com/{o}/{r}/{sha}/{path}` for each `SKILL.md` and,
-   for licence detection only, a skill directory's `LICENSE*` file.
+5. `raw.githubusercontent.com/{o}/{r}/{sha}/{path}` for each `SKILL.md`.
+   A `LICENSE*` file in the skill's directory is detected from the tree
+   listing; its content is not fetched.
 
 Caps: 256 skills per repository, 256 KiB per `SKILL.md`, 8 MiB of tree JSON,
 20 s per request, no redirects (the client refuses them), responses read
-with a byte bound.
+with a byte bound. A 429, or a 403 that GitHub marks as a spent rate limit
+(`x-ratelimit-remaining: 0` or `retry-after`), stops the run; any other 403
+is about that one repository and is recorded as `http_error`.
+
+Order: seeds first, then repositories never crawled, then the least recently
+crawled, so a run that stops at its bound or a rate limit reaches different
+repositories next time.
 
 ## Checks
 
@@ -164,9 +171,9 @@ document says "safe", "verified" or "passed".
 | Check | Fact published | Blocks publication |
 |---|---|---|
 | Pinned content | `revision` (40-hex commit) and `sha256` of the exact `SKILL.md` bytes at that commit | yes, when either is missing |
-| Frontmatter | `frontmatter: valid` | yes, when not valid: missing `---` block, missing or empty `name`/`description`, control characters, name over 128 bytes or description over 1024 bytes |
+| Frontmatter | `frontmatter: valid` | yes, when not valid: missing `---` block, missing or empty `name`/`description`, a repeated key, a flow collection as a value, control characters, or a name over 128 bytes. A description over 1024 bytes is cut at a character boundary and marked with an ellipsis, not blocked |
 | Size | `document_bytes`, `directory_bytes`, `directory_files` | yes, over 256 KiB / 4 MiB / 500 files |
-| Hidden text | label `hidden_text` | yes: bidirectional controls, zero-width characters (other than a leading BOM), Unicode tag characters, or text in an HTML comment over 200 bytes |
+| Hidden text | label `hidden_text` | yes: bidirectional embeddings, overrides and isolates (U+202A-202E, U+2066-2069), the zero-width space, invisible operators (U+2060-2064), a BOM after the start, Unicode tag characters outside an emoji flag sequence, or an HTML comment over 200 bytes. The zero-width joiner and non-joiner and the LRM/RLM marks are not hidden text: emoji, Persian, Indic and mixed-direction writing need them |
 | Repository archived | `archived: true` | yes |
 | Repository private / unreachable anonymously | none | yes |
 | Suppressed | none | yes (skill id, publisher id, or repository) |
@@ -289,7 +296,7 @@ Rules a reader enforces (the same function on server and client):
 - Bounds: signed document at most 4 MiB; at most 1,000 publishers and
   5,000 skills; name 128 bytes, description 1,024, at most 8 previous hashes,
   at most 16 pattern labels from the fixed set.
-- Ids: publisher id `^[a-z0-9][a-z0-9._-]{0,63}$` for seeds, else
+- Ids: publisher id `^[a-z0-9][a-z0-9_-]{0,63}$` (never starting `gh.`) for seeds, else
   `gh.<owner>.<repo>` lowercase; skill id is `<publisher_id>:<path>`; both
   unique; skills sorted by id; every skill's publisher present and its
   repository equal to the publisher's.
@@ -354,8 +361,10 @@ gate for catalog requests):
   carries nothing derived from inventory, follows or views; every install
   downloads the same whole object. That is the whole of decision 3's privacy
   property: the server learns only that an address fetched the catalog.
-- At most every six hours, at startup after a 0-10 minute jitter, and on an
-  explicit Skills refresh (30 s debounce, the existing throttle).
+- On the existing refresh schedule, unchanged: at most every six hours in
+  the background while a publisher is followed, and when Skills is opened
+  or refreshed (30 s debounce). With no key pinned no catalog request is
+  made at all.
 - Verified with the pinned keys, then `decode_payload` with the build's
   environment and the current time. A revision lower than the highest ever
   accepted is refused (`skills-catalog-rollback`); the watermark persists
@@ -437,8 +446,10 @@ Only when all of these hold: `insights_skills` on, `skills_catalog_suggestions`
 flag on, the user's own opt-in (stored in
 `insights-skills-suggestions-v1.json`, default false), and Local trace
 analysis on. At most one suggestion per request, at most four requests per
-day, each after an independent random delay of 1-30 minutes, never in the
-same tick as the catalog fetch, and each candidate at most once per 30 days.
+day, each after an independent random delay of 1-30 minutes, to a different
+host from the catalog fetch, and each candidate at most once per 30 days.
+Candidates come only from the inventory a Skills view already scanned; the
+reporter never starts a scan of its own.
 One per request means a server log line could never hold the set of skills
 one install has.
 
@@ -495,18 +506,24 @@ Added to `skills_copy.rs` and listed in the report, not wired to any view:
 
 - Crawler: a repository that fails any step records a label and keeps its
   previous rows; an incomplete tree or a failed `SKILL.md` read never marks
-  skills absent. GitHub 403/429 stops the run with the rate-limit label;
-  rows already written stay. A database error aborts the run.
-- Export: refuses (non-zero, label) if the database has no publishable
-  skill, the document would exceed a bound, or it fails `decode_payload`.
+  skills absent. A rate limit (above) stops the run with the
+  `rate_limited` label; rows already written stay. A database error aborts
+  the run.
+- Export: drops the lowest-ranked skills (suggested before marketplace
+  before list before seed, then fewest stars) past 5,000 skills or a 3 MiB
+  payload and counts them as `over_budget`; refuses (non-zero, label) if
+  nothing is publishable or the result fails `decode_payload`.
 - Publish: refuses before upload on any check, as for feature flags.
-- Daemon fetch: any failure keeps the cached catalog while it is unexpired;
-  expired or absent means the GitHub fallback. Errors surface as the
-  existing `error` label `insights-skills-refresh-failed`, never a notice.
-- Suggestions: any failure drops the attempt silently and counts it; no
-  retry storm (the daily cap still applies).
-- Ingest route: database absent or write failure answers 503 and the daemon
-  tries again on a later day.
+- Daemon fetch: a refused or unreachable document is silent and falls back
+  to the verified cache while it is unexpired, then to GitHub. Only the
+  GitHub path's own failures set the existing `error` label; nothing is a
+  notice.
+- Suggestions: only definitive outcomes are remembered for 30 days (the
+  server took it, the server refused it with 400, or GitHub does not serve
+  those bytes anonymously). A timeout or a 5xx is tried again at a later
+  attempt, after its random delay and within the daily cap.
+- Ingest route: database absent or write failure answers 503, which the
+  daemon treats as no answer.
 
 ## Licensing and boundaries
 
@@ -575,6 +592,14 @@ smoke. Wiring it into `operator-smoke` evidence is listed as follow-up.
 9. Codex and Cursor marketplaces not parsed until their formats are
    documented.
 10. Follows stay limited to the four seeded publishers in this slice.
+11. All three profiles, production included, declare
+    `skills_catalog_suggestions_v1` and permit its remote enable, so one
+    signed manifest or one local `near-ai feature-flags set` makes the
+    (unapproved) toggle available on that build. Dropping the capability
+    from the production profile until the copy is approved closes that.
+12. A description over 1024 bytes is shortened with an ellipsis rather
+    than blocking the skill (3 of 1,096 local skills swept on 2026-11-15
+    would otherwise have been dropped).
 
 ## Unverified
 

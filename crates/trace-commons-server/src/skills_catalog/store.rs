@@ -114,6 +114,27 @@ impl SkillsCatalogStore {
         Ok(())
     }
 
+    /// When each known repository was last crawled, for the crawl order.
+    pub async fn last_crawled(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, DateTime<Utc>>, DatabaseError> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        tx.batch_execute("SET LOCAL ROLE trace_skills_catalog_guard")
+            .await?;
+        let rows = tx
+            .query(
+                "SELECT repository, crawled_at FROM trace_skills_catalog_repositories",
+                &[],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
     /// Distinct repositories with pending suggestions, most reported first.
     pub async fn pending_suggestions(&self, limit: i64) -> Result<Vec<String>, DatabaseError> {
         let mut client = self.pool.get().await?;

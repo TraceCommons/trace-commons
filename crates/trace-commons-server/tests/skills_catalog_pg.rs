@@ -201,6 +201,12 @@ async fn skills_catalog_state_on_postgres() {
     let crawl = crawl_repository(&fetcher, &seed_target(repository), second_crawl_at).await;
     store.record_crawl(&crawl, second_crawl_at).await.unwrap();
 
+    assert!(
+        (store.last_crawled().await.unwrap()[repository] - second_crawl_at)
+            .num_seconds()
+            .abs()
+            <= 1
+    );
     let (repositories, skills) = store.load_for_export().await.unwrap();
     let a = skills
         .iter()
