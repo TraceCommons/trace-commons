@@ -404,8 +404,7 @@ is true when rows were cut. New fields, all optional and additive:
   catalog identity, absent for `github`.
 - `catalog.total_skills`: skills in the whole catalog.
 - `catalog.publishers[]`: `url`, `source_kind`.
-- `catalog.publisher_states[].signals`: the shape of the
-  `skills-popularity-signals` branch (`stars`, `pushed_at`,
+- `catalog.publisher_states[].signals`: `stars`, `pushed_at`,
   `repository_checked_at`, `commits_7d`, `commits_28d`,
   `activity_checked_at`), filled from the server catalog and decoded in
   Swift as `SkillsRepositorySignals`.
