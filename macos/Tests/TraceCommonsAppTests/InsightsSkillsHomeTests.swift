@@ -247,8 +247,13 @@ final class InsightsSkillsHomeTests: XCTestCase {
 
     func testYourWeekIsTheThreeMostUsedSkillsAndOpensThisWeek() throws {
         func used(_ name: String, _ uses: Int, agent: String = "claude_code") throws -> DaemonData.SkillsUsageRow {
-            let value: [String: Any] = ["name": name, "agent": agent, "population": "direct", "invocations": uses, "loads": 0, "sessions": 1,
-                                        "windows": [["days": 7, "invocations": uses, "loads": 0, "sessions": 1]]]
+            // Today's bucket (11-15) and one from eight days back are not in
+            // the seven completed days; the rolling window counts both.
+            let value: [String: Any] = ["name": name, "agent": agent, "population": "direct", "invocations": uses + 200, "loads": 0, "sessions": 1,
+                                        "windows": [["days": 7, "invocations": uses + 100, "loads": 0, "sessions": 1]],
+                                        "daily": [["day": "2026-11-07", "invocations": 100, "loads": 0, "sessions": 1],
+                                                  ["day": "2026-11-08", "invocations": uses, "loads": 0, "sessions": 1],
+                                                  ["day": "2026-11-15", "invocations": 100, "loads": 0, "sessions": 1]]]
             return try JSONDecoder().decode(DaemonData.SkillsUsageRow.self, from: JSONSerialization.data(withJSONObject: value))
         }
         let rows = [try used("a", 2), try used("b", 9), try used("c", 5), try used("d", 1), try used("idle", 0),
@@ -267,6 +272,11 @@ final class InsightsSkillsHomeTests: XCTestCase {
         XCTAssertTrue(project(snapshot(rows: rows, partial: true)).week.isEmpty)
         XCTAssertTrue(project(snapshot(rows: rows, analysis: false)).week.isEmpty)
         XCTAssertTrue(project(snapshot(rows: [try used("idle", 0)])).week.isEmpty)
+        // The same seven days as a usage story's last week, so one skill
+        // never shows two totals in one feed.
+        let both = project(snapshot(rows: [try row(previous: 2, current: 5)]))
+        XCTAssertEqual(both.week.map(\.uses), [try XCTUnwrap(both.trends.first).currentUses])
+        XCTAssertEqual(both.week.first?.id, both.trends.first?.id)
     }
 
     func testReduceMotionTurnsEveryMovementOff() {

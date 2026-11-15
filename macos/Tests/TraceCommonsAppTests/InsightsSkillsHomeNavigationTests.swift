@@ -84,7 +84,8 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
         XCTAssertEqual(String(InsightsSkillsHomeView.headline("", name: "review").characters), "review", "Missing copy still names the skill")
     }
 
-    func testHomeFeedRendersAtPaneAndWideWidths() throws {
+    /// The stories every Home render draws.
+    private func homeFixture() throws -> (feed: InsightsSkillsHome.Snapshot, model: InsightsSkillsModel, utc: Calendar) {
         let copy = try XCTUnwrap(TCInsights.copy())
         let model = InsightsSkillsModel(copy: copy)
         let publisher = DaemonData.SkillsPublisher(id: "creator", name: "Obra", repository: "creator/skills", skillsRoot: "skills", instructionsURL: "https://example.com/install")
@@ -139,6 +140,30 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
         for period in InsightsSkillsHome.Period.allCases {
             XCTAssertFalse(model.text(period.copyKey).isEmpty, period.copyKey)
         }
+        return (feed, model, utc)
+    }
+
+    /// With motion on, in a window: the bars have risen and the feed has
+    /// settled by the time it is drawn. TC_SKILLS_HOME_RENDER_OUT saves it
+    /// beside the still renders, as `.motion.png`.
+    func testHomeFeedSettlesWithMotionOn() async throws {
+        let (feed, model, utc) = try homeFixture()
+        let started = Date()
+        let png = try await InsightsGetStartedRenderTests.render(
+            AnyView(ScrollView {
+                InsightsSkillsHomeView(feed: feed, model: model, now: now, calendar: utc, motion: SkillsHomeMotion(reduce: false), open: { _ in })
+                    .insightsSurface()
+            }), width: 440, height: 1500,
+            // Longer than the bars take to rise.
+            ready: { Date().timeIntervalSince(started) > 1 })
+        XCTAssertGreaterThan(png.count, 20_000)
+        if let output = ProcessInfo.processInfo.environment["TC_SKILLS_HOME_RENDER_OUT"] {
+            try png.write(to: URL(fileURLWithPath: output).deletingPathExtension().appendingPathExtension("motion.png"))
+        }
+    }
+
+    func testHomeFeedRendersAtPaneAndWideWidths() throws {
+        let (feed, model, utc) = try homeFixture()
         // TC_SKILLS_HOME_RENDER_SCHEME=light draws the light appearance.
         let light = ProcessInfo.processInfo.environment["TC_SKILLS_HOME_RENDER_SCHEME"] == "light"
         let saved = NSApplication.shared.appearance

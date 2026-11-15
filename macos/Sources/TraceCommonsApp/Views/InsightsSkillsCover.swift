@@ -111,50 +111,6 @@ enum SkillCoverArt {
         let letters = words.count > 1 ? words.prefix(2).compactMap(\.first).map(String.init).joined() : String(words.first?.prefix(2) ?? "")
         return letters.uppercased()
     }
-}
-
-/// The cover itself, filling whatever frame it is given. Decorative: the
-/// story beside it names the skill and the publisher in words, so it is
-/// hidden from assistive technology.
-struct SkillCover: View {
-    let spec: SkillCoverArt.Spec
-    /// The publisher's initials, or empty for none.
-    var initials = ""
-    /// Draw the initials as a small mark in the bottom-left corner (a
-    /// band), not centred (a tile).
-    var cornerMark = false
-    var radius: CGFloat = 9
-
-    var body: some View {
-        let palette = SkillCoverArt.palettes[spec.palette]
-        Rectangle()
-            .fill(LinearGradient(colors: [palette.from.color, palette.to.color],
-                                 startPoint: spec.flipped ? .topTrailing : .topLeading,
-                                 endPoint: spec.flipped ? .bottomLeading : .bottomTrailing))
-            .overlay {
-                Canvas { context, size in Self.draw(spec, in: &context, size: size) }
-            }
-            .overlay(alignment: cornerMark ? .bottomLeading : .center) {
-                if !initials.isEmpty { mark }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .accessibilityHidden(true)
-    }
-
-    @ViewBuilder private var mark: some View {
-        if cornerMark {
-            Text(initials).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, GlassTokens.Space.s3)
-                .padding(.vertical, GlassTokens.Space.s1)
-                .background(Capsule().fill(.black.opacity(0.28)))
-                .padding(GlassTokens.Space.s4)
-        } else {
-            Text(initials).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
-        }
-    }
 
     /// The pattern, in white at a low opacity over the gradient.
     static func draw(_ spec: SkillCoverArt.Spec, in context: inout GraphicsContext, size: CGSize) {
@@ -197,6 +153,50 @@ struct SkillCover: View {
                                with: ink, lineWidth: max(1, step * 0.45))
                 radius += step * 1.5
             }
+        }
+    }
+}
+
+/// The cover itself, filling whatever frame it is given. Decorative: the
+/// story beside it names the skill and the publisher in words, so it is
+/// hidden from assistive technology.
+struct SkillCover: View {
+    let spec: SkillCoverArt.Spec
+    /// The publisher's initials, or empty for none.
+    var initials = ""
+    /// Draw the initials as a small mark in the bottom-left corner (a
+    /// band), not centred (a tile).
+    var cornerMark = false
+    var radius: CGFloat = 9
+
+    var body: some View {
+        let palette = SkillCoverArt.palettes[spec.palette]
+        Rectangle()
+            .fill(LinearGradient(colors: [palette.from.color, palette.to.color],
+                                 startPoint: spec.flipped ? .topTrailing : .topLeading,
+                                 endPoint: spec.flipped ? .bottomLeading : .bottomTrailing))
+            .overlay {
+                Canvas { context, size in SkillCoverArt.draw(spec, in: &context, size: size) }
+            }
+            .overlay(alignment: cornerMark ? .bottomLeading : .center) {
+                if !initials.isEmpty { mark }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder private var mark: some View {
+        if cornerMark {
+            Text(initials).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, GlassTokens.Space.s3)
+                .padding(.vertical, GlassTokens.Space.s1)
+                .background(Capsule().fill(.black.opacity(0.28)))
+                .padding(GlassTokens.Space.s4)
+        } else {
+            Text(initials).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
         }
     }
 }

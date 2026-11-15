@@ -178,15 +178,38 @@ enum InsightsSkillsHome {
         return .init(updates: personalizedUpdates(snapshot, model: model, now: now),
                      trends: usageChanges(snapshot.usage, now: now, calendar: calendar),
                      creators: creatorChanges(snapshot, now: now),
-                     week: weekTop(snapshot.usage, now: now))
+                     week: weekTop(snapshot.usage, now: now, calendar: calendar))
     }
 
-    /// The three most-used skills of the daemon's seven-day window. Left
-    /// out while history is partial: a short count would read as the week.
-    private static func weekTop(_ usage: DaemonData.SkillsUsage, now: Date) -> [WeekSkill] {
-        guard usage.enabled, !usage.partial else { return [] }
-        return InsightsSkillsUsage.ranked(usage, days: 7, now: now).prefix(3)
-            .map { WeekSkill(id: $0.id, name: $0.name, agent: $0.agent, uses: $0.uses) }
+    /// The three most-used skills of the last seven completed local days:
+    /// the same days a usage story's last week is, so one skill never
+    /// shows two totals in one feed. The daemon's rolling seven-day window
+    /// is not used: it includes today. Left out while history is partial
+    /// or was not analysed today, when a short count would read as the
+    /// week; a skill whose daily history cannot be read is left out alone.
+    private static func weekTop(_ usage: DaemonData.SkillsUsage, now: Date, calendar: Calendar) -> [WeekSkill] {
+        let today = calendar.startOfDay(for: now)
+        guard usage.enabled, !usage.partial,
+              let checked = usage.lastAnalysisAt.flatMap(parse), checked >= today, checked <= now,
+              let start = calendar.date(byAdding: .day, value: -7, to: today) else { return [] }
+        let explicit = Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        let rows = usage.skills.filter { explicit.contains($0.agent) && ["direct", "delegated"].contains($0.population) }
+        let skills = Dictionary(grouping: rows, by: { $0.agent + "\u{0}" + $0.name }).compactMap { id, rows -> WeekSkill? in
+            guard let first = rows.first, Set(rows.map(\.population)).count == rows.count else { return nil }
+            var uses: [Int] = []
+            for day in rows.flatMap(\.daily) {
+                guard day.invocations >= 0, let date = formatter.date(from: day.day), formatter.string(from: date) == day.day else { return nil }
+                if date >= start && date < today { uses.append(day.invocations) }
+            }
+            guard let total = sum(uses), total > 0 else { return nil }
+            return WeekSkill(id: id, name: first.name, agent: first.agent, uses: total)
+        }
+        return Array(skills.sorted { $0.uses == $1.uses ? $0.id < $1.id : $0.uses > $1.uses }.prefix(3))
     }
 
     @MainActor

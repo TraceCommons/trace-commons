@@ -288,7 +288,13 @@ struct InsightsSkillsHomeView: View {
     private func week(_ skills: [InsightsSkillsHome.WeekSkill]) -> some View {
         let most = max(1, skills.map(\.uses).max() ?? 1)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-            Text(model.text("skills_home_week")).insightsHeading().accessibilityAddTraits(.isHeader)
+            // The card opens This week, but what it counts is the last seven
+            // completed days, as the usage stories do: the caption says so.
+            HStack(alignment: .firstTextBaseline) {
+                Text(model.text("skills_home_week")).insightsHeading().accessibilityAddTraits(.isHeader)
+                Spacer(minLength: GlassTokens.Space.s4)
+                Text(model.text("skills_home_trend_period")).insightsCaption()
+            }
             ForEach(skills) { skill in
                 let tool = Self.tool(skill.agent, label: model.agentLabel)
                 Button { open(.usage(id: skill.id)) } label: {
@@ -306,7 +312,6 @@ struct InsightsSkillsHomeView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityElement(children: .ignore)
                 .accessibilityLabel(model.text("skills_home_open_usage", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
                 .accessibilityValue(model.text("skills_invocations", values: ["count": String(skill.uses)]))
             }
