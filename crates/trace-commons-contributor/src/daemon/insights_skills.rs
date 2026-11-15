@@ -1,6 +1,15 @@
 //! Passive local Skills inventory and a bounded, curated public metadata cache.
 //! Catalog refreshes never send installed paths/content, authenticate, install,
 //! execute publisher code, or follow redirects. Only public metadata is persisted.
+//!
+//! The catalog comes from the server's signed document when
+//! `skills_server_catalog` is on and a verified, current one is held
+//! (`server_catalog`); otherwise from the four fixed publishers on GitHub.
+//! The one exception to "nothing about installed skills leaves the machine"
+//! is `suggestions`: off by default, behind its own flag and the user's own
+//! opt-in, it reports a public GitHub address of a skill the catalog lacks,
+//! one anonymous request at a time, after proving anonymously that GitHub
+//! serves those exact bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -214,6 +223,10 @@ struct Runtime {
     error: Option<&'static str>,
     inventory: Option<(Instant, InventoryPolicy, Inventory)>,
     inventory_scanned_at: Option<DateTime<Utc>>,
+    /// The verified server catalog last accepted or loaded from its cache.
+    /// Used only while `skills_server_catalog` is on and it is current.
+    server: Option<trace_commons_protocol::skills_catalog::CatalogDocument>,
+    server_loaded: bool,
 }
 
 /// A leaf lock: never held while taking daemon settings, policy, or counter locks.
@@ -221,6 +234,140 @@ struct Runtime {
 pub(crate) struct SkillsService {
     opencode: Mutex<opencode::State>,
     runtime: Mutex<Runtime>,
+    suggestions: Mutex<suggestions::Runtime>,
+    /// Tests pin their own throwaway catalog keys here.
+    #[cfg(test)]
+    catalog_keys: Mutex<Option<Vec<[u8; 32]>>>,
+}
+
+impl SkillsService {
+    /// The catalog keys this build pins for its environment.
+    fn catalog_keys(&self, shared: &DaemonShared) -> Vec<[u8; 32]> {
+        #[cfg(test)]
+        if let Some(keys) = self.catalog_keys.lock().ok().and_then(|k| k.clone()) {
+            return keys;
+        }
+        crate::skills_catalog::pinned_keys(shared.feature_flags.environment()).unwrap_or_default()
+    }
+
+    /// Load the held server catalog from its cache on first use.
+    fn load_server(&self, shared: &DaemonShared, runtime: &mut Runtime) {
+        if runtime.server_loaded || !server_flag_on(shared) {
+            return;
+        }
+        runtime.server_loaded = true;
+        runtime.server = server_catalog::load_cached(
+            shared.store.dir(),
+            shared.feature_flags.environment(),
+            &self.catalog_keys(shared),
+            Utc::now(),
+        );
+    }
+}
+
+/// The held server catalog, while its flag is on and it is current.
+fn current_server<'a>(
+    shared: &DaemonShared,
+    runtime: &'a Runtime,
+    now: DateTime<Utc>,
+) -> Option<&'a trace_commons_protocol::skills_catalog::CatalogDocument> {
+    runtime
+        .server
+        .as_ref()
+        .filter(|document| server_flag_on(shared) && document.is_current(now))
+}
+
+/// Catalog rows for the snapshot, most relevant first: skills matching an
+/// installed skill, then the seeded publishers, then the rest by repository
+/// stars. Seeded rows keep today's ids and gain the server's facts.
+fn catalog_rows(
+    public: &PublicState,
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    inventory: &Inventory,
+) -> Vec<Value> {
+    let installed: BTreeSet<(&str, &str)> = inventory
+        .skills
+        .iter()
+        .filter_map(|skill| skill.source.as_ref())
+        .map(|source| (source.repository.as_str(), source.path.as_str()))
+        .collect();
+    let server_skill = |repository: &str, path: &str| {
+        server.and_then(|document| {
+            document
+                .skills
+                .iter()
+                .find(|skill| skill.repository == repository && skill.path == path)
+        })
+    };
+    let mut ranked: Vec<((bool, bool, std::cmp::Reverse<u64>, String), Value)> = Vec::new();
+    for skill in &public.skills {
+        let Ok(mut row) = serde_json::to_value(skill) else {
+            continue;
+        };
+        if let (Some(document), Some(facts)) =
+            (server, server_skill(&skill.repository, &skill.path))
+        {
+            server_catalog::add_facts(&mut row, facts, document.checks_version);
+        }
+        let key = (
+            !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
+            false,
+            std::cmp::Reverse(u64::MAX),
+            skill.id.clone(),
+        );
+        ranked.push((key, row));
+    }
+    if let Some(document) = server {
+        let seeds: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+        for skill in &document.skills {
+            if seeds.contains(skill.publisher_id.as_str()) {
+                continue;
+            }
+            let Some(publisher) = document
+                .publishers
+                .iter()
+                .find(|p| p.id == skill.publisher_id)
+            else {
+                continue;
+            };
+            let key = (
+                !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
+                true,
+                std::cmp::Reverse(publisher.signals.stars.unwrap_or(0)),
+                skill.id.clone(),
+            );
+            ranked.push((
+                key,
+                server_catalog::skill_row(
+                    skill,
+                    &publisher.instructions_url,
+                    document.checks_version,
+                ),
+            ));
+        }
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0));
+    ranked.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Every seeded publisher's result from a server catalog. A publisher the
+/// catalog does not list is a failed check, which keeps its last metadata.
+fn seed_results(
+    document: &trace_commons_protocol::skills_catalog::CatalogDocument,
+) -> Vec<(&'static str, Result<FetchedCatalog, ()>)> {
+    publishers()
+        .into_iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+        .map(|publisher| {
+            let result = server_catalog::seed_skills(document, &publisher)
+                .map(|skills| FetchedCatalog {
+                    skills,
+                    complete: true,
+                })
+                .ok_or(());
+            (publisher.id, result)
+        })
+        .collect()
 }
 
 fn regular_destination(dir: &Path) -> Result<PathBuf, ()> {
@@ -573,6 +720,45 @@ impl SkillsService {
         }
         let service = Arc::clone(self);
         let spawned = shared.spawn_detached(move |shared| async move {
+            // The server catalog first, when enabled and a key is pinned: one
+            // anonymous GET of the same whole object every install fetches.
+            let environment = shared.feature_flags.environment();
+            let keys = service.catalog_keys(&shared);
+            let mut server = None;
+            if server_flag_on(&shared) && !keys.is_empty() {
+                let fetched = match (
+                    server_catalog::client(true),
+                    crate::channel::skills_catalog_url(environment),
+                ) {
+                    (Ok(client), Ok(url)) => {
+                        tokio::time::timeout(REFRESH_TOTAL, server_catalog::download(&client, url))
+                            .await
+                            .unwrap_or(Err(()))
+                    }
+                    _ => Err(()),
+                };
+                // A refused or unreachable document is not a Skills error: the
+                // held cache, then GitHub, still answer.
+                if let Ok(Ok(document)) = fetched.map(|bytes| {
+                    server_catalog::accept(&dir, environment, &keys, &bytes, Utc::now())
+                }) {
+                    server = Some(document);
+                }
+                if server.is_none() {
+                    server = server_catalog::load_cached(&dir, environment, &keys, Utc::now());
+                }
+            }
+            if let Some(document) = server {
+                let results = seed_results(&document);
+                if let Ok(mut runtime) = service.runtime.lock() {
+                    if server_flag_on(&shared) {
+                        runtime.server = Some(document);
+                        runtime.server_loaded = true;
+                    }
+                }
+                service.finish_refresh(&shared, &dir, results);
+                return;
+            }
             let client = reqwest::Client::builder()
                 .https_only(true)
                 .no_proxy()
@@ -681,10 +867,19 @@ pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
     if followed {
         shared.insights_skills.start_refresh(shared, false);
     }
+    suggestions::maybe_send(shared);
 }
 
 pub(crate) fn skills_flag_on(shared: &DaemonShared) -> bool {
     !shared.dev_dry_run && shared.feature_flags.is_enabled(INSIGHTS_SKILLS_FLAG)
+}
+
+/// The server catalog replaces the GitHub fetch only under its own flag.
+fn server_flag_on(shared: &DaemonShared) -> bool {
+    skills_flag_on(shared)
+        && shared
+            .feature_flags
+            .is_enabled(server_catalog::SERVER_CATALOG_FLAG)
 }
 
 fn feature_enabled(shared: &DaemonShared) -> bool {
@@ -881,26 +1076,73 @@ fn snapshot(shared: &DaemonShared) -> Value {
             })
             .unwrap_or_default(),
     );
-    let Ok(runtime) = shared.insights_skills.state(shared.store.dir()) else {
+    // Sampled before the Skills lock: it reads the settings lock.
+    let suggestions_available = suggestions::available(shared);
+    let Ok(mut runtime) = shared.insights_skills.state(shared.store.dir()) else {
         return json!({"enabled":true,"readable":false,"reason":ERROR_CACHE,"copy":copy()});
     };
     if !skills_flag_on(shared) {
         return json!({"enabled":false,"copy":copy()});
     }
+    shared.insights_skills.load_server(shared, &mut runtime);
+    let runtime = runtime;
     let now = Utc::now();
+    let server = current_server(shared, &runtime, now);
+    let server_publisher =
+        |id: &str| server.and_then(|document| document.publishers.iter().find(|p| p.id == id));
     let publisher_states: Vec<_> = publishers().iter().map(|publisher| {
         let state = runtime.public.publisher_states.get(publisher.id);
         let status = if publisher.repository.is_empty() { "unavailable" } else { state.map_or("not_checked", |state| {
             if state.status == "current" && state.checked_at.is_some_and(|at| now.signed_duration_since(at).num_seconds() >= REFRESH_AFTER.as_secs() as i64) { "unknown" } else { &state.status }
         }) };
-        json!({"publisher_id":publisher.id,"status":status,"checked_at":state.and_then(|state| state.checked_at)})
+        let mut row = json!({"publisher_id":publisher.id,"status":status,"checked_at":state.and_then(|state| state.checked_at)});
+        if let Some(seed) = server_publisher(publisher.id).filter(|p| p.repository == publisher.repository) {
+            row["signals"] = server_catalog::signals_row(&seed.signals);
+        }
+        row
     }).collect();
     let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
     let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
     let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
-    let (catalog, catalog_partial) = bounded_rows(runtime.public.skills.iter(), 180 * 1024);
-    let (updates, updates_partial) =
-        bounded_rows(updates(&inventory, &runtime.public, now), 64 * 1024);
+    let (catalog, catalog_partial) = bounded_rows(
+        catalog_rows(&runtime.public, server, &inventory),
+        180 * 1024,
+    );
+    // Publishers beyond the fixed four: only those an emitted row names.
+    let mut catalog_publishers = serde_json::to_value(publishers())
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut publisher_states = publisher_states;
+    if let Some(document) = server {
+        let fixed: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+        let named: BTreeSet<&str> = catalog
+            .iter()
+            .filter_map(|row| row.get("publisher_id").and_then(Value::as_str))
+            .filter(|id| !fixed.contains(id))
+            .collect();
+        for publisher in document
+            .publishers
+            .iter()
+            .filter(|p| named.contains(p.id.as_str()))
+        {
+            catalog_publishers.push(json!({
+                "id": publisher.id, "name": publisher.name, "repository": publisher.repository,
+                "skills_root": publisher.skills_root.clone().unwrap_or_default(),
+                "instructions_url": publisher.instructions_url,
+                "url": publisher.url, "source_kind": publisher.source_kind,
+            }));
+            publisher_states.push(json!({
+                "publisher_id": publisher.id, "status": "current",
+                "checked_at": document.issued_at,
+                "signals": server_catalog::signals_row(&publisher.signals),
+            }));
+        }
+    }
+    let (updates, updates_partial) = bounded_rows(
+        updates_with_server(&inventory, &runtime.public, server, now),
+        64 * 1024,
+    );
     let (feed, feed_partial) = bounded_rows(
         runtime
             .public
@@ -918,7 +1160,11 @@ fn snapshot(shared: &DaemonShared) -> Value {
     }
     let value = json!({
         "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
-        "catalog":{"publishers":publishers(),"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states},
+        "catalog":{"publishers":catalog_publishers,"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states,
+            "source": if server.is_some() { "server" } else { "github" },
+            "revision": server.map(|d| d.revision), "issued_at": server.map(|d| d.issued_at),
+            "expires_at": server.map(|d| d.expires_at), "total_skills": server.map(|d| d.skills.len())},
+        "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
@@ -990,8 +1236,57 @@ fn bounded_rows<T: Serialize>(
     (result, false)
 }
 
+#[cfg(test)]
 fn updates(inventory: &Inventory, state: &PublicState, now: DateTime<Utc>) -> Vec<Value> {
+    updates_with_server(inventory, state, None, now)
+}
+
+/// A non-seeded server skill at the installed skill's source, as today's
+/// `CatalogSkill` with the server's earlier hashes as its history.
+fn server_match(
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    installed: &crate::insights::skills::InstalledSkill,
+) -> Option<(CatalogSkill, Vec<String>)> {
+    let source = installed.source.as_ref()?;
+    let document = server?;
+    let seeds: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+    let skill = document.skills.iter().find(|skill| {
+        skill.repository == source.repository
+            && skill.path == source.path
+            && !seeds.contains(skill.publisher_id.as_str())
+    })?;
+    Some((
+        CatalogSkill {
+            id: skill.id.clone(),
+            publisher_id: skill.publisher_id.clone(),
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            repository: skill.repository.clone(),
+            path: skill.path.clone(),
+            revision: skill.revision.clone(),
+            sha256: skill.sha256.clone(),
+            source_url: skill.source_url.clone(),
+            instructions_url: trace_commons_protocol::skills_catalog::repository_url(
+                &skill.repository,
+            ),
+        },
+        skill.previous_sha256.clone(),
+    ))
+}
+
+fn updates_with_server(
+    inventory: &Inventory,
+    state: &PublicState,
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    now: DateTime<Utc>,
+) -> Vec<Value> {
     inventory.skills.iter().map(|installed| {
+        if !state.skills.iter().any(|skill| installed.source.as_ref().is_some_and(|source| source.repository == skill.repository && source.path == skill.path)) {
+            if let Some((skill, history)) = server_match(server, installed) {
+                let status = serde_json::to_value(freshness(installed, &skill, &history)).unwrap_or(json!("unknown"));
+                return json!({"installed_id":installed.id,"status":status,"catalog_skill_id":skill.id});
+            }
+        }
         let catalog = installed.source.as_ref().and_then(|source| state.skills.iter().find(|skill| source.repository == skill.repository && source.path == skill.path));
         let status = catalog.map(|skill| {
             let checked = state.publisher_states.get(&skill.publisher_id);
@@ -1011,6 +1306,8 @@ fn updates(inventory: &Inventory, state: &PublicState, now: DateTime<Utc>) -> Ve
 
 mod detail;
 pub(crate) mod opencode;
+mod server_catalog;
+mod suggestions;
 
 pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
     if req.params.get("session_ref").is_some() {
@@ -1040,6 +1337,11 @@ pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
         value = json!({"enabled":false,"copy":copy()});
     }
     Response::ok(req.id, value)
+}
+
+/// `insights_skills_suggestions {"opted_in": bool}`.
+pub(crate) fn handle_suggestions(shared: &DaemonShared, req: &Request) -> Response {
+    suggestions::handle_set(shared, req)
 }
 
 pub(crate) fn handle_follow(shared: &DaemonShared, req: &Request) -> Response {

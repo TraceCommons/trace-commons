@@ -120,6 +120,7 @@ pub mod routing;
 pub mod routing_copy;
 pub mod shell_words_copy;
 pub mod skill_loop;
+pub mod skills_catalog;
 pub mod source;
 pub mod source_copy;
 pub mod submit;
