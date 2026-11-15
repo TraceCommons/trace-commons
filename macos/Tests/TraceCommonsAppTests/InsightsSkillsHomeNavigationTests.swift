@@ -96,35 +96,64 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
         let earlier = DaemonData.SkillsFeedEvent(id: "creator-add", publisherID: publisher.id, skillID: added.id, kind: "added", observedAt: "2026-11-03T09:00:00Z")
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        // The same stories as the first feed render, plus what the newer
+        // cards need: daily history, the week's top skills, and three
+        // changes from a second publisher this week (a roll-up).
+        let second = DaemonData.SkillsPublisher(id: "anthropic-skills", name: "Example Labs", repository: "example/skills", skillsRoot: "skills", instructionsURL: "https://example.com/install")
+        let rolled = ["pdf", "spreadsheets", "frontend-design"].enumerated().map { index, name in
+            let skill = DaemonData.CatalogSkill(id: "catalog-" + name, publisherID: second.id, name: name, description: "", repository: second.repository, path: "skills/" + name, revision: "main", sha256: String(repeating: "e", count: 64), sourceURL: "https://example.com/" + name, instructionsURL: "https://example.com/install")
+            let observed = now.addingTimeInterval(-Double(2 * 86_400 + index * 3600))
+            return InsightsSkillsHome.CreatorUpdate(id: "rolled-" + name, event: .init(id: "rolled-" + name, publisherID: second.id, skillID: skill.id, kind: index == 0 ? "added" : "updated", observedAt: "2026-11-13T12:00:00Z"), skill: skill, publisher: second, observedAt: observed)
+        }
         let feed = InsightsSkillsHome.Snapshot(
-            updates: [.init(id: "update-review", groupID: "installed-review", installedID: "installed-review", name: "review", agents: ["claude_code", "codex"], catalogSkill: catalogSkill, checkedAt: now)],
-            trends: [.init(id: "claude_code\u{0}review", name: "systematic-debugging", agent: "claude_code", previousUses: 2, currentUses: 7, direction: .more, periodEnd: now),
-                     .init(id: "opencode\u{0}planning", name: "planning", agent: "opencode", previousUses: 4, currentUses: 0, direction: .less, periodEnd: now),
+            updates: [.init(id: "update-review", groupID: "installed-review", installedID: "installed-review", name: "review", agents: ["claude_code", "codex"], catalogSkill: catalogSkill, checkedAt: now, publisherName: publisher.name)],
+            trends: [.init(id: "claude_code\u{0}review", name: "systematic-debugging", agent: "claude_code", previousUses: 2, currentUses: 7, direction: .more, periodEnd: now,
+                           daily: [0, 1, 0, 0, 1, 0, 0, 1, 0, 2, 1, 0, 2, 1]),
+                     .init(id: "opencode\u{0}planning", name: "planning", agent: "opencode", previousUses: 4, currentUses: 0, direction: .less, periodEnd: now,
+                           daily: [1, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]),
                      // No use the week before, and an agent with no logo artwork.
-                     .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", previousUses: 0, currentUses: 3, direction: .started, periodEnd: now)],
+                     .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", previousUses: 0, currentUses: 3, direction: .started, periodEnd: now,
+                           daily: [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0])],
             creators: [.init(id: event.id, event: event, skill: described, publisher: publisher, observedAt: now.addingTimeInterval(-3 * 3600)),
-                       .init(id: earlier.id, event: earlier, skill: added, publisher: publisher, observedAt: now.addingTimeInterval(-12 * 86_400 - 3 * 3600))])
-        XCTAssertEqual(feed.timeline(now: now, calendar: utc).map(\.period), [.today, .earlier])
-        XCTAssertEqual(feed.timeline(now: now, calendar: utc).flatMap(\.stories).count, 6)
+                       .init(id: earlier.id, event: earlier, skill: added, publisher: publisher, observedAt: now.addingTimeInterval(-12 * 86_400 - 3 * 3600))] + rolled,
+            week: [.init(id: "claude_code\u{0}review", name: "systematic-debugging", agent: "claude_code", uses: 7),
+                   .init(id: "claude_code\u{0}brainstorming", name: "brainstorming", agent: "claude_code", uses: 4),
+                   .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", uses: 3)])
+        let groups = feed.timeline(now: now, calendar: utc)
+        XCTAssertEqual(groups.map(\.period), [.today, .thisWeek, .earlier])
+        XCTAssertEqual(groups.map { $0.stories.map(\.id) }, [
+            ["update-review", "creator:creator-update", "trend:claude_code\u{0}review", "trend:opencode\u{0}planning", "trend:cline\u{0}writing-plans"],
+            ["week", "rollup:thisWeek:anthropic-skills"],
+            ["creator:creator-add"]])
+        XCTAssertEqual(InsightsSkillsHome.Snapshot.heroID(in: groups), "update-review")
         // Swift reads these through the FFI dylib: a stale one draws blanks.
         for key in ["skills_home_today", "skills_home_this_week", "skills_home_earlier",
                     "skills_home_story_update", "skills_home_story_more", "skills_home_story_less",
                     "skills_home_story_added", "skills_home_story_updated",
-                    "skills_home_more", "skills_home_less", "skills_home_started",
-                    "skills_home_view", "skills_home_trend_period"] {
+                    "skills_home_compare_up", "skills_home_compare_down", "skills_home_week", "skills_home_rollup",
+                    "skills_home_view", "skills_home_trend_period",
+                    // Other tables' words the feed reuses.
+                    "skills_invocations", "skills_inspect", "skills_uses", "skills_usage_period_label", "skills_usage_chart_accessibility"] {
             XCTAssertFalse(model.text(key).isEmpty, key)
         }
         for period in InsightsSkillsHome.Period.allCases {
             XCTAssertFalse(model.text(period.copyKey).isEmpty, period.copyKey)
         }
+        // TC_SKILLS_HOME_RENDER_SCHEME=light draws the light appearance.
+        let light = ProcessInfo.processInfo.environment["TC_SKILLS_HOME_RENDER_SCHEME"] == "light"
+        let saved = NSApplication.shared.appearance
+        NSApplication.shared.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        defer { NSApplication.shared.appearance = saved }
         for width: CGFloat in [408, 800] {
-            let content = InsightsSkillsHomeView(feed: feed, model: model, now: now, calendar: utc, open: { _ in })
+            // One frame is drawn, so the feed is drawn still: with motion on,
+            // a chart's first frame is its bars before they rise.
+            let content = InsightsSkillsHomeView(feed: feed, model: model, now: now, calendar: utc, motion: .still, open: { _ in })
                 .insightsSurface()
                 .frame(width: width)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(16)
-                .background(Color(red: 0.18, green: 0.19, blue: 0.23))
-                .environment(\.colorScheme, .dark)
+                .background(light ? Color(red: 0.93, green: 0.93, blue: 0.95) : Color(red: 0.18, green: 0.19, blue: 0.23))
+                .environment(\.colorScheme, light ? .light : .dark)
             let renderer = ImageRenderer(content: content)
             var bitmap: NSBitmapImageRep?
             renderer.render(rasterizationScale: 2) { size, paint in
@@ -139,7 +168,7 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
             }
             let image = try XCTUnwrap(bitmap)
             XCTAssertEqual(image.pixelsWide, Int((width + 32) * 2))
-            XCTAssertGreaterThan(image.pixelsHigh, 500)
+            XCTAssertGreaterThan(image.pixelsHigh, 1_500)
             let png = try XCTUnwrap(image.representation(using: .png, properties: [:]))
             XCTAssertGreaterThan(png.count, 10_000)
             if let output = ProcessInfo.processInfo.environment["TC_SKILLS_HOME_RENDER_OUT"] {

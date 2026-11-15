@@ -7,7 +7,9 @@ enum InsightsSkillsHome {
         let updates: [Update]
         let trends: [Trend]
         let creators: [CreatorUpdate]
-        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty }
+        /// The most-used skills of the past seven days, most used first.
+        var week: [WeekSkill] = []
+        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty && week.isEmpty }
 
         /// The feed: every item in one column, newest first, under the
         /// period it falls in. Empty periods are left out.
@@ -19,35 +21,63 @@ enum InsightsSkillsHome {
         /// day began, and usage changes after everything else today, in
         /// the order given (largest change first). A catalog change for a
         /// skill whose update is already in the feed is the same news and
-        /// is left out. This week is the local ISO week, as elsewhere in
-        /// Insights.
+        /// is left out. Two or more changes from one publisher in one
+        /// period are one roll-up, at the newest change's time. The week's
+        /// most-used skills open This week. This week is the local ISO
+        /// week, as elsewhere in Insights.
         func timeline(now: Date = Date(), calendar: Calendar = .current) -> [Group] {
             let today = calendar.startOfDay(for: now)
             var iso = Calendar(identifier: .iso8601)
             iso.timeZone = calendar.timeZone
-            let week = iso.dateInterval(of: .weekOfYear, for: now)?.start ?? today
-            let updating = Set(updates.map(\.catalogSkill.id))
+            let week = min(today, iso.dateInterval(of: .weekOfYear, for: now)?.start ?? today)
+            func period(_ date: Date) -> Period { date >= today ? .today : date >= week ? .thisWeek : .earlier }
+
             var entries: [(date: Date, rank: Int, story: Story)] = []
             entries += updates.map { (min(max($0.checkedAt, today), now), 0, .update($0)) }
-            entries += creators.filter { !updating.contains($0.skill.id) }.map { ($0.observedAt, 1, .creator($0)) }
+
+            let updating = Set(updates.map(\.catalogSkill.id))
+            let changes = creators.filter { !updating.contains($0.skill.id) }
+            var catalog: [(date: Date, id: String, story: Story)] = []
+            for (key, found) in Dictionary(grouping: changes, by: { RollupKey(period: period($0.observedAt), publisher: $0.publisher.id) }) {
+                let newest = found.sorted { $0.observedAt == $1.observedAt ? $0.id < $1.id : $0.observedAt > $1.observedAt }
+                if newest.count > 1 {
+                    let rollup = Rollup(id: "\(key.period):\(key.publisher)", publisher: newest[0].publisher, changes: newest)
+                    catalog.append((newest[0].observedAt, rollup.id, .rollup(rollup)))
+                } else {
+                    catalog += newest.map { ($0.observedAt, $0.id, .creator($0)) }
+                }
+            }
+            // A dictionary has no order of its own: date, then id.
+            entries += catalog.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }.map { ($0.date, 1, $0.story) }
             entries += trends.map { (today, 2, .trend($0)) }
-            // Each source array is already in its own order; the index keeps it.
+
+            // Each source is already in its own order; the index keeps it.
             let ordered = entries.enumerated().sorted { a, b in
                 if a.element.date != b.element.date { return a.element.date > b.element.date }
                 if a.element.rank != b.element.rank { return a.element.rank < b.element.rank }
                 return a.offset < b.offset
             }.map(\.element)
-            return Period.allCases.compactMap { period in
-                let stories = ordered.filter { entry in
-                    switch period {
-                    case .today: entry.date >= today
-                    case .thisWeek: entry.date < today && entry.date >= week
-                    case .earlier: entry.date < min(today, week)
-                    }
-                }.map(\.story)
-                return stories.isEmpty ? nil : Group(period: period, stories: stories)
+            return Period.allCases.compactMap { which in
+                var stories = ordered.filter { period($0.date) == which }.map(\.story)
+                if which == .thisWeek, !self.week.isEmpty { stories.insert(.week(self.week), at: 0) }
+                return stories.isEmpty ? nil : Group(period: which, stories: stories)
             }
         }
+
+        /// The one story drawn tall: the first under Today, when it is
+        /// about a catalog skill and so has a cover to show. A usage
+        /// change, a roll-up, or a feed with nothing today has none.
+        static func heroID(in groups: [Group]) -> String? {
+            guard let first = groups.first, first.period == .today, let story = first.stories.first else { return nil }
+            switch story {
+            case .update, .creator: return story.id
+            case .trend, .rollup, .week: return nil
+            }
+        }
+    }
+    private struct RollupKey: Hashable {
+        let period: Period
+        let publisher: String
     }
     struct Update: Identifiable {
         let id: String
@@ -57,6 +87,8 @@ enum InsightsSkillsHome {
         let agents: [String]
         let catalogSkill: DaemonData.CatalogSkill
         let checkedAt: Date
+        /// The catalog's name for the publisher, for the cover's mark.
+        var publisherName: String? = nil
     }
     enum Direction { case more, less, started }
     struct Trend: Identifiable {
@@ -67,6 +99,35 @@ enum InsightsSkillsHome {
         let currentUses: Int
         let direction: Direction
         let periodEnd: Date
+        /// Uses on each of the fourteen completed local days the story
+        /// compares, oldest first: the previous seven, then the last
+        /// seven. Empty when the story was not built from daily history.
+        var daily: [Int] = []
+
+        struct Bar: Identifiable, Equatable {
+            let id: Int
+            let uses: Int
+            /// In the last seven days, the ones the headline is about.
+            let recent: Bool
+        }
+        /// The chart's bars, or none unless there are exactly fourteen days.
+        var bars: [Bar] {
+            guard daily.count == 14 else { return [] }
+            return daily.enumerated().map { Bar(id: $0.offset, uses: max(0, $0.element), recent: $0.offset >= 7) }
+        }
+    }
+    struct WeekSkill: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let agent: String
+        let uses: Int
+    }
+    /// Several catalog changes from one publisher in one period.
+    struct Rollup: Identifiable {
+        let id: String
+        let publisher: DaemonData.SkillsPublisher
+        /// Newest first; at least two.
+        let changes: [CreatorUpdate]
     }
     struct CreatorUpdate: Identifiable {
         let id: String
@@ -91,13 +152,15 @@ enum InsightsSkillsHome {
 
     /// One item of the feed.
     enum Story: Identifiable {
-        case update(Update), trend(Trend), creator(CreatorUpdate)
+        case update(Update), trend(Trend), creator(CreatorUpdate), rollup(Rollup), week([WeekSkill])
 
         var id: String {
             switch self {
             case .update(let item): item.id
             case .trend(let item): "trend:" + item.id
             case .creator(let item): "creator:" + item.id
+            case .rollup(let item): "rollup:" + item.id
+            case .week: "week"
             }
         }
     }
@@ -114,7 +177,16 @@ enum InsightsSkillsHome {
         guard snapshot.enabled, snapshot.readable else { return .init(updates: [], trends: [], creators: []) }
         return .init(updates: personalizedUpdates(snapshot, model: model, now: now),
                      trends: usageChanges(snapshot.usage, now: now, calendar: calendar),
-                     creators: creatorChanges(snapshot, now: now))
+                     creators: creatorChanges(snapshot, now: now),
+                     week: weekTop(snapshot.usage, now: now))
+    }
+
+    /// The three most-used skills of the daemon's seven-day window. Left
+    /// out while history is partial: a short count would read as the week.
+    private static func weekTop(_ usage: DaemonData.SkillsUsage, now: Date) -> [WeekSkill] {
+        guard usage.enabled, !usage.partial else { return [] }
+        return InsightsSkillsUsage.ranked(usage, days: 7, now: now).prefix(3)
+            .map { WeekSkill(id: $0.id, name: $0.name, agent: $0.agent, uses: $0.uses) }
     }
 
     @MainActor
@@ -140,7 +212,8 @@ enum InsightsSkillsHome {
                       let checked = state.checkedAt.flatMap(parse), checked <= now,
                       now.timeIntervalSince(checked) < 6 * 60 * 60 else { return nil }
                 return Update(id: "update:\(group.id)", groupID: group.id, installedID: installed.id,
-                              name: installed.name, agents: group.agents, catalogSkill: catalog, checkedAt: checked)
+                              name: installed.name, agents: group.agents, catalogSkill: catalog, checkedAt: checked,
+                              publisherName: snapshot.catalog.publishers.first { $0.id == catalog.publisherID }?.name)
             }
             if let candidate = candidates.sorted(by: { $0.installedID < $1.installedID }).first { items.append(candidate) }
         }
@@ -178,6 +251,7 @@ enum InsightsSkillsHome {
             guard let first = rows.first, Set(rows.map(\.population)).count == rows.count,
                   rows.allSatisfy({ ["direct", "delegated"].contains($0.population) && $0.undatedEvents == 0 }) else { return nil }
             var before: [Int] = [], after: [Int] = []
+            var daily = [Int](repeating: 0, count: 14)
             for row in rows {
                 guard Set(row.daily.map(\.day)).count == row.daily.count,
                       row.invocations == 0 || !row.daily.isEmpty else { return nil }
@@ -185,11 +259,18 @@ enum InsightsSkillsHome {
                     guard day.invocations >= 0, let start = date(day.day), start <= today else { return nil }
                     if start >= currentStart && start < today { after.append(day.invocations) }
                     else if start >= previousStart && start < currentStart { before.append(day.invocations) }
+                    else { continue }
+                    guard let index = calendar.dateComponents([.day], from: previousStart, to: start).day,
+                          daily.indices.contains(index) else { return nil }
+                    let next = daily[index].addingReportingOverflow(day.invocations)
+                    guard !next.overflow else { return nil }
+                    daily[index] = next.partialValue
                 }
             }
             guard let previous = sum(before), let current = sum(after), previous != current else { return nil }
             return Trend(id: id, name: first.name, agent: first.agent, previousUses: previous, currentUses: current,
-                         direction: current > previous ? (previous == 0 ? .started : .more) : .less, periodEnd: today)
+                         direction: current > previous ? (previous == 0 ? .started : .more) : .less, periodEnd: today,
+                         daily: daily)
         }
         return Array(items.sorted {
             let a = abs($0.currentUses - $0.previousUses), b = abs($1.currentUses - $1.previousUses)

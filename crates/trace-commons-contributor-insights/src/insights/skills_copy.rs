@@ -1,6 +1,6 @@
 //! Shared words for the local Skills surface and public publisher catalog.
 
-pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "date"];
+pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "previous", "date"];
 
 pub const COPY: &[(&str, &str)] = &[
     ("skills_tab_home", "Home"),
@@ -22,9 +22,16 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_home_open_skill", "View {name}"),
     ("skills_home_open_usage", "View usage for {name}"),
     ("skills_home_open_creator", "View {name} from {publisher}"),
-    ("skills_home_more", "{count} more uses"),
-    ("skills_home_less", "{count} fewer uses"),
-    ("skills_home_started", "Used in past week"),
+    ("skills_home_compare_up", "{count} uses, up from {previous}"),
+    (
+        "skills_home_compare_down",
+        "{count} uses, down from {previous}",
+    ),
+    ("skills_home_week", "Your week"),
+    (
+        "skills_home_rollup",
+        "{count} skills from {publisher} changed",
+    ),
     ("skills_most_used", "Most-used skills"),
     ("skills_related_traces", "Related traces"),
     ("skills_removal_candidates", "Removal candidates"),
@@ -232,6 +239,22 @@ mod tests {
             assert!(!words.contains("invocation"), "{key}");
             assert!(!words.contains("session"), "{key}");
         }
+    }
+
+    #[test]
+    fn home_usage_lines_give_both_weeks_and_claim_no_first_use() {
+        let copy = super::super::service::ui_copy();
+        for key in ["skills_home_compare_up", "skills_home_compare_down"] {
+            let words = &copy[key];
+            assert_eq!(words.matches("{count}").count(), 1, "{key}");
+            assert_eq!(words.matches("{previous}").count(), 1, "{key}");
+            assert!(!words.contains("first"), "{key}");
+            assert!(!words.contains("started"), "{key}");
+        }
+        assert_eq!(copy["skills_home_week"], "Your week");
+        // A roll-up counts catalog changes; it does not say who wrote them.
+        assert!(copy["skills_home_rollup"].contains("{publisher}"));
+        assert!(!copy["skills_home_rollup"].contains("posted"));
     }
 
     #[test]

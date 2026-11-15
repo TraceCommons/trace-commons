@@ -106,10 +106,13 @@ final class InsightsSkillsHomeTests: XCTestCase {
         .init(id: "claude_code\u{0}" + name, name: name, agent: "claude_code", previousUses: previous, currentUses: current,
               direction: current > previous ? .more : .less, periodEnd: date("2026-11-15T00:00:00Z"))
     }
-    private func change(_ id: String, catalogID: String, observed: String) -> InsightsSkillsHome.CreatorUpdate {
+    /// Each change has its own publisher unless one is named: two from one
+    /// publisher in a period are a roll-up.
+    private func change(_ id: String, catalogID: String, observed: String, from publisherID: String? = nil) -> InsightsSkillsHome.CreatorUpdate {
         let skill = catalogSkill(catalogID)
-        return .init(id: id, event: .init(id: id, publisherID: "maker", skillID: catalogID, kind: "updated", observedAt: observed),
-                     skill: skill, publisher: publisher, observedAt: date(observed))
+        let maker = DaemonData.SkillsPublisher(id: publisherID ?? "maker-" + id, name: "Maker", repository: "maker/skills", skillsRoot: "skills", instructionsURL: "https://example.com")
+        return .init(id: id, event: .init(id: id, publisherID: maker.id, skillID: catalogID, kind: "updated", observedAt: observed),
+                     skill: skill, publisher: maker, observedAt: date(observed))
     }
     private func catalogSkill(_ id: String) -> DaemonData.CatalogSkill {
         .init(id: id, publisherID: "maker", name: "review", description: "", repository: "maker/skills", path: "skills/review/SKILL.md", revision: "main", sha256: String(repeating: "b", count: 64), sourceURL: "https://example.com/source", instructionsURL: "https://example.com")
@@ -177,6 +180,110 @@ final class InsightsSkillsHomeTests: XCTestCase {
             change("local-yesterday", catalogID: "two", observed: "2026-11-14T14:00:00Z")])
         XCTAssertEqual(ids(feed.timeline(now: now, calendar: tokyo)), [["creator:local-today"], ["creator:local-yesterday"]])
         XCTAssertEqual(feed.timeline(now: now, calendar: tokyo).map(\.period), [.today, .thisWeek])
+    }
+
+    // MARK: Roll-ups, the hero, the chart and the week
+
+    func testSeveralChangesFromOnePublisherInAPeriodAreOneRollup() throws {
+        let feed = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [
+            change("a", catalogID: "one", observed: "2026-11-14T10:00:00Z", from: "obra"),
+            change("b", catalogID: "two", observed: "2026-11-13T10:00:00Z", from: "obra"),
+            change("c", catalogID: "three", observed: "2026-11-14T12:00:00Z", from: "obra"),
+            change("alone", catalogID: "four", observed: "2026-11-14T11:00:00Z", from: "other"),
+            // The same publisher in another period is its own story.
+            change("old", catalogID: "five", observed: "2026-11-02T10:00:00Z", from: "obra")])
+        let groups = feed.timeline(now: now, calendar: calendar)
+        XCTAssertEqual(ids(groups), [["rollup:thisWeek:obra", "creator:alone"], ["creator:old"]])
+        guard case .rollup(let rollup) = try XCTUnwrap(groups.first?.stories.first) else { return XCTFail("Expected a roll-up") }
+        XCTAssertEqual(rollup.changes.map(\.id), ["c", "a", "b"], "Newest first, at the newest change's place in the feed")
+        XCTAssertEqual(rollup.publisher.id, "obra")
+        // The grouping is by dictionary; the order must not depend on it.
+        for _ in 0 ..< 20 { XCTAssertEqual(ids(feed.timeline(now: now, calendar: calendar)), ids(groups)) }
+    }
+
+    func testARollupCountsOnlyChangesNotAlreadyToldAsAnUpdate() {
+        let feed = InsightsSkillsHome.Snapshot(
+            updates: [update("mine", catalogID: "one", checked: "2026-11-15T11:00:00Z")], trends: [],
+            creators: [change("a", catalogID: "one", observed: "2026-11-14T10:00:00Z", from: "obra"),
+                       change("b", catalogID: "two", observed: "2026-11-14T09:00:00Z", from: "obra")])
+        XCTAssertEqual(ids(feed.timeline(now: now, calendar: calendar)), [["update:mine"], ["creator:b"]], "One change left is a story, not a roll-up of one")
+    }
+
+    func testTheHeroIsTheFirstStoryTodayWhenItHasACover() {
+        typealias Home = InsightsSkillsHome.Snapshot
+        func hero(_ feed: Home) -> String? { Home.heroID(in: feed.timeline(now: now, calendar: calendar)) }
+        let anUpdate = update("a", checked: "2026-11-15T11:00:00Z")
+        XCTAssertEqual(hero(Home(updates: [anUpdate], trends: [trend("big", previous: 1, current: 9)], creators: [])), "update:a")
+        XCTAssertEqual(hero(Home(updates: [anUpdate], trends: [], creators: [change("noon", catalogID: "one", observed: "2026-11-15T11:30:00Z")])),
+                       "creator:noon", "The newest story today, whichever kind")
+        XCTAssertNil(hero(Home(updates: [], trends: [trend("big", previous: 1, current: 9)], creators: [])), "A usage change has no cover")
+        XCTAssertNil(hero(Home(updates: [], trends: [], creators: [change("old", catalogID: "one", observed: "2026-11-12T10:00:00Z")])),
+                     "Nothing today: no story is promoted from an older period")
+        XCTAssertNil(hero(Home(updates: [], trends: [], creators: [
+            change("a", catalogID: "one", observed: "2026-11-15T10:00:00Z", from: "obra"),
+            change("b", catalogID: "two", observed: "2026-11-15T09:00:00Z", from: "obra")])), "A roll-up is not drawn tall")
+        XCTAssertNil(hero(Home(updates: [], trends: [], creators: [])))
+        let week = [InsightsSkillsHome.WeekSkill(id: "claude_code\u{0}review", name: "review", agent: "claude_code", uses: 3)]
+        XCTAssertNil(hero(Home(updates: [], trends: [], creators: [], week: week)))
+    }
+
+    func testAUsageStoryCarriesItsFourteenCompletedDays() throws {
+        // row(): 2 uses on 11-03 and 5 on 11-10; the delegated row adds 1 and
+        // 2 on the same days. 10-30 is before the fourteen days and today
+        // (11-15) is not complete, so neither is drawn.
+        let story = try XCTUnwrap(project(snapshot(rows: [try row(previous: 2, current: 5), try row("delegated", previous: 1, current: 2)])).trends.first)
+        XCTAssertEqual(story.daily, [0, 0, 3, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0])
+        XCTAssertEqual(story.daily.prefix(7).reduce(0, +), story.previousUses)
+        XCTAssertEqual(story.daily.suffix(7).reduce(0, +), story.currentUses)
+        XCTAssertEqual(story.bars.map(\.uses), story.daily)
+        XCTAssertEqual(story.bars.map(\.recent), Array(repeating: false, count: 7) + Array(repeating: true, count: 7))
+        XCTAssertEqual(story.bars.map(\.id), Array(0 ..< 14))
+        // A story without daily history draws no chart, never a flat one.
+        XCTAssertTrue(trend("bare", previous: 1, current: 2).bars.isEmpty)
+        var short = trend("short", previous: 1, current: 2)
+        short.daily = [1, 2, 3]
+        XCTAssertTrue(short.bars.isEmpty)
+    }
+
+    func testYourWeekIsTheThreeMostUsedSkillsAndOpensThisWeek() throws {
+        func used(_ name: String, _ uses: Int, agent: String = "claude_code") throws -> DaemonData.SkillsUsageRow {
+            let value: [String: Any] = ["name": name, "agent": agent, "population": "direct", "invocations": uses, "loads": 0, "sessions": 1,
+                                        "windows": [["days": 7, "invocations": uses, "loads": 0, "sessions": 1]]]
+            return try JSONDecoder().decode(DaemonData.SkillsUsageRow.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        let rows = [try used("a", 2), try used("b", 9), try used("c", 5), try used("d", 1), try used("idle", 0),
+                    try used("uncounted", 50, agent: "codex")]
+        let feed = project(snapshot(rows: rows))
+        XCTAssertEqual(feed.week.map(\.name), ["b", "c", "a"], "Codex has no counted uses in this fixture's coverage")
+        XCTAssertEqual(feed.week.map(\.uses), [9, 5, 2])
+        XCTAssertFalse(feed.isEmpty)
+        let groups = feed.timeline(now: now, calendar: calendar)
+        XCTAssertEqual(ids(groups), [["week"]])
+        XCTAssertEqual(groups.map(\.period), [.thisWeek])
+        // It leads This week, above that week's other stories.
+        let more = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [change("c", catalogID: "one", observed: "2026-11-13T10:00:00Z")], week: feed.week)
+        XCTAssertEqual(ids(more.timeline(now: now, calendar: calendar)), [["week", "creator:c"]])
+        // A partial history would pass a short count off as the week.
+        XCTAssertTrue(project(snapshot(rows: rows, partial: true)).week.isEmpty)
+        XCTAssertTrue(project(snapshot(rows: rows, analysis: false)).week.isEmpty)
+        XCTAssertTrue(project(snapshot(rows: [try used("idle", 0)])).week.isEmpty)
+    }
+
+    func testReduceMotionTurnsEveryMovementOff() {
+        let still = SkillsHomeMotion(reduce: true)
+        XCTAssertEqual(still, .still)
+        XCTAssertFalse(still.growsBars)
+        XCTAssertFalse(still.lifts)
+        XCTAssertFalse(still.scrolls)
+        XCTAssertFalse(still.rollsNumbers)
+        XCTAssertNil(still.expand)
+        XCTAssertNil(still.hover)
+        XCTAssertNil(still.grow)
+        let moving = SkillsHomeMotion(reduce: false)
+        XCTAssertTrue(moving.growsBars && moving.lifts && moving.scrolls && moving.rollsNumbers)
+        XCTAssertNotNil(moving.expand)
+        XCTAssertNotNil(moving.hover)
+        XCTAssertNotNil(moving.grow)
     }
 
     func testYesterdayAnalysisCannotTreatTheUnfinishedDayAsComplete() throws {
