@@ -32,6 +32,7 @@ pub mod public_run;
 mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
+pub mod skills_catalog;
 pub mod submit_rate;
 pub mod terms;
 pub mod trace_contribution;

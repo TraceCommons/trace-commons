@@ -1059,3 +1059,314 @@ async fn local_override_drives_skills_gate_and_invalidates_in_flight_scope() {
         "turning Skills on must not opt into Local trace analysis"
     );
 }
+
+fn with_catalog_flags(mut shared: DaemonShared) -> DaemonShared {
+    let flag = |capability: &str| {
+        json!({"description":"Skills","owner":"tests","class":"product","default":false,
+               "required_capabilities":[capability],"timing":"live"})
+    };
+    let registry = serde_json::from_value(json!({
+        "schema_version":1,"registry_version":3,
+        "flags":{
+            "insights_skills": flag("insights_skills_v1"),
+            "skills_server_catalog": flag("skills_server_catalog_v1"),
+            "skills_catalog_suggestions": flag("skills_catalog_suggestions_v1"),
+        }
+    }))
+    .unwrap();
+    let profile = serde_json::from_value(json!({
+        "schema_version":1,"registry_version":3,"environment":"testing",
+        "capabilities":["insights_skills_v1","skills_server_catalog_v1","skills_catalog_suggestions_v1"],
+        "remote_enable":["insights_skills","skills_server_catalog","skills_catalog_suggestions"],
+        "signing_keys":[]
+    }))
+    .unwrap();
+    shared.feature_flags = crate::feature_flags::Runtime::open(
+        registry,
+        crate::feature_flags::test_signing::pin(profile),
+        shared.store.dir(),
+        Utc::now(),
+    )
+    .unwrap();
+    shared
+}
+
+fn set_catalog_flags(shared: &DaemonShared, revision: u64, server: bool, suggestions: bool) {
+    let now = Utc::now();
+    let manifest = serde_json::to_vec(&json!({
+        "schema_version":1,"environment":"testing","revision":revision,
+        "issued_at":now,"expires_at":now+chrono::Duration::hours(1),
+        "flags":{"insights_skills":true,"skills_server_catalog":server,
+                 "skills_catalog_suggestions":suggestions}
+    }))
+    .unwrap();
+    shared
+        .feature_flags
+        .accept(&crate::feature_flags::test_signing::sign(&manifest), now)
+        .unwrap();
+}
+
+/// A shared daemon holding a verified server catalog signed by a throwaway
+/// key that only this test pins, with an installed copy of the catalog's
+/// non-seeded skill.
+fn with_server_catalog() -> (tempfile::TempDir, DaemonShared) {
+    use super::server_catalog::tests::{document, key, public, signed};
+    let (dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_catalog_flags(DaemonShared::load(store).unwrap());
+    set_catalog_flags(&shared, 1, true, false);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    let signer = key();
+    *shared.insights_skills.catalog_keys.lock().unwrap() = Some(vec![public(&signer)]);
+    let now = Utc::now();
+    let document = server_catalog::accept(
+        shared.store.dir(),
+        trace_commons_protocol::skills_catalog::Environment::Testing,
+        &[public(&signer)],
+        &signed(&signer, &document(now)),
+        now,
+    )
+    .unwrap();
+    shared
+        .insights_skills
+        .finish_refresh(&shared, shared.store.dir(), seed_results(&document));
+    let policy = inventory_policy(&shared).unwrap();
+    let inventory: Inventory = serde_json::from_value(json!({
+        "skills":[{"id":"lint","name":"lint","description":"Test","agent":"codex","scope":"global",
+                   "location":"~/.codex/skills/lint/SKILL.md","sha256":"b".repeat(64),
+                   "source":{"repository":"acme/skills","path":"lint/SKILL.md","revision":null}}],
+        "partial":false,"coverage":[]
+    }))
+    .unwrap();
+    shared
+        .insights_skills
+        .state(shared.store.dir())
+        .unwrap()
+        .inventory = Some((Instant::now(), policy, inventory));
+    (dir, shared)
+}
+
+#[test]
+fn a_server_catalog_keeps_seed_ids_and_adds_its_own_skills_with_facts() {
+    let (_dir, shared) = with_server_catalog();
+    {
+        let runtime = shared.insights_skills.runtime.lock().unwrap();
+        // Seeds flow through the existing path with today's ids.
+        assert_eq!(
+            runtime
+                .public
+                .skills
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["obra:skills/plan/SKILL.md"]
+        );
+        // A seed the catalog does not list keeps its state and is unknown.
+        assert_eq!(runtime.public.publisher_states["slack"].status, "unknown");
+        assert_eq!(runtime.public.publisher_states["obra"].status, "current");
+        // Only public metadata reaches the persisted cache.
+        assert!(
+            runtime
+                .public
+                .skills
+                .iter()
+                .all(|s| s.publisher_id == "obra")
+        );
+    }
+    let value = snapshot(&shared);
+    let catalog = &value["catalog"];
+    assert_eq!(catalog["source"], "server");
+    assert_eq!(catalog["total_skills"], 2);
+    let rows = catalog["skills"].as_array().unwrap();
+    // The installed skill's catalog row comes first.
+    assert_eq!(rows[0]["id"], "gh.acme.skills:lint/SKILL.md");
+    assert_eq!(rows[0]["license"]["spdx"], "MIT");
+    assert_eq!(rows[0]["checks"]["frontmatter"], "valid");
+    assert_eq!(rows[0]["checks_version"], 2);
+    assert_eq!(rows[1]["id"], "obra:skills/plan/SKILL.md");
+    assert_eq!(
+        rows[1]["checks"]["document_bytes"], 10,
+        "seed rows gain the server's facts"
+    );
+    let acme = catalog["publishers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "gh.acme.skills")
+        .unwrap();
+    assert_eq!(acme["url"], "https://github.com/acme/skills");
+    assert_eq!(acme["source_kind"], "marketplace");
+    let states = catalog["publisher_states"].as_array().unwrap();
+    let state = |id: &str| states.iter().find(|s| s["publisher_id"] == id).unwrap();
+    assert_eq!(state("obra")["signals"]["stars"], 900);
+    assert_eq!(state("gh.acme.skills")["status"], "current");
+    assert_eq!(state("gh.acme.skills")["signals"]["commits_28d"], 3);
+    // The installed copy's hash is the server's previous version.
+    let update = &value["updates"][0];
+    assert_eq!(update["catalog_skill_id"], "gh.acme.skills:lint/SKILL.md");
+    assert_eq!(update["status"], "update_available");
+    assert_eq!(
+        value["suggestions"],
+        json!({"available": false, "opted_in": false})
+    );
+}
+
+#[test]
+fn turning_the_server_catalog_flag_off_returns_to_github_rows() {
+    let (_dir, shared) = with_server_catalog();
+    set_catalog_flags(&shared, 2, false, false);
+    let value = snapshot(&shared);
+    assert_eq!(value["catalog"]["source"], "github");
+    assert!(value["catalog"]["revision"].is_null());
+    let rows = value["catalog"]["skills"].as_array().unwrap();
+    assert!(rows.iter().all(|row| row["publisher_id"] == "obra"));
+    assert!(rows.iter().all(|row| row.get("checks").is_none()));
+}
+
+#[test]
+fn a_cached_server_catalog_needs_a_pinned_key_to_load() {
+    let (_dir, shared) = with_server_catalog();
+    let dir = shared.store.dir();
+    let environment = trace_commons_protocol::skills_catalog::Environment::Testing;
+    assert!(server_catalog::load_cached(dir, environment, &[], Utc::now()).is_none());
+    // A daemon restarted with no pinned key (the shipped state) ignores it.
+    *shared.insights_skills.catalog_keys.lock().unwrap() = Some(vec![]);
+    {
+        let mut runtime = shared.insights_skills.runtime.lock().unwrap();
+        runtime.server = None;
+        runtime.server_loaded = false;
+    }
+    assert_eq!(snapshot(&shared)["catalog"]["source"], "github");
+}
+
+#[test]
+fn reporting_is_offered_only_under_its_flag_and_the_users_choice() {
+    let (_dir, shared) = with_server_catalog();
+    let request = |opted_in: bool| Request {
+        id: 1,
+        method: "insights_skills_suggestions".into(),
+        params: json!({"opted_in": opted_in}),
+    };
+    let reply = handle_suggestions(&shared, &request(true));
+    assert_eq!(
+        reply.result.unwrap(),
+        json!({"available": false, "opted_in": false})
+    );
+    assert!(
+        !shared
+            .store
+            .dir()
+            .join("insights-skills-suggestions-v1.json")
+            .exists()
+    );
+    set_catalog_flags(&shared, 2, true, true);
+    assert_eq!(
+        snapshot(&shared)["suggestions"],
+        json!({"available": true, "opted_in": false, "pending": 0, "sent_total": 0, "last_sent_at": null})
+    );
+    let reply = handle_suggestions(&shared, &request(true));
+    assert_eq!(
+        reply.result.unwrap(),
+        json!({"available": true, "opted_in": true})
+    );
+    assert_eq!(snapshot(&shared)["suggestions"]["opted_in"], true);
+    let bad = Request {
+        id: 2,
+        method: "insights_skills_suggestions".into(),
+        params: json!({"opted_in": "yes"}),
+    };
+    assert!(handle_suggestions(&shared, &bad).error.is_some());
+    // Local analysis off withdraws the offer without forgetting the choice.
+    shared.settings.lock().unwrap().insights_counter_pass = false;
+    assert_eq!(snapshot(&shared)["suggestions"]["available"], false);
+}
+
+/// Which fetchers one `choose_catalog` call used, and what it chose.
+async fn choice(
+    dir: &Path,
+    server_on: bool,
+    keys: &[[u8; 32]],
+    served: Result<Vec<u8>, ()>,
+) -> (bool, bool, Option<u64>, usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let asked_server = AtomicBool::new(false);
+    let asked_github = AtomicBool::new(false);
+    let (server_flag, github_flag) = (&asked_server, &asked_github);
+    let (document, results) = choose_catalog(
+        dir,
+        trace_commons_protocol::skills_catalog::Environment::Testing,
+        server_on,
+        keys,
+        move || async move {
+            server_flag.store(true, Ordering::SeqCst);
+            served
+        },
+        move || async move {
+            github_flag.store(true, Ordering::SeqCst);
+            vec![("obra", Err(()))]
+        },
+    )
+    .await;
+    (
+        asked_server.load(Ordering::SeqCst),
+        asked_github.load(Ordering::SeqCst),
+        document.map(|d| d.revision),
+        results.len(),
+    )
+}
+
+#[tokio::test]
+async fn the_server_catalog_replaces_github_only_when_enabled_pinned_and_valid() {
+    use super::server_catalog::tests::{document, key, public, signed};
+    let dir = tempfile::tempdir().unwrap();
+    let signer = key();
+    let pinned = [public(&signer)];
+    let now = Utc::now();
+    let good = signed(&signer, &document(now));
+    // Flag off: no catalog request, GitHub as before.
+    assert_eq!(
+        choice(dir.path(), false, &pinned, Ok(good.clone())).await,
+        (false, true, None, 1)
+    );
+    // No pinned key (the shipped state): no catalog request either.
+    assert_eq!(
+        choice(dir.path(), true, &[], Ok(good.clone())).await,
+        (false, true, None, 1)
+    );
+    // A refused document with nothing cached: GitHub.
+    assert_eq!(
+        choice(
+            dir.path(),
+            true,
+            &pinned,
+            Ok(signed(&key(), &document(now)))
+        )
+        .await,
+        (true, true, None, 1)
+    );
+    // A valid document: GitHub is not contacted, and every seed has a result.
+    let revision = Some(now.timestamp() as u64);
+    assert_eq!(
+        choice(dir.path(), true, &pinned, Ok(good)).await,
+        (true, false, revision, 3)
+    );
+    // Unreachable now, but the verified cache still answers.
+    assert_eq!(
+        choice(dir.path(), true, &pinned, Err(())).await,
+        (true, false, revision, 3)
+    );
+    // An expired cache does not: GitHub again.
+    let stale = tempfile::tempdir().unwrap();
+    let old = now - chrono::Duration::days(8);
+    server_catalog::accept(
+        stale.path(),
+        trace_commons_protocol::skills_catalog::Environment::Testing,
+        &pinned,
+        &signed(&signer, &document(old)),
+        old,
+    )
+    .unwrap();
+    assert_eq!(
+        choice(stale.path(), true, &pinned, Err(())).await,
+        (true, true, None, 1)
+    );
+}

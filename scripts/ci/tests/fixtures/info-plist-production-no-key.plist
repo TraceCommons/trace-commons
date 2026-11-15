@@ -17,7 +17,7 @@
          this key is missing (staging design, section 4.3). -->
     <key>TCChannel</key><string>production</string>
     <key>TCFeatureEnvironment</key><string>production</string>
-    <key>TCFeatureProfileDigest</key><string>a1edf75a9f6920e73a1cd794b1a12a6a412397529f37d40b5972eda5f032b692</string>
+    <key>TCFeatureProfileDigest</key><string>c16078fe9b52305f3b002f2d267f6ee31b238a48abf11ab4b4cc9926a34197d5</string>
     <key>TCPrivateAICampaignURL</key><string>https://storage.googleapis.com/tracecommons-flatpak/updates/private-ai-campaign.json</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>

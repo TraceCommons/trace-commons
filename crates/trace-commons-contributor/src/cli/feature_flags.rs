@@ -205,7 +205,7 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 ];
 /// The raw Ed25519 key in a `PUBLIC KEY` PEM, as `gcloud kms keys versions
 /// get-public-key --public-key-format pem` writes it.
-fn public_key_from_pem(pem: &str) -> Result<[u8; 32]> {
+pub(super) fn public_key_from_pem(pem: &str) -> Result<[u8; 32]> {
     use base64::Engine as _;
     let body: String = pem
         .lines()
@@ -223,7 +223,7 @@ fn public_key_from_pem(pem: &str) -> Result<[u8; 32]> {
     <[u8; 32]>::try_from(raw).map_err(|_| anyhow::anyhow!("public-key-not-ed25519"))
 }
 /// A signature file as gcloud wrote it: 64 raw bytes, or their base64.
-fn decode_signature_file(bytes: &[u8]) -> Result<[u8; 64]> {
+pub(super) fn decode_signature_file(bytes: &[u8]) -> Result<[u8; 64]> {
     use base64::Engine as _;
     if let Ok(raw) = <[u8; 64]>::try_from(bytes) {
         return Ok(raw);

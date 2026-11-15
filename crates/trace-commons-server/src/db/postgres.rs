@@ -2144,6 +2144,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_review_rechecks",
         include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
     ),
+    // V160: the public Skills catalog's crawl state and app suggestions. No
+    // tenant: forced RLS, one guard role, and the runtime reaches only the
+    // guard-owned suggestion function.
+    (
+        160,
+        "skills_catalog",
+        include_str!("../../../../migrations/V160__skills_catalog.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2411,6 +2419,31 @@ impl Database for PgBackend {
     ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
     {
         PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn record_skills_catalog_suggestion(
+        &self,
+        suggestion: &trace_commons_protocol::skills_catalog::SkillSuggestion,
+    ) -> Result<crate::db::SkillsCatalogSuggestionOutcome, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        // No tenant context: V160's tables belong to no tenant, and the
+        // runtime reaches them only through the guard-owned function.
+        let row = client
+            .query_one(
+                "SELECT trace_skills_catalog_suggest($1, $2, $3)",
+                &[
+                    &suggestion.repository,
+                    &suggestion.path,
+                    &suggestion.revision,
+                ],
+            )
+            .await?;
+        let outcome: String = row.get(0);
+        Ok(match outcome.as_str() {
+            "stored" => crate::db::SkillsCatalogSuggestionOutcome::Stored,
+            "counted" => crate::db::SkillsCatalogSuggestionOutcome::Counted,
+            _ => crate::db::SkillsCatalogSuggestionOutcome::Full,
+        })
     }
 
     async fn record_usage_events(
@@ -9751,6 +9784,90 @@ mod v158_tests {
         assert!(
             !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
             "V158 must not grant anything TO PUBLIC"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v160_tests {
+    /// V160: the Skills catalog tables belong to no tenant, force RLS, give
+    /// PUBLIC nothing, and leave the runtime one guard-owned function.
+    #[test]
+    fn v160_keeps_the_catalog_behind_its_guard() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__skills_catalog.sql", 160);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V160 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 160 && *name == "skills_catalog"),
+            "V160 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V160__skills_catalog.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for table in [
+            "trace_skills_catalog_repositories",
+            "trace_skills_catalog_skills",
+            "trace_skills_catalog_suggestions",
+        ] {
+            for required in [
+                format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;"),
+                format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;"),
+                format!("REVOKE ALL ON {table} FROM PUBLIC;"),
+                format!(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO trace_skills_catalog_guard;"
+                ),
+            ] {
+                assert!(code.contains(&required), "V160 is missing `{required}`");
+            }
+        }
+        for required in [
+            "CREATE ROLE trace_skills_catalog_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;",
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$",
+            "OWNER TO trace_skills_catalog_guard;",
+            "REVOKE ALL ON FUNCTION trace_skills_catalog_suggest(TEXT, TEXT, TEXT) FROM PUBLIC;",
+            "TO trace_ingest_runtime;",
+            "IF v_pending >= 10000 THEN",
+            "REVOKE trace_skills_catalog_guard FROM CURRENT_USER;",
+        ] {
+            assert!(code.contains(required), "V160 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches("TO trace_ingest_runtime").count(),
+            1,
+            "the runtime gets exactly one grant: EXECUTE on the suggestion function"
+        );
+        assert!(
+            !code.contains("tenant_id"),
+            "V160 tables belong to no tenant"
+        );
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "DISABLE ROW LEVEL SECURITY",
+            "GRANT ALL",
+            "WITH INHERIT",
+            "WITH SET",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V160 must not contain `{forbidden}`"
+            );
+        }
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V160 must not grant anything TO PUBLIC"
         );
     }
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "registry_version": 2,
+  "registry_version": 3,
   "flags": {
     "insights_skills": {
       "description": "Local skill inventory, observed usage, public publisher feeds, and update detection in Insights.",
@@ -9,6 +9,26 @@
       "default": false,
       "required_capabilities": [
         "insights_skills_v1"
+      ],
+      "timing": "live"
+    },
+    "skills_server_catalog": {
+      "description": "Read the Skills catalog from the operator-signed server document instead of fetching publishers from GitHub; GitHub stays the fallback while no valid catalog is held.",
+      "owner": "TraceCommons",
+      "class": "product",
+      "default": false,
+      "required_capabilities": [
+        "skills_server_catalog_v1"
+      ],
+      "timing": "live"
+    },
+    "skills_catalog_suggestions": {
+      "description": "Offer the opt-in setting that reports public GitHub skills missing from the Skills catalog, one anonymous request at a time. Sends nothing until the user opts in.",
+      "owner": "TraceCommons",
+      "class": "product",
+      "default": false,
+      "required_capabilities": [
+        "skills_catalog_suggestions_v1"
       ],
       "timing": "live"
     }

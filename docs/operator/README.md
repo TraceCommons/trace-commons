@@ -22,6 +22,7 @@ the link.
 | If you are... | Start with |
 |---|---|
 | Enabling or disabling client features by environment | [`./feature-flags.md`](./feature-flags.md) |
+| Crawling, signing and publishing the public Skills catalog | [`./skills-catalog.md`](./skills-catalog.md) |
 | First-time deploying `trace-commons-server` | [`./deployment.md`](./deployment.md) |
 | Bringing up the GCP pilot end-to-end | [`./pilot-gcp-deployment.md`](./pilot-gcp-deployment.md) |
 | Standing up the pilot operator dashboard | [`./pilot-dashboard.md`](./pilot-dashboard.md) |

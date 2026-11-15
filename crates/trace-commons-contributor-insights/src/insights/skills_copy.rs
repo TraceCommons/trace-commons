@@ -219,6 +219,17 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_scope_global", "All projects"),
     ("skills_scope_project", "Project"),
     ("skills_scope_plugin_cache", "Cached; may be inactive"),
+    // NEEDS OWNER APPROVAL (2026-11-15, spec skills-catalog-server): the
+    // opt-in for reporting public skills the catalog lacks. Not wired to any
+    // view; the reporting flag ships off.
+    (
+        "skills_suggestions_toggle",
+        "Suggest public skills for the catalog",
+    ),
+    (
+        "skills_suggestions_detail",
+        "Sends the GitHub address of public skills you use that the catalog doesn’t list yet. Never sends private or local skills, their contents, or who you are.",
+    ),
 ];
 
 #[cfg(test)]

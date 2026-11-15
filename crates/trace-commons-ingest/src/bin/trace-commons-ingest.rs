@@ -47,6 +47,8 @@ mod referral_admin;
 mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
+#[path = "trace_commons_ingest_internal/skills_catalog_suggestions.rs"]
+mod skills_catalog_suggestions;
 #[path = "trace_commons_ingest_internal/terms_acceptance.rs"]
 mod terms_acceptance;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
@@ -9045,6 +9047,18 @@ pub fn app(state: Arc<AppState>) -> Router {
         // found before an account or any consent exists. A POST, so the
         // coarsened figures never sit in a URL a proxy logs; a small body
         // bound.
+        // Same reason: an app reports one public skill the Skills catalog
+        // lacks, with no credential by design (spec 2026-11-15). Validated
+        // whole against the protocol's SkillSuggestion; stored only through
+        // V160's guard-owned function. A small body bound.
+        .route(
+            // The literal, so the route inventory's `^/v1/public/` rule
+            // classifies it; a test pins it to the protocol's constant.
+            "/v1/public/skills-catalog/suggestions",
+            post(skills_catalog_suggestions::skills_catalog_suggestion_handler).layer(
+                DefaultBodyLimit::max(trace_commons_protocol::skills_catalog::MAX_SUGGESTION_BYTES),
+            ),
+        )
         .route(
             "/v1/public/first-run-copy",
             post(first_run_copy::first_run_copy_handler).layer(DefaultBodyLimit::max(
