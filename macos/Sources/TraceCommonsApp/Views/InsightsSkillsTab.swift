@@ -116,9 +116,33 @@ struct InsightsSkillsTab: View {
         .insightsSection()
     }
 
+    private func indexAgentLogos(_ agents: [String]) -> some View {
+        HStack(spacing: GlassTokens.Space.s2) {
+            ForEach(agents, id: \.self) { agent in
+                let tool: GlassTool = switch agent {
+                case "codex": .codex
+                case "claude_code": .claudeCode
+                case "opencode": .openCode
+                default: .other(initials: String(model.agentLabel(agent).prefix(2)))
+                }
+                Group {
+                    if let logo = tool.logo {
+                        GlassToolLogoShape(logo).fill(tool.tint.color).frame(width: 14, height: 14)
+                    } else {
+                        Text(tool.initials).insightsCaption()
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(model.agentLabel(agent))
+                .help(model.agentLabel(agent))
+            }
+        }
+    }
+
     private func inventory(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
         let skills = model.inventorySkills(in: snapshot, matching: inventoryQuery, agent: inventoryAgent,
                                           availability: inventoryAvailability, sort: inventorySort, days: usageDays)
+        let groups = InsightsSkillsIndex.groups(snapshot.inventory.skills, matching: skills.map(\.id))
         return section("skills_inventory") {
             LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 GlassTextField(model.text("skills_search"), text: $inventoryQuery,
@@ -153,24 +177,28 @@ struct InsightsSkillsTab: View {
                     Text(model.text("skills_analysis_off")).insightsNote()
                     if let reviewSettings { Button(model.text("skills_review_settings")) { model.invalidateDetails(); reviewSettings() } }
                 }
-                ForEach(skills) { skill in
+                ForEach(groups) { group in
+                    let skill = group.representative
+                    let definitionSkill = group.definitionInstallation(in: snapshot)
                     VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Button { selectedSkillID = selectedSkillID == skill.id ? nil : skill.id } label: {
+                        Button { selectedSkillID = selectedSkillID == group.id ? nil : group.id } label: {
                             HStack {
                                 Text(skill.name).insightsHeading()
                                 Spacer()
-                                Image(systemName: selectedSkillID == skill.id ? "chevron.up" : "chevron.down")
+                                indexAgentLogos(group.agents)
+                                Image(systemName: selectedSkillID == group.id ? "chevron.up" : "chevron.down")
                             }
                         }.buttonStyle(.plain)
-                        .accessibilityLabel(model.text("skills_inspect", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
+                        .accessibilityLabel(model.text("skills_inspect", values: ["name": skill.name + ", " + group.agents.map(model.agentLabel).joined(separator: ", ")]))
                         if !skill.description.isEmpty { Text(skill.description) }
-                        Text(model.agentLabel(skill.agent)).insightsCaption()
-                        Text(model.text("skills_availability_" + (snapshot.inventory.details[skill.id]?.availability ?? "unknown"))).insightsCaption()
+                        Text(Array(Set(group.installations.map {
+                            model.text("skills_availability_" + (snapshot.inventory.details[$0.id]?.availability ?? "unknown"))
+                        })).sorted().joined(separator: " · ")).insightsCaption()
                         if let definitionStatus = snapshot.inventory.details[skill.id]?.definitionStatus,
                            ["invalid", "unreadable"].contains(definitionStatus) {
                             Text(model.text("skills_definition_status_" + definitionStatus)).insightsNote()
                         }
-                        let usageRows = model.usageRows(for: skill, in: snapshot).filter { $0.windows.contains { $0.days == usageDays } }
+                        let usageRows = InsightsSkillsIndex.usageRows(group, snapshot: snapshot, model: model).filter { $0.windows.contains { $0.days == usageDays } }
                         if !usageRows.isEmpty && snapshot.usage.enabled {
                           ForEach(usageRows, id: \.identity) { row in
                            if let window = row.windows.first(where: { $0.days == usageDays }) {
@@ -182,7 +210,7 @@ struct InsightsSkillsTab: View {
                                 Text(model.text("skills_invocations", values: ["count": String(window.invocations)]))
                             }
                             if let date = row.lastSeen { Text(model.text("skills_last_seen", values: ["date": model.timestamp(date)])).insightsCaption() }
-                            if selectedSkillID == skill.id {
+                            if selectedSkillID == group.id {
                                 Text(model.text("skills_loads", values: ["count": String(window.loads)]))
                                 Text(model.text("skills_undated", values: ["count": String(row.undatedEvents)])).insightsCaption()
                                 evidenceLinks(row)
@@ -197,16 +225,26 @@ struct InsightsSkillsTab: View {
                            }
                           }
                         } else { Text(model.text(model.usageState(for: skill, in: snapshot))).insightsNote() }
-                        if selectedSkillID == skill.id {
-                            Text(skill.location).insightsMono().textSelection(.enabled)
-                            Text(model.scopeLabel(skill.scope)).insightsCaption()
+                        if selectedSkillID == group.id {
+                            ForEach(group.installations) { installation in
+                                HStack {
+                                    indexAgentLogos([installation.agent])
+                                    Text(installation.location).insightsMono().textSelection(.enabled)
+                                }
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(model.agentLabel(installation.agent) + ", " + installation.location)
+                                Text(model.scopeLabel(installation.scope)).insightsCaption()
+                                if installation.id != skill.id {
+                                    Text(model.text("skills_availability_" + (snapshot.inventory.details[installation.id]?.availability ?? "unknown"))).insightsCaption()
+                                }
+                            }
                             Group {
-                                if model.definition?.skillID == skill.id, let body = model.definition?.definition {
+                                if model.definition?.skillID == definitionSkill.id, let body = model.definition?.definition {
                                     Text(body).insightsMono().textSelection(.enabled)
                                 } else if model.definitionFailure {
                                     Text(model.text("skills_definition_unavailable")).insightsNote()
                                 } else { Text(model.text("skills_loading")).insightsNote() }
-                            }.task(id: "\(skill.id):\(model.detailEpoch)") { await model.loadDefinition(skill.id) }
+                            }.task(id: "\(definitionSkill.id):\(model.detailEpoch)") { await model.loadDefinition(definitionSkill.id) }
 
                         }
                     }.accessibilityElement(children: .contain)
@@ -301,8 +339,6 @@ struct InsightsSkillsTab: View {
                     }
                     Text(model.agentLabel(picked.agent)).insightsCaption()
                     if !picked.daily.isEmpty { usageChart(picked) }
-                    Text(model.text("skills_related_traces")).insightsHeading()
-                    usageEvidenceLinks(picked)
 
                 }.insightsCard()
             }
@@ -344,20 +380,6 @@ struct InsightsSkillsTab: View {
         .frame(height: 120)
         .insightsPlot()
         .accessibilityLabel(model.text("skills_usage_chart_accessibility", values: ["name": skill.name + ", " + model.agentLabel(skill.agent)]))
-    }
-
-    private func usageEvidenceLinks(_ skill: InsightsSkillsUsage.Skill) -> some View {
-        let links = model.usageEvidenceLinks(skill.sources)
-        return VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-            if links.isEmpty { Text(model.text("skills_evidence_unavailable")).insightsNote() }
-            ForEach(Array(links.enumerated()), id: \.element.sessionRef) { index, link in
-                Button(model.text("skills_evidence_session", values: ["count": String(index + 1)])) {
-                    evidenceOpen = true
-                    Task { await model.loadEvidence(link.sessionRef) }
-                }.accessibilityLabel(model.text("skills_evidence_accessibility",
-                    values: ["name": skill.name + " · " + model.agentLabel(skill.agent), "count": String(index + 1)]))
-            }
-        }
     }
 
     private func observationCoverage(_ usage: DaemonData.SkillsUsage) -> some View {

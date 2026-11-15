@@ -169,11 +169,6 @@ final class InsightsSkillsModel {
         return links.filter { seen.insert($0.sessionRef).inserted }
     }
 
-    func usageEvidenceLinks(_ rows: [DaemonData.SkillsUsageRow]) -> [DaemonData.SkillsUsageEvidence] {
-        var seen = Set<String>()
-        return rows.flatMap { evidenceLinks(for: $0) }.filter { seen.insert($0.sessionRef).inserted }
-    }
-
     func usageSummary(_ row: DaemonData.SkillsUsageRow, coverage: [DaemonData.SkillsUsageCoverage]) -> String {
         let observation = coverage.first { $0.agent == row.agent }?.status
         var figures: [String] = []
@@ -232,12 +227,26 @@ final class InsightsSkillsModel {
     /// six-hour throttle. Only the explicit Refresh action forces a refresh.
     func observe() async {
         await readWhenReady()
+        var failures = 0
         while !Task.isCancelled, reader != nil {
-            let refreshing = shown?.refreshing == true
-            do { try await Task.sleep(for: refreshing ? .seconds(2) : idlePollInterval) }
+            let delay = observationDelay(failureAttempt: failures)
+            failures = failureKey == nil ? 0 : min(failures + 1, 4)
+            do { try await Task.sleep(for: delay) }
             catch { return }
             await readWhenReady()
         }
+    }
+
+    func observationDelay(failureAttempt: Int) -> Duration {
+        // A transport failure can retain a snapshot whose refresh flag is stale.
+        if failureKey != nil { return Self.retryDelay(attempt: failureAttempt) }
+        return shown?.refreshing == true ? .seconds(2) : idlePollInterval
+    }
+
+    /// Retry failed local reads promptly, backing off to avoid a hot error loop.
+    /// Reads remain non-forcing so publisher refresh throttles still apply.
+    static func retryDelay(attempt: Int) -> Duration {
+        min(.seconds(2) * (1 << min(max(attempt, 0), 4)), .seconds(30))
     }
 
     /// An inactive view may leave a noncancellable IPC read finishing.
