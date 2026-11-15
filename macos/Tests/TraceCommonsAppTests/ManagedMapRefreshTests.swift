@@ -20,7 +20,12 @@ final class ManagedMapRefreshTests: XCTestCase {
 
         client.emit(.unknown("something_else"))
         client.emit(.unknown("managed_changed"))
-        for _ in 0..<10_000 where store.destinationReads == before { await Task.yield() }
+        // A yield budget alone runs out on a loaded machine before the
+        // reread is scheduled, so bound the wait by the clock.
+        let deadline = ContinuousClock.now + .seconds(10)
+        while store.destinationReads == before, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         for _ in 0..<50 { await Task.yield() }
         XCTAssertEqual(store.destinationReads, before + 1,
                        "managed_changed rereads the destinations once; another unknown event does not")
