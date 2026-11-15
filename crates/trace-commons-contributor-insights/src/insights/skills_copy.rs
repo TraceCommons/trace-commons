@@ -3,6 +3,23 @@
 pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "date"];
 
 pub const COPY: &[(&str, &str)] = &[
+    ("skills_tab_home", "Home"),
+    ("skills_home_updates", "Updates for you"),
+    ("skills_home_trends", "Usage changes"),
+    ("skills_home_trend_period", "Past 7 days"),
+    ("skills_home_creators", "From creators"),
+    ("skills_home_empty", "No updates yet."),
+    ("skills_home_view", "View"),
+    ("skills_home_browse", "Browse"),
+    ("skills_home_index", "Installed skills"),
+    ("skills_home_index_accessibility", "View installed skills"),
+    ("skills_home_browse_accessibility", "Browse skill catalog"),
+    ("skills_home_open_skill", "View {name}"),
+    ("skills_home_open_usage", "View usage for {name}"),
+    ("skills_home_open_creator", "View {name} from {publisher}"),
+    ("skills_home_more", "{count} more uses"),
+    ("skills_home_less", "{count} fewer uses"),
+    ("skills_home_started", "Used in past week"),
     ("skills_most_used", "Most-used skills"),
     ("skills_related_traces", "Related traces"),
     ("skills_removal_candidates", "Removal candidates"),
@@ -196,6 +213,21 @@ pub const COPY: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn home_copy_is_short_and_names_its_actions() {
+        let copy = super::super::service::ui_copy();
+        assert_eq!(copy["skills_tab_home"], "Home");
+        assert_eq!(copy["skills_home_view"], "View");
+        assert_eq!(copy["skills_home_trend_period"], "Past 7 days");
+        for (key, words) in COPY
+            .iter()
+            .filter(|(key, _)| key.starts_with("skills_home_"))
+        {
+            assert!(!words.contains("invocation"), "{key}");
+            assert!(!words.contains("session"), "{key}");
+        }
+    }
 
     #[test]
     fn copy_is_unique_shared_and_has_declared_placeholders() {

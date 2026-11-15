@@ -40,6 +40,8 @@ final class InsightsSkillsRenderTests: XCTestCase {
         guard let snapshot = model.shown, snapshot.enabled, !model.busy,
               !model.text(section.copyKey).isEmpty else { return false }
         switch section {
+        case .home:
+            return true
         case .inventory:
             return snapshot.inventory.skills.contains { $0.id == "installed-1" }
                 && snapshot.updates.contains { $0.status == "update_available" }

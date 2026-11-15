@@ -302,9 +302,9 @@ final class InsightsSkillsTests: XCTestCase {
     }
 
     func testSkillsSectionsKeepTheirOrderAndSharedCopyKeys() {
-        XCTAssertEqual(SkillsSection.allCases, [.inventory, .usage, .catalog, .following])
+        XCTAssertEqual(SkillsSection.allCases, [.home, .inventory, .usage, .catalog, .following])
         XCTAssertEqual(SkillsSection.allCases.map(\.copyKey),
-                       ["skills_tab_inventory", "skills_tab_usage", "skills_tab_catalog", "skills_tab_following"])
+                       ["skills_tab_home", "skills_tab_inventory", "skills_tab_usage", "skills_tab_catalog", "skills_tab_following"])
     }
 
     func testTimestampsUseTheNativeLocalizedDateFormat() throws {
