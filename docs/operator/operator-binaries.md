@@ -14,7 +14,7 @@ This runbook is intended to be readable end-to-end in under ten minutes.
 
 | Binary | Audience | Default bearer env | Subcommands |
 |---|---|---|---|
-| `trace-commons-review` | Reviewers | `TRACE_COMMONS_REVIEWER_BEARER` | 8 |
+| `trace-commons-review` | Reviewers | `TRACE_COMMONS_REVIEWER_BEARER` | 12 |
 | `trace-commons-admin` | Hosted-service admins | `TRACE_COMMONS_ADMIN_BEARER` | 12 |
 | `trace-commons-worker` | Per-route worker operators | one per subcommand (see below) | 8 |
 | `trace-commons-tenant` | Tenant-policy operators | `TRACE_COMMONS_TENANT_BEARER` | 12 |
@@ -53,7 +53,7 @@ keep their tokens under non-default names.
 
 | Bearer env (default) | Gate (server side) | Consumed by |
 |---|---|---|
-| `TRACE_COMMONS_REVIEWER_BEARER` | reviewer role | `trace-commons-review` (all 8 subcommands) |
+| `TRACE_COMMONS_REVIEWER_BEARER` | reviewer role | `trace-commons-review` (all 12 subcommands) |
 | `TRACE_COMMONS_ADMIN_BEARER` | admin role | `trace-commons-admin` (all 12 subcommands) |
 | `TRACE_COMMONS_TENANT_BEARER` | admin role (tenant ops use the same gate) | `trace-commons-tenant` (10 server-backed subcommands) |
 | `TRACE_COMMONS_UTILITY_CREDIT_WORKER_BEARER` | utility-credit worker | `trace-commons-worker worker-utility-credit` |
@@ -117,6 +117,43 @@ trace-commons-review review-decision \
 # 4. If you need to walk away, release the lease.
 trace-commons-review review-lease-release --submission-id <UUID>
 ```
+
+### Reviewer: recheck a held pipeline run
+
+Pipeline runs use their own review queue and claims. The legacy submission
+commands above do not release pipeline holds. `pipeline-recheck` processes
+covered content through the configured external classifier; it requires
+authorization for that processing and saves a candidate without approving it.
+See [the recheck runbook](./privacy-review-recheck.md) for coverage, limits and
+audited content readback.
+
+```bash
+trace-commons-review pipeline-quarantine --limit 50 --json
+trace-commons-review pipeline-claim --run-id <RUN_UUID> --json
+
+# Use the current review source hash and the returned lease token.
+# Keep the recheck ID unchanged when retrying the same request.
+trace-commons-review pipeline-recheck \
+  --run-id <RUN_UUID> --lease-token <LEASE_UUID> \
+  --recheck-id <RECHECK_UUID> --expected-source-hash <SOURCE_SHA256> --json
+
+# Inspect the saved version and its privacy evidence before deciding.
+trace-commons-review pipeline-assessment \
+  --run-id <RUN_UUID> --lease-token <LEASE_UUID> \
+  --decision approve --reason privacy_rechecked \
+  --resolved-quarantine-reason privacy_risk_high_review_required \
+  --candidate-id <CANDIDATE_UUID> --candidate-content-hash <CONTENT_SHA256> --json
+```
+
+Hashes use `sha256:` followed by 64 lowercase hexadecimal characters. Repeat
+`--resolved-quarantine-reason` for every hold the approval resolves. The server
+requires the latest candidate ID and content hash once a rechecked version
+exists; both CLI flags must be supplied together. Runs without a candidate can
+still be assessed without those two flags. The recheck client allows up to 31
+minutes for classification and the server response; the server still enforces
+its claim lease and classifier limits. An assessment resumes the normal
+pipeline. Indexing and credit are subsequent results, subject to the existing
+consent and scoring rules.
 
 ### Retention maintenance: admin vs worker
 

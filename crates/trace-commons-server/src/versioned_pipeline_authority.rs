@@ -9,7 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, PrivacyFilterBackendTag};
 use trace_commons_protocol::trace_contribution::{
-    ResidualRiskCondition, TraceContributionEnvelope, rescrub_trace_envelope,
+    ResidualRiskCondition, ReviewPrivacyRecheckEvidence, TraceContributionEnvelope,
+    rescrub_trace_envelope,
 };
 
 use crate::trace_authority::SubmissionAuthority;
@@ -24,6 +25,8 @@ pub const PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL: &str = "privacy_classifi
 /// The deterministic rescrub failed at the receipt (a privacy filter
 /// configuration error, not a classifier outage).
 pub const PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL: &str = "privacy_rescrub_failed";
+/// Only a boundary with complete review coverage can prepare reviewed revisions.
+pub const PIPELINE_REVIEW_RECHECK_UNAVAILABLE_LABEL: &str = "pipeline_review_recheck_unavailable";
 
 #[async_trait]
 pub trait PipelineAuthorityProvider: Send + Sync {
@@ -107,6 +110,15 @@ pub trait PipelinePrivacyBoundary: Send + Sync {
         &self,
         envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>>;
+
+    /// Recheck a held revision with complete review coverage. A legacy or
+    /// deterministic-only boundary cannot manufacture usable review evidence.
+    async fn recheck_for_review(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<ReviewPrivacyRecheckEvidence> {
+        anyhow::bail!(PIPELINE_REVIEW_RECHECK_UNAVAILABLE_LABEL)
+    }
 
     /// The one answer to whether this boundary may serve a routed or
     /// drained tenant: `false` by default, and readiness fails closed on it.
@@ -194,6 +206,25 @@ impl PipelinePrivacyBoundary for ClassifierRedactorPipelinePrivacyBoundary {
             self.adapter.as_ref(),
             envelope,
             self.policy,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))
+    }
+
+    async fn recheck_for_review(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<ReviewPrivacyRecheckEvidence> {
+        if !self.classifies_prose_pii() {
+            anyhow::bail!(PIPELINE_REVIEW_RECHECK_UNAVAILABLE_LABEL);
+        }
+        // Review revisions cover every event, independent of the ordinary
+        // receipt/backstop policy. The protocol runs the local scrub first
+        // and applies all mutations atomically on a clone.
+        trace_commons_protocol::trace_contribution::recheck_envelope_for_review_with(
+            self.adapter.as_ref(),
+            envelope,
+            trace_commons_protocol::trace_contribution::PiiClassifyPolicy::AllEvents,
         )
         .await
         .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))
@@ -288,6 +319,43 @@ mod tests {
             PrivacyFilterBackendTag::Sidecar,
             PiiClassifyPolicy::AllEvents,
         )
+    }
+
+    #[tokio::test]
+    async fn review_recheck_fails_closed_without_a_real_classifier() {
+        let mut envelope = envelope_with_text("ordinary text").await;
+        let original = serde_json::to_vec(&envelope).unwrap();
+        let error = DeterministicPipelinePrivacyBoundary
+            .recheck_for_review(&mut envelope)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), PIPELINE_REVIEW_RECHECK_UNAVAILABLE_LABEL);
+        let noop = ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(trace_commons_protocol::trace_contribution::NoopPrivacyFilterAdapter),
+            PrivacyFilterBackendTag::None,
+            PiiClassifyPolicy::ProseOnly,
+        );
+        let error = noop.recheck_for_review(&mut envelope).await.unwrap_err();
+        assert_eq!(error.to_string(), PIPELINE_REVIEW_RECHECK_UNAVAILABLE_LABEL);
+        assert_eq!(serde_json::to_vec(&envelope).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn review_recheck_covers_notes_under_all_events() {
+        let boundary = ClassifierRedactorPipelinePrivacyBoundary::new(
+            Arc::new(PersonClassifier),
+            PrivacyFilterBackendTag::Sidecar,
+            PiiClassifyPolicy::ProseOnly,
+        );
+        let mut envelope = envelope_with_text("ordinary text").await;
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        envelope.replay.replay_notes = vec!["Jane Doe".into()];
+        let evidence = boundary.recheck_for_review(&mut envelope).await.unwrap();
+        assert_eq!(evidence.policy, PiiClassifyPolicy::AllEvents);
+        assert!(evidence.coverage_complete);
+        assert!(evidence.residual_scan_complete);
+        assert!(evidence.useful_classifier_result);
+        assert_eq!(envelope.replay.replay_notes, vec!["[REDACTED:person]"]);
     }
 
     /// `production_qualified` is the one answer a boundary gives (Zaki

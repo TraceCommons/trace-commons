@@ -9333,7 +9333,19 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/review/pipeline/runs/{run_id}/assessment",
-            post(pipeline_review_assessment_handler),
+            post(pipeline_review_assessment_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/recheck",
+            post(pipeline_review_recheck::recheck_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/rechecks",
+            get(pipeline_review_recheck::list_handler),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/rechecks/{recheck_id}/content",
+            get(pipeline_review_recheck::content_handler),
         )
         .route("/v1/datasets/replay", get(dataset_replay_handler))
         .route(
@@ -21952,6 +21964,9 @@ use near_provisioning::{
     near_ai_provision_finish_handler, near_ai_provision_start_handler,
     near_provision_finish_handler, near_provision_start_handler,
 };
+
+#[path = "trace_commons_ingest_internal/pipeline_review_recheck.rs"]
+mod pipeline_review_recheck;
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
@@ -44417,6 +44432,9 @@ fn pipeline_review_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>
         if label == PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE {
             return api_error(StatusCode::CONFLICT, label.clone());
         }
+        if let Some(status) = pipeline_review_recheck::constraint_status(label) {
+            return api_error(status, label.clone());
+        }
         if label == "quarantine reason is unresolved" {
             return api_error(StatusCode::UNPROCESSABLE_ENTITY, label.clone());
         }
@@ -44452,6 +44470,10 @@ struct PipelineReviewQueueItem {
     /// it, so Review ignores it; such a run cannot be claimed again.
     assessment_superseded: bool,
     created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_source_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_candidate: Option<pipeline_review_recheck::CandidateSummary>,
 }
 
 /// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
@@ -44469,26 +44491,48 @@ async fn pipeline_review_quarantine_handler(
     require_reviewer(&tenant)?;
     let pipeline_service = require_pipeline_service(state.as_ref())?;
     let limit = query.limit.unwrap_or(DEFAULT_PIPELINE_REVIEW_QUEUE_LIMIT);
-    let queue = pipeline_service
+    let entries = pipeline_service
         .store()
         .list_review_queue(&tenant.tenant_id, limit)
         .await
-        .map_err(internal_error)?
-        .into_iter()
-        .map(|entry| PipelineReviewQueueItem {
+        .map_err(internal_error)?;
+    let mut queue = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let score_hold =
+            entry.run.next_phase == Some(trace_commons_gate_api::pipeline::Phase::Score);
+        let candidate = if score_hold {
+            None
+        } else {
+            pipeline_service
+                .store()
+                .list_review_rechecks(&tenant.tenant_id, entry.run.run_id, 1)
+                .await
+                .map_err(internal_error)?
+                .into_iter()
+                .next()
+        };
+        let review_source_hash = if score_hold {
+            None
+        } else {
+            candidate
+                .as_ref()
+                .map(|value| value.content_hash.clone())
+                .or_else(|| entry.run.privacy_pass_content_hash.clone())
+        };
+        queue.push(PipelineReviewQueueItem {
             run_id: entry.run.run_id,
             submission_id: entry.run.submission_id,
             admission_reason: entry.run.admission_reason,
-            phase: if entry.run.next_phase == Some(trace_commons_gate_api::pipeline::Phase::Score) {
-                "score"
-            } else {
-                "review"
-            },
+            phase: if score_hold { "score" } else { "review" },
             hold_reason: entry.hold_reason,
             assessment_superseded: entry.assessment_superseded,
             created_at: entry.run.created_at,
-        })
-        .collect();
+            review_source_hash,
+            review_candidate: candidate
+                .as_ref()
+                .map(pipeline_review_recheck::CandidateSummary::from),
+        });
+    }
     Ok(Json(queue))
 }
 
@@ -44670,12 +44714,17 @@ async fn pipeline_run_submission_id(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PipelineReviewAssessmentRequest {
     lease_token: Uuid,
     recommendation: String,
     reason: String,
     #[serde(default)]
     resolved_quarantine_reasons: Vec<String>,
+    #[serde(default)]
+    candidate_id: Option<Uuid>,
+    #[serde(default)]
+    candidate_content_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -44695,6 +44744,11 @@ async fn pipeline_review_assessment_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let candidate_binding = pipeline_review_recheck::assessment_binding(
+        body.candidate_id,
+        body.candidate_content_hash,
+    )?;
+    let binds_candidate = candidate_binding.is_some();
     let recommendation = match body.recommendation.as_str() {
         "approve" => ReviewRecommendation::Approve,
         "reject" => ReviewRecommendation::Reject,
@@ -44761,11 +44815,12 @@ async fn pipeline_review_assessment_handler(
         .map_err(internal_error)?;
     let (assessment, at_score) = pipeline_service
         .store()
-        .record_review_assessment_for_hold(
+        .record_review_assessment_for_hold_with_recheck(
             &claim,
             recommendation,
             reason,
             resolved_quarantine_reasons,
+            candidate_binding,
         )
         .await
         .map_err(pipeline_review_db_error)?;
@@ -44795,6 +44850,9 @@ async fn pipeline_review_assessment_handler(
             Some(&trace_free_text_audit_reason(event_reason)),
         );
         event.event_id = assessment.assessment_id;
+        if binds_candidate {
+            event.decision_inputs_hash = Some(assessment.evidence_hash.clone());
+        }
         append_audit_event_mirrored(state.as_ref(), &tenant, event, audit_row, "audit event")
             .await
             .map(|_| ())

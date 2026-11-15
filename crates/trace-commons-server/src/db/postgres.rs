@@ -276,6 +276,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_admission_usage",
     "pipeline_review_claims",
     "pipeline_review_assessments",
+    "pipeline_review_rechecks",
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
@@ -2136,6 +2137,12 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         158,
         "account_terms_acceptances",
         include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
+    ),
+    // Immutable corrected review versions and exact assessment binding.
+    (
+        159,
+        "pipeline_review_rechecks",
+        include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
     ),
 ];
 
@@ -7948,6 +7955,7 @@ mod tests {
         (111, 4),
         (112, 4),
         (113, 4),
+        (159, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -8683,6 +8691,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
@@ -8736,6 +8745,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
@@ -9772,5 +9782,42 @@ mod pool_timeout_tests {
             pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
             Duration::from_secs(3) + POOL_CREATE_TIMEOUT
         );
+    }
+}
+
+#[cfg(test)]
+mod v159_tests {
+    #[test]
+    fn v159_records_immutable_tenant_scoped_rechecks_and_binds_approvals() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let marker = format!("migrations/V{}__pipeline_review_rechecks.sql", 159);
+        assert_eq!(THIS_FILE.matches(&marker).count(), 4);
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 159 && *name == "pipeline_review_rechecks")
+        );
+        let sql = include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql");
+        for required in [
+            "CREATE TABLE pipeline_review_rechecks",
+            "ALTER TABLE pipeline_review_rechecks FORCE ROW LEVEL SECURITY",
+            "USING (tenant_id = trace_current_tenant_id())",
+            "WITH CHECK (tenant_id = trace_current_tenant_id())",
+            "GRANT SELECT, INSERT ON pipeline_review_rechecks TO trace_ingest_runtime",
+            "pipeline_review_rechecks_reject_update",
+            "pipeline_review_rechecks_reject_delete",
+            "pipeline_review_assessments_require_recheck_binding",
+            "pipeline_runs_require_recheck_approval_source",
+            "d.input_object_ref_id = candidate.object_ref_id",
+            "d.input_hash = candidate.content_hash",
+            "UNIQUE (tenant_id, run_id, ordinal)",
+            "'review-recheck'",
+        ] {
+            assert!(sql.contains(required), "V159 missing {required}");
+        }
+        assert!(!sql.contains("GRANT UPDATE ON pipeline_review_rechecks"));
+        assert!(!sql.contains("GRANT DELETE ON pipeline_review_rechecks"));
+        assert!(!sql.contains("TO PUBLIC"));
+        assert!(!sql.contains("SET privacy_pass_"));
     }
 }

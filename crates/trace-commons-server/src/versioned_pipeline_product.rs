@@ -2032,6 +2032,7 @@ mod tests {
                 "pipeline_admission_usage",
                 "pipeline_review_claims",
                 "pipeline_review_assessments",
+                "pipeline_review_rechecks",
                 "pipeline_index_invalidations",
                 "pipeline_export_snapshots",
                 "pipeline_export_snapshot_items",

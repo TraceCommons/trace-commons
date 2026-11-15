@@ -72,6 +72,7 @@ the link.
 | A tenant's audited writes fail after a file append failed in required-mirror mode | [`./audit-trail-forensics.md#repairing-a-required-mirror-lockout`](./audit-trail-forensics.md#repairing-a-required-mirror-lockout) |
 | Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
+| Rechecking held pipeline privacy evidence without modifying a pass | [`./privacy-review-recheck.md`](./privacy-review-recheck.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
