@@ -34,7 +34,7 @@ enum InsightsSkillsUsage {
         return "skills_usage_empty"
     }
 
-    static func ranked(_ usage: DaemonData.SkillsUsage, days: Int, now: Date = Date()) -> [Skill] {
+    static func ranked(_ usage: DaemonData.SkillsUsage, days: Int, now: Date = Date(), includingID: String? = nil) -> [Skill] {
         guard usage.enabled, [7, 30, 90].contains(days) else { return [] }
         let agents = Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent))
         let rows = usage.skills.filter {
@@ -44,7 +44,7 @@ enum InsightsSkillsUsage {
         return Dictionary(grouping: rows, by: { $0.agent + "\u{0}" + $0.name }).compactMap { id, rows in
             guard let first = rows.first else { return nil }
             let total = rows.reduce(0) { $0 + max(0, $1.windows.first { $0.days == days }?.invocations ?? 0) }
-            guard total > 0 else { return nil }
+            guard total > 0 || id == includingID else { return nil }
             // Daemon windows roll from request time; lastAnalysisAt describes
             // the counter pass, not the window endpoint. Buckets are local days.
             let anchor = now

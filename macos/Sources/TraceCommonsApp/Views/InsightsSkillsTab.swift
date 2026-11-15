@@ -4,7 +4,9 @@ import TCDesign
 import TCShellCore
 
 enum SkillsSection: String, CaseIterable, Hashable {
-    case inventory, usage, catalog, following
+    case home, inventory, usage, catalog, following
+
+    static let defaultSection: Self = .home
 
     var copyKey: String { "skills_tab_" + rawValue }
 }
@@ -22,10 +24,12 @@ struct InsightsSkillsTab: View {
     @State private var usageDays = 30
     @State private var selectedSkillID: String?
     @State private var selectedUsageID: String?
+    @State private var selectedCatalogID: String?
+    @State private var selectedCatalogInstallationID: String?
     @State private var selectedSection: SkillsSection
     @Environment(\.scenePhase) private var scenePhase
 
-    init(model: InsightsSkillsModel, reviewSettings: (() -> Void)? = nil, initialSection: SkillsSection = .inventory) {
+    init(model: InsightsSkillsModel, reviewSettings: (() -> Void)? = nil, initialSection: SkillsSection = SkillsSection.defaultSection) {
         self.model = model
         self.reviewSettings = reviewSettings
         _selectedSection = State(initialValue: initialSection)
@@ -78,12 +82,15 @@ struct InsightsSkillsTab: View {
                 if let snapshot = model.shown {
                     if snapshot.enabled {
                         switch selectedSection {
+                        case .home:
+                            InsightsSkillsHomeView(feed: InsightsSkillsHome.make(snapshot, model: model), model: model,
+                                                   open: { openHome($0, snapshot: snapshot) })
                         case .inventory:
                             inventory(snapshot)
                         case .usage:
                             usage(snapshot)
                         case .catalog:
-                            publishers(snapshot)
+                            if selectedCatalogID == nil { publishers(snapshot) }
                             catalog(snapshot)
                         case .following:
                             feed(snapshot)
@@ -100,7 +107,13 @@ struct InsightsSkillsTab: View {
         .insightsSurface()
         .onDisappear { model.invalidateDetails() }
         .onChange(of: selectedSkillID) { _, _ in model.invalidateDetails() }
-        .onChange(of: selectedSection) { _, _ in model.invalidateDetails() }
+        .onChange(of: selectedSection) { _, section in
+            model.invalidateDetails()
+            if section != .catalog {
+                selectedCatalogID = nil
+                selectedCatalogInstallationID = nil
+            }
+        }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await model.observe()
@@ -117,26 +130,30 @@ struct InsightsSkillsTab: View {
     }
 
     private func indexAgentLogos(_ agents: [String]) -> some View {
-        HStack(spacing: GlassTokens.Space.s2) {
-            ForEach(agents, id: \.self) { agent in
-                let tool: GlassTool = switch agent {
-                case "codex": .codex
-                case "claude_code": .claudeCode
-                case "opencode": .openCode
-                default: .other(initials: String(model.agentLabel(agent).prefix(2)))
-                }
-                Group {
-                    if let logo = tool.logo {
-                        GlassToolLogoShape(logo).fill(tool.tint.color).frame(width: 14, height: 14)
-                    } else {
-                        Text(tool.initials).insightsCaption()
-                    }
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(model.agentLabel(agent))
-                .help(model.agentLabel(agent))
-            }
+        InsightsSkillsAgentLogos(agents: agents, label: model.agentLabel)
+    }
+
+    private func openHome(_ destination: SkillsHomeDestination, snapshot: DaemonData.SkillsSnapshot) {
+        guard let route = SkillsHomeRoute.resolve(destination, in: snapshot) else { return }
+        evidenceOpen = false
+        model.invalidateDetails()
+        switch route.section {
+        case .inventory:
+            inventoryQuery = ""
+            inventoryAgent = ""
+            inventoryAvailability = ""
+            selectedSkillID = nil
+        case .usage:
+            usageDays = 7
+            selectedUsageID = route.usageID
+        case .catalog:
+            catalogQuery = ""
+            selectedCatalogID = route.catalogID
+            selectedCatalogInstallationID = route.installedID
+        case .home, .following:
+            break
         }
+        selectedSection = route.section
     }
 
     private func inventory(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
@@ -268,8 +285,8 @@ struct InsightsSkillsTab: View {
     }
 
     private func usage(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
-        let ranked = InsightsSkillsUsage.ranked(snapshot.usage, days: usageDays)
-        let picked = ranked.first { $0.id == selectedUsageID } ?? ranked.first
+        let ranked = InsightsSkillsUsage.ranked(snapshot.usage, days: usageDays, includingID: selectedUsageID)
+        let picked = selectedUsageID == nil ? ranked.first : ranked.first { $0.id == selectedUsageID }
         let candidates = InsightsSkillsUsage.removalCandidates(snapshot, days: usageDays, model: model)
         return VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
             Picker(model.text("skills_usage_period_label"), selection: $usageDays) {
@@ -329,6 +346,9 @@ struct InsightsSkillsTab: View {
                         }
                     }
                 }
+            }
+            if picked == nil, selectedUsageID != nil {
+                Text(model.text("skills_usage_unavailable")).insightsNote()
             }
             if let picked {
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
@@ -475,7 +495,10 @@ struct InsightsSkillsTab: View {
     }
 
     private func catalog(_ snapshot: DaemonData.SkillsSnapshot) -> some View {
-        let skills = model.catalogSkills(in: snapshot, matching: catalogQuery)
+        let skills = model.catalogSkills(in: snapshot, matching: catalogQuery).sorted {
+            if ($0.id == selectedCatalogID) != ($1.id == selectedCatalogID) { return $0.id == selectedCatalogID }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
         return section("skills_catalog") {
             LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 if snapshot.catalog.partial { Text(model.text("skills_partial_catalog")).insightsNote() }
@@ -494,9 +517,9 @@ struct InsightsSkillsTab: View {
                         Text(skill.name).insightsHeading()
                         if !skill.description.isEmpty { Text(skill.description) }
                         Text(skill.repository + "/" + skill.path).insightsMono()
-                        if let installed = snapshot.inventory.skills.first(where: {
-                            model.catalogMatch(for: $0, in: snapshot)?.id == skill.id
-                        }), let update = snapshot.updates.first(where: { $0.installedID == installed.id }) {
+                        if let update = SkillsHomeRoute.catalogUpdate(catalogID: skill.id,
+                            installedID: skill.id == selectedCatalogID ? selectedCatalogInstallationID : nil,
+                            in: snapshot) {
                             status(update.status)
                         }
                         instructions(skill.instructionsURL, name: skill.name)

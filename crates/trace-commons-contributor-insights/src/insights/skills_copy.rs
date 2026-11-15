@@ -1,8 +1,37 @@
 //! Shared words for the local Skills surface and public publisher catalog.
 
-pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "date"];
+pub const PLACEHOLDERS: &[&str] = &["publisher", "name", "count", "previous", "date"];
 
 pub const COPY: &[(&str, &str)] = &[
+    ("skills_tab_home", "Home"),
+    ("skills_home_today", "Today"),
+    ("skills_home_this_week", "This week"),
+    ("skills_home_earlier", "Earlier"),
+    ("skills_home_story_update", "{name} has an update"),
+    ("skills_home_story_more", "You used {name} more"),
+    ("skills_home_story_less", "You used {name} less"),
+    ("skills_home_story_added", "{name} was added"),
+    ("skills_home_story_updated", "{name} was updated"),
+    ("skills_home_trend_period", "Past 7 days"),
+    ("skills_home_empty", "No updates yet."),
+    ("skills_home_view", "View"),
+    ("skills_home_browse", "Browse"),
+    ("skills_home_index", "Installed skills"),
+    ("skills_home_index_accessibility", "View installed skills"),
+    ("skills_home_browse_accessibility", "Browse skill catalog"),
+    ("skills_home_open_skill", "View {name}"),
+    ("skills_home_open_usage", "View usage for {name}"),
+    ("skills_home_open_creator", "View {name} from {publisher}"),
+    ("skills_home_compare_up", "{count} uses, up from {previous}"),
+    (
+        "skills_home_compare_down",
+        "{count} uses, down from {previous}",
+    ),
+    ("skills_home_week", "Your week"),
+    (
+        "skills_home_rollup",
+        "{count} skills from {publisher} changed",
+    ),
     ("skills_most_used", "Most-used skills"),
     ("skills_related_traces", "Related traces"),
     ("skills_removal_candidates", "Removal candidates"),
@@ -196,6 +225,55 @@ pub const COPY: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn home_copy_is_short_and_names_its_actions() {
+        let copy = super::super::service::ui_copy();
+        assert_eq!(copy["skills_tab_home"], "Home");
+        assert_eq!(copy["skills_home_view"], "View");
+        assert_eq!(copy["skills_home_trend_period"], "Past 7 days");
+        for (key, words) in COPY
+            .iter()
+            .filter(|(key, _)| key.starts_with("skills_home_"))
+        {
+            assert!(!words.contains("invocation"), "{key}");
+            assert!(!words.contains("session"), "{key}");
+        }
+    }
+
+    #[test]
+    fn home_usage_lines_give_both_weeks_and_claim_no_first_use() {
+        let copy = super::super::service::ui_copy();
+        for key in ["skills_home_compare_up", "skills_home_compare_down"] {
+            let words = &copy[key];
+            assert_eq!(words.matches("{count}").count(), 1, "{key}");
+            assert_eq!(words.matches("{previous}").count(), 1, "{key}");
+            assert!(!words.contains("first"), "{key}");
+            assert!(!words.contains("started"), "{key}");
+        }
+        assert_eq!(copy["skills_home_week"], "Your week");
+        // A roll-up counts catalog changes; it does not say who wrote them.
+        assert!(copy["skills_home_rollup"].contains("{publisher}"));
+        assert!(!copy["skills_home_rollup"].contains("posted"));
+    }
+
+    #[test]
+    fn home_stories_name_their_skill_and_claim_no_first_use_or_author() {
+        let stories: Vec<_> = COPY
+            .iter()
+            .filter(|(key, _)| key.starts_with("skills_home_story_"))
+            .collect();
+        assert_eq!(stories.len(), 5);
+        for (key, words) in stories {
+            // The headline is split at the name to set it in strong type.
+            assert_eq!(words.matches("{name}").count(), 1, "{key}");
+            // A catalog change is not a creator's post.
+            assert!(!words.contains("{publisher}"), "{key}");
+            // Two weeks of history cannot show a first-ever use.
+            assert!(!words.contains("started"), "{key}");
+            assert!(!words.contains("first"), "{key}");
+        }
+    }
 
     #[test]
     fn copy_is_unique_shared_and_has_declared_placeholders() {
