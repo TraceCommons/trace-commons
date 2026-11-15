@@ -193,7 +193,7 @@ mod tests {
     fn payload() -> Vec<u8> {
         let issued = chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1, "checks_version": 1, "environment": "staging",
+            "schema_version": 1, "checks_version": catalog::CHECKS_VERSION, "environment": "staging",
             "revision": issued.timestamp(), "issued_at": issued,
             "expires_at": issued + Duration::days(7),
             "publishers": [], "skills": []
