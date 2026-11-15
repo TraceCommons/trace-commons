@@ -11,6 +11,10 @@ use trace_commons_protocol::trace_contribution::{
 
 const PRIVATE_MARKER: &str = "RECHECK_PRIVATE_MARKER";
 
+// Production permits one recheck per process. Independent test fixtures must
+// not contend for that intentional limit when the harness runs them in parallel.
+static RECHECK_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct RecheckBoundary {
     calls: AtomicUsize,
     complete: AtomicBool,
@@ -77,6 +81,7 @@ impl PipelinePrivacyBoundary for RecheckBoundary {
 }
 
 struct RecheckFixture {
+    _serial: tokio::sync::MutexGuard<'static, ()>,
     service: Arc<PipelineService>,
     index: Arc<IsolatedPipelineIndex>,
     adapters: Vec<Arc<RecordingSettlementAdapter>>,
@@ -87,6 +92,7 @@ struct RecheckFixture {
 }
 
 async fn recheck_fixture(backend: &Arc<PgBackend>, dir: &tempfile::TempDir) -> RecheckFixture {
+    let serial = RECHECK_FIXTURE_LOCK.lock().await;
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(
@@ -145,6 +151,7 @@ async fn recheck_fixture(backend: &Arc<PgBackend>, dir: &tempfile::TempDir) -> R
     assert_held_by_the_pass(&service, &tenant, &held).await;
     let claim = claim_for_review(&service, &tenant, held.run_id, 'e').await;
     RecheckFixture {
+        _serial: serial,
         service,
         index,
         adapters,
