@@ -407,8 +407,8 @@ is true when rows were cut. New fields, all optional and additive:
 - `catalog.publisher_states[].signals`: the shape of the
   `skills-popularity-signals` branch (`stars`, `pushed_at`,
   `repository_checked_at`, `commits_7d`, `commits_28d`,
-  `activity_checked_at`), filled from the server catalog. Swift decoding of
-  this object belongs to that branch.
+  `activity_checked_at`), filled from the server catalog and decoded in
+  Swift as `SkillsRepositorySignals`.
 - `catalog.skills[]`: `license`, `first_seen_at`, `last_changed_at`,
   `checks` (the document's object), `checks_version`.
 - `suggestions`: `{available, opted_in, pending, sent_total, last_sent_at}`

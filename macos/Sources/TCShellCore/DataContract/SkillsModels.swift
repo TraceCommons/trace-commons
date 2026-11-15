@@ -326,17 +326,22 @@ extension DaemonData {
         public let publisherID: String
         public let status: String
         public let checkedAt: String?
+        /// Public repository signals from the server catalog; nil when the
+        /// daemon knows none (GitHub path, older daemons).
+        public let signals: SkillsRepositorySignals?
 
-        public init(publisherID: String, status: String, checkedAt: String? = nil) {
+        public init(publisherID: String, status: String, checkedAt: String? = nil, signals: SkillsRepositorySignals? = nil) {
             self.publisherID = publisherID
             self.status = status
             self.checkedAt = checkedAt
+            self.signals = signals
         }
 
         enum CodingKeys: String, CodingKey {
             case publisherID = "publisher_id"
             case status
             case checkedAt = "checked_at"
+            case signals
         }
 
         public init(from decoder: Decoder) throws {
@@ -344,6 +349,40 @@ extension DaemonData {
             publisherID = try values.decode(String.self, forKey: .publisherID)
             status = try values.decode(String.self, forKey: .status)
             checkedAt = try values.decodeIfPresent(String.self, forKey: .checkedAt)
+            // Decorative data: a malformed value is unknown and never fails the snapshot.
+            signals = (try? values.decodeIfPresent(SkillsRepositorySignals.self, forKey: .signals)) ?? nil
+        }
+    }
+
+    /// Anonymous public GitHub signals for a publisher's whole repository,
+    /// as the server catalog measured them. Every field is optional: nil is
+    /// unknown, never zero.
+    public struct SkillsRepositorySignals: Codable, Equatable, Sendable {
+        public let stars: Int?
+        /// Latest push to any branch.
+        public let pushedAt: String?
+        public let repositoryCheckedAt: String?
+        /// Default-branch commits in the last week and the last four weeks.
+        public let commits7d: Int?
+        public let commits28d: Int?
+        public let activityCheckedAt: String?
+
+        public init(stars: Int? = nil, pushedAt: String? = nil, repositoryCheckedAt: String? = nil, commits7d: Int? = nil, commits28d: Int? = nil, activityCheckedAt: String? = nil) {
+            self.stars = stars
+            self.pushedAt = pushedAt
+            self.repositoryCheckedAt = repositoryCheckedAt
+            self.commits7d = commits7d
+            self.commits28d = commits28d
+            self.activityCheckedAt = activityCheckedAt
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case stars
+            case pushedAt = "pushed_at"
+            case repositoryCheckedAt = "repository_checked_at"
+            case commits7d = "commits_7d"
+            case commits28d = "commits_28d"
+            case activityCheckedAt = "activity_checked_at"
         }
     }
 

@@ -103,6 +103,7 @@ final class SkillsWireTests: XCTestCase {
     func testServerCatalogFactsAndSuggestionsDecode() throws {
         let json = #"""
         {"enabled":true,"catalog":{"source":"server","revision":1763251200,"issued_at":"2026-11-16T00:00:00Z","expires_at":"2026-11-30T00:00:00Z","total_skills":2,
+          "publisher_states":[{"publisher_id":"gh.acme.skills","status":"current","checked_at":"2026-11-16T00:00:00Z","signals":{"stars":40,"repository_checked_at":"2026-11-16T00:00:00Z","commits_7d":1,"commits_28d":3,"activity_checked_at":"2026-11-16T00:00:00Z"}},{"publisher_id":"obra","status":"current","signals":{"stars":"many"}}],
           "publishers":[{"id":"gh.acme.skills","name":"acme/skills","repository":"acme/skills","skills_root":"","instructions_url":"https://github.com/acme/skills","url":"https://github.com/acme/skills","source_kind":"marketplace"}],
           "skills":[{"id":"gh.acme.skills:lint/SKILL.md","publisher_id":"gh.acme.skills","name":"lint","description":"Lints.","repository":"acme/skills","path":"lint/SKILL.md","revision":"0123456789abcdef0123456789abcdef01234567","sha256":"aa","source_url":"https://github.com/acme/skills/blob/x/lint/SKILL.md","instructions_url":"https://github.com/acme/skills",
             "license":{"status":"declared","spdx":"MIT"},"first_seen_at":"2026-11-01T00:00:00Z","last_changed_at":"2026-11-10T00:00:00Z","checks_version":1,
@@ -113,6 +114,8 @@ final class SkillsWireTests: XCTestCase {
         XCTAssertEqual(snapshot.catalog.source, "server")
         XCTAssertEqual(snapshot.catalog.revision, 1763251200)
         XCTAssertEqual(snapshot.catalog.totalSkills, 2)
+        XCTAssertEqual(snapshot.catalog.publisherStates.first?.signals, DaemonData.SkillsRepositorySignals(stars: 40, repositoryCheckedAt: "2026-11-16T00:00:00Z", commits7d: 1, commits28d: 3, activityCheckedAt: "2026-11-16T00:00:00Z"))
+        XCTAssertNil(snapshot.catalog.publisherStates.last?.signals, "a malformed signal is unknown")
         XCTAssertEqual(snapshot.catalog.publishers.first?.sourceKind, "marketplace")
         XCTAssertEqual(snapshot.catalog.publishers.first?.url, "https://github.com/acme/skills")
         let skill = try XCTUnwrap(snapshot.catalog.skills.first)
