@@ -65,6 +65,7 @@ pub mod register_stats;
 pub mod rescore_distribution;
 pub mod reward_participant;
 pub mod secrets;
+pub mod skills_catalog;
 pub mod starter_advance_report;
 pub mod starter_plausibility;
 pub mod trace_artifact_gcs;
