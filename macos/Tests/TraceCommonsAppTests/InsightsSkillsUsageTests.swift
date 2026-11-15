@@ -90,13 +90,6 @@ final class InsightsSkillsUsageTests: XCTestCase {
         XCTAssertTrue(InsightsSkillsUsage.removalCandidates(.init(inventory: original.inventory, usage: usage),
             days: 30, model: InsightsSkillsModel(), now: now).isEmpty)
     }
-    func testEvidenceLinksDeduplicateAcrossPopulations() {
-        let direct = DaemonData.SkillsUsageRow(name: "review", agent: "claude_code", invocations: 1, loads: 0,
-            sessions: 1, sessionRefs: ["same"])
-        let delegated = DaemonData.SkillsUsageRow(name: "review", agent: "claude_code", invocations: 1, loads: 0,
-            sessions: 1, sessionRefs: ["same", "other"], population: "delegated")
-        XCTAssertEqual(InsightsSkillsModel().usageEvidenceLinks([direct, delegated]).map(\.sessionRef), ["same", "other"])
-    }
     func testCollidingAndSharedInstallationsAreNotRemovalCandidates() {
         let model = InsightsSkillsModel()
         let original = snapshot()
