@@ -117,7 +117,9 @@ struct InsightsSkillsHomeView: View {
 
     private func trend(_ item: InsightsSkillsHome.Trend) -> some View {
         let key = item.direction == .less ? "skills_home_story_less" : "skills_home_story_more"
-        return post(headline: key, name: item.name, time: model.text("skills_home_trend_period"),
+        // "Used in past week" already says the period.
+        return post(headline: key, name: item.name,
+                    time: item.direction == .started ? nil : model.text("skills_home_trend_period"),
                     summary: "",
                     view: model.text("skills_home_open_usage", values: ["name": item.name + ", " + model.agentLabel(item.agent)]),
                     destination: .usage(id: item.id)) {

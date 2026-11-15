@@ -99,11 +99,13 @@ final class InsightsSkillsHomeNavigationTests: XCTestCase {
         let feed = InsightsSkillsHome.Snapshot(
             updates: [.init(id: "update-review", groupID: "installed-review", installedID: "installed-review", name: "review", agents: ["claude_code", "codex"], catalogSkill: catalogSkill, checkedAt: now)],
             trends: [.init(id: "claude_code\u{0}review", name: "systematic-debugging", agent: "claude_code", previousUses: 2, currentUses: 7, direction: .more, periodEnd: now),
-                     .init(id: "opencode\u{0}planning", name: "planning", agent: "opencode", previousUses: 4, currentUses: 0, direction: .less, periodEnd: now)],
+                     .init(id: "opencode\u{0}planning", name: "planning", agent: "opencode", previousUses: 4, currentUses: 0, direction: .less, periodEnd: now),
+                     // No use the week before, and an agent with no logo artwork.
+                     .init(id: "cline\u{0}writing-plans", name: "writing-plans", agent: "cline", previousUses: 0, currentUses: 3, direction: .started, periodEnd: now)],
             creators: [.init(id: event.id, event: event, skill: described, publisher: publisher, observedAt: now.addingTimeInterval(-3 * 3600)),
                        .init(id: earlier.id, event: earlier, skill: added, publisher: publisher, observedAt: now.addingTimeInterval(-12 * 86_400 - 3 * 3600))])
         XCTAssertEqual(feed.timeline(now: now, calendar: utc).map(\.period), [.today, .earlier])
-        XCTAssertEqual(feed.timeline(now: now, calendar: utc).flatMap(\.stories).count, 5)
+        XCTAssertEqual(feed.timeline(now: now, calendar: utc).flatMap(\.stories).count, 6)
         // Swift reads these through the FFI dylib: a stale one draws blanks.
         for key in ["skills_home_today", "skills_home_this_week", "skills_home_earlier",
                     "skills_home_story_update", "skills_home_story_more", "skills_home_story_less",
