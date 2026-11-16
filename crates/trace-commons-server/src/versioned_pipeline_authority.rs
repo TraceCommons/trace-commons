@@ -265,7 +265,27 @@ mod tests {
             text: &str,
         ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
             if !text.contains("Jane Doe") {
-                return Ok(None);
+                // A native classifier explicitly attests that clean input has no spans.
+                return Ok(Some(SafePrivacyFilterRedaction {
+                    private_edits: Some(
+                        trace_commons_protocol::private_edit_map::PrivateRedactionEdits(
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ),
+                    redacted_text: text.to_string(),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".to_string(),
+                        span_count: 0,
+                        by_label: BTreeMap::new(),
+                        decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
+                    },
+                    report: RedactionReport::default(),
+                }));
             }
             let mut report = RedactionReport::default();
             report.counts.insert("privacy_filter:person".to_string(), 1);
