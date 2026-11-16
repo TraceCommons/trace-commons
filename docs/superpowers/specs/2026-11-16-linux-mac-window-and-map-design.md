@@ -224,21 +224,23 @@ sizes, behaviour and look, using the same data and the same words.
 - **No hiding.** The map is not hidden when nothing is pending; it shows the
   same scene the Mac app shows for that state.
 
-## Shared logic: the port
+## Logic is ported per platform
 
-GTK cannot reuse the Swift logic, so the tree, the scene layout, graph
-bucketing, inspector demand and the transfer feed must be written again. To
-avoid writing them twice more (Windows, Tauri), and to stop the Mac app and
-Linux drifting apart, they go into permissive Rust code. The Mac app keeps its
-Swift implementations for now.
+The GTK shell gets its own Rust port of the tree, the map scene, graph
+bucketing, inspector demand and the transfer feed, inside
+`crates/trace-commons-contributor-gtk`. These are not moved into shared code
+(owner, 2026-11-16): windowing and pane behaviour are expected to drift in
+platform-specific ways, and Windows will reproduce them separately in its own
+shell.
 
-- **Conformance.** A Swift test dumps each model's output for every recorded
-  sample set as JSON into a checked-in fixtures directory. The Rust tests read
-  those files and must produce identical output. A change on either side
-  without the other fails a test.
-- **Later.** Switching the Mac app to consume the Rust models through the FFI
-  is a separate later decision, and it removes the duplication.
-- **Where the code lives is an owner decision** (see below).
+- **Reference.** The Swift implementation is the reference behaviour. The
+  GTK port follows it, and records any deliberate platform difference beside
+  the code that makes it.
+- **Shared data and words stay shared.** Data still comes from the daemon's
+  methods, and words from `MonitorScreensCopy` and `MonitorTracesCopy`. The
+  per-platform part is layout, scene and window logic only.
+- **Check.** Agreement is checked by the side-by-side gallery below, not by
+  cross-language conformance tests.
 
 ## Shared test data and side-by-side captures
 
@@ -361,20 +363,13 @@ Swift implementations for now.
    needs no newer widget, because the three-pane container is custom, so the
    recommendation is to stay on 1.2. Raising it would give breakpoints, but it
    drops older distributions.
-5. **Where the shared models live.** Recommendation: a new permissive leaf
-   crate, `trace-commons-shell-model`, MIT OR Apache-2.0, depending only on
-   the protocol crate and `serde`. Adding it touches the crate sets in
-   `crates/trace-commons-server/tests/license_boundary.rs`; it adds a
-   permissive crate, and no AGPL edge. The alternative is a module inside
-   `trace-commons-contributor`, which rebuilds with every daemon edit.
 
 ## Slices (one PR each)
 
 1. **Shared samples in GTK, plus the capture gallery.** Add the debug sample
    backend, extend the Mac capture to whole windows, and add the pairing
    script. Its output is the "before" gallery.
-2. **Shared models in Rust,** with Swift-generated conformance fixtures.
-3. **Window shell:**
+2. **Window shell:**
    - the three-pane container
    - the toolbar row with the desktop's controls
    - the tab strip
@@ -382,16 +377,16 @@ Swift implementations for now.
    - the window-level inspector host
    - the graph footer
    - the page moves in the table above
-4. **Traces map:** scene, nodes, arcs, legend, zoom and focus.
-5. **Transfers and motion,** with reduced motion.
-6. **Look:** tokens and tiers, glyphs, Inter and the icon set (after approval
+3. **Traces map:** scene, nodes, arcs, legend, zoom and focus.
+4. **Transfers and motion,** with reduced motion.
+5. **Look:** tokens and tiers, glyphs, Inter and the icon set (after approval
    2), and painted glass.
-7. **Translucency and blur** (after S1 and approval 3).
-8. **Private AI map view.**
-9. **Tab drag reordering.**
+6. **Translucency and blur** (after S1 and approval 3).
+7. **Private AI map view.**
+8. **Tab drag reordering.**
 
-Slices 1 and 2 can run in parallel. Slice 3 depends on 1. Slices 4 and 5
-depend on 2 and 3.
+Slice 2 depends on 1. Slices 3 and 4 depend on 2. Slice 5 can start
+alongside 2 once its assets are approved.
 
 ## Acceptance
 
@@ -414,4 +409,4 @@ depend on 2 and 3.
 - Onboarding.
 - The menu-bar panel and edge rail.
 - Windows and Tauri.
-- Switching the Mac app to the shared Rust models.
+- Shared window or map logic across shells. Each shell ports it separately.
