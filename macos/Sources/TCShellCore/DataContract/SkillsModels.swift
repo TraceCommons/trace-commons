@@ -609,8 +609,12 @@ extension DaemonData {
         public let partial: Bool
         public let skills: [SkillsUsageRow]
         public let coverage: [SkillsUsageCoverage]
+        /// Where `partial` comes from, by agent; an agent left out has no
+        /// gap. `nil` from a daemon that does not say, or when rows were
+        /// left out of the answer: then only `partial` can be read.
+        public let partialAgents: [SkillsPartialAgent]?
 
-        public init(enabled: Bool = false, lastAnalysisAt: String? = nil, earliestEvidence: String? = nil, sessionsPartial: Int = 0, sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = [], delegatedSessionsObserved: Int? = nil, delegatedSessionsUnknown: Int? = nil, unclassifiedSessionsObserved: Int? = nil, unclassifiedSessionsUnknown: Int? = nil) {
+        public init(enabled: Bool = false, lastAnalysisAt: String? = nil, earliestEvidence: String? = nil, sessionsPartial: Int = 0, sessionsObserved: Int = 0, sessionsUnknown: Int = 0, partial: Bool = true, skills: [SkillsUsageRow] = [], coverage: [SkillsUsageCoverage] = [], delegatedSessionsObserved: Int? = nil, delegatedSessionsUnknown: Int? = nil, unclassifiedSessionsObserved: Int? = nil, unclassifiedSessionsUnknown: Int? = nil, partialAgents: [SkillsPartialAgent]? = nil) {
             self.enabled = enabled
             self.lastAnalysisAt = lastAnalysisAt
             self.earliestEvidence = earliestEvidence
@@ -624,6 +628,7 @@ extension DaemonData {
             self.partial = partial
             self.skills = skills
             self.coverage = coverage
+            self.partialAgents = partialAgents
         }
 
         enum CodingKeys: String, CodingKey {
@@ -640,6 +645,7 @@ extension DaemonData {
             case partial
             case skills
             case coverage
+            case partialAgents = "partial_agents"
         }
 
         public init(from decoder: Decoder) throws {
@@ -657,6 +663,35 @@ extension DaemonData {
             partial = try values.decodeIfPresent(Bool.self, forKey: .partial) ?? true
             skills = try values.decodeIfPresent([SkillsUsageRow].self, forKey: .skills) ?? []
             coverage = try values.decodeIfPresent([SkillsUsageCoverage].self, forKey: .coverage) ?? []
+            partialAgents = try values.decodeIfPresent([SkillsPartialAgent].self, forKey: .partialAgents)
+        }
+    }
+
+    /// One agent's incomplete skill history: the local days (`YYYY-MM-DD`,
+    /// as daily rows name them) a partial session touches, and how many
+    /// partial sessions could not be dated at all.
+    public struct SkillsPartialAgent: Codable, Equatable, Sendable {
+        public let agent: String
+        public let days: [String]
+        public let undated: Int
+
+        public init(agent: String, days: [String] = [], undated: Int = 0) {
+            self.agent = agent
+            self.days = days
+            self.undated = undated
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case agent
+            case days
+            case undated
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            agent = try values.decode(String.self, forKey: .agent)
+            days = try values.decodeIfPresent([String].self, forKey: .days) ?? []
+            undated = try values.decodeIfPresent(Int.self, forKey: .undated) ?? 0
         }
     }
 

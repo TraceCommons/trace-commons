@@ -1224,13 +1224,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
             .filter(|item| runtime.public.followed.contains(&item.publisher_id)),
         48 * 1024,
     );
-    if let Some(rows) = usage.get("skills").and_then(Value::as_array) {
-        let (rows, partial) = bounded_rows(rows, 96 * 1024);
-        usage["skills"] = rows.into();
-        if partial {
-            usage["partial"] = true.into();
-        }
-    }
+    bound_usage_rows(&mut usage, 96 * 1024);
     let value = json!({
         "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
         "catalog":{"publishers":catalog_publishers,"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states,
@@ -1286,6 +1280,22 @@ fn bounded_inventory_details(
         result.insert(id.to_owned(), value);
     }
     (result, false)
+}
+
+/// Usage rows within `limit` encoded bytes. Rows left out make the usage
+/// partial, and belong to no one agent: the per-agent gaps are dropped
+/// with them, so a shell falls back to `partial` alone.
+fn bound_usage_rows(usage: &mut Value, limit: usize) {
+    if let Some(rows) = usage.get("skills").and_then(Value::as_array) {
+        let (rows, partial) = bounded_rows(rows, limit);
+        usage["skills"] = rows.into();
+        if partial {
+            usage["partial"] = true.into();
+            if let Some(usage) = usage.as_object_mut() {
+                usage.remove("partial_agents");
+            }
+        }
+    }
 }
 
 fn bounded_rows<T: Serialize>(
