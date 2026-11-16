@@ -174,6 +174,46 @@ fn truncated_usage_rows_drop_the_per_agent_gaps() {
     );
 }
 
+/// 23 usage rows shaped as the daemon sends them (20 session references
+/// and evidence entries each, the cap), with `days` daily buckets each.
+fn owner_scale_usage(days: usize) -> Value {
+    let row = |n: usize| {
+        let windows: Vec<Value> = [7, 30, 90]
+            .iter()
+            .map(|d| json!({"days":d,"invocations":100,"loads":1,"sessions":10}))
+            .collect();
+        json!({"name":format!("plugin-name:skill-name-{n:02}"),"agent":"claude_code","population":"direct",
+            "invocations":1234,"loads":12,"sessions":40,"last_seen":"2026-11-15T11:00:00.123456Z",
+            "session_refs":vec!["t12345.1234567890123456789"; 20],"parent_session_refs":[],
+            "evidence":vec![json!({"session_ref":"t12345.1234567890123456789","parent_session_ref":null}); 20],
+            "windows":windows,
+            "daily":(0..days).map(|d| json!({"day":format!("2026-{:02}-{:02}", 8 + d / 28, 1 + d % 28),"invocations":10,"loads":0,"sessions":2})).collect::<Vec<_>>(),
+            "undated_events":0})
+    };
+    json!({"partial":true,"partial_agents":[{"agent":"codex","days":[],"undated":240}],
+        "skills":(0..23).map(row).collect::<Vec<_>>()})
+}
+
+#[test]
+fn owner_scale_usage_keeps_the_per_agent_gaps() {
+    // The owner's snapshot (about 418 KB, 290 installed skills) carries 23
+    // usage rows; only those rows count against their 96 KB bound.
+    let mut usage = owner_scale_usage(14);
+    bound_usage_rows(&mut usage, 96 * 1024);
+    assert_eq!(usage["skills"].as_array().unwrap().len(), 23);
+    assert_eq!(usage["partial_agents"][0]["agent"], "codex");
+    // Measured limit of the fallback: 23 rows of this shape with 31 or
+    // more days of daily history each no longer fit, and the shell then
+    // reads the global flag alone.
+    let fits = |days| {
+        let mut usage = owner_scale_usage(days);
+        bound_usage_rows(&mut usage, 96 * 1024);
+        usage.get("partial_agents").is_some()
+    };
+    assert!(fits(30));
+    assert!(!fits(31));
+}
+
 #[test]
 fn response_rows_observe_encoded_bytes_and_report_partial() {
     let (rows, partial) = bounded_rows([json!({"name":"one"}), json!({"name":"two"})], 20);
