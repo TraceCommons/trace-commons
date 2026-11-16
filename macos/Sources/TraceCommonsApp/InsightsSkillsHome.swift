@@ -244,17 +244,16 @@ enum InsightsSkillsHome {
     /// is not used: it includes today. Left out while history is partial
     /// or was not analysed today, when a short count would read as the
     /// week; a skill whose daily history cannot be read is left out alone.
+    /// Partial history is read by agent and day where the daemon says
+    /// which: an agent with a gap in these seven days is not counted.
     private static func weekTop(_ usage: DaemonData.SkillsUsage, now: Date, calendar: Calendar) -> [WeekSkill] {
         let today = calendar.startOfDay(for: now)
-        guard usage.enabled, !usage.partial,
+        guard usage.enabled,
               let checked = usage.lastAnalysisAt.flatMap(parse), checked >= today, checked <= now,
               let start = calendar.date(byAdding: .day, value: -7, to: today) else { return [] }
-        let explicit = Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent))
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = dayFormatter(calendar)
+        let explicit = complete(Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent)),
+                                usage, from: start, to: today, formatter: formatter)
         let rows = usage.skills.filter { explicit.contains($0.agent) && ["direct", "delegated"].contains($0.population) }
         let skills = Dictionary(grouping: rows, by: { $0.agent + "\u{0}" + $0.name }).compactMap { id, rows -> WeekSkill? in
             guard let first = rows.first, Set(rows.map(\.population)).count == rows.count else { return nil }
@@ -300,19 +299,19 @@ enum InsightsSkillsHome {
         return Array(items.sorted { $0.checkedAt == $1.checkedAt ? $0.id < $1.id : $0.checkedAt > $1.checkedAt }.prefix(3))
     }
 
+    /// Partial history is read by agent and day where the daemon says
+    /// which: an agent with a gap in the fourteen days compared tells no
+    /// change, since a gap could read as a decrease or a first use.
     private static func usageChanges(_ usage: DaemonData.SkillsUsage, now: Date, calendar: Calendar) -> [Trend] {
         let today = calendar.startOfDay(for: now)
-        guard usage.enabled, !usage.partial,
+        guard usage.enabled,
               let checked = usage.lastAnalysisAt.flatMap(parse), checked >= today, checked <= now,
               let previousStart = calendar.date(byAdding: .day, value: -14, to: today),
               let currentStart = calendar.date(byAdding: .day, value: -7, to: today),
               let earliest = usage.earliestEvidence.flatMap(parse), earliest <= previousStart else { return [] }
-        let explicit = Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent))
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = dayFormatter(calendar)
+        let explicit = complete(Set(usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent)),
+                                usage, from: previousStart, to: today, formatter: formatter)
         func date(_ day: String) -> Date? {
             guard let date = formatter.date(from: day), formatter.string(from: date) == day else { return nil }
             return date
@@ -371,6 +370,32 @@ enum InsightsSkillsHome {
         // Repeated updates to one skill do not crowd out other creators/skills.
         var seen = Set<String>()
         return Array(valid.filter { seen.insert($0.publisher.id + "\u{0}" + $0.skill.id).inserted }.prefix(5))
+    }
+
+    private static func dayFormatter(_ calendar: Calendar) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }
+
+    /// The `agents` whose history has no gap in the local days
+    /// `start ..< end`. Without per-agent gaps (an older daemon, or rows
+    /// left out of the answer), any partial history leaves none. A gap
+    /// that is undated, unreadable, or named with no day is everywhere.
+    private static func complete(_ agents: Set<String>, _ usage: DaemonData.SkillsUsage,
+                                 from start: Date, to end: Date, formatter: DateFormatter) -> Set<String> {
+        guard let gaps = usage.partialAgents else { return usage.partial ? [] : agents }
+        return agents.filter { agent in
+            gaps.filter { $0.agent == agent }.allSatisfy { gap in
+                gap.undated == 0 && !gap.days.isEmpty && gap.days.allSatisfy { day in
+                    guard let date = formatter.date(from: day), formatter.string(from: date) == day else { return false }
+                    return date < start || date >= end
+                }
+            }
+        }
     }
 
     private static func validHash(_ value: String) -> Bool { value.count == 64 && value.allSatisfy(\.isHexDigit) }
