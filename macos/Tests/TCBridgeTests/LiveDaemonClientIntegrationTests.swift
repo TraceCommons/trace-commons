@@ -83,6 +83,39 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         XCTAssertEqual(reread.scrubCheckMode, .manual)
     }
 
+    /// `record_usage_event` (#1920) reaches the real daemon by the name and
+    /// parameter the client sends, over the raw frame: the client's own
+    /// answer is `false` for a refusal and for not counted alike, so only
+    /// the frame tells routing apart from silence. A throwaway store has no
+    /// region answer, so nothing is counted; a name off the list is the
+    /// daemon's refusal. And `share_usage_data`, the Settings switch, round
+    /// trips through `set_settings`.
+    func testUsageEventsAndTheirSwitchReachTheRealDaemon() async throws {
+        let daemon = try startDaemon()
+        func frame(_ method: String, _ params: String) throws -> [String: Any] {
+            let object = try JSONSerialization.jsonObject(with: Data(daemon.call(method, params: params).utf8))
+            return try XCTUnwrap(object as? [String: Any])
+        }
+        for event in UsageEvent.allCases {
+            let reply = try frame("record_usage_event", #"{"event":"\#(event.rawValue)"}"#)
+            XCTAssertNil(reply["error"], "\(event.rawValue): \(reply)")
+            let result = try XCTUnwrap(reply["result"] as? [String: Any], event.rawValue)
+            XCTAssertEqual(result["recorded"] as? Bool, false, event.rawValue)
+        }
+        let refused = try frame("record_usage_event", #"{"event":"not_an_event"}"#)
+        let error = try XCTUnwrap(refused["error"] as? [String: Any])
+        XCTAssertEqual(error["message"] as? String, "usage-event-unknown")
+        let recorded = await live(daemon).recordUsageEvent(.setupFinished)
+        XCTAssertFalse(recorded)
+
+        let before = try XCTUnwrap(frame("get_settings", "{}")["result"] as? [String: Any])
+        XCTAssertEqual(before["share_usage_data"] as? Bool, true, "on by default")
+        let off = try XCTUnwrap(frame("set_settings", #"{"share_usage_data":false}"#)["result"] as? [String: Any])
+        XCTAssertEqual(off["share_usage_data"] as? Bool, false)
+        let after = try XCTUnwrap(frame("get_settings", "{}")["result"] as? [String: Any])
+        XCTAssertEqual(after["share_usage_data"] as? Bool, false)
+    }
+
     func testAnUnknownProjectIsTheDaemonsRefusalNotUnreachable() async throws {
         let client = live(try startDaemon())
         do {

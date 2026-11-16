@@ -20,67 +20,115 @@ final class UsageEventsTests: XCTestCase {
         XCTAssertEqual(MonitorWindowView.usageEvent(for: .insights), .tabInsightsOpened)
     }
 
-    /// A change of tab reports the tab now drawn, once; no change of what is
-    /// drawn reports nothing.
-    func test_aTabChangeReportsTheTabNowDrawn() {
-        for old in MonitorWindowView.Tab.allCases {
-            for new in MonitorWindowView.Tab.allCases {
-                let event = MonitorWindowView.usageEvent(tabChangedFrom: old, to: new, requiresOnboarding: false)
-                XCTAssertEqual(event, old == new ? nil : MonitorWindowView.usageEvent(for: new), "\(old) -> \(new)")
-            }
+    /// `reportDrawnTab` as the window runs it: the reducer, and the tab it
+    /// remembers as last reported. `land` is `consumePending`, which sets the
+    /// tab and clears the destination; `tabChanged` is `onChange(of: tab)`;
+    /// `readinessChanged` the readiness handler.
+    @MainActor private struct Window {
+        var tab: MonitorWindowView.Tab
+        var destination: MonitorWindowView.Tab?
+        var ready = true
+        var requiresOnboarding = false
+        var lastReported: MonitorWindowView.Tab?
+        var sent: [UsageEvent] = []
+
+        mutating func report() {
+            guard let event = MonitorWindowView.usageReport(
+                lastReported: lastReported, ready: ready, destinationLandsNow: destination != nil,
+                tab: tab, requiresOnboarding: requiresOnboarding) else { return }
+            lastReported = MonitorWindowView.shownTab(tab, requiresOnboarding: requiresOnboarding)
+            sent.append(event)
+        }
+
+        mutating func land() {
+            guard let destination else { return }
+            tab = destination
+            self.destination = nil
+        }
+
+        mutating func pick(_ picked: MonitorWindowView.Tab) {
+            let changed = picked != tab
+            tab = picked
+            if changed { report() }
         }
     }
 
-    /// The window's opening counts the tab it opens on, once, and only once
-    /// the window knows what it draws.
-    func test_theOpeningCountsTheDrawnTabOnceItIsKnown() {
-        func opening(reported: Bool = false, known: Bool = true, daemon: Bool = true, lands: Bool = false,
-                     tab: MonitorWindowView.Tab = .insights, onboarding: Bool = false) -> UsageEvent? {
-            MonitorWindowView.openingUsageEvent(reported: reported, onboardingKnown: known, hasDaemon: daemon,
-                                                destinationLandsNow: lands, tab: tab, requiresOnboarding: onboarding)
-        }
-        XCTAssertEqual(opening(), .tabInsightsOpened)
-        XCTAssertEqual(opening(tab: .home), .tabHomeOpened)
-        XCTAssertEqual(opening(onboarding: true), .tabPrivateAiOpened, "the drawn tab, not the restored one")
-        XCTAssertNil(opening(reported: true), "an opening counted twice")
-        XCTAssertNil(opening(known: false), "counted before the core said what is drawn")
-        XCTAssertNil(opening(daemon: false), "counted with no daemon to report to")
-        XCTAssertNil(opening(lands: true), "counted the tab a landing destination is about to replace")
+    /// A destination landing as the window opens counts once, as the tab it
+    /// lands on, whichever handler runs first.
+    func test_aDestinationLandingAsTheWindowOpensCountsOnce() {
+        // The destination lands first, the readiness handler reports, and
+        // the tab's change handler runs after both.
+        var landedFirst = Window(tab: .home, destination: .traces)
+        landedFirst.land()
+        landedFirst.report()
+        landedFirst.report()
+        XCTAssertEqual(landedFirst.sent, [.tabTracesOpened])
+
+        // The readiness handler runs while the destination still waits, then
+        // the destination lands and the tab's change handler reports.
+        var reportedFirst = Window(tab: .home, destination: .traces)
+        reportedFirst.report()
+        XCTAssertEqual(reportedFirst.sent, [], "counted the tab a landing destination is about to replace")
+        reportedFirst.land()
+        reportedFirst.report()
+        XCTAssertEqual(reportedFirst.sent, [.tabTracesOpened])
     }
 
-    /// While onboarding is required Inference is drawn whatever is picked, so
-    /// a change of the picked tab opens nothing.
-    func test_aTabChangeDuringOnboardingReportsNothing() {
-        for old in MonitorWindowView.Tab.allCases {
-            for new in MonitorWindowView.Tab.allCases {
-                XCTAssertNil(MonitorWindowView.usageEvent(tabChangedFrom: old, to: new, requiresOnboarding: true))
-            }
-        }
+    /// The tab the window opens on counts once; each pick of another tab
+    /// counts once; a redraw or a pick of the drawn tab counts nothing.
+    func test_theOpeningAndEachPickCountOnce() {
+        var window = Window(tab: .insights)
+        window.report()
+        window.report()
+        window.pick(.insights)
+        XCTAssertEqual(window.sent, [.tabInsightsOpened])
+        window.pick(.home)
+        window.pick(.inference)
+        window.pick(.traces)
+        window.pick(.insights)
+        XCTAssertEqual(window.sent, [.tabInsightsOpened, .tabHomeOpened, .tabPrivateAiOpened, .tabTracesOpened,
+                                     .tabInsightsOpened])
     }
 
-    /// The window reports on a tab change and on opening, from the drawn
-    /// tab, and nowhere else.
-    func test_theWindowReportsOnOpeningAndOnATabChange() throws {
+    /// Nothing counts before the window knows what it draws; the opening
+    /// counts once it does.
+    func test_nothingCountsBeforeTheWindowIsReady() {
+        var window = Window(tab: .home, ready: false)
+        window.report()
+        window.pick(.traces)
+        XCTAssertEqual(window.sent, [])
+        window.ready = true
+        window.report()
+        XCTAssertEqual(window.sent, [.tabTracesOpened])
+    }
+
+    /// While onboarding is required Inference is drawn whatever is picked:
+    /// it counts once, as Private AI, and a pick changes nothing.
+    func test_onlyInferenceCountsDuringOnboarding() {
+        var window = Window(tab: .home, requiresOnboarding: true)
+        window.report()
+        for tab in MonitorWindowView.Tab.allCases { window.pick(tab) }
+        XCTAssertEqual(window.sent, [.tabPrivateAiOpened])
+    }
+
+    /// The window runs the reducer from the readiness handler, after the
+    /// handlers that land a waiting destination, and from the tab's change
+    /// handler; nowhere else.
+    func test_theWindowReportsFromTheReducerOnly() throws {
         let window = try SettingsParityTests.text("Views/MonitorWindowView.swift")
-        let change = try XCTUnwrap(window.range(of: ".onChange(of: tab) { old, picked in\n"))
-        let changeBody = window[change.upperBound...].prefix(800)
-        XCTAssertTrue(changeBody.contains("Self.usageEvent(tabChangedFrom: old, to: picked,"))
-        XCTAssertTrue(changeBody.contains("requiresOnboarding: model.requiresOnboarding) {\n"))
-        XCTAssertTrue(changeBody.contains("model.recordUsage(event)"))
-        XCTAssertTrue(changeBody.contains("if !openingReported {\n                reportOpening()"),
-                      "a destination landing as the window opens is counted twice")
-        // The opening is reported once the window knows what it draws, after
-        // the handlers that land a waiting destination.
-        let opening = try XCTUnwrap(window.range(of:
+        let change = try XCTUnwrap(window.range(of: ".onChange(of: tab) { _, picked in\n"))
+        XCTAssertTrue(window[change.upperBound...].hasPrefix("            reportDrawnTab()\n"))
+        let ready = try XCTUnwrap(window.range(of:
             ".onChange(of: model.onboardingKnown && model.daemonData != nil, initial: true) { _, _ in\n"
-                + "            reportOpening()\n"))
+                + "            reportDrawnTab()\n"))
         let requests = try XCTUnwrap(window.range(of: ".onChange(of: navigation.requests, initial: true)"))
         let known = try XCTUnwrap(window.range(of: ".onChange(of: model.onboardingKnown) { _, _ in consumePending() }"))
-        XCTAssertLessThan(requests.lowerBound, opening.lowerBound)
-        XCTAssertLessThan(known.lowerBound, opening.lowerBound)
-        XCTAssertFalse(window.contains(".onAppear {\n            model.recordUsage"), "an opening counted before it is known")
+        XCTAssertLessThan(requests.lowerBound, ready.lowerBound)
+        XCTAssertLessThan(known.lowerBound, ready.lowerBound)
+        XCTAssertEqual(window.components(separatedBy: "reportDrawnTab()").count - 1, 3, "a third caller")
+        XCTAssertTrue(window.contains("lastReportedTab = Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding)"))
         XCTAssertTrue(window.contains("recordUsage: { model.recordUsage($0) })"), "Insights is given no reporter")
-        XCTAssertEqual(window.components(separatedBy: "model.recordUsage(").count - 1, 3)
+        XCTAssertEqual(window.components(separatedBy: "model.recordUsage(").count - 1, 2)
     }
 
     // MARK: Insights sub-views
