@@ -344,25 +344,17 @@ shell.
   `.github/workflows/clients.yml` builds with `--locked`. Any new crate updates
   `Cargo.lock` and `flatpak/cargo-sources.json`.
 
-## Owner approvals needed
+## Owner decisions (2026-11-16)
 
-1. **Notices.** The repo forbids new notices without explicit approval of the
-   notice and its wording. These Mac behaviours would be new on Linux:
-   - popover notices over the tab content
-   - transfer cards at the foot of the map on non-Traces tabs
-   - the inspector opening by itself on a demand
-
-   Approve each, or say which to leave out. Their words already exist in the
-   shared copy.
-2. **Assets.** Inter and the icon set, with the usual write-up (version,
-   licence, size, maintenance) before they land. Candidates for the icon set
-   are Lucide (ISC) and Phosphor (MIT). The write-up compares how close each
-   is to the ~30 symbols.
-3. **Blur crates.** Whatever S1 finds, with the same write-up.
-4. **libadwaita floor.** The crate builds against libadwaita 1.2. This design
-   needs no newer widget, because the three-pane container is custom, so the
-   recommendation is to stay on 1.2. Raising it would give breakpoints, but it
-   drops older distributions.
+1. **Notices: all three approved.** The inspector opens itself on demand,
+   transfer cards show at the foot of the map, and popover notices are laid
+   over the tab content, all as on Mac and in the shared copy's words.
+2. **Assets:** prepare the Inter and icon-set write-ups now. They land in the
+   look slice only after the owner approves them.
+3. **Blur:** spike it now, in a Linux container. A container cannot show real
+   KDE compositing, so the spike's result is recorded as unverified until it
+   is run on a real KDE desktop.
+4. **libadwaita:** raise the floor to 1.4 (feature `v1_4`).
 
 ## Slices (one PR each)
 
