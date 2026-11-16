@@ -11,7 +11,9 @@ use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::REGISTER_STATS_SELECT_SQL;
 use trace_commons_server::db::{Database, postgres::PgBackend};
-use trace_commons_server::register_stats::{fetch_register_stats_row, run_register_stats_refresh};
+use trace_commons_server::register_stats::{
+    fetch_public_register_stats_row, fetch_register_stats_row, run_register_stats_refresh,
+};
 
 /// Connects to the shared PostgreSQL test database and applies migrations.
 ///
@@ -207,4 +209,79 @@ async fn a_refresh_stamps_the_row_that_was_never_computed() {
         .expect("refresh");
     assert!(after.refreshed_at.is_some(), "a refresh stamps the row");
     assert!(!after.withheld, "a refreshed row is no longer withheld");
+}
+
+/// The serving login is not the migrator. On the pilot, ingest connects as a
+/// login that owns nothing and holds its privileges through the
+/// `trace_ingest_runtime` group (see V90), while V55 granted
+/// `trace_commons_public_read` only to whoever applied it. Every public
+/// request then failed `SET LOCAL ROLE trace_commons_public_read` with
+/// "permission denied to set role" and answered 500.
+///
+/// `SET ROLE` is checked against the session user, so this must log in as a
+/// real non-superuser: a superuser test login, or a `role=` connection
+/// option on one, would pass whether or not the grant exists.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_runtime_login_outside_the_migrator_serves_the_public_read() {
+    let backend = test_pool().await;
+    let login = "tc_register_stats_runtime_login";
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("connection");
+    admin
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{login}') THEN
+                     CREATE ROLE {login} LOGIN NOSUPERUSER NOBYPASSRLS;
+                 END IF;
+             END $$;
+             GRANT USAGE ON SCHEMA public TO {login};
+             GRANT trace_ingest_runtime TO {login};"
+        ))
+        .await
+        .expect("provision the runtime login as the pilot does");
+    // Only the group may carry the right; a direct grant left by an earlier
+    // run would make this pass for the wrong reason.
+    let direct: bool = admin
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_auth_members m
+                 JOIN pg_roles g ON g.oid = m.roleid
+                 JOIN pg_roles u ON u.oid = m.member
+                 WHERE g.rolname = 'trace_commons_public_read' AND u.rolname = $1)",
+            &[&login],
+        )
+        .await
+        .expect("inspect direct membership")
+        .get(0);
+    assert!(
+        !direct,
+        "the login holds no direct grant of the public role"
+    );
+    drop(admin);
+
+    let base = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("test database URL");
+    let mut url = reqwest::Url::parse(&base).expect("parse test database URL");
+    url.set_username(login).expect("set user");
+    let runtime = PgBackend::new(&DatabaseConfig {
+        url: SecretString::from(url.to_string()),
+        pool_size: 2,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    })
+    .await
+    .expect("connect as the runtime login");
+
+    let row = fetch_public_register_stats_row(&runtime)
+        .await
+        .expect("the serving login reads the public aggregate");
+    assert!(row.as_of.timestamp() > 0);
 }

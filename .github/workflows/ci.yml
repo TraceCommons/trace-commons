@@ -234,6 +234,7 @@ jobs:
         admission_test_first_run_stats
         admission_test_witness_blocked
         admission_test_skills_catalog
+        admission_test_register_stats
         admission_test_referral_rewards
         admission_test_referral_codes
         admission_test_referral_bonus
@@ -444,7 +445,8 @@ jobs:
             --test upload_principal_ownership_pg \
             --test upload_trust_frontier_plan_pg \
             --test versioned_pipeline_runtime_pg --test witness_blocked_pg \
-            --test witness_evidence_pg --test skills_catalog_pg
+            --test witness_evidence_pg --test skills_catalog_pg \
+            --test register_stats_rls
       # Lane B: the second server's suites, started in the background now and
       # reported by "lane B: results" near the end of the job. Each `suite`
       # line is one former step: its name, then only the variables that
@@ -623,6 +625,16 @@ jobs:
         run: cargo test -p trace-commons-server --test skills_catalog_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_skills_catalog
+      # The public register-stats read (V55, V161), served through
+      # trace_commons_public_read. Its suite never ran in CI, so a grant gap
+      # that 500'd every public request on the pilot went unseen: one test
+      # logs in as a real non-superuser holding only trace_ingest_runtime,
+      # as the pilot's ingest login does. `--ignored` is required: the
+      # suite's tests are ignored by default and pass having run nothing.
+      - name: register_stats_rls
+        run: cargo test -p trace-commons-server --test register_stats_rls -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_register_stats
       - name: trace_invite_registry_pg
         run: cargo test -p trace-commons-server --test trace_invite_registry_pg
         env:

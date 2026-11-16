@@ -2152,6 +2152,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "skills_catalog",
         include_str!("../../../../migrations/V160__skills_catalog.sql"),
     ),
+    // V161: the ingest runtime group may assume the public register-stats
+    // role. V55 granted it only to its applier, so a login that is not the
+    // migrator answered 500 on every public request.
+    (
+        161,
+        "register_stats_runtime_public_read",
+        include_str!("../../../../migrations/V161__register_stats_runtime_public_read.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under

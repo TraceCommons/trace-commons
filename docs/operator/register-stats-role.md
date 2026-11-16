@@ -77,6 +77,22 @@ it explicitly after migrating:
 GRANT trace_commons_public_read TO <runtime_role>;
 ```
 
+Since V161, a login that holds its privileges through the
+`trace_ingest_runtime` group (the pilot's shape, see V90) needs nothing more:
+V161 grants `trace_commons_public_read` to that group. Before V161 the pilot
+answered 500 on every public request for exactly this reason: ingest connects
+as `tc_ingest_runtime_login`, the migrations were applied as `app`, and only
+`app` held the role. `register_stats_rls`'s
+`a_runtime_login_outside_the_migrator_serves_the_public_read` reproduces that
+shape with a real non-superuser login, and CI runs the suite.
+
+To check a live deployment, as the login ingest actually connects as (read
+it from the running process, not from an env file, which can disagree):
+
+```sql
+SELECT current_user, pg_has_role(current_user, 'trace_commons_public_read', 'MEMBER');
+```
+
 ## Verifying it locally
 
 `SET ROLE` succeeds trivially for a PostgreSQL superuser regardless of
