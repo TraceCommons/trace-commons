@@ -16696,7 +16696,9 @@ async fn submit_trace_handler_authenticated(
             .map_err(internal_error)?;
         let existing_derived =
             read_all_derived_records(&state.root, tenant.tenant_id()).map_err(internal_error)?;
-        let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+        let derived_precheck = build_derived_precheck_off_runtime(&envelope, existing_derived)
+            .await
+            .map_err(internal_error)?;
         ensure_not_revoked_by_tombstone(
             &existing_revocations,
             envelope.submission_id,
@@ -25443,7 +25445,9 @@ async fn operator_rescrub_quarantined_submission(
         .into_iter()
         .filter(|derived| derived.submission_id != submission_id)
         .collect::<Vec<_>>();
-    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    let derived_precheck = build_derived_precheck_off_runtime(&envelope, existing_derived)
+        .await
+        .map_err(internal_error)?;
     let derived_record =
         build_derived_record(&auth.tenant_id, target_status, &envelope, derived_precheck);
 
@@ -47169,7 +47173,7 @@ async fn process_one_pii_backstop(
         .into_iter()
         .filter(|derived| derived.submission_id != item.submission_id)
         .collect::<Vec<_>>();
-    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    let derived_precheck = build_derived_precheck_off_runtime(&envelope, existing_derived).await?;
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     let derived_record =
         build_derived_record(&item.tenant_id, target_status, &envelope, derived_precheck);
@@ -58662,7 +58666,7 @@ async fn rederive_one_backstop_released(
         .filter(|derived| derived.submission_id != submission_id)
         .cloned()
         .collect::<Vec<_>>();
-    let precheck = build_derived_precheck(&envelope, &existing);
+    let precheck = build_derived_precheck_off_runtime(&envelope, existing).await?;
     let derived_record = build_derived_record(&tenant_id, record.status, &envelope, precheck);
     let summary_changed =
         prior_summary_hash != Some(derived_record.canonical_summary_hash.as_str());
@@ -70978,12 +70982,58 @@ fn trace_vector_payload_candidate_is_compatible(
             .all(|value| value.is_finite())
 }
 
+/// The synchronous precheck, for tests; service paths use
+/// [`build_derived_precheck_off_runtime`].
+#[cfg(test)]
 fn build_derived_precheck(
     envelope: &TraceContributionEnvelope,
     existing: &[TraceCommonsDerivedRecord],
 ) -> TraceCommonsDerivedPrecheck {
     let canonical_summary = canonical_summary_for_embedding(envelope);
     let canonical_summary_hash = sha256_prefixed(&canonical_summary);
+    derived_precheck_from_summary(
+        envelope.submission_id,
+        canonical_summary,
+        canonical_summary_hash,
+        coverage_tags_for_envelope(envelope),
+        existing,
+    )
+}
+
+/// [`build_derived_precheck`] with the neighbour search on a blocking
+/// thread. The search scores the new summary against every existing derived
+/// record of the tenant, which on a tenant with thousands of long summaries
+/// is seconds of CPU; on a runtime worker that stalls every request queued
+/// behind it. The summary and tags are taken from the envelope here, so the
+/// envelope itself is not moved or cloned.
+async fn build_derived_precheck_off_runtime(
+    envelope: &TraceContributionEnvelope,
+    existing: Vec<TraceCommonsDerivedRecord>,
+) -> anyhow::Result<TraceCommonsDerivedPrecheck> {
+    let submission_id = envelope.submission_id;
+    let canonical_summary = canonical_summary_for_embedding(envelope);
+    let canonical_summary_hash = sha256_prefixed(&canonical_summary);
+    let coverage_tags = coverage_tags_for_envelope(envelope);
+    tokio::task::spawn_blocking(move || {
+        derived_precheck_from_summary(
+            submission_id,
+            canonical_summary,
+            canonical_summary_hash,
+            coverage_tags,
+            &existing,
+        )
+    })
+    .await
+    .context("derived precheck task failed")
+}
+
+fn derived_precheck_from_summary(
+    submission_id: Uuid,
+    canonical_summary: String,
+    canonical_summary_hash: String,
+    coverage_tags: Vec<String>,
+    existing: &[TraceCommonsDerivedRecord],
+) -> TraceCommonsDerivedPrecheck {
     let target = TraceSummaryFeatures::new(&canonical_summary);
     // A candidate whose hash matches scores 1.0 without its features, so
     // only the others are tokenized.
@@ -70995,7 +71045,7 @@ fn build_derived_precheck(
         })
         .collect::<Vec<_>>();
     let neighbors = nearest_trace_neighbors(
-        envelope.submission_id,
+        submission_id,
         &target,
         &canonical_summary_hash,
         existing
@@ -71017,7 +71067,6 @@ fn build_derived_precheck(
     } else {
         (1.0 - duplicate_score).clamp(0.05, 0.95)
     };
-    let coverage_tags = coverage_tags_for_envelope(envelope);
 
     TraceCommonsDerivedPrecheck {
         canonical_summary,
