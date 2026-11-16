@@ -418,7 +418,8 @@ is a later change, after a published catalog has been live for one release.
 
 The Skills snapshot is bounded by the 1 MiB IPC frame. Today the catalog
 rows are capped at 180 KiB. With a server catalog the daemon keeps that cap
-and orders rows: catalog skills matching an installed skill, then seed and
+and orders rows: the active publishers' few skills (below), then catalog
+skills matching an installed skill, then seed and
 followed publishers' skills, then the rest by repository stars; `partial`
 is true when rows were cut. New fields, all optional and additive:
 
@@ -435,6 +436,17 @@ is true when rows were cut. New fields, all optional and additive:
   `checks` (the document's object), `checks_version`.
 - `suggestions`: `{available, opted_in, pending, sent_total, last_sent_at}`
   (below).
+- `catalog.active_publishers`: `[{publisher_id, skill_ids}]`, at most three
+  publishers with at most three skills each, most active first; `null`
+  unless a verified, current server catalog is held. Chosen by
+  `insights_skills/active_publishers.rs` from the document's repository
+  signals alone (never from inventory, usage or traces): commits in the
+  measured week, counted up to 20, then stars, then id; at least 10 stars
+  and one commit, signals at most 14 days old, not archived, not
+  `suggested`. The choice is made before any row is sized and those skills'
+  rows are sent first, so every install holding the document is sent the
+  same list and each id names a row in the same snapshot. Not persisted in
+  `PublicState`.
 
 Updates: an installed skill matching a non-seed server skill gets freshness
 from the server's `previous_sha256` exactly as the four publishers do from

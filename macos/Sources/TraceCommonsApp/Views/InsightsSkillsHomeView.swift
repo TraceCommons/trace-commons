@@ -135,6 +135,7 @@ struct InsightsSkillsHomeView: View {
         case .creator(let item): creator(item, hero: hero)
         case .rollup(let item): rollup(item)
         case .week(let skills): week(skills)
+        case .active(let publishers): active(publishers)
         }
     }
 
@@ -232,22 +233,63 @@ struct InsightsSkillsHomeView: View {
                     Spacer(minLength: 0)
                     Text(Format.when(item.changes[0].observedAt, relativeTo: now)).insightsCaption().lineLimit(1).layoutPriority(1)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: GlassTokens.Space.s4, alignment: .top)],
-                          alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    ForEach(item.changes) { change in
-                        Button { open(.catalog(id: change.skill.id)) } label: {
-                            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                                SkillCover(spec: .init(skillID: change.skill.id, publisherID: change.skill.publisherID))
-                                    .frame(maxWidth: .infinity).frame(height: 48)
-                                Text(change.skill.name).insightsCaption().lineLimit(1).truncationMode(.tail)
+                coverStrip(item.changes.map(\.skill), publisher: publisher.name)
+            }
+        }
+    }
+
+    /// Skills as a row of covers, each opening its catalog entry.
+    private func coverStrip(_ skills: [DaemonData.CatalogSkill], publisher: String) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: GlassTokens.Space.s4, alignment: .top)],
+                  alignment: .leading, spacing: GlassTokens.Space.s4) {
+            ForEach(skills) { skill in
+                Button { open(.catalog(id: skill.id)) } label: {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                        SkillCover(spec: .init(skillID: skill.id, publisherID: skill.publisherID))
+                            .frame(maxWidth: .infinity).frame(height: 48)
+                        Text(skill.name).insightsCaption().lineLimit(1).truncationMode(.tail)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(model.text("skills_home_open_creator", values: ["name": skill.name + ", " + skill.path, "publisher": publisher]))
+                .help(skill.name)
+            }
+        }
+    }
+
+    // MARK: Publishers with recent public activity
+
+    /// One card for all of them: who, the two public counts they were
+    /// ranked by, and a few of their skills.
+    private func active(_ publishers: [InsightsSkillsHome.Active]) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
+            Text(model.text("skills_home_active")).insightsHeading().accessibilityAddTraits(.isHeader)
+            ForEach(publishers) { item in
+                HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+                    SkillCover(spec: .init(skillID: "", publisherID: item.publisher.id), initials: SkillCoverArt.initials(item.publisher.name))
+                        .frame(width: markSize, height: markSize)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text(Self.headline("{name}", name: item.publisher.name))
+                                .lineLimit(1).truncationMode(.middle)
+                            HStack(spacing: GlassTokens.Space.s5) {
+                                Label {
+                                    Text(model.text("skills_home_stars", values: ["count": InsightsSkillsHome.Active.short(item.stars)]))
+                                } icon: {
+                                    Image(systemName: "star.fill").glassGlyph(9).accessibilityHidden(true)
+                                }
+                                .labelStyle(.titleAndIcon)
+                                // The exact count for assistive technology.
+                                .accessibilityLabel(model.text("skills_home_stars", values: ["count": String(item.stars)]))
+                                Text(model.text("skills_home_recent_commits", values: ["count": String(item.commits)]))
                             }
-                            .contentShape(Rectangle())
+                            .insightsCaption()
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(model.text("skills_home_open_creator", values: ["name": change.skill.name + ", " + change.skill.path, "publisher": publisher.name]))
-                        .help(change.skill.name)
+                        coverStrip(item.skills, publisher: item.publisher.name)
                     }
                 }
+                .accessibilityElement(children: .contain)
             }
         }
     }

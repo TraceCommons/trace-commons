@@ -279,6 +279,90 @@ final class InsightsSkillsHomeTests: XCTestCase {
         XCTAssertEqual(both.week.first?.id, both.trends.first?.id)
     }
 
+    // MARK: Recently active publishers
+
+    /// A server-catalog snapshot with `count` publishers, each with `skills`
+    /// catalog skills, all named by the daemon as recently active.
+    private func serverSnapshot(publishers count: Int = 2, skills: Int = 2, source: String? = "server",
+                                signals: (Int) -> DaemonData.SkillsRepositorySignals? = { .init(stars: 1_000 * ($0 + 1), commits7d: 5 + $0, commits28d: 20) },
+                                named: [DaemonData.SkillsActivePublisher]? = nil) -> DaemonData.SkillsSnapshot {
+        let publishers = (0 ..< count).map { DaemonData.SkillsPublisher(id: "gh.p\($0)", name: "owner\($0)/skills", repository: "owner\($0)/skills", skillsRoot: "", instructionsURL: "https://example.com", url: "https://github.com/owner\($0)/skills", sourceKind: "list") }
+        let catalogSkills = publishers.flatMap { publisher in
+            (0 ..< skills).map { DaemonData.CatalogSkill(id: "\(publisher.id):s\($0)/SKILL.md", publisherID: publisher.id, name: "s\($0)", description: "", repository: publisher.repository, path: "s\($0)/SKILL.md", revision: "main", sha256: String(repeating: "c", count: 64), sourceURL: "https://example.com/source", instructionsURL: "https://example.com") }
+        }
+        let states = publishers.enumerated().map { DaemonData.SkillsPublisherState(publisherID: $0.element.id, status: "current", checkedAt: "2026-11-15T11:00:00Z", signals: signals($0.offset)) }
+        let active = named ?? publishers.map { publisher in .init(publisherID: publisher.id, skillIDs: catalogSkills.filter { $0.publisherID == publisher.id }.map(\.id)) }
+        return .init(enabled: true, catalog: .init(publishers: publishers, skills: catalogSkills, publisherStates: states, source: source, activePublishers: active))
+    }
+
+    func testRecentlyActivePublishersAreDrawnOnlyFromAVerifiedServerCatalog() {
+        let active = project(serverSnapshot()).active
+        XCTAssertEqual(active.map(\.publisher.id), ["gh.p0", "gh.p1"], "The daemon's order is kept")
+        XCTAssertEqual(active.map(\.stars), [1_000, 2_000])
+        XCTAssertEqual(active.map(\.commits), [5, 6])
+        XCTAssertEqual(active.first?.skills.map(\.id), ["gh.p0:s0/SKILL.md", "gh.p0:s1/SKILL.md"])
+        // The four fixed publishers fetched from GitHub are not a verified
+        // catalog, whatever the snapshot says beside them; nor is a daemon
+        // that does not say where its catalog came from.
+        XCTAssertTrue(project(serverSnapshot(source: "github")).active.isEmpty)
+        XCTAssertTrue(project(serverSnapshot(source: nil)).active.isEmpty)
+        XCTAssertTrue(project(serverSnapshot(source: "Server")).active.isEmpty)
+        XCTAssertTrue(project(serverSnapshot(named: [])).active.isEmpty)
+        XCTAssertTrue(project(serverSnapshot(named: [])).isEmpty, "With nothing to say, Home is its empty state and draws no card")
+        XCTAssertFalse(project(serverSnapshot()).isEmpty)
+    }
+
+    func testAnActivePublisherNeedsItsSignalsAndASkillTheSnapshotCarries() {
+        // Unknown is not zero: no stars or no commit count, no row.
+        XCTAssertEqual(project(serverSnapshot { $0 == 0 ? nil : .init(stars: 50, commits7d: 2, commits28d: 2) }).active.map(\.publisher.id), ["gh.p1"])
+        XCTAssertEqual(project(serverSnapshot { $0 == 0 ? .init(stars: nil, commits7d: 2, commits28d: 2) : .init(stars: 50, commits7d: 2, commits28d: 2) }).active.map(\.publisher.id), ["gh.p1"])
+        XCTAssertEqual(project(serverSnapshot { $0 == 0 ? .init(stars: 50) : .init(stars: 50, commits7d: 2, commits28d: 2) }).active.map(\.publisher.id), ["gh.p1"])
+        XCTAssertEqual(project(serverSnapshot { $0 == 0 ? .init(stars: 50, commits7d: 0, commits28d: 9) : .init(stars: 50, commits7d: 2, commits28d: 2) }).active.map(\.publisher.id), ["gh.p1"])
+        XCTAssertTrue(project(serverSnapshot { _ in .init(stars: -1, commits7d: 2, commits28d: 2) }).active.isEmpty)
+        // Ids that name nothing here, or another publisher's skill, are dropped;
+        // a publisher left with no skill is not drawn.
+        let named: [DaemonData.SkillsActivePublisher] = [
+            .init(publisherID: "gh.p0", skillIDs: ["missing", "gh.p1:s0/SKILL.md", "gh.p0:s1/SKILL.md", "gh.p0:s1/SKILL.md"]),
+            .init(publisherID: "gh.unknown", skillIDs: ["gh.p0:s0/SKILL.md"]),
+            .init(publisherID: "gh.p1", skillIDs: ["missing"]),
+            .init(publisherID: "gh.p0", skillIDs: ["gh.p0:s0/SKILL.md"])]
+        let active = project(serverSnapshot(named: named)).active
+        XCTAssertEqual(active.map(\.publisher.id), ["gh.p0"], "A publisher is drawn once")
+        XCTAssertEqual(active.first?.skills.map(\.id), ["gh.p0:s1/SKILL.md"])
+    }
+
+    func testAtMostThreeActivePublishersWithThreeSkillsEach() {
+        let active = project(serverSnapshot(publishers: 5, skills: 5)).active
+        XCTAssertEqual(active.map(\.publisher.id), ["gh.p0", "gh.p1", "gh.p2"])
+        XCTAssertEqual(active.map(\.skills.count), [3, 3, 3])
+    }
+
+    func testActivePublishersAreOneCardInThisWeekAfterTheRecap() throws {
+        let active = project(serverSnapshot()).active
+        let alone = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [], active: active)
+        XCTAssertEqual(ids(alone.timeline(now: now, calendar: calendar)), [["active"]])
+        XCTAssertEqual(alone.timeline(now: now, calendar: calendar).map(\.period), [.thisWeek])
+        XCTAssertNil(InsightsSkillsHome.Snapshot.heroID(in: alone.timeline(now: now, calendar: calendar)))
+        let week = [InsightsSkillsHome.WeekSkill(id: "claude_code\u{0}review", name: "review", agent: "claude_code", uses: 3)]
+        let full = InsightsSkillsHome.Snapshot(updates: [], trends: [], creators: [change("c", catalogID: "one", observed: "2026-11-13T10:00:00Z")], week: week, active: active)
+        XCTAssertEqual(ids(full.timeline(now: now, calendar: calendar)), [["week", "active", "creator:c"]])
+        // The skills it names open exactly those catalog entries.
+        let snapshot = serverSnapshot()
+        for skill in active.flatMap(\.skills) {
+            XCTAssertEqual(SkillsHomeRoute.resolve(.catalog(id: skill.id), in: snapshot)?.catalogID, skill.id)
+        }
+    }
+
+    func testStarCountsAreShortAndNeverRoundedUp() {
+        XCTAssertEqual(InsightsSkillsHome.Active.short(0), "0")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(999), "999")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(1_000), "1K")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(1_949), "1.9K")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(12_400), "12K")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(99_999), "99K")
+        XCTAssertEqual(InsightsSkillsHome.Active.short(1_250_000), "1.2M")
+    }
+
     func testReduceMotionTurnsEveryMovementOff() {
         let still = SkillsHomeMotion(reduce: true)
         XCTAssertEqual(still, .still)

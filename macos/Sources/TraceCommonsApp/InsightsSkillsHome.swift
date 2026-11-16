@@ -9,7 +9,10 @@ enum InsightsSkillsHome {
         let creators: [CreatorUpdate]
         /// The most-used skills of the past seven days, most used first.
         var week: [WeekSkill] = []
-        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty && week.isEmpty }
+        /// Publishers with recent public activity, most active first. Only
+        /// ever filled from a verified server catalog.
+        var active: [Active] = []
+        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty && week.isEmpty && active.isEmpty }
 
         /// The feed: every item in one column, newest first, under the
         /// period it falls in. Empty periods are left out.
@@ -59,6 +62,9 @@ enum InsightsSkillsHome {
             }.map(\.element)
             return Period.allCases.compactMap { which in
                 var stories = ordered.filter { period($0.date) == which }.map(\.story)
+                // The recap, then the active publishers, lead This week. The
+                // publishers' signals have no day of their own to sort by.
+                if which == .thisWeek, !active.isEmpty { stories.insert(.active(active), at: 0) }
                 if which == .thisWeek, !self.week.isEmpty { stories.insert(.week(self.week), at: 0) }
                 return stories.isEmpty ? nil : Group(period: which, stories: stories)
             }
@@ -71,7 +77,7 @@ enum InsightsSkillsHome {
             guard let first = groups.first, first.period == .today, let story = first.stories.first else { return nil }
             switch story {
             case .update, .creator: return story.id
-            case .trend, .rollup, .week: return nil
+            case .trend, .rollup, .week, .active: return nil
             }
         }
     }
@@ -122,6 +128,27 @@ enum InsightsSkillsHome {
         let agent: String
         let uses: Int
     }
+    /// A publisher the server catalog measured as recently active, with
+    /// the public repository signals it is shown by. The signals are for
+    /// the whole repository, not for its skills alone.
+    struct Active: Identifiable {
+        let publisher: DaemonData.SkillsPublisher
+        let stars: Int
+        /// Default-branch commits in the week before the server measured.
+        let commits: Int
+        let skills: [DaemonData.CatalogSkill]
+        var id: String { publisher.id }
+
+        /// A count in at most four characters, cut and never rounded up:
+        /// 1,949 is "1.9K", not "2K".
+        static func short(_ count: Int) -> String {
+            for (unit, letter) in [(1_000_000, "M"), (1_000, "K")] where count >= unit {
+                let tenths = count / (unit / 10)
+                return tenths < 100 && tenths % 10 != 0 ? "\(tenths / 10).\(tenths % 10)\(letter)" : "\(tenths / 10)\(letter)"
+            }
+            return String(max(0, count))
+        }
+    }
     /// Several catalog changes from one publisher in one period.
     struct Rollup: Identifiable {
         let id: String
@@ -152,7 +179,7 @@ enum InsightsSkillsHome {
 
     /// One item of the feed.
     enum Story: Identifiable {
-        case update(Update), trend(Trend), creator(CreatorUpdate), rollup(Rollup), week([WeekSkill])
+        case update(Update), trend(Trend), creator(CreatorUpdate), rollup(Rollup), week([WeekSkill]), active([Active])
 
         var id: String {
             switch self {
@@ -161,6 +188,7 @@ enum InsightsSkillsHome {
             case .creator(let item): "creator:" + item.id
             case .rollup(let item): "rollup:" + item.id
             case .week: "week"
+            case .active: "active"
             }
         }
     }
@@ -178,7 +206,36 @@ enum InsightsSkillsHome {
         return .init(updates: personalizedUpdates(snapshot, model: model, now: now),
                      trends: usageChanges(snapshot.usage, now: now, calendar: calendar),
                      creators: creatorChanges(snapshot, now: now),
-                     week: weekTop(snapshot.usage, now: now, calendar: calendar))
+                     week: weekTop(snapshot.usage, now: now, calendar: calendar),
+                     active: activePublishers(snapshot.catalog))
+    }
+
+    /// The daemon's recently active publishers, in its order, resolved
+    /// against the rows of the same snapshot. Nothing is ranked here, and
+    /// nothing local takes part: the daemon reads the order from the
+    /// server catalog's public signals.
+    ///
+    /// Drawn only when the snapshot says its catalog is the verified
+    /// server one. A publisher needs known stars and a known commit count
+    /// (unknown is not zero) and at least one skill this snapshot carries
+    /// under its own id; anything else is left out, never guessed at.
+    private static func activePublishers(_ catalog: DaemonData.SkillsCatalog) -> [Active] {
+        guard catalog.source == "server" else { return [] }
+        var seen = Set<String>()
+        let found = catalog.activePublishers.compactMap { entry -> Active? in
+            guard !seen.contains(entry.publisherID),
+                  let publisher = catalog.publishers.first(where: { $0.id == entry.publisherID }),
+                  let signals = catalog.publisherStates.first(where: { $0.publisherID == entry.publisherID })?.signals,
+                  let stars = signals.stars, stars >= 0, let commits = signals.commits7d, commits >= 1 else { return nil }
+            var named = Set<String>()
+            let skills = entry.skillIDs.filter { named.insert($0).inserted }.compactMap { id in
+                catalog.skills.first { $0.id == id && $0.publisherID == publisher.id }
+            }
+            guard !skills.isEmpty else { return nil }
+            seen.insert(publisher.id)
+            return Active(publisher: publisher, stars: stars, commits: commits, skills: Array(skills.prefix(3)))
+        }
+        return Array(found.prefix(3))
     }
 
     /// The three most-used skills of the last seven completed local days:

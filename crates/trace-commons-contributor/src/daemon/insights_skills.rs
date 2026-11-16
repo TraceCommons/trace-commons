@@ -277,13 +277,17 @@ fn current_server<'a>(
         .filter(|document| server_flag_on(shared) && document.is_current(now))
 }
 
-/// Catalog rows for the snapshot, most relevant first: skills matching an
-/// installed skill, then the seeded publishers, then the rest by repository
-/// stars. Seeded rows keep today's ids and gain the server's facts.
+/// Catalog rows for the snapshot, most relevant first: the few skills in
+/// `first` (repository and path; the recently active publishers' skills,
+/// chosen from the document alone, so they are sent to every install), then
+/// skills matching an installed skill, then the seeded publishers, then the
+/// rest by repository stars. Seeded rows keep today's ids and gain the
+/// server's facts.
 fn catalog_rows(
     public: &PublicState,
     server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
     inventory: &Inventory,
+    first: &BTreeSet<(&str, &str)>,
 ) -> Vec<Value> {
     let installed: BTreeSet<(&str, &str)> = inventory
         .skills
@@ -299,7 +303,7 @@ fn catalog_rows(
                 .find(|skill| skill.repository == repository && skill.path == path)
         })
     };
-    let mut ranked: Vec<((bool, bool, std::cmp::Reverse<u64>, String), Value)> = Vec::new();
+    let mut ranked: Vec<((bool, bool, bool, std::cmp::Reverse<u64>, String), Value)> = Vec::new();
     for skill in &public.skills {
         let Ok(mut row) = serde_json::to_value(skill) else {
             continue;
@@ -310,6 +314,7 @@ fn catalog_rows(
             server_catalog::add_facts(&mut row, facts, document.checks_version);
         }
         let key = (
+            !first.contains(&(skill.repository.as_str(), skill.path.as_str())),
             !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
             false,
             std::cmp::Reverse(u64::MAX),
@@ -331,6 +336,7 @@ fn catalog_rows(
                 continue;
             };
             let key = (
+                !first.contains(&(skill.repository.as_str(), skill.path.as_str())),
                 !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
                 true,
                 std::cmp::Reverse(publisher.signals.stars.unwrap_or(0)),
@@ -1142,10 +1148,39 @@ fn snapshot(shared: &DaemonShared) -> Value {
     let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
     let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
     let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
+    // Recently active publishers, chosen from the verified document's
+    // public signals alone and before any row is sized, so every install
+    // holding this document is sent the same choice.
+    let active = server
+        .map(|document| active_publishers::selected(document, now))
+        .unwrap_or_default();
+    let active_skills: BTreeSet<(&str, &str)> = active
+        .iter()
+        .flat_map(|(_, skills)| skills.iter())
+        .map(|skill| (skill.repository.as_str(), skill.path.as_str()))
+        .collect();
     let (catalog, catalog_partial) = bounded_rows(
-        catalog_rows(&runtime.public, server, &inventory),
+        catalog_rows(&runtime.public, server, &inventory, &active_skills),
         180 * 1024,
     );
+    // A skill is named by the id of the row sent for it; a seed's row is
+    // matched by repository and path, as its signals are.
+    let active_rows = server.map(|_| {
+        let sent: BTreeMap<(&str, &str), (&str, &str)> = catalog
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    (row.get("repository")?.as_str()?, row.get("path")?.as_str()?),
+                    (row.get("id")?.as_str()?, row.get("publisher_id")?.as_str()?),
+                ))
+            })
+            .collect();
+        active_publishers::rows(&active, |skill| {
+            sent.get(&(skill.repository.as_str(), skill.path.as_str()))
+                .filter(|(_, publisher)| *publisher == skill.publisher_id)
+                .map(|(id, _)| (*id).to_string())
+        })
+    });
     // Publishers beyond the fixed four: only those an emitted row names.
     let mut catalog_publishers = serde_json::to_value(publishers())
         .ok()
@@ -1201,7 +1236,8 @@ fn snapshot(shared: &DaemonShared) -> Value {
         "catalog":{"publishers":catalog_publishers,"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states,
             "source": if server.is_some() { "server" } else { "github" },
             "revision": server.map(|d| d.revision), "issued_at": server.map(|d| d.issued_at),
-            "expires_at": server.map(|d| d.expires_at), "total_skills": server.map(|d| d.skills.len())},
+            "expires_at": server.map(|d| d.expires_at), "total_skills": server.map(|d| d.skills.len()),
+            "active_publishers": active_rows},
         "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
         "usage":usage,
@@ -1342,6 +1378,7 @@ fn updates_with_server(
     }).collect()
 }
 
+mod active_publishers;
 mod detail;
 pub(crate) mod opencode;
 mod server_catalog;

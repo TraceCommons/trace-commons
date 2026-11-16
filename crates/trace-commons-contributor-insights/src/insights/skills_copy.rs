@@ -219,6 +219,13 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_scope_global", "All projects"),
     ("skills_scope_project", "Project"),
     ("skills_scope_plugin_cache", "Cached; may be inactive"),
+    // NEEDS OWNER APPROVAL (2026-11-15): the Home card for publishers with
+    // recent public activity. Showing GitHub star counts is approved; these
+    // three wordings are not. The card is drawn only from a verified server
+    // catalog, which no build holds until a catalog key is pinned.
+    ("skills_home_active", "Active on GitHub"),
+    ("skills_home_stars", "{count} stars"),
+    ("skills_home_recent_commits", "Recent commits: {count}"),
     // NEEDS OWNER APPROVAL (2026-11-15, spec skills-catalog-server): the
     // opt-in for reporting public skills the catalog lacks. Not wired to any
     // view; the reporting flag ships off.
@@ -250,6 +257,27 @@ mod tests {
             assert!(!words.contains("invocation"), "{key}");
             assert!(!words.contains("session"), "{key}");
         }
+    }
+
+    #[test]
+    fn the_active_publishers_card_names_what_is_measured() {
+        let copy = super::super::service::ui_copy();
+        // GitHub has its own list called Trending; this is not that list.
+        assert!(!copy["skills_home_active"].contains("Trending"));
+        // The count is of a week that ended when the server measured it,
+        // which may be days ago, and the feed's "Past 7 days" means seven
+        // completed local days.
+        for key in ["skills_home_active", "skills_home_recent_commits"] {
+            assert!(!copy[key].contains("week"), "{key}");
+            assert!(!copy[key].contains("7 days"), "{key}");
+            assert!(!copy[key].contains("today"), "{key}");
+        }
+        // A count of one reads correctly.
+        assert_eq!(
+            copy["skills_home_recent_commits"].replace("{count}", "1"),
+            "Recent commits: 1"
+        );
+        assert_eq!(copy["skills_home_stars"].matches("{count}").count(), 1);
     }
 
     #[test]
