@@ -156,6 +156,25 @@ fn tree_file_count_is_bounded_without_silently_truncating() {
 }
 
 #[test]
+fn truncated_usage_rows_drop_the_per_agent_gaps() {
+    let usage = || {
+        json!({"partial":false,"partial_agents":[{"agent":"codex","days":[],"undated":1}],
+            "skills":[{"name":"one"},{"name":"two"}]})
+    };
+    let mut kept = usage();
+    bound_usage_rows(&mut kept, 1024);
+    assert_eq!(kept["partial"], false);
+    assert_eq!(kept["partial_agents"][0]["agent"], "codex");
+    let mut cut = usage();
+    bound_usage_rows(&mut cut, 20);
+    assert_eq!(cut["partial"], true);
+    assert!(
+        cut.get("partial_agents").is_none(),
+        "shell falls back to partial"
+    );
+}
+
+#[test]
 fn response_rows_observe_encoded_bytes_and_report_partial() {
     let (rows, partial) = bounded_rows([json!({"name":"one"}), json!({"name":"two"})], 20);
     assert!(partial);

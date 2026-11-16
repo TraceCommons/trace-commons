@@ -2836,6 +2836,12 @@ impl CounterPass {
         let mut delegated_unknown = 0usize;
         let mut unclassified_observed = 0usize;
         let mut unclassified_unknown = 0usize;
+        // Where `partial` comes from, by agent and local day, so a story
+        // counting one agent is held back only by a gap in its own days.
+        let mut gaps = crate::insights::skill_usage::PartialScope::default();
+        if opencode_partial {
+            gaps.mark_undated("opencode");
+        }
         if let (Some(key), Some(store)) = (&key, &store) {
             let never = never_digests(key, never_project_keys);
             let tag = store_tag_of(key, store);
@@ -2849,12 +2855,18 @@ impl CounterPass {
             }
             for (parent_key, parent) in store.rows.iter().filter(|(_, row)| is_listed(row, &never))
             {
-                delegated_unknown += (parent.skill_children_expected as usize).saturating_sub(
+                let missing = (parent.skill_children_expected as usize).saturating_sub(
                     retained_children
                         .get(parent_key)
                         .copied()
                         .unwrap_or_default(),
                 );
+                delegated_unknown += missing;
+                if missing > 0 {
+                    // A child runs inside its parent's session.
+                    let (start, end) = skill_span(parent);
+                    gaps.mark(skill_agent(parent), start, end, now, &chrono::Local);
+                }
             }
             let direct = store
                 .rows
@@ -2873,20 +2885,13 @@ impl CounterPass {
                 })
             });
             for (row, population, reference, parent_reference) in direct.chain(delegated) {
-                let agent = match row.body {
-                    RowBody::Claude { .. }
-                    | RowBody::Unknown {
-                        source: AnalyticsSource::ClaudeCode,
-                        ..
-                    } => "claude_code",
-                    _ => "codex",
-                };
                 inputs.push((
                     row.skill_usage.as_ref(),
-                    agent,
+                    skill_agent(row),
                     population,
                     reference,
                     parent_reference,
+                    Some(skill_span(row)),
                 ));
             }
         }
@@ -2897,11 +2902,18 @@ impl CounterPass {
                 row.population,
                 row.reference.clone(),
                 row.parent_reference.clone(),
+                // An OpenCode row carries no span: a gap there is undated.
+                None,
             )
         }));
-        for (evidence, agent, population, reference, parent_reference) in inputs {
+        for (evidence, agent, population, reference, parent_reference, span) in inputs {
+            let gap = |gaps: &mut crate::insights::skill_usage::PartialScope| match span {
+                Some((start, end)) => gaps.mark(agent, start, end, now, &chrono::Local),
+                None => gaps.mark_undated(agent),
+            };
             let Some(evidence) = evidence.filter(|e| e.schema_version == SKILL_USAGE_VERSION)
             else {
+                gap(&mut gaps);
                 match population {
                     "delegated" => delegated_unknown += 1,
                     "direct" => unknown += 1,
@@ -2916,12 +2928,17 @@ impl CounterPass {
             }
             partial |= evidence.partial || population == "unknown";
             sessions_partial += usize::from(evidence.partial);
+            if evidence.partial || population == "unknown" {
+                gap(&mut gaps);
+            }
             for count in &evidence.skills {
                 let key = (count.name.clone(), agent, population);
                 // Response size stays bounded independently of the
                 // number of rows the counter store retains.
                 if !aggregates.contains_key(&key) && aggregates.len() >= 512 {
                     partial = true;
+                    // The dropped count's days are not kept: undated.
+                    gaps.mark_undated(agent);
                     continue;
                 }
                 let entry = aggregates.entry(key).or_insert_with(|| Aggregate {
@@ -3029,6 +3046,9 @@ impl CounterPass {
                 "sessions_observed": observed,
                 "sessions_unknown": unknown,
                 "partial": partial || unknown > 0 || delegated_unknown > 0 || unclassified_unknown > 0 || observed + delegated_observed + unclassified_observed == 0,
+                // Every source of `partial` above but an empty history,
+                // named by agent; an agent left out has no gap.
+                "partial_agents": gaps.agents(),
                 "skills": aggregates.into_values().collect::<Vec<_>>(),
             },
             "coverage": {
@@ -4498,6 +4518,29 @@ fn is_listed(row: &CounterRow, never: &NeverDigests) -> bool {
     !never.contains(&row.project) && !row.is_automated()
 }
 
+/// The agent a row's skill evidence is reported under.
+fn skill_agent(row: &CounterRow) -> &'static str {
+    match row.body {
+        RowBody::Claude { .. }
+        | RowBody::Unknown {
+            source: AnalyticsSource::ClaudeCode,
+            ..
+        } => "claude_code",
+        _ => "codex",
+    }
+}
+
+/// When a row's skill evidence can lie: from its first recorded event to
+/// the later of its last recorded event and its file's last write. With no
+/// recorded event, no start: its uses can be anywhere before that write.
+fn skill_span(row: &CounterRow) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    let start = row.earliest_event_at.or(row.first_event_at);
+    let end = row
+        .latest_event_at
+        .map_or(row.modified_at, |at| at.max(row.modified_at));
+    (start, Some(end))
+}
+
 /// The row order and store tag a Sessions reference names
 /// ([`CounterRow::listed_reference`]): `t`, plain digits, `.`, plain digits.
 /// `None` for anything else, a reference from before the tag included.
@@ -5922,6 +5965,119 @@ mod tests {
         assert_eq!(row["invocations"], 1);
         assert_eq!(row["evidence"][0]["session_ref"], "os.opaque");
         assert!(f.pass.load_cached().unwrap().is_none());
+    }
+
+    /// A Claude Code and a Codex session, each with the given evidence
+    /// partiality, both spanning the day before today.
+    fn partial_agents_for(claude_partial: bool, codex_partial: bool) -> serde_json::Value {
+        let f = Fixture::new();
+        let claude = f.write("claude.jsonl", &claude_bytes());
+        let codex = f.write("codex.jsonl", &codex_bytes());
+        f.run_skills(&[
+            candidate(SOURCE_CLAUDE_CODE, &claude),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        assert_eq!(store.rows.len(), 2);
+        let at = Utc::now() - Duration::days(1);
+        for row in store.rows.values_mut() {
+            let is_claude = matches!(row.body, RowBody::Claude { .. });
+            row.earliest_event_at = Some(at);
+            row.latest_event_at = Some(at);
+            row.modified_at = at;
+            row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
+                schema_version: SKILL_USAGE_VERSION,
+                coverage: if is_claude {
+                    crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations
+                } else {
+                    crate::insights::skill_usage::SkillUsageCoverage::LoadsOnly
+                },
+                partial: if is_claude {
+                    claude_partial
+                } else {
+                    codex_partial
+                },
+                skills: Vec::new(),
+            });
+        }
+        f.pass.save(store).unwrap();
+        f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"].clone()
+    }
+
+    #[test]
+    fn skill_usage_names_partial_history_by_agent_and_day() {
+        let day = (Utc::now() - Duration::days(1))
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let usage = partial_agents_for(false, true);
+        assert_eq!(usage["partial"], true, "the global flag keeps its meaning");
+        assert_eq!(
+            usage["partial_agents"],
+            serde_json::json!([{"agent":"codex","days":[day],"undated":0}]),
+            "a Codex gap does not mark Claude Code"
+        );
+        let usage = partial_agents_for(true, false);
+        assert_eq!(
+            usage["partial_agents"],
+            serde_json::json!([{"agent":"claude_code","days":[day],"undated":0}])
+        );
+        let usage = partial_agents_for(false, false);
+        assert_eq!(usage["partial"], false);
+        assert_eq!(usage["partial_agents"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn skill_usage_places_sessions_with_missing_evidence_and_children_by_agent() {
+        let f = Fixture::new();
+        let claude = f.write("claude.jsonl", &claude_bytes());
+        f.run_skills(&[candidate(SOURCE_CLAUDE_CODE, &claude)]);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        let at = Utc::now() - Duration::days(3);
+        let row = store.rows.values_mut().next().unwrap();
+        row.earliest_event_at = Some(at);
+        row.latest_event_at = Some(at);
+        row.modified_at = at;
+        row.skill_usage = None;
+        f.pass.save(store.clone()).unwrap();
+        let day = at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let usage = &f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"];
+        assert_eq!(
+            usage["partial_agents"],
+            serde_json::json!([{"agent":"claude_code","days":[day],"undated":0}]),
+            "an unread session is a gap on its own days"
+        );
+        let row = store.rows.values_mut().next().unwrap();
+        row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
+            schema_version: SKILL_USAGE_VERSION,
+            coverage: crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations,
+            partial: false,
+            skills: Vec::new(),
+        });
+        row.skill_children_expected = 2;
+        f.pass.save(store).unwrap();
+        let usage = &f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"];
+        assert_eq!(usage["child_sessions_unavailable"], 2);
+        assert_eq!(
+            usage["partial_agents"],
+            serde_json::json!([{"agent":"claude_code","days":[day],"undated":0}]),
+            "children not read are a gap on their parent's days"
+        );
+    }
+
+    #[test]
+    fn skill_usage_counts_opencode_gaps_as_undated() {
+        let f = Fixture::new();
+        let value =
+            f.pass
+                .skill_usage_value_with_opencode(true, &NeverFolders::NONE, Vec::new(), true);
+        assert_eq!(
+            value["usage"]["partial_agents"],
+            serde_json::json!([{"agent":"opencode","days":[],"undated":1}])
+        );
     }
 
     #[test]

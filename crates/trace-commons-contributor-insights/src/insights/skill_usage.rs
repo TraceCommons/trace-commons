@@ -244,6 +244,87 @@ impl SkillUsageScan {
     }
 }
 
+/// How far back partial history is placed by day: the daily history's own
+/// horizon. A gap older than this is older than any day a story counts.
+pub const PARTIAL_DAYS_HORIZON: i64 = 90;
+
+/// One agent's incomplete skill history: the local days a partial
+/// session's span touches within the horizon, and how many partial
+/// sessions could not be placed at all (to be read as inside every day).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PartialAgent {
+    pub agent: &'static str,
+    /// Local `YYYY-MM-DD`, as daily usage rows name their day; oldest first.
+    pub days: Vec<String>,
+    pub undated: usize,
+}
+
+/// Where usage history is incomplete, by agent and local day, so a story
+/// counting one agent over some days is held back only by a gap there.
+#[derive(Debug, Default)]
+pub struct PartialScope {
+    agents: BTreeMap<&'static str, (BTreeSet<chrono::NaiveDate>, usize)>,
+}
+
+impl PartialScope {
+    /// A partial session of `agent` whose evidence lies between `start`
+    /// and `end`. With no `start` the session recorded no time, so its
+    /// uses can be anywhere up to `end` (the last write); with no `end`
+    /// it cannot be placed at all and counts as undated.
+    pub fn mark<Tz: chrono::TimeZone>(
+        &mut self,
+        agent: &'static str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+        tz: &Tz,
+    ) {
+        let Some(end) = end else {
+            self.mark_undated(agent);
+            return;
+        };
+        let horizon = now - chrono::Duration::days(PARTIAL_DAYS_HORIZON);
+        let (first, last) = match start {
+            Some(start) => (start.min(end), start.max(end)),
+            None => (horizon, end),
+        };
+        let (first, last) = (first.max(horizon), last.min(now));
+        if last < first {
+            return;
+        }
+        let last = last.with_timezone(tz).date_naive();
+        let mut day = first.with_timezone(tz).date_naive();
+        let days = &mut self.agents.entry(agent).or_default().0;
+        while day <= last {
+            days.insert(day);
+            let Some(next) = day.succ_opt() else { break };
+            day = next;
+        }
+    }
+
+    /// A partial session of `agent` with no time to place it by.
+    pub fn mark_undated(&mut self, agent: &'static str) {
+        let undated = &mut self.agents.entry(agent).or_default().1;
+        *undated = undated.saturating_add(1);
+    }
+
+    /// Agents with a gap, by name; an agent left out has none.
+    pub fn agents(&self) -> Vec<PartialAgent> {
+        self.agents
+            .iter()
+            .filter(|(_, (days, undated))| !days.is_empty() || *undated > 0)
+            .map(|(agent, (days, undated))| PartialAgent {
+                agent,
+                days: days
+                    .iter()
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .collect(),
+                undated: *undated,
+            })
+            .collect()
+    }
+}
+
 /// Extract only OpenCode's structured skill calls and successful definition
 /// reads. Call arguments and result text are never executed or persisted.
 /// Feed one session at a time: call IDs are scoped to their source session.
@@ -524,6 +605,123 @@ mod tests {
         let evidence = scan.finish();
         assert!(evidence.partial);
         assert!(evidence.skills.len() <= 128);
+    }
+
+    fn at(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn partial_scope_names_only_the_agent_with_the_gap() {
+        let tz = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "codex",
+            Some(at("2026-11-12T15:00:00Z")),
+            Some(at("2026-11-12T16:00:00Z")),
+            now,
+            &tz,
+        );
+        let agents = scope.agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent, "codex");
+        assert_eq!(agents[0].days, ["2026-11-12"]);
+        assert_eq!(agents[0].undated, 0);
+        assert!(!agents.iter().any(|a| a.agent == "claude_code"));
+    }
+
+    #[test]
+    fn partial_scope_places_a_span_on_every_local_day_it_touches() {
+        // UTC-5: 2026-11-10T03:00Z is still the 9th locally.
+        let tz = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-10T03:00:00Z")),
+            Some(at("2026-11-11T12:00:00Z")),
+            now,
+            &tz,
+        );
+        let agents = scope.agents();
+        assert_eq!(agents[0].agent, "claude_code");
+        assert_eq!(agents[0].days, ["2026-11-09", "2026-11-10", "2026-11-11"]);
+    }
+
+    #[test]
+    fn partial_scope_counts_unplaceable_sessions_as_undated() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-10T03:00:00Z")),
+            None,
+            now,
+            &tz,
+        );
+        scope.mark_undated("opencode");
+        let agents = scope.agents();
+        let claude = agents.iter().find(|a| a.agent == "claude_code").unwrap();
+        assert_eq!(claude.undated, 1);
+        assert!(claude.days.is_empty());
+        assert_eq!(
+            agents
+                .iter()
+                .find(|a| a.agent == "opencode")
+                .unwrap()
+                .undated,
+            1
+        );
+    }
+
+    #[test]
+    fn partial_scope_without_a_start_reaches_back_to_the_horizon() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            None,
+            Some(at("2026-11-02T10:00:00Z")),
+            now,
+            &tz,
+        );
+        let days = &scope.agents()[0].days;
+        assert_eq!(days.first().map(String::as_str), Some("2026-08-18"));
+        assert_eq!(days.last().map(String::as_str), Some("2026-11-02"));
+        assert_eq!(days.len(), 77);
+    }
+
+    #[test]
+    fn partial_scope_leaves_out_gaps_older_than_the_horizon_and_clips_the_future() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-07-01T10:00:00Z")),
+            Some(at("2026-07-02T10:00:00Z")),
+            now,
+            &tz,
+        );
+        assert!(scope.agents().is_empty(), "older than the horizon");
+        scope.mark(
+            "claude_code",
+            Some(at("2026-10-20T10:00:00Z")),
+            Some(at("2026-10-20T11:00:00Z")),
+            now,
+            &tz,
+        );
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-16T10:00:00Z")),
+            Some(at("2026-11-19T10:00:00Z")),
+            now,
+            &tz,
+        );
+        assert_eq!(scope.agents()[0].days, ["2026-10-20", "2026-11-16"]);
     }
 
     fn opencode_call(id: &str, tool: &str, input: Value) -> SessionEvent {
