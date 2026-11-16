@@ -982,17 +982,6 @@ pub struct MonitorScreensCopy {
     /// [`MONITOR_CORE_UNREACHABLE`] (copy-guide rule 7). DRAFT, NEEDS
     /// APPROVAL (2026-11-04).
     pub settings_core_unreachable: &'static str,
-    /// Settings > General: the anonymous weekly usage counts' card title
-    /// (`share_usage_data`, #1920). DRAFT, NEEDS APPROVAL (2026-11-16): the
-    /// owner approved the counts, not these words.
-    pub usage_data_title: &'static str,
-    /// The `share_usage_data` switch's label. DRAFT, NEEDS APPROVAL
-    /// (2026-11-16); the spec's own draft wording.
-    pub usage_data_toggle: &'static str,
-    /// The line under the `share_usage_data` switch: what is counted (which
-    /// screens are opened, weekly, anonymously), where (US only) and what is
-    /// never sent. DRAFT, NEEDS APPROVAL (2026-11-16).
-    pub usage_data_caption: &'static str,
     /// A mission's credit range: projected credit,
     /// labelled as such (owner ruling, 2026-10-02). Never `pending`, which
     /// is submitted credit still being scored: a contribution mission is
@@ -1616,11 +1605,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         signed_out: "Not signed in",
         sign_in: "Sign in",
         settings_core_unreachable: "The watcher isn't answering.",
-        // DRAFT, NEEDS APPROVAL (2026-11-16): pending owner approval.
-        usage_data_title: "Usage data",
-        usage_data_toggle: "Share anonymous usage data",
-        usage_data_caption: "Weekly counts of which screens you open, sent only from the US. \
-            No traces, files or prompts.",
         projected: "Projected",
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",

@@ -55,23 +55,6 @@ fn settings_core_down_line_claims_no_last_report() {
     assert!(preview_copy::MONITOR_CORE_UNREACHABLE.starts_with(screens.settings_core_unreachable));
 }
 
-/// The anonymous usage counts' switch (#1920, words DRAFT, NEEDS
-/// APPROVAL 2026-11-16): the caption says the counts are anonymous and
-/// weekly, which screens are counted, that only the US sends them, and
-/// that no content goes with them.
-#[test]
-fn usage_data_switch_says_what_is_counted_and_what_is_not() {
-    let screens = preview_copy::monitor_screens_copy();
-    assert_eq!(screens.usage_data_title, "Usage data");
-    assert_eq!(screens.usage_data_toggle, "Share anonymous usage data");
-    assert_ne!(screens.usage_data_title, screens.usage_data_toggle);
-    let caption = screens.usage_data_caption;
-    for needle in ["Weekly", "screens", "only from the US", "No traces"] {
-        assert!(caption.contains(needle), "{needle}: {caption}");
-    }
-    assert!(!caption.contains("  "), "a broken line join: {caption}");
-}
-
 #[test]
 fn add_login_failure_does_not_say_switch_accounts() {
     let copy = account_change_copy::account_change_copy();

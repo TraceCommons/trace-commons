@@ -7,8 +7,7 @@ import XCTest
 
 /// The anonymous weekly usage counts (#1920, approved by the owner
 /// 2026-11-16) as the app sends them: which screen or action reports which
-/// event, that a report never waits and never surfaces, and the
-/// `share_usage_data` switch in Settings > General.
+/// event, and that a report never waits and never surfaces.
 @MainActor
 final class UsageEventsTests: XCTestCase {
     // MARK: Main tabs
@@ -174,7 +173,6 @@ final class UsageEventsTests: XCTestCase {
             model.setLiveDataForTesting(LiveDaemonClient(transport: daemon))
             await model.recordUsage(.insightsOverviewOpened)?.value
             XCTAssertEqual(daemon.calls.count, 1, answer)
-            XCTAssertNil(model.shareUsageDataRefusal, answer)
         }
         XCTAssertNil(AppModel().recordUsage(.tabHomeOpened), "a report with no daemon went somewhere")
     }
@@ -188,97 +186,6 @@ final class UsageEventsTests: XCTestCase {
         model.firstRunFinished(notice: nil)
         await fulfillment(of: [sent], timeout: 10)
         XCTAssertEqual(daemon.calls.map(\.params), [#"{"event":"setup_finished"}"#])
-    }
-
-    // MARK: The switch
-
-    static func frame(_ value: Bool?) -> String {
-        let key = value.map { "\"share_usage_data\":\($0)," } ?? ""
-        return """
-        {"id":1,"result":{\(key)"quiescence_secs":45,"digest_interval_secs":3600,
-        "local_notifications":true,"queue_ttl_days":14,"max_queue_entries":500,
-        "max_uploads_per_day":100,"near_ai_configured":false,
-        "claude_root_configured":true,"codex_root_configured":true}}
-        """
-    }
-
-    static let refused = #"{"id":1,"error":{"code":"unavailable","message":"settings-save-failed"}}"#
-
-    static func settings(_ value: Bool?) throws -> DaemonSettingsView {
-        try DaemonClient(daemon: UsageDaemon(answer: frame(value))).settings()
-    }
-
-    func test_theSettingsViewReadsTheKeyAndAbsenceIsNotOff() throws {
-        XCTAssertEqual(try Self.settings(true).shareUsageData, true)
-        XCTAssertEqual(try Self.settings(false).shareUsageData, false)
-        XCTAssertNil(try Self.settings(nil).shareUsageData, "an older daemon's silence read as an answer")
-    }
-
-    /// A confirmed write moves the switch, both ways, and sends only its key.
-    func test_aConfirmedWriteMovesTheSwitchAndSendsOnlyItsKey() async throws {
-        for on in [false, true] {
-            let daemon = UsageDaemon(answer: Self.frame(on))
-            let model = AppModel()
-            model.setDaemonSettingsForTesting(try Self.settings(!on))
-            model.setClientForTesting(DaemonClient(daemon: daemon))
-            await model.setShareUsageData(on)
-            XCTAssertEqual(model.daemonSettings?.shareUsageData, on)
-            XCTAssertNil(model.shareUsageDataRefusal)
-            XCTAssertFalse(model.shareUsageDataBusy)
-            XCTAssertEqual(daemon.calls.first?.method, "set_settings")
-            XCTAssertEqual(daemon.calls.first?.params, "{\"share_usage_data\":\(on)}")
-        }
-    }
-
-    /// A reply carrying the other value is where the daemon stands: kept,
-    /// and refused.
-    func test_anEchoOfTheOtherValueIsARefusal() async throws {
-        let model = AppModel()
-        model.setDaemonSettingsForTesting(try Self.settings(true))
-        model.setClientForTesting(DaemonClient(daemon: UsageDaemon(answer: Self.frame(true))))
-        await model.setShareUsageData(false)
-        XCTAssertEqual(model.daemonSettings?.shareUsageData, true)
-        XCTAssertNotNil(model.shareUsageDataRefusal)
-        XCTAssertEqual(model.shareUsageDataRefusal, MonitorWords.table?.requestFailed)
-    }
-
-    /// A failed write never claims the asked value.
-    func test_aFailedWriteKeepsTheDaemonsValueAndSaysSo() async throws {
-        for read in [Self.frame(true), Self.refused] {
-            let model = AppModel()
-            model.setDaemonSettingsForTesting(try Self.settings(true))
-            model.setClientForTesting(DaemonClient(daemon: UsageDaemon(write: Self.refused, read: read)))
-            await model.setShareUsageData(false)
-            XCTAssertEqual(model.daemonSettings?.shareUsageData, true)
-            XCTAssertNotNil(model.shareUsageDataRefusal)
-            XCTAssertFalse(model.shareUsageDataBusy)
-        }
-    }
-
-    /// The switch sits in General, is drawn only from a value the daemon
-    /// reported, takes no second write in flight, and its words are marked
-    /// as drafts nobody has approved.
-    func test_theSwitchIsDrawnFromItsConfirmedValueInGeneral() throws {
-        let general = try SettingsParityTests.text("Views/Settings/GeneralSection.swift")
-        XCTAssertEqual(general.components(separatedBy: "UsageCountsSettingsCard()").count - 1, 1)
-        let card = try SettingsParityTests.text("Views/Settings/UsageCountsSettingsCard.swift")
-        XCTAssertTrue(card.contains("if let on = model.daemonSettings?.shareUsageData, let words = MonitorWords.table {"))
-        XCTAssertTrue(card.contains("Task { await model.setShareUsageData(on) }"))
-        XCTAssertTrue(card.contains(".disabled(model.shareUsageDataBusy)"))
-        XCTAssertTrue(card.contains("model.shareUsageDataRefusal"))
-        XCTAssertTrue(card.contains("// COPY: pending owner approval"))
-        // Every word is the core's: nothing authored here.
-        for needle in ["Text(\"", "Toggle(\"", "GlassEyebrowCard(\"", "static let"] {
-            XCTAssertFalse(card.contains(needle), "the card authors \(needle)")
-        }
-        XCTAssertTrue(card.contains("GlassEyebrowCard(words.usageDataTitle)"))
-        XCTAssertTrue(card.contains("Toggle(words.usageDataToggle,"))
-        XCTAssertTrue(card.contains("Text(words.usageDataCaption)"))
-        let words = try XCTUnwrap(MonitorWords.table)
-        XCTAssertEqual(words.usageDataToggle, "Share anonymous usage data")
-        XCTAssertTrue(words.usageDataCaption.contains("only from the US"), words.usageDataCaption)
-        XCTAssertTrue(SettingsSection.general.availableBeforeOnboarding,
-                      "the off switch for counts that start at install waits for first run")
     }
 }
 
