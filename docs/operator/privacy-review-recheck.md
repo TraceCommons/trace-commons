@@ -79,6 +79,38 @@ Withdrawal invalidates candidate object references through the existing deletion
 path. DB guards prevent older binaries from approving the old pass after a
 candidate exists.
 
+## Field-name findings
+
+Manual rechecks recognize exact public property names from the compiled
+`trace_commons.review_key_catalog.v1` catalog. It covers reviewed parameter
+paths and types for spawn_agent, update_plan, exec_command and write_stdin.
+This recognizes public syntax; it does not authenticate a tool or grant
+permission. Only the property name is recognized. Its value and every nested
+field still receive the normal scans. Trace-supplied schemas, manifest hashes,
+lookalike tool names and tool results cannot extend this catalog.
+
+Other keys are classified as synthetic JSON `{key:null}`. The JSON context
+avoids treating isolated programming names as prose and includes no associated
+value. A key finding remains held; names are never rewritten. Missing context
+inspection, missing span provenance, invalid offsets, findings outside the key,
+credentials and budget failures cannot produce complete coverage. Native
+span-backed classifiers provide the required provenance; text-only or declining
+backends leave contextual key coverage incomplete.
+
+Fresh `evidence.key_diagnostics` records catalog version, recognized/contextual
+key counts and at most 128 findings. Each finding carries a domain-separated
+hashed location, fixed category/reason, optional confidence in millionths and
+an applicable compiled schema version. Raw keys, values, dynamic paths and
+private classifier spans are not included. `truncated` means more findings
+exist; it never makes a held candidate eligible. Missing confidence stays
+unavailable. Older candidates may have no diagnostics; do not invent locations
+for their aggregate key-finding flag.
+
+A newly deployed policy does not change stored candidates or assessments.
+Create a fresh recheck candidate and inspect its exact ID/hash before approval.
+Complete AllEvents coverage, immutable identity/consent/correction rules,
+residual scanning and existing approval eligibility requirements still apply.
+
 ## Standalone diagnostic
 
 `privacy-recheck` is an operator diagnostic. It does not claim a review lease,
@@ -88,7 +120,7 @@ Every result has `approval_eligible: false`.
 Build the current protocol implementation without adding dependencies:
 
 ```sh
-SCCACHE_SERVER_PORT=4227 RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0 \
+RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0 \
   cargo build -p trace-commons-protocol --example privacy-recheck \
   --features near-ai-privacy-filter
 ```
@@ -167,7 +199,7 @@ review assessment to the exact candidate.
 Validate the diagnostic with:
 
 ```sh
-SCCACHE_SERVER_PORT=4227 RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0 \
+RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0 \
   cargo test -p trace-commons-protocol --example privacy-recheck \
   --features near-ai-privacy-filter
 ```

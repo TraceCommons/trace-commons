@@ -70,6 +70,7 @@ impl PipelinePrivacyBoundary for RecheckBoundary {
             basis.push(ResidualRiskCondition::ResidualSurvivor);
         }
         Ok(ReviewPrivacyRecheckEvidence {
+            key_diagnostics: None,
             basis,
             coverage_complete: self.complete.load(Ordering::SeqCst),
             correction_status: ReviewCorrectionStatus::Absent,

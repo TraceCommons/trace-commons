@@ -52,6 +52,7 @@ impl PipelinePrivacyBoundary for RecheckBoundary {
         envelope.replay.replay_notes.push(REVIEWED_NOTE.to_owned());
         envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
         Ok(ReviewPrivacyRecheckEvidence {
+            key_diagnostics: None,
             basis: Vec::new(),
             coverage_complete: true,
             correction_status: ReviewCorrectionStatus::Absent,

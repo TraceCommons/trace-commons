@@ -16,7 +16,7 @@ impl PrivacyFilterAdapter for PersonFilter {
             });
         }
         if !text.contains("Jane Doe") {
-            return Ok(None);
+            return crate::privacy_filter_spans::apply_spans("test", text, &[]);
         }
         let mut report = RedactionReport::default();
         report
@@ -325,6 +325,7 @@ async fn review_recheck_covers_all_deterministic_side_prose_and_preserves_identi
 #[test]
 fn review_recheck_evidence_has_fixed_serialized_labels() {
     let evidence = ReviewPrivacyRecheckEvidence {
+        key_diagnostics: None,
         basis: vec![ResidualRiskCondition::FoundAndRemoved],
         coverage_complete: true,
         correction_status: ReviewCorrectionStatus::CheckedUnchanged,
@@ -350,7 +351,7 @@ impl PrivacyFilterAdapter for RecordingFilter {
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
         self.0.lock().unwrap().push(text.into());
-        Ok(None)
+        crate::privacy_filter_spans::apply_spans("test", text, &[])
     }
 }
 
@@ -787,8 +788,11 @@ impl PrivacyFilterAdapter for FaultFilter {
         &self,
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-        if text != self.marker {
-            return Ok(None);
+        let contextual_key = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .is_some_and(|v| v.as_object().is_some_and(|m| m.contains_key(self.marker)));
+        if text != self.marker && !contextual_key {
+            return crate::privacy_filter_spans::apply_spans("test", text, &[]);
         }
         let mut report = RedactionReport::default();
         if matches!(self.fault, ClassifierFault::Mismatch) {
@@ -947,5 +951,100 @@ async fn review_recheck_holds_key_rewrites_and_flags_even_without_counts() {
                     .contains("misaligned_response_marker")
             );
         }
+    }
+}
+
+/// Reproduces the hosted classifier's standalone-name false positives.
+struct SchemaWordFilter(std::sync::Mutex<Vec<String>>);
+#[async_trait::async_trait]
+impl PrivacyFilterAdapter for SchemaWordFilter {
+    async fn redact_text(
+        &self,
+        text: &str,
+    ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+        self.0.lock().unwrap().push(text.to_owned());
+        let marker = if text == "fork_turns" || text == "explanation" {
+            Some(text)
+        } else if text.contains("Jane Doe") {
+            Some("Jane Doe")
+        } else {
+            None
+        };
+        let spans = marker
+            .map(|marker| {
+                let start = text.find(marker).unwrap();
+                crate::privacy_filter_spans::ClassifySpan {
+                    category: "private_person".into(),
+                    start: text[..start].chars().count(),
+                    end: text[..start + marker.len()].chars().count(),
+                    score: 0.973834,
+                }
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        crate::privacy_filter_spans::apply_spans("test", text, &spans)
+    }
+}
+
+#[tokio::test]
+async fn schema_key_public_parameter_does_not_hold_but_private_value_is_redacted() {
+    for (tool, key, value) in [
+        ("functions.spawn_agent", "fork_turns", "all"),
+        (
+            "functions.update_plan",
+            "explanation",
+            "Jane Doe requested a plan",
+        ),
+    ] {
+        let mut e = envelope().await;
+        e.replay.replay_notes = vec!["Jane Doe requested review".into()];
+        e.events[0].event_type = TraceContributionEventType::ToolCall;
+        e.events[0].tool_name = Some(tool.into());
+        e.events[0].structured_payload = serde_json::json!({"arguments":{key:value}});
+        let f = SchemaWordFilter(std::sync::Mutex::new(Vec::new()));
+        let evidence = recheck_envelope_for_review_with(&f, &mut e, PiiClassifyPolicy::AllEvents)
+            .await
+            .unwrap();
+        assert!(
+            evidence.coverage_complete,
+            "public schema parameter must not create a hold"
+        );
+        assert!(!evidence.basis.contains(&ResidualRiskCondition::KeyFinding));
+        assert!(
+            e.events[0].structured_payload["arguments"]
+                .get(key)
+                .is_some()
+        );
+        assert!(
+            !serde_json::to_string(&e.events[0].structured_payload)
+                .unwrap()
+                .contains("Jane Doe")
+        );
+        assert!(!f.0.lock().unwrap().iter().any(|s| s == key));
+    }
+}
+
+#[tokio::test]
+async fn schema_key_unknown_parameters_receive_json_context_and_real_names_stay_held() {
+    for (key, held) in [("fork_turns", false), ("Jane Doe", true)] {
+        let mut e = envelope().await;
+        e.replay.replay_notes = vec!["Jane Doe requested review".into()];
+        e.events[0].event_type = TraceContributionEventType::ToolResult;
+        e.events[0].tool_name = Some("functions.spawn_agent".into());
+        e.events[0].structured_payload = serde_json::json!({key:"value"});
+        let f = SchemaWordFilter(std::sync::Mutex::new(Vec::new()));
+        let evidence = recheck_envelope_for_review_with(&f, &mut e, PiiClassifyPolicy::AllEvents)
+            .await
+            .unwrap();
+        assert_eq!(
+            evidence.basis.contains(&ResidualRiskCondition::KeyFinding),
+            held
+        );
+        assert_eq!(evidence.coverage_complete, !held);
+        let context =
+            serde_json::to_string(&serde_json::json!({key:serde_json::Value::Null})).unwrap();
+        assert!(f.0.lock().unwrap().contains(&context));
+        assert!(!f.0.lock().unwrap().iter().any(|s| s == key));
+        assert!(e.events[0].structured_payload.get(key).is_some());
     }
 }

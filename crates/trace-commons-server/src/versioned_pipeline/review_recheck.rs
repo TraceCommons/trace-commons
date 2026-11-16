@@ -570,6 +570,7 @@ mod tests {
             object_ref_id: Uuid::new_v4(),
             content_hash: format!("sha256:{}", "2".repeat(64)),
             evidence: ReviewPrivacyRecheckEvidence {
+                key_diagnostics: None,
                 basis: vec![ResidualRiskCondition::ConsentContentFlag],
                 coverage_complete: true,
                 correction_status: ReviewCorrectionStatus::CheckedUnchanged,
