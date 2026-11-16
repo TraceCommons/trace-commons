@@ -31,6 +31,23 @@ final class UsageEventsTests: XCTestCase {
         }
     }
 
+    /// The window's opening counts the tab it opens on, once, and only once
+    /// the window knows what it draws.
+    func test_theOpeningCountsTheDrawnTabOnceItIsKnown() {
+        func opening(reported: Bool = false, known: Bool = true, daemon: Bool = true, lands: Bool = false,
+                     tab: MonitorWindowView.Tab = .insights, onboarding: Bool = false) -> UsageEvent? {
+            MonitorWindowView.openingUsageEvent(reported: reported, onboardingKnown: known, hasDaemon: daemon,
+                                                destinationLandsNow: lands, tab: tab, requiresOnboarding: onboarding)
+        }
+        XCTAssertEqual(opening(), .tabInsightsOpened)
+        XCTAssertEqual(opening(tab: .home), .tabHomeOpened)
+        XCTAssertEqual(opening(onboarding: true), .tabPrivateAiOpened, "the drawn tab, not the restored one")
+        XCTAssertNil(opening(reported: true), "an opening counted twice")
+        XCTAssertNil(opening(known: false), "counted before the core said what is drawn")
+        XCTAssertNil(opening(daemon: false), "counted with no daemon to report to")
+        XCTAssertNil(opening(lands: true), "counted the tab a landing destination is about to replace")
+    }
+
     /// While onboarding is required Inference is drawn whatever is picked, so
     /// a change of the picked tab opens nothing.
     func test_aTabChangeDuringOnboardingReportsNothing() {
@@ -46,12 +63,22 @@ final class UsageEventsTests: XCTestCase {
     func test_theWindowReportsOnOpeningAndOnATabChange() throws {
         let window = try SettingsParityTests.text("Views/MonitorWindowView.swift")
         let change = try XCTUnwrap(window.range(of: ".onChange(of: tab) { old, picked in\n"))
-        let changeBody = window[change.upperBound...].prefix(300)
+        let changeBody = window[change.upperBound...].prefix(800)
         XCTAssertTrue(changeBody.contains("Self.usageEvent(tabChangedFrom: old, to: picked,"))
         XCTAssertTrue(changeBody.contains("requiresOnboarding: model.requiresOnboarding) {\n"))
         XCTAssertTrue(changeBody.contains("model.recordUsage(event)"))
-        XCTAssertTrue(window.contains(
-            "model.recordUsage(Self.usageEvent(for: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding)))"))
+        XCTAssertTrue(changeBody.contains("if !openingReported {\n                reportOpening()"),
+                      "a destination landing as the window opens is counted twice")
+        // The opening is reported once the window knows what it draws, after
+        // the handlers that land a waiting destination.
+        let opening = try XCTUnwrap(window.range(of:
+            ".onChange(of: model.onboardingKnown && model.daemonData != nil, initial: true) { _, _ in\n"
+                + "            reportOpening()\n"))
+        let requests = try XCTUnwrap(window.range(of: ".onChange(of: navigation.requests, initial: true)"))
+        let known = try XCTUnwrap(window.range(of: ".onChange(of: model.onboardingKnown) { _, _ in consumePending() }"))
+        XCTAssertLessThan(requests.lowerBound, opening.lowerBound)
+        XCTAssertLessThan(known.lowerBound, opening.lowerBound)
+        XCTAssertFalse(window.contains(".onAppear {\n            model.recordUsage"), "an opening counted before it is known")
         XCTAssertTrue(window.contains("recordUsage: { model.recordUsage($0) })"), "Insights is given no reporter")
         XCTAssertEqual(window.components(separatedBy: "model.recordUsage(").count - 1, 3)
     }

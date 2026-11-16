@@ -416,8 +416,10 @@ struct InsightsView: View {
 extension InsightsView {
     /// The anonymous usage count for an Insights sub-view coming on screen
     /// (#1920). Breakdown is `patterns`. Skills is on no list, so it counts
-    /// nothing; Sessions and Analyze have no sub-view in this app, so
-    /// `insights_sessions_opened` and `insights_analyze_opened` are never sent.
+    /// nothing. This app has no Sessions or Analyze tab, so
+    /// `insights_sessions_opened` and `insights_analyze_opened` are not sent
+    /// from here (a day's sessions open in Breakdown's inspector, which is
+    /// not a sub-view of its own).
     nonisolated static func usageEvent(for tab: InsightsTab) -> UsageEvent? {
         switch tab {
         case .overview: .insightsOverviewOpened
