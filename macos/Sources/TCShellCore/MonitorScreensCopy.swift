@@ -100,6 +100,12 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     /// Settings' line when the core does not answer: Settings shows nothing
     /// it last reported.
     public let settingsCoreUnreachable: String
+    /// Settings > General's anonymous usage counts card (#1920): its
+    /// title, the `share_usage_data` switch's label and the line under it.
+    /// The core marks all three DRAFT, NEEDS APPROVAL (2026-11-16).
+    public let usageDataTitle: String
+    public let usageDataToggle: String
+    public let usageDataCaption: String
     public let projected: String
     public let projectedNote: String
     /// `{min}`, `{max}`: a mission's range in `points`.
@@ -210,6 +216,9 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case signedOut = "signed_out"
         case signIn = "sign_in"
         case settingsCoreUnreachable = "settings_core_unreachable"
+        case usageDataTitle = "usage_data_title"
+        case usageDataToggle = "usage_data_toggle"
+        case usageDataCaption = "usage_data_caption"
         case projected
         case projectedNote = "projected_note"
         case missionCreditPoints = "mission_credit_points"
@@ -306,6 +315,9 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "signed_out",
         "sign_in",
         "settings_core_unreachable",
+        "usage_data_title",
+        "usage_data_toggle",
+        "usage_data_caption",
         "projected",
         "projected_note",
         "mission_credit_points",
@@ -343,7 +355,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         else {
             return nil
         }
-        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.openApp, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.signIn, copy.settingsCoreUnreachable, copy.projected, copy.projectedNote, copy.missionCreditPoints, copy.missionCreditPointsOne, copy.windowLastHours, copy.historySubmitted]
+        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.openApp, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.signIn, copy.settingsCoreUnreachable, copy.usageDataTitle, copy.usageDataToggle, copy.usageDataCaption, copy.projected, copy.projectedNote, copy.missionCreditPoints, copy.missionCreditPointsOne, copy.windowLastHours, copy.historySubmitted]
         return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole || !copy.historyActions.isWhole
             || !copy.shell.isWhole || !copy.tracesGraph.isWhole || !copy.flowMap.isWhole
             || !copy.homeHistory.isWhole || !copy.settingsNav.isWhole || !copy.edgeRail.isWhole

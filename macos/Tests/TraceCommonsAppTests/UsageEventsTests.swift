@@ -262,11 +262,21 @@ final class UsageEventsTests: XCTestCase {
         let general = try SettingsParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertEqual(general.components(separatedBy: "UsageCountsSettingsCard()").count - 1, 1)
         let card = try SettingsParityTests.text("Views/Settings/UsageCountsSettingsCard.swift")
-        XCTAssertTrue(card.contains("if let on = model.daemonSettings?.shareUsageData {"))
+        XCTAssertTrue(card.contains("if let on = model.daemonSettings?.shareUsageData, let words = MonitorWords.table {"))
         XCTAssertTrue(card.contains("Task { await model.setShareUsageData(on) }"))
         XCTAssertTrue(card.contains(".disabled(model.shareUsageDataBusy)"))
         XCTAssertTrue(card.contains("model.shareUsageDataRefusal"))
         XCTAssertTrue(card.contains("// COPY: pending owner approval"))
+        // Every word is the core's: nothing authored here.
+        for needle in ["Text(\"", "Toggle(\"", "GlassEyebrowCard(\"", "static let"] {
+            XCTAssertFalse(card.contains(needle), "the card authors \(needle)")
+        }
+        XCTAssertTrue(card.contains("GlassEyebrowCard(words.usageDataTitle)"))
+        XCTAssertTrue(card.contains("Toggle(words.usageDataToggle,"))
+        XCTAssertTrue(card.contains("Text(words.usageDataCaption)"))
+        let words = try XCTUnwrap(MonitorWords.table)
+        XCTAssertEqual(words.usageDataToggle, "Share anonymous usage data")
+        XCTAssertTrue(words.usageDataCaption.contains("only from the US"), words.usageDataCaption)
         XCTAssertTrue(SettingsSection.general.availableBeforeOnboarding,
                       "the off switch for counts that start at install waits for first run")
     }
