@@ -6069,6 +6069,57 @@ mod tests {
     }
 
     #[test]
+    fn skill_usage_places_a_session_with_no_event_time_up_to_its_last_write() {
+        let local = |at: DateTime<Utc>| {
+            at.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        for (written, covers_recent) in [(1, true), (30, false)] {
+            let f = Fixture::new();
+            let claude = f.write("claude.jsonl", &claude_bytes());
+            f.run_skills(&[candidate(SOURCE_CLAUDE_CODE, &claude)]);
+            let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+            let at = Utc::now() - Duration::days(written);
+            let row = store.rows.values_mut().next().unwrap();
+            row.earliest_event_at = None;
+            row.first_event_at = None;
+            row.latest_event_at = None;
+            row.modified_at = at;
+            row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
+                schema_version: SKILL_USAGE_VERSION,
+                coverage: crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations,
+                partial: true,
+                skills: Vec::new(),
+            });
+            f.pass.save(store).unwrap();
+            let usage = &f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"];
+            let gap = &usage["partial_agents"][0];
+            assert_eq!(gap["agent"], "claude_code");
+            let days: Vec<&str> = gap["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d.as_str().unwrap())
+                .collect();
+            assert_eq!(days.last().copied(), Some(local(at).as_str()));
+            // Any of its uses may lie anywhere before its last write.
+            let recent: Vec<String> = (1..=14)
+                .map(|n| local(Utc::now() - Duration::days(n)))
+                .collect();
+            assert_eq!(
+                recent.iter().all(|day| days.contains(&day.as_str())),
+                covers_recent,
+                "written {written} days ago"
+            );
+            assert_eq!(
+                recent.iter().any(|day| days.contains(&day.as_str())),
+                covers_recent
+            );
+        }
+    }
+
+    #[test]
     fn skill_usage_counts_opencode_gaps_as_undated() {
         let f = Fixture::new();
         let value =
