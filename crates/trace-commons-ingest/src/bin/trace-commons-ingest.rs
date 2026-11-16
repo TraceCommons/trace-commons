@@ -138,8 +138,8 @@ use trace_commons_server::trace_authority::parse_storage_policy_values;
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
 use trace_commons_server::trace_summary_similarity::{
     TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION, TRACE_SIMILARITY_NEIGHBOR_THRESHOLD,
-    trace_redacted_summary_embedding, trace_summary_embedding_similarity,
-    trace_summary_similarity_score,
+    TraceSummaryFeatures, trace_redacted_summary_embedding, trace_summary_embedding_similarity,
+    trace_summary_features_similarity_score,
 };
 // The gate variables the production pipeline assembly shares with the
 // legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
@@ -70627,7 +70627,9 @@ const TRACE_SIMILARITY_MAX_NEIGHBORS: usize = 5;
 struct TraceSimilarityCandidate<'a> {
     submission_id: Uuid,
     trace_id: Uuid,
-    canonical_summary: Option<&'a str>,
+    /// The candidate's summary features, computed once per pass by the
+    /// caller (`None` when it has no summary).
+    features: Option<&'a TraceSummaryFeatures>,
     canonical_summary_hash: Option<&'a str>,
 }
 
@@ -70640,7 +70642,7 @@ struct TraceSimilarityNeighbor {
 
 fn nearest_trace_neighbors<'a>(
     target_submission_id: Uuid,
-    target_summary: &str,
+    target: &TraceSummaryFeatures,
     target_hash: &str,
     candidates: impl IntoIterator<Item = TraceSimilarityCandidate<'a>>,
 ) -> Vec<TraceSimilarityNeighbor> {
@@ -70648,10 +70650,10 @@ fn nearest_trace_neighbors<'a>(
         .into_iter()
         .filter(|candidate| candidate.submission_id != target_submission_id)
         .filter_map(|candidate| {
-            let score = trace_summary_similarity_score(
-                target_summary,
+            let score = trace_summary_features_similarity_score(
+                target,
                 target_hash,
-                candidate.canonical_summary,
+                candidate.features,
                 candidate.canonical_summary_hash,
             );
             (score >= TRACE_SIMILARITY_NEIGHBOR_THRESHOLD).then(|| TraceSimilarityNeighbor {
@@ -70982,16 +70984,29 @@ fn build_derived_precheck(
 ) -> TraceCommonsDerivedPrecheck {
     let canonical_summary = canonical_summary_for_embedding(envelope);
     let canonical_summary_hash = sha256_prefixed(&canonical_summary);
+    let target = TraceSummaryFeatures::new(&canonical_summary);
+    // A candidate whose hash matches scores 1.0 without its features, so
+    // only the others are tokenized.
+    let existing_features = existing
+        .iter()
+        .map(|record| {
+            (record.canonical_summary_hash != canonical_summary_hash)
+                .then(|| TraceSummaryFeatures::new(&record.canonical_summary))
+        })
+        .collect::<Vec<_>>();
     let neighbors = nearest_trace_neighbors(
         envelope.submission_id,
-        &canonical_summary,
+        &target,
         &canonical_summary_hash,
-        existing.iter().map(|record| TraceSimilarityCandidate {
-            submission_id: record.submission_id,
-            trace_id: record.trace_id,
-            canonical_summary: Some(record.canonical_summary.as_str()),
-            canonical_summary_hash: Some(record.canonical_summary_hash.as_str()),
-        }),
+        existing
+            .iter()
+            .zip(&existing_features)
+            .map(|(record, features)| TraceSimilarityCandidate {
+                submission_id: record.submission_id,
+                trace_id: record.trace_id,
+                features: features.as_ref(),
+                canonical_summary_hash: Some(record.canonical_summary_hash.as_str()),
+            }),
     );
     let duplicate_score = neighbors
         .first()
@@ -77441,6 +77456,30 @@ async fn index_vector_metadata_from_db(
         .filter(|candidate| !active_vector_ids.contains(&candidate.vector_entry_id))
         .collect::<Vec<_>>();
     let limit = limit.unwrap_or(usize::MAX);
+    // Each eligible summary's features, computed once for the pass: every
+    // pending record is compared against every eligible one, and scoring
+    // from the strings re-tokenized and re-hashed both sides each time,
+    // which held a runtime worker for over a minute on a large tenant.
+    let eligible_features = if dry_run || pending_candidates.is_empty() {
+        BTreeMap::new()
+    } else {
+        eligible
+            .iter()
+            .filter_map(|candidate| {
+                candidate
+                    .record
+                    .canonical_summary
+                    .as_deref()
+                    .map(|summary| {
+                        (
+                            candidate.vector_entry_id,
+                            TraceSummaryFeatures::new(summary),
+                        )
+                    })
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let empty_summary_features = TraceSummaryFeatures::new("");
     let mut report = TraceVectorIndexRunReport {
         skipped_existing_count: eligible.len().saturating_sub(pending_candidates.len()),
         pending_after_count: pending_candidates.len().saturating_sub(limit),
@@ -77470,12 +77509,14 @@ async fn index_vector_metadata_from_db(
         })?;
         let summary_neighbors = nearest_trace_neighbors(
             record.submission_id,
-            record.canonical_summary.as_deref().unwrap_or_default(),
+            eligible_features
+                .get(&vector_entry_id)
+                .unwrap_or(&empty_summary_features),
             source_hash,
             eligible.iter().map(|candidate| TraceSimilarityCandidate {
                 submission_id: candidate.record.submission_id,
                 trace_id: candidate.record.trace_id,
-                canonical_summary: candidate.record.canonical_summary.as_deref(),
+                features: eligible_features.get(&candidate.vector_entry_id),
                 canonical_summary_hash: candidate.record.canonical_summary_hash.as_deref(),
             }),
         );

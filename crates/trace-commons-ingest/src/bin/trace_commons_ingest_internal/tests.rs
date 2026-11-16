@@ -7083,28 +7083,32 @@ fn trace_summary_similarity_exact_hash_wins_and_fuzzy_neighbors_are_ranked() {
 
     let neighbors = nearest_trace_neighbors(
         target_submission,
-        "Task type: calendar scheduling timezone retry",
+        &TraceSummaryFeatures::new("Task type: calendar scheduling timezone retry"),
         "sha256:target",
         [
             TraceSimilarityCandidate {
                 submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
                     .expect("uuid parses"),
                 trace_id: fuzzy_trace,
-                canonical_summary: Some("Task type: calendar scheduling timezone ambiguity retry"),
+                features: Some(&TraceSummaryFeatures::new(
+                    "Task type: calendar scheduling timezone ambiguity retry",
+                )),
                 canonical_summary_hash: Some("sha256:fuzzy"),
             },
             TraceSimilarityCandidate {
                 submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
                     .expect("uuid parses"),
                 trace_id: exact_trace,
-                canonical_summary: Some("different text but same hash"),
+                features: Some(&TraceSummaryFeatures::new("different text but same hash")),
                 canonical_summary_hash: Some("sha256:target"),
             },
             TraceSimilarityCandidate {
                 submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000023")
                     .expect("uuid parses"),
                 trace_id: unrelated_trace,
-                canonical_summary: Some("database migration checksum repair"),
+                features: Some(&TraceSummaryFeatures::new(
+                    "database migration checksum repair",
+                )),
                 canonical_summary_hash: Some("sha256:unrelated"),
             },
         ],
@@ -7128,28 +7132,30 @@ fn trace_summary_similarity_excludes_same_submission_and_sorts_ties() {
 
     let neighbors = nearest_trace_neighbors(
         target_submission,
-        "tool call retry calendar auth failure",
+        &TraceSummaryFeatures::new("tool call retry calendar auth failure"),
         "sha256:target",
         [
             TraceSimilarityCandidate {
                 submission_id: target_submission,
                 trace_id: Uuid::parse_str("00000000-0000-0000-0000-000000000010")
                     .expect("uuid parses"),
-                canonical_summary: Some("tool call retry calendar auth failure"),
+                features: Some(&TraceSummaryFeatures::new(
+                    "tool call retry calendar auth failure",
+                )),
                 canonical_summary_hash: Some("sha256:target"),
             },
             TraceSimilarityCandidate {
                 submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
                     .expect("uuid parses"),
                 trace_id: second_trace,
-                canonical_summary: Some("tool call retry calendar auth"),
+                features: Some(&TraceSummaryFeatures::new("tool call retry calendar auth")),
                 canonical_summary_hash: Some("sha256:two"),
             },
             TraceSimilarityCandidate {
                 submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
                     .expect("uuid parses"),
                 trace_id: first_trace,
-                canonical_summary: Some("tool call retry calendar auth"),
+                features: Some(&TraceSummaryFeatures::new("tool call retry calendar auth")),
                 canonical_summary_hash: Some("sha256:one"),
             },
         ],

@@ -22,6 +22,24 @@ pub const TRACE_SIMILARITY_NEIGHBOR_THRESHOLD: f32 = 0.25;
 /// The redacted-summary embedding's dimension.
 pub const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION: usize = 64;
 
+/// A summary's tokens and redacted-summary embedding, computed once so a
+/// pass that compares one summary against many does not re-tokenize and
+/// re-hash both sides of every comparison. Scoring from features is
+/// bit-identical to scoring from the strings.
+#[derive(Debug, Clone)]
+pub struct TraceSummaryFeatures {
+    tokens: BTreeSet<String>,
+    embedding: Vec<f32>,
+}
+
+impl TraceSummaryFeatures {
+    pub fn new(summary: &str) -> Self {
+        let tokens = trace_similarity_tokens(summary);
+        let embedding = trace_redacted_summary_embedding_from_tokens(&tokens);
+        Self { tokens, embedding }
+    }
+}
+
 /// `main`'s duplicate score of `target_summary` against `candidates`
 /// (summary, summary hash): the best neighbour's score, or 0.0 with no
 /// neighbour. `build_derived_precheck` stores this as the derived record's
@@ -31,10 +49,15 @@ pub fn trace_summary_duplicate_score<'a>(
     target_hash: &str,
     candidates: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
 ) -> f32 {
+    let target = TraceSummaryFeatures::new(target_summary);
     candidates
         .into_iter()
         .map(|(summary, hash)| {
-            trace_summary_similarity_score(target_summary, target_hash, summary, hash)
+            let candidate = match hash {
+                Some(hash) if hash == target_hash => None,
+                _ => summary.map(TraceSummaryFeatures::new),
+            };
+            trace_summary_features_similarity_score(&target, target_hash, candidate.as_ref(), hash)
         })
         .filter(|score| *score >= TRACE_SIMILARITY_NEIGHBOR_THRESHOLD)
         .fold(0.0f32, f32::max)
@@ -52,31 +75,54 @@ pub fn trace_summary_similarity_score(
     let Some(candidate_summary) = candidate_summary else {
         return 0.0;
     };
-    let target_embedding = trace_redacted_summary_embedding(target_summary);
-    let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
-    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding).max(
-        trace_summary_token_similarity(target_summary, candidate_summary),
+    trace_summary_features_similarity_score(
+        &TraceSummaryFeatures::new(target_summary),
+        target_hash,
+        Some(&TraceSummaryFeatures::new(candidate_summary)),
+        candidate_hash,
     )
 }
 
-fn trace_summary_token_similarity(left: &str, right: &str) -> f32 {
-    let left_tokens = trace_similarity_tokens(left);
-    let right_tokens = trace_similarity_tokens(right);
-    if left_tokens.is_empty() || right_tokens.is_empty() {
+/// [`trace_summary_similarity_score`] over precomputed features: 1.0 on a
+/// matching hash, 0.0 with no candidate summary, otherwise the larger of the
+/// embeddings' cosine and the token sets' Jaccard index.
+pub fn trace_summary_features_similarity_score(
+    target: &TraceSummaryFeatures,
+    target_hash: &str,
+    candidate: Option<&TraceSummaryFeatures>,
+    candidate_hash: Option<&str>,
+) -> f32 {
+    if candidate_hash.is_some_and(|hash| hash == target_hash) {
+        return 1.0;
+    }
+    let Some(candidate) = candidate else {
+        return 0.0;
+    };
+    trace_summary_embedding_similarity(&target.embedding, &candidate.embedding).max(
+        trace_summary_token_similarity(&target.tokens, &candidate.tokens),
+    )
+}
+
+fn trace_summary_token_similarity(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f32 {
+    if left.is_empty() || right.is_empty() {
         return 0.0;
     }
-    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
-    let union = left_tokens.union(&right_tokens).count() as f32;
-    if union == 0.0 {
+    let intersection = left.intersection(right).count();
+    let union = left.len() + right.len() - intersection;
+    if union == 0 {
         0.0
     } else {
-        (intersection / union).clamp(0.0, 1.0)
+        (intersection as f32 / union as f32).clamp(0.0, 1.0)
     }
 }
 
 pub fn trace_redacted_summary_embedding(input: &str) -> Vec<f32> {
+    trace_redacted_summary_embedding_from_tokens(&trace_similarity_tokens(input))
+}
+
+fn trace_redacted_summary_embedding_from_tokens(tokens: &BTreeSet<String>) -> Vec<f32> {
     let mut values = vec![0.0f32; TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION];
-    for token in trace_similarity_tokens(input) {
+    for token in tokens {
         let digest = Sha256::digest(token.as_bytes());
         let mut index_bytes = [0u8; 8];
         index_bytes.copy_from_slice(&digest[..8]);
@@ -138,6 +184,87 @@ fn push_trace_similarity_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The string-based scorer as it stood before features were
+    /// precomputed (5a85898d1), verbatim, as the reference the features
+    /// path must match bit for bit.
+    fn reference_score(
+        target_summary: &str,
+        target_hash: &str,
+        candidate_summary: Option<&str>,
+        candidate_hash: Option<&str>,
+    ) -> f32 {
+        if candidate_hash.is_some_and(|hash| hash == target_hash) {
+            return 1.0;
+        }
+        let Some(candidate_summary) = candidate_summary else {
+            return 0.0;
+        };
+        let target_embedding = trace_redacted_summary_embedding(target_summary);
+        let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
+        let left_tokens = trace_similarity_tokens(target_summary);
+        let right_tokens = trace_similarity_tokens(candidate_summary);
+        let token_similarity = if left_tokens.is_empty() || right_tokens.is_empty() {
+            0.0
+        } else {
+            let intersection = left_tokens.intersection(&right_tokens).count() as f32;
+            let union = left_tokens.union(&right_tokens).count() as f32;
+            if union == 0.0 {
+                0.0
+            } else {
+                (intersection / union).clamp(0.0, 1.0)
+            }
+        };
+        trace_summary_embedding_similarity(&target_embedding, &candidate_embedding)
+            .max(token_similarity)
+    }
+
+    #[test]
+    fn features_score_matches_the_string_scorer_bit_for_bit() {
+        let summaries = [
+            "",
+            "a",
+            "the and for",
+            "Task type: calendar scheduling timezone retry",
+            "Task type: calendar scheduling timezone ambiguity retry",
+            "tool call retry calendar auth failure",
+            "tool call retry calendar auth",
+            "database migration checksum repair",
+            "Ünïcode tokens: naïve café_bar 42 x y zz",
+            "repeat repeat repeat repeat other",
+        ];
+        for (i, target) in summaries.iter().enumerate() {
+            let target_features = TraceSummaryFeatures::new(target);
+            for (j, candidate) in summaries.iter().enumerate() {
+                let target_hash = format!("h{i}");
+                let candidate_hash = format!("h{j}");
+                for (summary, hash) in [
+                    (Some(*candidate), Some(candidate_hash.as_str())),
+                    (Some(*candidate), None),
+                    (None, Some(candidate_hash.as_str())),
+                ] {
+                    let expected = reference_score(target, &target_hash, summary, hash);
+                    let features = summary.map(TraceSummaryFeatures::new);
+                    let got = trace_summary_features_similarity_score(
+                        &target_features,
+                        &target_hash,
+                        features.as_ref(),
+                        hash,
+                    );
+                    assert_eq!(
+                        got.to_bits(),
+                        expected.to_bits(),
+                        "{target:?} vs {summary:?}"
+                    );
+                    assert_eq!(
+                        trace_summary_similarity_score(target, &target_hash, summary, hash)
+                            .to_bits(),
+                        expected.to_bits()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_matching_hash_scores_one() {
