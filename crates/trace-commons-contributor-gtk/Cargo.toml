@@ -42,6 +42,23 @@ path = "src/bin/probe.rs"
 name = "near-ai"
 path = "src/bin/near-ai.rs"
 
+[features]
+# Spike S1/S2 of the 2026-11-16 window-and-map spec: translucency and KDE blur.
+# OFF by default, so default builds, CI and the flatpak are unchanged. Turns on
+# the Linux-only crates below and the `blur_spike` example. Not for merge; see
+# docs/superpowers/plans/2026-11-16-linux-blur-spike.md.
+blur-spike = [
+  "dep:gdk4-wayland",
+  "dep:gdk4-x11",
+  "dep:wayland-client",
+  "dep:wayland-protocols-plasma",
+  "dep:x11rb",
+]
+
+[[example]]
+name = "blur_spike"
+required-features = ["blur-spike"]
+
 [dependencies]
 # The core is linked directly rather than through the C ABI: on Linux both
 # sides are Rust, so the FFI layer would buy nothing and cost a marshalling
@@ -86,6 +103,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # through notify-rust's own D-Bus use, at the same major version pinned
 # here, so this adds zero new packages -- only a direct edge.
 zbus = "5"
+
+# Spike-only (feature `blur-spike`), Linux-only. See the dependency write-up in
+# docs/superpowers/plans/2026-11-16-linux-blur-spike.md before keeping any.
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk4-wayland = { version = "0.9", features = ["wayland_crate"], optional = true }
+gdk4-x11 = { version = "0.9", optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols-plasma = { version = "0.3", features = ["client"], optional = true }
+x11rb = { version = "0.13", default-features = false, optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
