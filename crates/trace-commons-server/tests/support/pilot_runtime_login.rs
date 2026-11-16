@@ -260,18 +260,21 @@ pub async fn provision_runtime_login(url: &str, login: &str, extra_memberships: 
         own_privileges, 0,
         "the runtime login must hold no privilege of its own; use a fresh database"
     );
-    // trace_ingest_runtime is itself a member of only the two roles a
-    // migration grants it: trace_witness_evidence_runtime (V90) and
-    // trace_public_run_runtime (the V74 grant, applied above). A broader
-    // membership widens every login the group carries, so catch it here
-    // rather than in whatever test happens to exercise it.
+    // trace_ingest_runtime is itself a member of only the three roles a
+    // migration grants it: trace_witness_evidence_runtime (V90),
+    // trace_public_run_runtime (the V74 grant, applied above) and
+    // trace_commons_public_read (V161, so the serving login can answer the
+    // public register stats). A broader membership widens every login the
+    // group carries, so catch it here rather than in whatever test happens
+    // to exercise it.
     assert_eq!(
         group_memberships,
         vec![
+            "trace_commons_public_read".to_string(),
             "trace_public_run_runtime".to_string(),
             "trace_witness_evidence_runtime".to_string(),
         ],
-        "trace_ingest_runtime must be a member of only the V74 and V90 roles it is granted"
+        "trace_ingest_runtime must be a member of only the V74, V90 and V161 roles it is granted"
     );
     drop(client);
     let _ = connection.await;
