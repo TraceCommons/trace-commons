@@ -554,7 +554,7 @@ struct NearAiSpan {
     category: String,
     start: usize,
     end: usize,
-    #[serde(default)]
+    #[serde(default = "crate::privacy_filter_spans::unavailable_classifier_score")]
     score: f64,
     #[serde(default)]
     text: Option<String>,
@@ -1779,6 +1779,23 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn missing_endpoint_confidence_remains_unavailable_after_verification() {
+        let raw: Vec<NearAiSpan> = serde_json::from_str(
+            r#"[{"category":"private_person","start":0,"end":5,"text":"Alice"}]"#,
+        )
+        .unwrap();
+        assert!(raw[0].score.is_nan());
+        let (spans, _) = verify_span_texts("Alice", raw).unwrap();
+        let result = crate::privacy_filter_spans::apply_spans("test", "Alice", &spans)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
     }
 
     // ---- What may be cached. An answer that verification accepts is cached

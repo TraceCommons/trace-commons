@@ -30,7 +30,13 @@ use crate::canonical_json;
 use crate::llm::recording::{TraceFile, TraceResponse};
 use crate::redaction::redact_sensitive_json;
 
+mod key_privacy;
 mod tool_output_detectors;
+#[cfg(feature = "near-ai-privacy-filter")]
+use key_privacy::ReviewKeyScanner;
+pub use key_privacy::{
+    REVIEW_KEY_CATALOG_VERSION, ReviewKeyDiagnostics, ReviewKeyFinding, ReviewKeyReason,
+};
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
@@ -5683,6 +5689,7 @@ const TYPED_METADATA_FIELDS: &[&str] = &[
 /// `Ok(false)` the moment any budget is exceeded (aggregate bytes, a single
 /// field's bytes, node count, or recursion depth) - the caller treats that
 /// as incomplete coverage, never as a silent skip.
+#[cfg(feature = "near-ai-privacy-filter")]
 fn classify_structured_payload_node<'a>(
     adapter: &'a dyn PrivacyFilterAdapter,
     value: &'a mut Value,
@@ -5690,6 +5697,7 @@ fn classify_structured_payload_node<'a>(
     budget: &'a mut StructuredPayloadBudget,
     report: &'a mut RedactionReport,
     review_recheck: bool,
+    keys: &'a mut ReviewKeyScanner,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'a>,
 > {
@@ -5716,17 +5724,20 @@ fn classify_structured_payload_node<'a>(
                 Ok(true)
             }
             Value::Array(items) => {
-                for item in items.iter_mut() {
-                    if !classify_structured_payload_node(
+                for (index, item) in items.iter_mut().enumerate() {
+                    let parent = keys.push_index(index);
+                    let result = classify_structured_payload_node(
                         adapter,
                         item,
                         depth + 1,
                         budget,
                         report,
                         review_recheck,
+                        keys,
                     )
-                    .await?
-                    {
+                    .await;
+                    keys.restore(parent);
+                    if !result? {
                         return Ok(false);
                     }
                 }
@@ -5734,41 +5745,39 @@ fn classify_structured_payload_node<'a>(
             }
             Value::Object(entries) => {
                 for (key, item) in entries.iter_mut() {
-                    if !budget.charge_field(key.len()) {
-                        return Ok(false);
-                    }
-                    if let Some(redaction) = adapter.redact_text(key).await? {
-                        if review_recheck {
-                            let misaligned = redaction.summary.decoded_mismatch
-                                || redaction.report.coverage_incomplete;
-                            let finding = redaction.redacted_text != *key
-                                || !redaction.report.counts.is_empty()
+                    if review_recheck {
+                        if !keys
+                            .inspect(adapter, key, Some(item), budget, report)
+                            .await?
+                        {
+                            return Ok(false);
+                        }
+                    } else {
+                        if !budget.charge_field(key.len()) {
+                            return Ok(false);
+                        }
+                        if let Some(redaction) = adapter.redact_text(key).await? {
+                            if !redaction.report.counts.is_empty()
                                 || !redaction.report.pii_labels_present.is_empty()
                                 || redaction.report.blocked_secret_detected
-                                || redaction.report.key_finding_detected;
-                            report.coverage_incomplete |= misaligned;
-                            report.key_finding_detected |= finding;
-                            if misaligned || finding {
-                                return Ok(false);
+                            {
+                                report.key_finding_detected = true;
                             }
                         }
-                        let has_finding = !redaction.report.counts.is_empty()
-                            || !redaction.report.pii_labels_present.is_empty()
-                            || redaction.report.blocked_secret_detected;
-                        if has_finding {
-                            report.key_finding_detected = true;
-                        }
                     }
-                    if !classify_structured_payload_node(
+                    let parent = keys.push_key(key);
+                    let result = classify_structured_payload_node(
                         adapter,
                         item,
                         depth + 1,
                         budget,
                         report,
                         review_recheck,
+                        keys,
                     )
-                    .await?
-                    {
+                    .await;
+                    keys.restore(parent);
+                    if !result? {
                         return Ok(false);
                     }
                 }
@@ -5883,6 +5892,7 @@ struct ReviewSideProse<'a> {
     budget: StructuredPayloadBudget,
     report: RedactionReport,
     summary: Option<SafePrivacyFilterSummary>,
+    keys: ReviewKeyScanner,
     sweeper: DeterministicTraceRedactor,
     state: RedactionState,
 }
@@ -5895,6 +5905,7 @@ impl<'a> ReviewSideProse<'a> {
             budget,
             report: RedactionReport::default(),
             summary: None,
+            keys: ReviewKeyScanner::default(),
             sweeper: DeterministicTraceRedactor::bare(),
             state: RedactionState::default(),
         }
@@ -5936,38 +5947,9 @@ impl<'a> ReviewSideProse<'a> {
     }
 
     async fn inspect_key(&mut self, key: &str) -> Result<bool, TraceContributionError> {
-        if !self.charge(key) {
-            return Ok(false);
-        }
-        let credentials = self.sweeper.detect_correction_credentials(key);
-        let (_, observations) = self.sweeper.redact_text(key);
-        if credentials.blocked_secret_detected
-            || credentials.key_finding_detected
-            || observations
-                .counts
-                .keys()
-                .any(|label| label_bears_severity(label))
-            || observations
-                .pii_labels_present
-                .iter()
-                .any(|label| label_bears_severity(label))
-        {
-            self.report.key_finding_detected = true;
-            return Ok(false);
-        }
-        let mut finding = false;
-        if let Some(redaction) = self.adapter.redact_text(key).await? {
-            finding |= redaction.redacted_text != key
-                || !redaction.report.counts.is_empty()
-                || !redaction.report.pii_labels_present.is_empty()
-                || redaction.report.blocked_secret_detected
-                || redaction.report.key_finding_detected
-                || redaction.summary.decoded_mismatch;
-            self.report.coverage_incomplete |=
-                redaction.report.coverage_incomplete || redaction.summary.decoded_mismatch;
-        }
-        self.report.key_finding_detected |= finding;
-        Ok(!self.report.coverage_incomplete && !finding)
+        self.keys
+            .inspect(self.adapter, key, None, &mut self.budget, &mut self.report)
+            .await
     }
 
     fn redact_value<'b>(
@@ -5987,14 +5969,20 @@ impl<'a> ReviewSideProse<'a> {
             match value {
                 Value::String(text) => covered &= self.redact(text).await?,
                 Value::Array(items) => {
-                    for item in items {
-                        covered &= self.redact_value(item, depth + 1).await?;
+                    for (index, item) in items.iter_mut().enumerate() {
+                        let parent = self.keys.push_index(index);
+                        let result = self.redact_value(item, depth + 1).await;
+                        self.keys.restore(parent);
+                        covered &= result?;
                     }
                 }
                 Value::Object(entries) => {
                     for (key, item) in entries {
                         covered &= self.inspect_key(key).await?;
-                        covered &= self.redact_value(item, depth + 1).await?;
+                        let parent = self.keys.push_key(key);
+                        let result = self.redact_value(item, depth + 1).await;
+                        self.keys.restore(parent);
+                        covered &= result?;
                     }
                 }
                 _ => {}
@@ -6066,6 +6054,8 @@ pub enum ReviewCorrectionStatus {
 /// risk, unresolved correction status and exact corrected-version identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewPrivacyRecheckEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_diagnostics: Option<ReviewKeyDiagnostics>,
     pub basis: Vec<ResidualRiskCondition>,
     pub coverage_complete: bool,
     pub correction_status: ReviewCorrectionStatus,
@@ -6078,12 +6068,14 @@ pub struct ReviewPrivacyRecheckEvidence {
 fn review_original_keys_have_findings(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    keys: &mut ReviewKeyScanner,
 ) -> Result<bool, ResidualScanError> {
     fn walk(
         redactor: &DeterministicTraceRedactor,
         value: &Value,
         depth: usize,
         nodes: &mut usize,
+        keys: &mut ReviewKeyScanner,
     ) -> Result<bool, ResidualScanError> {
         if depth > RESIDUAL_SCAN_MAX_DEPTH {
             return Err(ResidualScanError::BudgetExceeded);
@@ -6096,8 +6088,11 @@ fn review_original_keys_have_findings(
                 }
             }
             Value::Array(items) => {
-                for item in items {
-                    if walk(redactor, item, depth + 1, nodes)? {
+                for (index, item) in items.iter().enumerate() {
+                    let parent = keys.push_index(index);
+                    let found = walk(redactor, item, depth + 1, nodes, keys);
+                    keys.restore(parent);
+                    if found? {
                         return Ok(true);
                     }
                 }
@@ -6121,9 +6116,13 @@ fn review_original_keys_have_findings(
                             .iter()
                             .any(|label| label_bears_severity(label))
                     {
+                        keys.note_deterministic(key, report.blocked_secret_detected);
                         return Ok(true);
                     }
-                    if walk(redactor, item, depth + 1, nodes)? {
+                    let parent = keys.push_key(key);
+                    let found = walk(redactor, item, depth + 1, nodes, keys);
+                    keys.restore(parent);
+                    if found? {
                         return Ok(true);
                     }
                 }
@@ -6134,7 +6133,7 @@ fn review_original_keys_have_findings(
     }
     let value =
         serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
-    walk(redactor, &value, 0, &mut 0)
+    walk(redactor, &value, 0, &mut 0, keys)
 }
 
 /// Recheck a held trace for a separately stored reviewed version.
@@ -6160,8 +6159,12 @@ pub async fn recheck_envelope_for_review_with(
     // handed to an external classifier. This covers nested event payloads,
     // assertions and every metadata map without changing the legacy helper.
     let key_scan = residual_secret_labels(&DeterministicTraceRedactor::bare(), &candidate);
-    let risk_keys =
-        review_original_keys_have_findings(&DeterministicTraceRedactor::bare(), &candidate);
+    let mut key_diagnostics = ReviewKeyScanner::default();
+    let risk_keys = review_original_keys_have_findings(
+        &DeterministicTraceRedactor::bare(),
+        &candidate,
+        &mut key_diagnostics,
+    );
     let key_hold = match (&key_scan, &risk_keys) {
         (Err(_), _) | (_, Err(_)) => Some(ResidualRiskCondition::ResidualScanUnavailable),
         (Ok(locations), Ok(risk_key))
@@ -6183,7 +6186,16 @@ pub async fn recheck_envelope_for_review_with(
         } else {
             ReviewCorrectionStatus::Absent
         };
+        let mut keys = key_diagnostics;
+        if keys.diagnostics.findings.is_empty() {
+            keys.note_scan_failure(if condition == ResidualRiskCondition::KeyFinding {
+                ReviewKeyReason::DeterministicFinding
+            } else {
+                ReviewKeyReason::BudgetExceeded
+            });
+        }
         let evidence = ReviewPrivacyRecheckEvidence {
+            key_diagnostics: Some(keys.diagnostics),
             basis: vec![condition],
             coverage_complete: false,
             correction_status,
@@ -6244,6 +6256,7 @@ async fn rescrub_envelope_prose_pii_impl(
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
     let mut structured_complete = true;
+    let mut keys = ReviewKeyScanner::default();
     let mut examined_events: u32 = 0;
     let mut skipped_events: u32 = 0;
 
@@ -6312,6 +6325,7 @@ async fn rescrub_envelope_prose_pii_impl(
                 continue;
             }
             let mut clone = event.structured_payload.clone();
+            keys.begin_event(index, event);
             let covered = classify_structured_payload_node(
                 adapter,
                 &mut clone,
@@ -6319,6 +6333,7 @@ async fn rescrub_envelope_prose_pii_impl(
                 &mut classifier_budget,
                 &mut report,
                 review_recheck,
+                &mut keys,
             )
             .await?;
             structured_updates.push((index, clone));
@@ -6333,6 +6348,8 @@ async fn rescrub_envelope_prose_pii_impl(
     let mut review_coverage_complete = true;
     if review_recheck {
         let mut side = ReviewSideProse::new(adapter, classifier_budget);
+        side.keys = keys;
+        side.keys.begin_side("ironclaw", "feature_flags");
         for (key, value) in &mut envelope.ironclaw.feature_flags {
             review_coverage_complete &= side.inspect_key(key).await?;
             review_coverage_complete &= side.redact(value).await?;
@@ -6370,12 +6387,16 @@ async fn rescrub_envelope_prose_pii_impl(
         for note in &mut envelope.replay.replay_notes {
             review_coverage_complete &= side.redact(note).await?;
         }
+        side.keys.begin_side("replay", "tool_manifest_hashes");
         for (key, value) in &mut envelope.replay.tool_manifest_hashes {
             review_coverage_complete &= side.inspect_key(key).await?;
             review_coverage_complete &= side.redact(value).await?;
         }
-        for assertion in &mut envelope.replay.expected_assertions {
+        side.keys.begin_side("replay", "expected_assertions");
+        for (index, assertion) in envelope.replay.expected_assertions.iter_mut().enumerate() {
+            let parent = side.keys.push_index(index);
             review_coverage_complete &= side.redact_value(assertion, 0).await?;
+            side.keys.restore(parent);
         }
         if let Some(embedding) = envelope.embedding_analysis.as_mut() {
             for tag in &mut embedding.coverage_tags {
@@ -6416,6 +6437,7 @@ async fn rescrub_envelope_prose_pii_impl(
             merge_privacy_filter_summary(&mut summary, &side_summary);
         }
         report.merge(side.report);
+        keys = side.keys;
     }
 
     // Second pass: no awaits below this line, so the updates collected
@@ -6569,6 +6591,7 @@ async fn rescrub_envelope_prose_pii_impl(
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
     Ok(ReviewPrivacyRecheckEvidence {
+        key_diagnostics: review_recheck.then_some(keys.diagnostics),
         basis,
         coverage_complete,
         correction_status,
