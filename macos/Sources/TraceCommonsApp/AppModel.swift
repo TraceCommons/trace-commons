@@ -1565,6 +1565,18 @@ final class AppModel: ObservableObject {
     /// Overview observes it; Settings reads metadata and saves consent.
     @Published private(set) var subscriptionUsageModel: SubscriptionUsageModel?
     var daemonData: (any DaemonDataClient)? { liveData }
+
+    /// Reports one anonymous usage count (`record_usage_event`, #1920,
+    /// approved by the owner 2026-11-16), fire-and-forget: nothing waits on
+    /// it and nothing is drawn from it. The daemon decides whether it is
+    /// counted (`share_usage_data` and the US-only region check); a refusal,
+    /// `recorded: false` or no daemon at all is dropped silently. Returns
+    /// the task only so tests can wait for the report to be sent.
+    @discardableResult
+    func recordUsage(_ event: UsageEvent) -> Task<Void, Never>? {
+        guard let client = daemonData else { return nil }
+        return Task.detached(priority: .utility) { _ = await client.recordUsageEvent(event) }
+    }
     private var undoTask: Task<Void, Never>?
 
     /// Client-side bookkeeping for the daemon's bounded preview scheduler --
@@ -3168,6 +3180,44 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A `share_usage_data` write is in flight; the switch takes no other.
+    @Published private(set) var shareUsageDataBusy = false
+    /// The core's request-failed words for a `share_usage_data` write the
+    /// daemon refused or did not confirm; cleared by the next confirmed one.
+    @Published private(set) var shareUsageDataRefusal: String?
+
+    /// Turns the anonymous weekly usage counts on or off
+    /// (`share_usage_data`, #1920: on by default, US only), sending only
+    /// that key. The same rule as `setInsightsSwitch`: nothing is applied
+    /// optimistically, only a reply echoing what was asked is confirmed, a
+    /// reply carrying the other value is kept and refused, and a failed
+    /// write reads the settings back and never claims the asked value.
+    func setShareUsageData(_ on: Bool) async {
+        guard !shareUsageDataBusy else { return }
+        guard let client else {
+            shareUsageDataRefusal = MonitorWords.table?.requestFailed
+            return
+        }
+        shareUsageDataBusy = true
+        defer { shareUsageDataBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["share_usage_data": on]) }
+        }.value
+        switch result {
+        case .success(let settings) where settings.shareUsageData == on:
+            daemonSettings = settings
+            shareUsageDataRefusal = nil
+        case .success(let settings):
+            if settings.shareUsageData != nil { daemonSettings = settings }
+            shareUsageDataRefusal = MonitorWords.table?.requestFailed
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            shareUsageDataRefusal = MonitorWords.table?.requestFailed
+        }
+    }
+
     @Published private(set) var tokenContributionBusy = false
     @Published private(set) var tokenContributionSaveFailed = false
 
@@ -3316,6 +3366,7 @@ final class AppModel: ObservableObject {
         self.client = client
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
+    func setLiveDataForTesting(_ client: LiveDaemonClient?) { liveData = client }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
     func setPrivateInferenceBusyForTesting(_ busy: Bool) { privateInferenceBusy = busy }
     func setHarnessesForTesting(_ harnesses: HarnessList) { publishIfChanged(\.harnesses, harnesses) }
@@ -5100,9 +5151,13 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// The first run finished; keep what it must still say for the main
-    /// window (`ShellNotices`), which outlives the first-run host.
+    /// window (`ShellNotices`), which outlives the first-run host. Both
+    /// endings (enrolled and watch-only) arrive here once, from
+    /// `FirstRunRunner.finish()`, so this is where `setup_finished` is
+    /// counted -- not `markOnboardingComplete`, which the self-test calls too.
     func firstRunFinished(notice: String?) {
         firstRunNotice = notice
+        recordUsage(.setupFinished)
     }
 
     /// Watching only: the marker is keyed by the config directory, since

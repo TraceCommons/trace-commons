@@ -403,11 +403,12 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// Sections that read nothing from the daemon: the appearance, the
-    /// login item and the update feed are all local. Notifications is not:
-    /// beside the system's permission it draws the nudge switches, which
-    /// read `get_settings`.
-    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .updates]
+    /// Sections that read nothing from the daemon: the login item and the
+    /// update feed are local. Notifications is not: beside the system's
+    /// permission it draws the nudge switches, which read `get_settings`.
+    /// Nor is General since the anonymous usage counts' switch (#1920),
+    /// which reads `share_usage_data` from `get_settings`.
+    static let localOnlySections: Set<SettingsSection> = [.startup, .updates]
 
     /// Each daemon-reading section's branch for "the daemon has not answered",
     /// and what that branch draws. Every branch is the absent case written
@@ -417,6 +418,7 @@ final class SettingsParityTests: XCTestCase {
             ("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead"),
         ]),
         .insights: ("InsightsSettingsCard", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
+        .general: ("UsageCountsSettingsCard", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
         .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
         .notifications: ("NudgeSettingsSection", [("if store.settings == nil {", "SettingsReadNotice(settingsRead")]),
         .consent: ("ConsentSection", [("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead")]),

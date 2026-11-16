@@ -121,6 +121,30 @@ final class LiveDaemonClientTests: XCTestCase {
         ])
     }
 
+    /// `record_usage_event {event}` (#1920): the daemon's name and the
+    /// event's protocol name, one call per report, and whatever comes back
+    /// -- not counted, a refusal, an unreachable daemon, an unreadable
+    /// reply -- is `false`, never an error a screen could show.
+    func testAUsageEventSendsItsNameAndNeverFails() async {
+        let answers: [String] = [
+            #"{"id":0,"result":{"recorded":true}}"#,
+            #"{"id":0,"result":{"recorded":false}}"#,
+            #"{"id":0,"error":{"code":"bad_params","message":"usage-event-unknown"}}"#,
+            #"{"id":0,"error":{"code":"unavailable","message":"daemon-not-running"}}"#,
+            "not a frame",
+            #"{"id":0,"result":{}}"#,
+        ]
+        for (index, answer) in answers.enumerated() {
+            let transport = ScriptedTransport { method, _ in method == "record_usage_event" ? answer : nil }
+            let client = LiveDaemonClient(transport: transport)
+            let recorded = await client.recordUsageEvent(.tabInsightsOpened)
+            XCTAssertEqual(recorded, index == 0, answer)
+            XCTAssertEqual(transport.calls.map(\.method), ["record_usage_event"], answer)
+            XCTAssertEqual(transport.calls.map(\.params), [#"{"event":"tab_insights_opened"}"#], answer)
+            XCTAssertEqual(transport.calls.map(\.onQueue), [true], "the report blocked the caller's thread")
+        }
+    }
+
     /// Only the two kinds with a one-time offer have a marker to clear; any
     /// other kind sends nothing.
     func testOnlyAnOfferedKindsMarkerCanBeCleared() async {

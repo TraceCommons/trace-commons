@@ -6,7 +6,8 @@ import TCShellCore
 /// exploration). Under the flat glass theme Light is its light tint and Dark
 /// its dark tint; under classic they are the classic light and dark. The
 /// choice applies at once and is kept for the next launch. Then the edge
-/// rail's switch, and the Traces map's style.
+/// rail's switch, the Traces map's style, Home's promotions and the
+/// anonymous usage counts' switch (`UsageCountsSettingsCard`).
 struct GeneralSection: View {
     @State private var appearance = GlassAppearance.stored
     /// The edge rail's switch: a shell preference, read once and written
@@ -24,6 +25,9 @@ struct GeneralSection: View {
         edgeRailCard
         mapStyleCard
         promotionsCard
+        // The anonymous weekly usage counts' off switch (#1920), the one
+        // card here that reads the daemon.
+        UsageCountsSettingsCard()
     }
 
     /// Whether Home shows promotions, such as a new model on NEAR AI

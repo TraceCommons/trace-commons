@@ -97,6 +97,28 @@ struct MonitorWindowView: View {
         requiresOnboarding ? .inference : tab
     }
 
+    /// The anonymous usage count for a tab coming on screen (#1920).
+    static func usageEvent(for shown: Tab) -> UsageEvent {
+        switch shown {
+        case .home: .tabHomeOpened
+        case .inference: .tabPrivateAiOpened
+        case .traces: .tabTracesOpened
+        case .insights: .tabInsightsOpened
+        }
+    }
+
+    /// The count for a change of the picked tab: the tab now DRAWN, and only
+    /// when it differs from the one drawn before. While onboarding is
+    /// required Inference is drawn whatever is picked, so a change there
+    /// opens nothing. Every change of `tab` counts, whoever made it: the
+    /// strip, Home's and Insights' links to another tab, and an opener's
+    /// destination (`land`) are each the person asking for that screen.
+    static func usageEvent(tabChangedFrom old: Tab, to new: Tab, requiresOnboarding: Bool) -> UsageEvent? {
+        let before = shownTab(old, requiresOnboarding: requiresOnboarding)
+        let after = shownTab(new, requiresOnboarding: requiresOnboarding)
+        return before == after ? nil : usageEvent(for: after)
+    }
+
     /// The NEAR AI payout rail's streams for Insights' NEAR AI card, read
     /// off the main actor. Any refusal (no account session, no rail, a
     /// daemon that predates streams) reads as none, so the card is drawn
@@ -350,7 +372,8 @@ struct MonitorWindowView: View {
                                  }, openSkillsSettings: {
                                      navigation.requestSettings(at: .insights)
                                      openWindow(id: WindowID.settings)
-                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
+                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"),
+                                 recordUsage: { model.recordUsage($0) })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -440,6 +463,13 @@ struct MonitorWindowView: View {
         // A destination this window could not show yet (before the core
         // said) is taken once it can.
         .onChange(of: model.onboardingKnown) { _, _ in consumePending() }
+        // The tab the window opens on counts as opened (#1920): opening the
+        // window is the person asking for a screen, as picking a tab is.
+        // `onAppear` runs once per opening of the window, not on a redraw,
+        // and the restored tab changes nothing until it is picked again.
+        .onAppear {
+            model.recordUsage(Self.usageEvent(for: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding)))
+        }
         // Restored scene state cannot hold a mission page open while
         // missions are hidden.
         .onChange(of: model.missionsShown, initial: true) { _, shown in
@@ -486,7 +516,11 @@ struct MonitorWindowView: View {
         .onChange(of: traces.showsIgnored) { _, shows in if showsIgnored != shows { showsIgnored = shows } }
         // #1146 `MonitorShell`: picking Inference shows the map's Private AI
         // view, picking Traces its Traces view; Home keeps the choice.
-        .onChange(of: tab) { _, picked in
+        .onChange(of: tab) { old, picked in
+            if let event = Self.usageEvent(tabChangedFrom: old, to: picked,
+                                           requiresOnboarding: model.requiresOnboarding) {
+                model.recordUsage(event)
+            }
             if let view = Self.mapTab(for: picked) { mapTab = view }
             // Opening Traces is a new visit: the resume notice's Not now
             // from the last one no longer hides it.

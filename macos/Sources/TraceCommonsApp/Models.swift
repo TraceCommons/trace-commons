@@ -830,6 +830,11 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// by default); "Hide" on the card turns it off. Absent from an older
     /// daemon: no switch, never an "off".
     var insightsRecapCardEnabled: Bool? = nil
+    /// Whether the anonymous weekly usage counts are on
+    /// (`share_usage_data`, #1920: on by default; counted only from the US,
+    /// which the daemon decides). Absent from an older daemon: no switch,
+    /// never an "off".
+    var shareUsageData: Bool? = nil
     /// Whether the app shows missions at all (`missions_enabled`, owner
     /// decision 2026-10-16: hidden for now, off by default, flipped only
     /// through `set_settings`). Absent from an older daemon, which reads as
@@ -877,6 +882,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"
+        case shareUsageData = "share_usage_data"
     }
 }
 

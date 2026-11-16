@@ -340,6 +340,16 @@ public protocol DaemonDataClient: Sendable {
     /// an empty snapshot. Draw a finished stream as core-down, never as
     /// "nothing to show".
     func events() -> AsyncStream<DaemonDataEvent>
+
+    // MARK: Usage counts
+
+    /// `record_usage_event {event}`: one anonymous weekly count (#1920).
+    /// Never throws and is never waited on by a screen: whether it was
+    /// counted (`recorded`) is the daemon's to decide, from
+    /// `share_usage_data` and the US-only region check, and a failed or
+    /// refused report is dropped without a word. Answers `recorded`, for
+    /// tests; callers ignore it.
+    func recordUsageEvent(_ event: UsageEvent) async -> Bool
 }
 
 extension DaemonDataClient {
@@ -388,6 +398,9 @@ extension DaemonDataClient {
     public func setSubscriptionUsage(provider: String, on: Bool) async throws {
         throw DaemonDataError.notAvailableYet(method: "subscription_usage")
     }
+
+    /// Sample and preview clients count nothing.
+    public func recordUsageEvent(_ event: UsageEvent) async -> Bool { false }
 
     /// `list_pending` in queue order, every pending entry or one project's.
     public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
