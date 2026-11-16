@@ -219,10 +219,10 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_scope_global", "All projects"),
     ("skills_scope_project", "Project"),
     ("skills_scope_plugin_cache", "Cached; may be inactive"),
-    // NEEDS OWNER APPROVAL (2026-11-15): the Home card for publishers with
-    // recent public activity. Showing GitHub star counts is approved; these
-    // three wordings are not. The card is drawn only from a verified server
-    // catalog, which no build holds until a catalog key is pinned.
+    // The Home card for publishers with recent public activity. The owner
+    // accepted these three wordings for now on 2026-11-16. The card is drawn
+    // only from a verified server catalog, which no build holds until a
+    // catalog key is pinned.
     ("skills_home_active", "Active on GitHub"),
     ("skills_home_stars", "{count} stars"),
     ("skills_home_recent_commits", "Recent commits: {count}"),
