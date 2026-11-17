@@ -201,6 +201,11 @@ const CSS: &str = r#"
   border-right: 1px solid #000000;
 }
 
+/* The rule between two rows of cells in a box. */
+.tc-brand-ruled {
+  border-top: 1px solid #000000;
+}
+
 /* `brand.tint` behind an acknowledgement or a withheld notice. */
 .tc-brand-notice {
   border: 2px solid #000000;
