@@ -596,18 +596,50 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
 /// here costs only the host link, never the daemon.
 #[cfg(unix)]
 fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRuntime>> {
+    #[cfg(test)]
+    if let Some((runtime, sandboxed)) = host_link_test_runtime(shared.store.dir()) {
+        return start_host_link_with(shared, shared.store.dir(), Some(runtime), sandboxed);
+    }
     if !cfg!(target_os = "linux") {
         return Ok(None);
     }
     let Ok(platform_default) = crate::config::platform_default_dir() else {
         return Ok(None);
     };
-    let claim = match host_link::claim(
-        shared.store.dir(),
+    start_host_link_with(
+        shared,
         &platform_default,
         host_link::runtime_dir(),
         host_link::runs_sandboxed(),
-    ) {
+    )
+}
+
+/// Test-only runtime directories, by state directory, so a test can start a
+/// real embedded daemon as the host part (or as a sandboxed one) without
+/// touching the real `XDG_RUNTIME_DIR` or the real default state directory.
+#[cfg(all(test, unix))]
+fn host_link_test_runtimes() -> &'static std::sync::Mutex<
+    std::collections::HashMap<std::path::PathBuf, (std::path::PathBuf, bool)>,
+> {
+    static RUNTIMES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (std::path::PathBuf, bool)>>,
+    > = std::sync::OnceLock::new();
+    RUNTIMES.get_or_init(Default::default)
+}
+
+#[cfg(all(test, unix))]
+fn host_link_test_runtime(dir: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+    host_link_test_runtimes().lock().unwrap().get(dir).cloned()
+}
+
+#[cfg(unix)]
+fn start_host_link_with(
+    shared: &Arc<ipc::DaemonShared>,
+    platform_default: &std::path::Path,
+    runtime: Option<std::path::PathBuf>,
+    sandboxed: bool,
+) -> Result<Option<HostLinkRuntime>> {
+    let claim = match host_link::claim(shared.store.dir(), platform_default, runtime, sandboxed) {
         Ok(Some(claim)) => claim,
         Ok(None) => return Ok(None),
         Err(host_link::WatcherHeld) => {
@@ -7625,6 +7657,118 @@ mod tests {
              runtime that path builds"
         );
         embedded.close();
+    }
+
+    /// A daemon started as the host part, in a scratch runtime directory.
+    #[cfg(unix)]
+    fn host_link_store(
+        sandboxed: bool,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::config::ConfigStore,
+        std::path::PathBuf,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("tc");
+        if sandboxed {
+            std::fs::create_dir(&runtime).unwrap();
+        }
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        host_link_test_runtimes()
+            .lock()
+            .unwrap()
+            .insert(store.dir().to_path_buf(), (runtime.clone(), sandboxed));
+        (dir, run, store, runtime)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_part_answers_over_the_host_link_and_leaves_its_marker() {
+        let (_dir, _run, store, runtime) = host_link_store(false);
+        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
+        let embedded = start_embedded(store.clone()).await.unwrap();
+
+        let answer = tokio::task::spawn_blocking({
+            let sock = sock.clone();
+            move || client::try_call_at(&sock, "status", &serde_json::json!({}))
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the host link answered");
+        assert!(answer.error.is_none(), "{:?}", answer.error);
+        assert!(answer.result.is_some());
+
+        embedded.close();
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+        // `close` aborts the serving task; the listener closes when the
+        // runtime next retires it, which needs this task to yield. A
+        // process that ends after `close` (`daemon run`) gets there at once.
+        for _ in 0..200 {
+            if host_link::probe(&sock) != host_link::LinkState::Listening {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            host_link::probe(&sock),
+            host_link::LinkState::Down,
+            "a stopped host part leaves its socket file, so a sandboxed \
+             window attaches to it rather than starting a second daemon"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_refused_on_the_watcher_lock_leaves_nothing_behind() {
+        let (_dir, _run, store, runtime) = host_link_store(false);
+        std::fs::create_dir(&runtime).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runtime.join(host_link::WATCHER_LOCK_FILE))
+            .unwrap();
+        held.try_lock().unwrap();
+
+        let err = match start_embedded(store.clone()).await {
+            Ok(_) => panic!("another daemon on this login watches"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::AlreadyRunning)
+        );
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+        assert!(!runtime.join(host_link::HOST_LINK_SOCK_FILE).exists());
+
+        drop(held);
+        start_embedded(store).await.unwrap().close();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sandboxed_daemon_holds_the_watcher_lock_and_serves_no_host_link() {
+        let (_dir, _run, store, runtime) = host_link_store(true);
+        let embedded = start_embedded(store).await.unwrap();
+        assert!(!runtime.join(host_link::HOST_LINK_SOCK_FILE).exists());
+
+        let host = tempfile::tempdir().unwrap();
+        assert_eq!(
+            host_link::claim(host.path(), host.path(), Some(runtime.clone()), false).unwrap_err(),
+            host_link::WatcherHeld,
+            "the host part must not start while the sandbox watches"
+        );
+        embedded.close();
+        assert!(
+            host_link::claim(host.path(), host.path(), Some(runtime), false)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

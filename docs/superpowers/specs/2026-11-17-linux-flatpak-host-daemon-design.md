@@ -191,6 +191,29 @@ needs them:
   a Linux run: the tray and update monitor must be re-tested.
 - `--share=network` should not be added; the host daemon does the network.
 
+## Owner review points
+
+- `crates/trace-commons-contributor/tests/release_pipeline.rs` pinned the
+  manifest at exactly two filesystem grants as a security assertion. It now
+  pins three, naming the new one exactly and refusing any `xdg-config`
+  grant. This is a deliberate widening and needs the owner's sign-off.
+- `FLATPAK_SESSION_ROOTS_EXPLANATION` in the GTK crate's `src/copy.rs`
+  ("It asks for access to those folders only.") is no longer exact: the app
+  also gets the runtime directory, which holds no session data. Not edited;
+  approved words.
+
+## Residual risks
+
+- At login the runtime directory is empty, so which daemon wins is start
+  order: if the window starts and hosts before the systemd unit runs, the
+  unit fails on `watcher.lock` and retries until the window quits. The
+  window does not hand over to the host part while it runs.
+- A sandboxed daemon arbitrates only when the runtime directory is mounted
+  in the sandbox (the manifest grant). An older Flatpak build without the
+  grant hosts without taking `watcher.lock`, so a host daemon cannot see it.
+- After `close`, the host-link listener stops when the runtime retires its
+  aborted task; `daemon run` exits right after, so in practice at once.
+
 ## Linux checklist
 
 1. In the installed Flatpak, `flatpak run --command=sh ai.tracecommons.Contributor`
@@ -217,5 +240,10 @@ needs them:
    sandbox as before (roots screen), Launch off with the existing line.
 9. Another local user (or `sudo -u nobody socat - UNIX-CONNECT:...`) cannot
    connect to the host link.
-10. Run `scripts/flatpak/check-host-link.sh`; it covers items 1-3 and
+10. Confirm `:create` works on an `xdg-run/...` path: with no
+    `$XDG_RUNTIME_DIR/trace-commons` on the host, `flatpak run` creates it,
+    and the host daemon then tightens it to 0700.
+11. Confirm `flock` on `watcher.lock` through the bind mount excludes the
+    host daemon (item 4).
+12. Run `scripts/flatpak/check-host-link.sh`; it covers items 1-3 and
     the `daemon_on_host` capability from both sides of the sandbox.

@@ -20,6 +20,13 @@
 //! socket's own mode; the daemon refuses to serve from a directory that is
 //! not 0700.
 //!
+//! On Linux a daemon on its default state directory, outside a Flatpak
+//! sandbox, also serves this same dispatcher on the host link
+//! (`daemon::host_link`), for a Flatpak window that cannot see the state
+//! directory. That socket's directory under `XDG_RUNTIME_DIR` is held at
+//! 0700 too, and every connection to it must also come from the daemon's own
+//! uid (`SO_PEERCRED`) before a byte is read.
+//!
 //! Two operations -- arming a project for `auto_upload` and bulk-approving
 //! the whole queue -- used to be refused over the socket and required a
 //! terminal. That restriction is gone: the reasoning behind it does not
