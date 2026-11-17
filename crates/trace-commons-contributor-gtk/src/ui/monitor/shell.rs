@@ -280,9 +280,12 @@ impl Shell {
                 let Some(scroller) = scroller.upgrade() else {
                     return;
                 };
+                // Each widget's own flag, not `is_visible`: that one asks
+                // the ancestors too, and the column starts hidden, so no
+                // card would ever look shown and it would never open.
                 scroller.set_visible(cards.iter().any(|(slot, card)| {
-                    slot.upgrade().is_some_and(|slot| slot.is_visible())
-                        && card.upgrade().is_some_and(|card| card.is_visible())
+                    slot.upgrade().is_some_and(|slot| slot.get_visible())
+                        && card.upgrade().is_some_and(|card| card.get_visible())
                 }));
             })
         };
