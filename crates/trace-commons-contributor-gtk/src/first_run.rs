@@ -161,14 +161,30 @@ pub fn terms_handoff_refused(result: &Result<Value, String>) -> bool {
     !result.as_ref().is_ok_and(Value::is_object)
 }
 
+/// Whether `set_settings`'s answer took each declaration sent. The answer
+/// never carries a declaration (it holds a path): it reports each one's
+/// mode as `<key>_mode` (`daemon::ipc::redacted_settings`), so that is what
+/// is compared. A declaration without a mode is never acknowledged.
+pub fn roots_acknowledged<'a>(
+    mut sent: impl Iterator<Item = (&'a String, &'a Value)>,
+    answer: &Value,
+) -> bool {
+    let mut any = false;
+    let all = sent.all(|(key, declaration)| {
+        any = true;
+        declaration
+            .get("mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| {
+                answer.get(format!("{key}_mode")).and_then(Value::as_str) == Some(mode)
+            })
+    });
+    any && all
+}
+
 pub fn acknowledged(action: &Action, value: &Value) -> bool {
     match action {
-        Action::SetSourceSettings(roots) => {
-            !roots.is_empty()
-                && roots
-                    .iter()
-                    .all(|(key, expected)| value.get(key) == Some(expected))
-        }
+        Action::SetSourceSettings(roots) => roots_acknowledged(roots.iter(), value),
         Action::SetAskEachTime => value.get("withdrawn").and_then(Value::as_bool).is_some(),
         Action::SetConsentScopes(requested) => {
             let Ok(expected) = trace_commons_contributor::consent::validate_scopes(requested)
@@ -600,6 +616,46 @@ mod tests {
         assert!(terms_handoff_refused(&Ok(json!(false))));
         assert!(!terms_handoff_refused(&Ok(json!({"held": true}))));
         assert!(!terms_handoff_refused(&Ok(json!({"held": false}))));
+    }
+
+    /// `set_settings` answers with `get_settings`'s view, which drops every
+    /// `*_source` declaration (it holds a path) and reports `*_source_mode`
+    /// (`daemon::ipc::redacted_settings`). Seen live on Ubuntu 26.04: a
+    /// daemon that saved `claude_source` watch and `codex_source` off
+    /// answered `claude_source_mode: "watch"`, `codex_source_mode: "off"`
+    /// and no `claude_source`, and Tools said the change couldn't be saved.
+    #[test]
+    fn a_roots_commit_is_acknowledged_by_the_modes_the_daemon_reports() {
+        let roots = Action::SetSourceSettings(
+            [
+                (
+                    "claude_source".to_string(),
+                    json!({"mode": "watch", "path": "/home/u/.claude/projects"}),
+                ),
+                ("codex_source".to_string(), json!({"mode": "off"})),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let answer = json!({
+            "claude_source_mode": "watch",
+            "codex_source_mode": "off",
+            "claude_root_configured": true,
+            "codex_root_configured": false,
+        });
+        assert!(acknowledged(&roots, &answer));
+        // A mode the daemon did not take is not acknowledged.
+        let refused = json!({"claude_source_mode": "unset", "codex_source_mode": "off"});
+        assert!(!acknowledged(&roots, &refused));
+        // Nor is an answer that says nothing about the sources.
+        assert!(!acknowledged(&roots, &json!({"ok": true})));
+        // A declaration with no mode is never acknowledged.
+        let odd = Action::SetSourceSettings(
+            [("claude_source".to_string(), json!({"path": "/x"}))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(!acknowledged(&odd, &answer));
     }
 
     use super::*;
