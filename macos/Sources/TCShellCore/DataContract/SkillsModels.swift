@@ -10,6 +10,10 @@ extension DaemonData {
         public let inventory: SkillsInventory
         public let catalog: SkillsCatalog
         public let followedPublishers: [String]
+        /// Home suggestions, never implicit follows. Empty from older daemons.
+        public let defaultPublishers: [String]
+        public let homeFeed: [SkillsFeedEvent]
+        public let homeFeedPartial: Bool
         public let updates: [SkillsUpdate]
         public let feed: [SkillsFeedEvent]
         public let feedPartial: Bool
@@ -19,7 +23,7 @@ extension DaemonData {
         /// daemons, which read as unavailable.
         public let suggestions: SkillsSuggestions
 
-        public init(enabled: Bool = false, readable: Bool = true, refreshing: Bool = false, error: String? = nil, inventory: SkillsInventory = .init(), catalog: SkillsCatalog = .init(), followedPublishers: [String] = [], updates: [SkillsUpdate] = [], feed: [SkillsFeedEvent] = [], feedPartial: Bool = false, usage: SkillsUsage = .init(), copy: [String: String] = [:], suggestions: SkillsSuggestions = .init()) {
+        public init(enabled: Bool = false, readable: Bool = true, refreshing: Bool = false, error: String? = nil, inventory: SkillsInventory = .init(), catalog: SkillsCatalog = .init(), followedPublishers: [String] = [], updates: [SkillsUpdate] = [], feed: [SkillsFeedEvent] = [], feedPartial: Bool = false, usage: SkillsUsage = .init(), copy: [String: String] = [:], suggestions: SkillsSuggestions = .init(), defaultPublishers: [String] = [], homeFeed: [SkillsFeedEvent] = [], homeFeedPartial: Bool = false) {
             self.enabled = enabled
             self.readable = readable
             self.refreshing = refreshing
@@ -27,6 +31,9 @@ extension DaemonData {
             self.inventory = inventory
             self.catalog = catalog
             self.followedPublishers = followedPublishers
+            self.defaultPublishers = defaultPublishers
+            self.homeFeed = homeFeed
+            self.homeFeedPartial = homeFeedPartial
             self.updates = updates
             self.feed = feed
             self.feedPartial = feedPartial
@@ -43,6 +50,9 @@ extension DaemonData {
             case inventory
             case catalog
             case followedPublishers = "followed_publishers"
+            case defaultPublishers = "default_publishers"
+            case homeFeed = "home_feed"
+            case homeFeedPartial = "home_feed_partial"
             case updates
             case feed
             case feedPartial = "feed_partial"
@@ -60,6 +70,9 @@ extension DaemonData {
             inventory = try values.decodeIfPresent(SkillsInventory.self, forKey: .inventory) ?? .init()
             catalog = try values.decodeIfPresent(SkillsCatalog.self, forKey: .catalog) ?? .init()
             followedPublishers = try values.decodeIfPresent([String].self, forKey: .followedPublishers) ?? []
+            defaultPublishers = try values.decodeIfPresent([String].self, forKey: .defaultPublishers) ?? []
+            homeFeed = try values.decodeIfPresent([SkillsFeedEvent].self, forKey: .homeFeed) ?? []
+            homeFeedPartial = try values.decodeIfPresent(Bool.self, forKey: .homeFeedPartial) ?? false
             updates = try values.decodeIfPresent([SkillsUpdate].self, forKey: .updates) ?? []
             feed = try values.decodeIfPresent([SkillsFeedEvent].self, forKey: .feed) ?? []
             feedPartial = try values.decodeIfPresent(Bool.self, forKey: .feedPartial) ?? false

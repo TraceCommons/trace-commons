@@ -49,6 +49,9 @@ struct Publisher {
     instructions_url: &'static str,
 }
 
+// Curated Home suggestions, not implicit follows or an activity ranking.
+const DEFAULT_HOME_PUBLISHERS: [&str; 3] = ["obra", "poteto", "slack"];
+
 fn publishers() -> [Publisher; 4] {
     [
         Publisher {
@@ -354,6 +357,36 @@ fn catalog_rows(
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0));
     ranked.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Reserve one real example per Home creator before the shared catalog is
+/// bounded. The remaining rows keep their active/installed/catalog priority;
+/// a large first creator cannot crowd every other default out of Home.
+fn reserve_home_creator_examples(mut rows: Vec<Value>, defaults: &[&str]) -> Vec<Value> {
+    // Preserve the existing active/installed order when no rows will be cut.
+    // Use the same encoded-byte accounting as bounded_rows below.
+    let fits = rows
+        .iter()
+        .try_fold(2usize, |bytes, row| {
+            let size = serde_json::to_vec(row).ok()?.len();
+            let total = bytes.saturating_add(size).saturating_add(1);
+            (total <= 180 * 1024).then_some(total)
+        })
+        .is_some();
+    if defaults.is_empty() || fits {
+        return rows;
+    }
+    let mut examples = Vec::with_capacity(defaults.len());
+    for publisher in defaults {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| row.get("publisher_id").and_then(Value::as_str) == Some(*publisher))
+        {
+            examples.push(rows.remove(index));
+        }
+    }
+    examples.extend(rows);
+    examples
 }
 
 type Results = Vec<(&'static str, Result<FetchedCatalog, ()>)>;
@@ -898,19 +931,13 @@ impl SkillsService {
     }
 }
 
-/// Daemon polling refreshes only after the user follows a publisher. Opening
-/// the Skills tab remains an explicit catalog request, subject to throttling.
+/// Keep the default Home creators and explicit follows current. The feature,
+/// analysis, dry-run and six-hour throttle gates remain in the refresh path.
 pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
     if !enabled(shared) {
         return;
     }
-    let followed = shared
-        .insights_skills
-        .state(shared.store.dir())
-        .is_ok_and(|runtime| !runtime.public.followed.is_empty());
-    if followed {
-        shared.insights_skills.start_refresh(shared, false);
-    }
+    shared.insights_skills.start_refresh(shared, false);
     suggestions::maybe_send(shared);
 }
 
@@ -1148,6 +1175,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
     let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
     let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
     let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
+    let defaults = DEFAULT_HOME_PUBLISHERS.as_slice();
     // Recently active publishers, chosen from the verified document's
     // public signals alone and before any row is sized, so every install
     // holding this document is sent the same choice.
@@ -1160,7 +1188,10 @@ fn snapshot(shared: &DaemonShared) -> Value {
         .map(|skill| (skill.repository.as_str(), skill.path.as_str()))
         .collect();
     let (catalog, catalog_partial) = bounded_rows(
-        catalog_rows(&runtime.public, server, &inventory, &active_skills),
+        reserve_home_creator_examples(
+            catalog_rows(&runtime.public, server, &inventory, &active_skills),
+            defaults,
+        ),
         180 * 1024,
     );
     // A skill is named by the id of the row sent for it; a seed's row is
@@ -1216,14 +1247,10 @@ fn snapshot(shared: &DaemonShared) -> Value {
         updates_with_server(&inventory, &runtime.public, server, now),
         64 * 1024,
     );
-    let (feed, feed_partial) = bounded_rows(
-        runtime
-            .public
-            .feed
-            .iter()
-            .filter(|item| runtime.public.followed.contains(&item.publisher_id)),
-        48 * 1024,
-    );
+    // Both partitions contribute to Home; Following contains explicit choices
+    // only. Their metadata shares one budget, with a turn for each publisher.
+    let (feed, feed_partial, home_feed, home_feed_partial) =
+        bounded_home_news(&runtime.public, 48 * 1024);
     bound_usage_rows(&mut usage, 96 * 1024);
     let value = json!({
         "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
@@ -1234,6 +1261,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
             "active_publishers": active_rows},
         "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
+        "default_publishers":defaults,"home_feed":home_feed,"home_feed_partial":home_feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
     });
@@ -1296,6 +1324,86 @@ fn bound_usage_rows(usage: &mut Value, limit: usize) {
             }
         }
     }
+}
+
+/// Keep discovery available after following a creator, without implicitly
+/// following the curated defaults. Select newest rows in publisher rounds so
+/// one creator's burst cannot exhaust the combined metadata budget first.
+fn bounded_home_news(state: &PublicState, limit: usize) -> (Vec<Value>, bool, Vec<Value>, bool) {
+    let mut candidates: Vec<_> = state
+        .feed
+        .iter()
+        .filter(|item| {
+            state.followed.contains(&item.publisher_id)
+                || DEFAULT_HOME_PUBLISHERS.contains(&item.publisher_id.as_str())
+        })
+        .collect();
+    candidates.sort_by(|left, right| feed_order(left, right));
+    let mut seen = BTreeSet::new();
+    let mut publishers: BTreeMap<&str, Vec<&FeedItem>> = BTreeMap::new();
+    for item in candidates {
+        if seen.insert(item.id.as_str()) {
+            publishers
+                .entry(item.publisher_id.as_str())
+                .or_default()
+                .push(item);
+        }
+    }
+    let mut publishers: Vec<_> = publishers.into_values().map(Vec::into_iter).collect();
+    let mut feed = Vec::new();
+    let mut home_feed = Vec::new();
+    let mut feed_partial = false;
+    let mut home_feed_partial = false;
+    // Include both arrays' brackets and each actual inter-row comma.
+    let mut bytes = 4usize;
+    loop {
+        let mut had_row = false;
+        for publisher in &mut publishers {
+            let Some(item) = publisher.next() else {
+                continue;
+            };
+            had_row = true;
+            let (rows, partial) = if state.followed.contains(&item.publisher_id) {
+                (&mut feed, &mut feed_partial)
+            } else {
+                (&mut home_feed, &mut home_feed_partial)
+            };
+            let Ok(value) = serde_json::to_value(item) else {
+                *partial = true;
+                continue;
+            };
+            let Ok(body) = serde_json::to_vec(&value) else {
+                *partial = true;
+                continue;
+            };
+            let row_bytes = body.len().saturating_add(usize::from(!rows.is_empty()));
+            if bytes.saturating_add(row_bytes) > limit {
+                *partial = true;
+                continue;
+            }
+            bytes += row_bytes;
+            rows.push((item, value));
+        }
+        if !had_row {
+            break;
+        }
+    }
+    // Selection is fair across publishers; presentation stays chronological.
+    feed.sort_by(|(left, _), (right, _)| feed_order(left, right));
+    home_feed.sort_by(|(left, _), (right, _)| feed_order(left, right));
+    (
+        feed.into_iter().map(|(_, value)| value).collect(),
+        feed_partial,
+        home_feed.into_iter().map(|(_, value)| value).collect(),
+        home_feed_partial,
+    )
+}
+
+fn feed_order(left: &FeedItem, right: &FeedItem) -> std::cmp::Ordering {
+    right
+        .observed_at
+        .cmp(&left.observed_at)
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn bounded_rows<T: Serialize>(

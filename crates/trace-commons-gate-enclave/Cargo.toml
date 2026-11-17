@@ -18,11 +18,11 @@ trace-commons-gate-api = { path = "../trace-commons-gate-api" }
 # a staged base model. Hermetic CI builds (default features) do not see
 # these deps.
 #
-# A2.3 dropped the direct candle git pins; mistralrs brings candle 0.10.2
-# (crates.io) transitively. mistralrs is git-pinned to master SHA
-# 2d4ba4f16f61e5e18be085d0dd137bc95cba038a (2026-04-15); Slice 0 PoC
-# validated raw-logits perplexity on Lambda A100 against this SHA.
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "2d4ba4f16f61e5e18be085d0dd137bc95cba038a", optional = true, default-features = false }
+# Pinned mistralrs 0.9.5 brings Candle 0.11.1 and patched ZIP >= 9.1.3.
+# This update clears the ZIP advisories without enabling inference tools or
+# code/shell execution. The request helper tests those disabled capabilities.
+# The earlier A100 PoC used 2d4ba4f; this pin still needs GPU qualification.
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "5b81196dfab4823ff30b9e8404be9eec6fddece6", optional = true, default-features = false }
 tokenizers = { version = "0.21.4", optional = true, default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4.3", optional = true }
 # Used by mistralrs's tokenize API (`Either::Right(text)`).

@@ -151,6 +151,14 @@ impl FacadeError {
         match error {
             PipelineError::NoRoute(no_route) => Self::from_no_route(no_route, connect),
             PipelineError::Admission(_) => Self::invalid_request(error.to_string()),
+            PipelineError::TranslationRefused { rejected } => {
+                let detail = rejected
+                    .iter()
+                    .map(|(backend, reason)| format!("{backend}: {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Self::invalid_request(format!("No compatible translation: {detail}"))
+            }
             PipelineError::Upstream(upstream) | PipelineError::AllFailed { last: upstream, .. } => {
                 Self::from_upstream(upstream)
             }
@@ -423,6 +431,29 @@ mod tests {
                 retry_after_secs: None,
             }));
         assert_eq!(err.retry_after_secs, None);
+    }
+
+    #[test]
+    fn a_content_translation_refusal_is_an_invalid_request_with_its_reason() {
+        let error = PipelineError::TranslationRefused {
+            rejected: vec![("nearai".into(), "images in tool output".into())],
+        };
+        for openai in [false, true] {
+            let err = FacadeError::from_pipeline(&error);
+            let err = if openai {
+                err.on_openai_facade(true)
+            } else {
+                err
+            };
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(err.kind, "invalid_request_error");
+            assert!(err.message.contains("nearai"));
+            assert!(err.message.contains("images in tool output"));
+            assert!(err.retry_after_secs.is_none());
+            assert!(err.codex_notice.is_none());
+        }
+        // The ledger uses Display, which must remain a fixed metadata label.
+        assert_eq!(error.to_string(), "request translation refused");
     }
 
     #[test]
