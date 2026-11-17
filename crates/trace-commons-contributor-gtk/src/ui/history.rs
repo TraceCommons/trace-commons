@@ -192,7 +192,8 @@ pub fn refresh(app: &Rc<App>) {
 
 /// Draws History with a community standing whose figures are as wide as
 /// they get, so a fit test covers the Community panel.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 pub(crate) fn show_community_for_test(app: &Rc<App>) {
     let value = serde_json::json!({
         "community": {
