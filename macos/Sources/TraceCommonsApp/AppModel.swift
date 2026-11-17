@@ -3202,7 +3202,8 @@ final class AppModel: ObservableObject {
     /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
     /// the Monitor's gates and every request's routing.
     var onboardingKnown: Bool {
-        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+        if DebugScreenshot.capturesSampleWindows { return true }
+        return LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
     }
 
     /// What the launch's own request opens (`LaunchRouting.launchOpening`).
@@ -3236,6 +3237,7 @@ final class AppModel: ObservableObject {
     /// `loggedIn` reads false, so onboarding reads required until then;
     /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
+        if DebugScreenshot.capturesSampleWindows { return false }
         if startup == .needsRoots { return true }
         if Self.reviewSkipsSignIn { return false }
         return !status.loggedIn || !isOnboardingComplete
