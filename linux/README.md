@@ -11,9 +11,11 @@ from a machine that is not running Linux. They mirror the Windows dev VM
 | `tc-linux-kde` | Debian 13 | Plasma 6, Wayland |
 
 Both are `e2-standard-4` with a 100 GB disk, in `us-central1-a` of the
-pilot project, and render in software (no GPU). The desktop user `tc` is
-logged straight into a Wayland session that never locks, so the app and
-screenshots always have a session to run in.
+pilot project, and render in software (no GPU). The bootstrap sets the
+desktop user `tc` to log straight into a Wayland session that never locks.
+Check that the session exists (`loginctl list-sessions`) before relying on
+it: on 2026-11-17 the KDE box had none. Without it, run the app under a
+nested headless Weston as your own user (see Screenshots).
 
 ## Cost
 

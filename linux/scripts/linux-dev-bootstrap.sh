@@ -19,9 +19,10 @@ fi
 
 COMMON=(build-essential pkg-config git curl ca-certificates libgtk-4-dev libadwaita-1-dev
   tesseract-ocr imagemagick weston dbus-user-session xdg-desktop-portal-gtk)
-# Debian names the screenshot tool kde-spectacle; Ubuntu's archive mirror
-# answered 404 for pool files on the first boot of 2026-11-16 (an index read
-# before the mirror settled), so a failed install refreshes and retries once.
+# Debian names the screenshot tool kde-spectacle. On the first boot of
+# 2026-11-16 Ubuntu's regional mirror answered 404 for many pool files (cause
+# not established), so a failed install refreshes the index and retries once.
+# This retry has not yet been exercised on a box.
 install_packages() {
   if [ "$FLAVOR" = kde ]; then
     apt-get install -y "$@" "${COMMON[@]}" kde-plasma-desktop sddm plasma-workspace krdp kde-spectacle \
