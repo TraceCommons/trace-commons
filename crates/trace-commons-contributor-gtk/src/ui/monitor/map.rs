@@ -1730,7 +1730,6 @@ fn memory_legend_word() -> &'static str {
 /// transfer card's memory well (the Mac's `Image(systemName: "lock")`).
 pub(super) fn lock_icon() -> gtk::DrawingArea {
     let lock = gtk::DrawingArea::new();
-    lock.add_css_class("tc-map-lock");
     lock.set_content_width(10);
     lock.set_content_height(10);
     lock.set_valign(gtk::Align::Center);

@@ -165,10 +165,9 @@ mod tests {
             .expect("the memory well");
         let first = well.first_child().expect("the well's first child");
         assert!(
-            first.has_css_class("tc-map-lock"),
-            "{:?}",
-            first.css_classes()
+            first.is::<gtk::DrawingArea>(),
+            "the well opens with {}",
+            first.type_().name()
         );
-        assert!(first.is::<gtk::DrawingArea>());
     }
 }
