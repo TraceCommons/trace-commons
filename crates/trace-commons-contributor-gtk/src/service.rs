@@ -8,8 +8,9 @@
 //! start; after "Not now" it stays quiet for the run, and the Private AI
 //! start area keeps a "Set up" button beside its unavailable line.
 //!
-//! The only thing this window asks of the host is systemd's `StartUnit` for
-//! the channel's fixed unit, on the session bus. It never runs the install
+//! The only thing this window asks of the host is systemd's `RestartUnit` for
+//! the channel's fixed unit, on the session bus (besides reading the unit's
+//! state). It never runs the install
 //! command: that is copied to the clipboard.
 
 use std::path::{Path, PathBuf};
@@ -107,6 +108,27 @@ pub fn first_setup_asks(on_linux: bool, headless_driver: bool) -> bool {
     on_linux && !headless_driver
 }
 
+/// Whether the window shows the folders screen for the daemon it is
+/// attached to (owner, 2026-11-17): after a switch-over, or any attach to
+/// the background service, whose daemon has no session folders declared.
+/// `settings` is that daemon's `get_settings`. Never while this window
+/// hosts the daemon (it cannot start without them), at most once per
+/// attachment (`asked`), and not while first run is open, whose own Tools
+/// step asks the same question.
+pub fn asks_for_folders(
+    hosting: bool,
+    settings: &Value,
+    asked: bool,
+    first_run_open: bool,
+) -> bool {
+    // `null` is "never asked" (`daemon::settings::roots_declared` needs
+    // both); a missing key is a daemon that does not say, never a question.
+    let undeclared = ["claude_source", "codex_source"]
+        .iter()
+        .any(|key| settings.get(key).is_some_and(Value::is_null));
+    !hosting && !asked && !first_run_open && undeclared
+}
+
 /// Whether a window attached to the host daemon goes back to running its
 /// own: the host part is gone (no socket answers, no unit marker), and the
 /// last try did not already fail with the link in this same state.
@@ -121,20 +143,36 @@ pub enum WatchStep {
     Close,
     /// The install finished but the service is not up -- this window's own
     /// daemon holds it off, or it is still starting: stop that daemon, ask
-    /// systemd to start the unit, attach. Once per dialog.
+    /// systemd to restart the unit, attach.
     SwitchOver,
     /// Keep waiting.
     Keep,
 }
 
+/// The switch-overs an open dialog has tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tries {
+    /// How many it has made.
+    pub made: u32,
+    /// How long ago the last one ended; `None` before the first.
+    pub since_last: Option<std::time::Duration>,
+}
+
 /// The not-installed and too-old dialogs watch for the service while open.
-pub fn watch_step(open: Dialog, state: ServiceState, switched: bool) -> WatchStep {
+pub fn watch_step(open: Dialog, state: ServiceState, tries: Tries) -> WatchStep {
     match (open, state) {
         (_, ServiceState::Running) => WatchStep::Close,
         // After the command ran: this window's daemon may hold the new
-        // unit off (the update case too, where an older daemon ran beside
-        // a sandboxed one).
-        (Dialog::Install | Dialog::Update, ServiceState::InstalledNotRunning) if !switched => {
+        // unit off (the update case too, where an older daemon ran beside a
+        // sandboxed one). Tried again after a pause when a try did not bring
+        // it up, a bounded number of times.
+        (Dialog::Install | Dialog::Update, ServiceState::InstalledNotRunning)
+            if tries.made < SWITCH_TRIES
+                && (tries.made == 0
+                    || tries
+                        .since_last
+                        .is_some_and(|ago| ago >= SWITCH_RETRY_AFTER)) =>
+        {
             WatchStep::SwitchOver
         }
         _ => WatchStep::Keep,
@@ -144,12 +182,31 @@ pub fn watch_step(open: Dialog, state: ServiceState, switched: bool) -> WatchSte
 /// How often an open dialog looks again.
 pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long a switch-over waits for the unit to answer after `StartUnit`.
+/// How long a switch-over waits for the unit to answer after `RestartUnit`.
+/// The unit is `Type=simple` with no `ExecStartPre` (`daemon::install`), and
+/// `RestartUnit` skips any `RestartSec` wait, so this covers only the
+/// daemon's own start: loading its state, taking `watcher.lock`, binding the
+/// sockets -- seconds, not tens of them.
 pub const SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The systemd user manager's `StartUnit`, as one fixed call: destination,
-/// object, interface, method, then the arguments. Only the channel's unit.
-pub fn start_unit_call() -> (
+/// How long after a switch-over that did not bring the service up an open
+/// dialog waits before trying again. Longer than [`SWITCH_WAIT`], so a unit
+/// still starting is not restarted again under itself.
+pub const SWITCH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many switch-overs an open dialog makes in all: each restarts the unit
+/// and replaces this window's daemon.
+pub const SWITCH_TRIES: u32 = 3;
+
+/// The systemd user manager's `RestartUnit(in s name, in s mode, out o job)`
+/// (org.freedesktop.systemd1(5)), as one fixed call: destination, object,
+/// interface, method, then the arguments. Only the channel's unit.
+///
+/// Restart, not start: while the unit waits out `RestartSec=30` after a
+/// start that failed on this window's lock (`auto-restart`), systemd before
+/// v257 queues a `StartUnit` job until that wait ends; a restart job starts
+/// the unit at once. A unit that is not running is started.
+pub fn restart_unit_call() -> (
     &'static str,
     &'static str,
     &'static str,
@@ -160,7 +217,7 @@ pub fn start_unit_call() -> (
         SYSTEMD_DESTINATION,
         SYSTEMD_PATH,
         SYSTEMD_MANAGER,
-        "StartUnit",
+        "RestartUnit",
         (
             trace_commons_contributor::channel::SYSTEMD_UNIT_NAME,
             "replace",
@@ -175,12 +232,14 @@ const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 /// How long one systemd call may take.
 const BUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Ask the systemd user manager to start the unit. Blocking and bounded;
-/// callers run it off the GTK thread. `Ok` means systemd queued the job, not
-/// that the daemon came up: the probe says that.
-pub fn start_unit() -> anyhow::Result<()> {
+/// Ask the systemd user manager to restart the unit ([`restart_unit_call`]).
+/// Blocking and bounded; callers run it off the GTK thread, after stopping
+/// any daemon this window runs, so the unit can take `watcher.lock`. `Ok`
+/// means systemd queued the job, not that the daemon came up: the probe
+/// says that.
+pub fn restart_unit() -> anyhow::Result<()> {
     bounded(|| {
-        let (destination, path, interface, method, args) = start_unit_call();
+        let (destination, path, interface, method, args) = restart_unit_call();
         let connection = zbus::blocking::Connection::session()?;
         let proxy = zbus::blocking::Proxy::new(&connection, destination, path, interface)?;
         let _job: zbus::zvariant::OwnedObjectPath = proxy.call(method, &args)?;
@@ -216,11 +275,13 @@ pub fn unit_file_installed() -> Option<bool> {
     .flatten()
 }
 
-/// Whether systemd reports the unit `active`: `GetUnit`, then the unit's
-/// `ActiveState` (org.freedesktop.systemd1(5)). `Some(false)` when the unit
-/// is not loaded or in any other state (`activating` while it restarts);
-/// `None` when the bus cannot be asked.
-pub fn unit_active() -> Option<bool> {
+/// Whether systemd reports the unit `active`, and for how long: `GetUnit`,
+/// then the unit's `ActiveState` and `ActiveEnterTimestamp`
+/// (org.freedesktop.systemd1(5): `CLOCK_REALTIME` microseconds, 0 when not
+/// recorded this boot). `Some((false, None))` when the unit is not loaded or
+/// in any other state (`activating` while it restarts); `None` when the bus
+/// cannot be asked.
+pub fn unit_active() -> Option<(bool, Option<std::time::Duration>)> {
     bounded(|| {
         let connection = zbus::blocking::Connection::session().ok()?;
         let manager = zbus::blocking::Proxy::new(
@@ -235,7 +296,7 @@ pub fn unit_active() -> Option<bool> {
             &(trace_commons_contributor::channel::SYSTEMD_UNIT_NAME,),
         ) {
             Ok(path) => path,
-            Err(zbus::Error::MethodError(..)) => return Some(false),
+            Err(zbus::Error::MethodError(..)) => return Some((false, None)),
             Err(_) => return None,
         };
         let unit = zbus::blocking::Proxy::new(
@@ -246,9 +307,27 @@ pub fn unit_active() -> Option<bool> {
         )
         .ok()?;
         let state: String = unit.get_property("ActiveState").ok()?;
-        Some(state == "active")
+        if state != "active" {
+            return Some((false, None));
+        }
+        let entered: Option<u64> = unit.get_property("ActiveEnterTimestamp").ok();
+        Some((
+            true,
+            entered.and_then(|usec| active_for(usec, std::time::SystemTime::now())),
+        ))
     })
     .flatten()
+}
+
+/// How long ago `entered_usec` (`CLOCK_REALTIME` microseconds) was, from
+/// `now`. `None` for 0 (not recorded) or a time after `now`: an unknown
+/// duration never counts toward the too-old grace.
+pub fn active_for(entered_usec: u64, now: std::time::SystemTime) -> Option<std::time::Duration> {
+    if entered_usec == 0 {
+        return None;
+    }
+    let entered = std::time::UNIX_EPOCH + std::time::Duration::from_micros(entered_usec);
+    now.duration_since(entered).ok()
 }
 
 /// Run `f` on its own thread for at most [`BUS_TIMEOUT`].
@@ -334,6 +413,7 @@ pub fn gather(hosting: bool, attached: Option<&Path>) -> ServiceFacts {
             .flatten()
             .map(|file| file.exists())
     });
+    let active = unit_active();
     let hello = hello_targets(hosting, attached, link, link_socket.as_deref())
         .iter()
         .find_map(|socket| hello_at(socket));
@@ -341,7 +421,8 @@ pub fn gather(hosting: bool, attached: Option<&Path>) -> ServiceFacts {
         link,
         hosting,
         unit_installed,
-        unit_active: unit_active(),
+        unit_active: active.map(|(active, _)| active),
+        unit_active_for: active.and_then(|(_, since)| since),
         answer: answer_from_hello(hello.as_ref()),
     }
 }
@@ -446,43 +527,84 @@ mod tests {
         );
     }
 
+    fn tried(made: u32, ago: Option<u64>) -> Tries {
+        Tries {
+            made,
+            since_last: ago.map(std::time::Duration::from_secs),
+        }
+    }
+
     #[test]
-    fn an_open_dialog_closes_when_the_service_runs_and_switches_over_once() {
+    fn an_open_dialog_closes_when_the_service_runs_and_switches_over() {
         for dialog in [Dialog::Install, Dialog::Start, Dialog::Update] {
-            assert_eq!(
-                watch_step(dialog, ServiceState::Running, false),
-                WatchStep::Close
-            );
-            assert_eq!(
-                watch_step(dialog, ServiceState::Running, true),
-                WatchStep::Close
-            );
+            for tries in [tried(0, None), tried(SWITCH_TRIES, Some(0))] {
+                assert_eq!(
+                    watch_step(dialog, ServiceState::Running, tries),
+                    WatchStep::Close
+                );
+            }
         }
         assert_eq!(
-            watch_step(Dialog::Install, ServiceState::InstalledNotRunning, false),
+            watch_step(
+                Dialog::Install,
+                ServiceState::InstalledNotRunning,
+                tried(0, None)
+            ),
             WatchStep::SwitchOver
         );
         assert_eq!(
-            watch_step(Dialog::Install, ServiceState::InstalledNotRunning, true),
+            watch_step(Dialog::Install, ServiceState::NotInstalled, tried(0, None)),
             WatchStep::Keep
         );
         assert_eq!(
-            watch_step(Dialog::Install, ServiceState::NotInstalled, false),
-            WatchStep::Keep
-        );
-        assert_eq!(
-            watch_step(Dialog::Update, ServiceState::TooOld, false),
+            watch_step(Dialog::Update, ServiceState::TooOld, tried(0, None)),
             WatchStep::Keep
         );
         // Updated, but held off by this window's own daemon.
         assert_eq!(
-            watch_step(Dialog::Update, ServiceState::InstalledNotRunning, false),
+            watch_step(
+                Dialog::Update,
+                ServiceState::InstalledNotRunning,
+                tried(0, None)
+            ),
             WatchStep::SwitchOver
         );
+        // "Start it" is the person's to press.
         assert_eq!(
-            watch_step(Dialog::Start, ServiceState::InstalledNotRunning, false),
+            watch_step(
+                Dialog::Start,
+                ServiceState::InstalledNotRunning,
+                tried(0, None)
+            ),
             WatchStep::Keep
         );
+    }
+
+    /// A switch-over that did not bring the service up is tried again, so
+    /// the dialog does not wait forever on one failed attempt -- but not on
+    /// every 2 s look (each try restarts the unit and replaces this
+    /// window's daemon), and not without end.
+    #[test]
+    fn a_failed_switch_over_is_tried_again_after_a_pause_a_few_times() {
+        let retry = SWITCH_RETRY_AFTER.as_secs();
+        for dialog in [Dialog::Install, Dialog::Update] {
+            let step = |tries| watch_step(dialog, ServiceState::InstalledNotRunning, tries);
+            // Just failed: wait.
+            assert_eq!(step(tried(1, Some(0))), WatchStep::Keep);
+            assert_eq!(step(tried(1, Some(retry - 1))), WatchStep::Keep);
+            // After the pause: again.
+            assert_eq!(step(tried(1, Some(retry))), WatchStep::SwitchOver);
+            assert_eq!(
+                step(tried(SWITCH_TRIES - 1, Some(retry))),
+                WatchStep::SwitchOver
+            );
+            // Bounded.
+            assert_eq!(step(tried(SWITCH_TRIES, Some(retry * 10))), WatchStep::Keep);
+        }
+        // The pause outlasts a whole switch-over's wait, so a try that is
+        // still settling is never cut short by the next.
+        assert!(SWITCH_RETRY_AFTER > SWITCH_WAIT);
+        assert!(SWITCH_TRIES >= 2);
     }
 
     #[test]
@@ -536,6 +658,25 @@ mod tests {
     }
 
     #[test]
+    fn an_attached_daemon_without_folders_gets_the_folders_screen_once() {
+        let undeclared = json!({"claude_source": null, "codex_source": null});
+        let half = json!({"claude_source": {"watch": "/c"}, "codex_source": null});
+        let declared = json!({"claude_source": {"watch": "/c"}, "codex_source": "off"});
+        assert!(asks_for_folders(false, &undeclared, false, false));
+        assert!(asks_for_folders(false, &half, false, false));
+        assert!(!asks_for_folders(false, &declared, false, false));
+        // Once per attachment.
+        assert!(!asks_for_folders(false, &undeclared, true, false));
+        // First run's Tools step asks it.
+        assert!(!asks_for_folders(false, &undeclared, false, true));
+        // A hosting window cannot have started without them.
+        assert!(!asks_for_folders(true, &undeclared, false, false));
+        // A daemon that does not report the fields says nothing either way.
+        assert!(!asks_for_folders(false, &json!({}), false, false));
+        assert!(!asks_for_folders(false, &json!(null), false, false));
+    }
+
+    #[test]
     fn the_window_falls_back_only_when_the_host_part_is_gone() {
         assert!(falls_back(true, LinkState::Absent, false));
         // Down is a host daemon restarting or stopped: stay attached.
@@ -548,14 +689,28 @@ mod tests {
     }
 
     #[test]
-    fn start_unit_asks_for_the_channels_fixed_unit_only() {
-        let (destination, path, interface, method, (unit, mode)) = start_unit_call();
+    fn the_switch_over_restarts_the_channels_fixed_unit_only() {
+        let (destination, path, interface, method, (unit, mode)) = restart_unit_call();
         assert_eq!(destination, "org.freedesktop.systemd1");
         assert_eq!(path, "/org/freedesktop/systemd1");
         assert_eq!(interface, "org.freedesktop.systemd1.Manager");
-        assert_eq!(method, "StartUnit");
+        // RestartUnit, not StartUnit: before systemd v257 a start job
+        // queued while the unit waits out `RestartSec` (auto-restart) runs
+        // only when that wait ends; a restart cuts it short.
+        assert_eq!(method, "RestartUnit");
         assert_eq!(unit, trace_commons_contributor::channel::SYSTEMD_UNIT_NAME);
         assert_eq!(mode, "replace");
+    }
+
+    #[test]
+    fn an_unknown_or_future_activation_time_is_no_duration() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        assert_eq!(active_for(0, now), None);
+        assert_eq!(active_for(1_001_000_000, now), None);
+        assert_eq!(
+            active_for(990_000_000, now),
+            Some(std::time::Duration::from_secs(10))
+        );
     }
 
     #[test]

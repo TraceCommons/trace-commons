@@ -337,6 +337,9 @@ pub struct App {
     /// screen they just switched to.
     pub history_location: RefCell<crate::queue_folders::Location>,
     quit_confirmed: Cell<bool>,
+    /// The folders screen was shown for the daemon this window is attached
+    /// to; cleared when the backend is replaced.
+    folders_asked: Cell<bool>,
 }
 
 /// How long a scroll must sit still before `preview_visible` is sent.
@@ -537,6 +540,7 @@ impl App {
             queue_location: RefCell::new(crate::queue_folders::Location::Root),
             history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
+            folders_asked: Cell::new(false),
         });
 
         app.home.bind(&app);
@@ -650,6 +654,9 @@ impl App {
                     // sweep still belongs -- it runs once per resync, not
                     // once per card resolved.
                     "resync_required" => {
+                        // The daemon may have restarted, counting its
+                        // managed revisions afresh.
+                        managed_sessions::backend_changed(&app.private_inference.managed_revision);
                         app.refresh();
                         app.poll_outstanding_previews();
                     }
@@ -796,6 +803,25 @@ impl App {
         });
     }
 
+    /// Show the folders screen when the attached daemon has none declared
+    /// (`service::asks_for_folders`). Sign-in and enrollment stay with first
+    /// run, which asks the same question at its own Tools step.
+    fn ask_for_folders_if_needed(self: &Rc<Self>, settings: &serde_json::Value) {
+        // Camera runs, as `onboarding::present_if_needed`.
+        if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
+            return;
+        }
+        if crate::service::asks_for_folders(
+            self.worker.hosts_the_loop(),
+            settings,
+            self.folders_asked.get(),
+            onboarding::automatic_window_open(),
+        ) {
+            self.folders_asked.set(true);
+            roots::present_connected(self);
+        }
+    }
+
     /// Classify the background service from this window's backend.
     pub fn service_state<F>(self: &Rc<Self>, callback: F)
     where
@@ -814,16 +840,19 @@ impl App {
 
     /// Replace the backend (`worker::Job::Reopen`), then read everything
     /// again from the daemon now in use. `callback` runs either way.
-    pub fn reopen<F>(self: &Rc<Self>, start_unit: bool, callback: F)
+    pub fn reopen<F>(self: &Rc<Self>, restart_unit: bool, callback: F)
     where
         F: FnOnce(&Rc<App>) + 'static,
     {
-        let id = self.worker.reopen(start_unit);
+        let id = self.worker.reopen(restart_unit);
         self.callbacks.borrow_mut().insert(
             id,
             Box::new(move |app, outcome| {
                 if let Outcome::Reopened { attachment, .. } = outcome {
                     app.worker.set_attachment(attachment);
+                    // Another daemon, with revisions and folders of its own.
+                    managed_sessions::backend_changed(&app.private_inference.managed_revision);
+                    app.folders_asked.set(false);
                     // Whatever happened, the daemon may have changed: the
                     // same "look again" as `resync_required`.
                     app.refresh();
@@ -907,6 +936,9 @@ impl App {
         // re-ask on the next launch, which is the nagging the marker exists
         // to prevent.
         self.call("get_settings", serde_json::json!({}), |app, result| {
+            if let Ok(raw) = result.as_ref() {
+                app.ask_for_folders_if_needed(raw);
+            }
             let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>)
             else {
                 return;

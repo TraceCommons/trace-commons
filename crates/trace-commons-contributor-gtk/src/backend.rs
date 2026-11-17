@@ -173,6 +173,19 @@ impl Backend {
         sandboxed: bool,
         host_socket: Option<std::path::PathBuf>,
     ) -> Result<Self> {
+        Self::open_at(dir, sandboxed, host_socket, None)
+    }
+
+    /// [`Backend::open_with`], with the place a hosted daemon takes
+    /// `watcher.lock` and serves the host link given (`None`: from the
+    /// environment), so a test can see that lock without touching the real
+    /// runtime directory.
+    pub fn open_at(
+        dir: std::path::PathBuf,
+        sandboxed: bool,
+        host_socket: Option<std::path::PathBuf>,
+        site: Option<daemon::HostLinkSite>,
+    ) -> Result<Self> {
         let host = || match daemon::host_link::route(
             sandboxed,
             host_socket.as_deref(),
@@ -201,7 +214,7 @@ impl Backend {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        match rt.block_on(daemon::start_embedded(store)) {
+        match rt.block_on(daemon::start_embedded_at(store, site)) {
             Ok(embedded) => {
                 let shared = Arc::clone(&embedded.shared);
                 let loop_shared = Arc::clone(&shared);
@@ -346,9 +359,14 @@ impl Backend {
     /// (`tc_daemon_stop`): ask the loop to stop, wait (bounded) for its pass
     /// to end, then close, so nothing writes after the lock is gone. An
     /// attached backend has nothing to stop.
-    pub fn stop(self) {
+    ///
+    /// Whether the locks are released: `false` when the runtime did not end
+    /// within [`STOP_WAIT`]. The locks then stay held until it does, and the
+    /// caller must not expect another daemon to take them yet. Blocking (up
+    /// to twice `STOP_WAIT`); the worker thread calls it, never GTK's.
+    pub fn stop(self) -> bool {
         let Backend::Hosting(hosting) = self else {
-            return;
+            return true;
         };
         let Hosting {
             rt,
@@ -369,9 +387,8 @@ impl Backend {
             supervisor.abort();
         }
         drop(shared);
-        // Every task is cancelled and dropped before the lock goes.
-        rt.shutdown_timeout(STOP_WAIT);
-        embedded.close();
+        // Every task, blocking work included, ends before the locks go.
+        release_after_shutdown(rt, move || embedded.close(), STOP_WAIT)
     }
 
     /// The socket an attached window talks to; `None` while hosting.
@@ -395,6 +412,30 @@ impl Backend {
             })),
         }
     }
+}
+
+/// Shut `rt` down, then `release`, on a thread of their own. Whether both
+/// finished within `bound`.
+///
+/// Dropping a runtime waits for every task on it, `spawn_blocking` work
+/// included (tokio's blocking pool shuts down with no timeout on drop), so
+/// `release` -- which lets go of the daemon's locks -- never runs while
+/// something of the old daemon can still write. `shutdown_timeout` gave no
+/// such promise: past its bound it returned with blocking work still
+/// running. When the bound passes first, this returns `false` and the
+/// thread finishes the release whenever the runtime does.
+pub(crate) fn release_after_shutdown(
+    rt: tokio::runtime::Runtime,
+    release: impl FnOnce() + Send + 'static,
+    bound: std::time::Duration,
+) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(rt);
+        release();
+        let _ = done.send(());
+    });
+    finished.recv_timeout(bound).is_ok()
 }
 
 /// A daemon answer that was an error: its fixed label, and whatever
@@ -1163,6 +1204,64 @@ mod roots_tests {
         );
     }
 
+    /// A stop whose runtime still has blocking work after the bound must
+    /// not release the lock under it: the release waits for the runtime to
+    /// end, and the stop reports that it did not finish.
+    #[test]
+    fn the_lock_is_released_only_after_every_runtime_task_has_ended() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&str>::new()));
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        {
+            let order = std::sync::Arc::clone(&order);
+            let started = std::sync::Arc::clone(&started);
+            rt.spawn_blocking(move || {
+                started.wait();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                order.lock().unwrap().push("blocking-ended");
+            });
+        }
+        started.wait();
+        let released = std::sync::Arc::clone(&order);
+        let finished = release_after_shutdown(
+            rt,
+            move || released.lock().unwrap().push("released"),
+            std::time::Duration::from_millis(50),
+        );
+        assert!(!finished, "the stop must report that it did not finish");
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "released while blocking work still ran"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while order.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "never released");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(*order.lock().unwrap(), ["blocking-ended", "released"]);
+    }
+
+    #[test]
+    fn a_runtime_that_ends_in_time_is_released_at_once() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&released);
+        assert!(release_after_shutdown(
+            rt,
+            move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+            std::time::Duration::from_secs(5),
+        ));
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     /// The switch-over to the background service stops the daemon this
     /// window runs, and only after that may another start on the same
     /// state directory: the lock is released, not leaked.
@@ -1187,6 +1286,49 @@ mod roots_tests {
         let again = Backend::open(dir.path().to_path_buf()).expect("hosts again");
         assert!(again.hosts_the_loop());
         again.stop();
+    }
+
+    /// The cross-sandbox lock too: a daemon this window hosts on the
+    /// platform default state directory holds `watcher.lock` in the runtime
+    /// directory, and stopping it releases that lock for the next daemon --
+    /// the background service, after a switch-over.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_hosted_daemon_releases_the_watcher_lock_for_the_next_one() {
+        let dir = Scratch::new("stop-watcher");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        // A short path: the host link's socket is bound in here.
+        let run = std::path::PathBuf::from(format!("/tmp/tc-wl-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&run).unwrap();
+        let run = Scratch(run);
+        let site = daemon::HostLinkSite {
+            runtime: run.path().join("rt"),
+            platform_default: dir.path().to_path_buf(),
+            sandboxed: false,
+            host_unit: false,
+        };
+        let watcher = site.runtime.join(daemon::host_link::WATCHER_LOCK_FILE);
+        let held = |path: &std::path::Path| -> bool {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("watcher.lock exists");
+            matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+        };
+
+        let backend = Backend::open_at(dir.path().to_path_buf(), false, None, Some(site.clone()))
+            .expect("hosts");
+        assert!(backend.hosts_the_loop());
+        assert!(held(&watcher), "a hosted daemon holds watcher.lock");
+        assert!(backend.stop(), "the stop finished");
+        assert!(!held(&watcher), "the stopped daemon kept watcher.lock");
+
+        let next = Backend::open_at(dir.path().to_path_buf(), false, None, Some(site))
+            .expect("the next daemon starts");
+        assert!(next.hosts_the_loop());
+        assert!(held(&watcher), "the next daemon holds watcher.lock");
+        assert!(next.stop());
+        assert!(!held(&watcher));
     }
 }
 

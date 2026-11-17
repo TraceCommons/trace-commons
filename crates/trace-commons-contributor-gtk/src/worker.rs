@@ -38,12 +38,12 @@ pub enum Job {
         needle: String,
     },
     /// Replace the backend: stop a daemon this window runs, ask systemd to
-    /// start the background service when `start_unit`, then open again by
+    /// restart the background service when `restart_unit`, then open again by
     /// the usual preference order (`Backend::open`). The switch-over to the
     /// service, and the fallback to this window's own daemon when the host
     /// part is gone.
     Reopen {
-        start_unit: bool,
+        restart_unit: bool,
     },
     /// Classify the background service (`daemon::service`) from this
     /// backend's point of view.
@@ -173,9 +173,9 @@ impl Worker {
 
             for (id, job) in job_rx {
                 let outcome = match job {
-                    Job::Reopen { start_unit } => {
+                    Job::Reopen { restart_unit } => {
                         pump.store(true, std::sync::atomic::Ordering::SeqCst);
-                        let (next, error) = reopen(backend, start_unit, &dir, &open);
+                        let (next, error) = reopen(backend, restart_unit, &dir, &open);
                         backend = next;
                         pump = spawn_pump(&backend, &event_tx);
                         Outcome::Reopened {
@@ -253,8 +253,8 @@ impl Worker {
     }
 
     /// Replace the backend; see [`Job::Reopen`].
-    pub fn reopen(&self, start_unit: bool) -> u64 {
-        self.submit(Job::Reopen { start_unit })
+    pub fn reopen(&self, restart_unit: bool) -> u64 {
+        self.submit(Job::Reopen { restart_unit })
     }
 
     /// Classify the background service; see [`Job::ServiceState`].
@@ -336,19 +336,25 @@ fn spawn_pump(
 /// the window shows its existing not-running state rather than ending.
 fn reopen(
     backend: Backend,
-    start_unit: bool,
+    restart_unit: bool,
     dir: &std::path::Path,
     open: &impl Fn(std::path::PathBuf) -> Result<Backend>,
 ) -> (Backend, Option<String>) {
     let local = dir.join(trace_commons_contributor::config::DAEMON_SOCK_FILE);
     let previous = backend.attached_socket().map(std::path::Path::to_path_buf);
-    backend.stop();
-    if start_unit {
-        // Whether systemd queued the start or not, the probe below and the
+    // The daemon this window ran is stopped first, so the unit can take
+    // `watcher.lock` (and on the host the state directory's lock).
+    let released = backend.stop();
+    if restart_unit && released {
+        // Whether systemd queued the restart or not, the probe below and the
         // fresh `open` decide; a failure shows as "It didn't start".
-        let _ = crate::service::start_unit();
+        let _ = crate::service::restart_unit();
         crate::service::wait_for_service(crate::service::SWITCH_WAIT, &local);
     }
+    // Not released: the old daemon's runtime is still ending and holds its
+    // locks until it does, so the unit could not start; the `open` below
+    // attaches and shows the not-running state, and the next try (or the
+    // runtime ending) moves on from there.
     match open(dir.to_path_buf()) {
         Ok(next) => (next, None),
         Err(error) => {

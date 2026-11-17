@@ -261,6 +261,16 @@ pub fn present(app: &Rc<App>) {
     register_automatic_window(&window);
 }
 
+/// Whether the automatic first-run window is open.
+pub(super) fn automatic_window_open() -> bool {
+    AUTOMATIC_WINDOW.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .is_some_and(|weak| weak.upgrade().is_some())
+    })
+}
+
 /// Track the first-run coordinator so shared setup completion closes it.
 pub(super) fn register_automatic_window(window: &adw::Window) {
     AUTOMATIC_WINDOW.with(|current| *current.borrow_mut() = Some(window.downgrade()));

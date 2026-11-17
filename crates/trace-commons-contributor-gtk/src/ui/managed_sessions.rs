@@ -244,12 +244,53 @@ fn refusal_key(label: &str) -> &'static str {
     }
 }
 
+/// Whether a snapshot at `revision` is drawn: never one older than the last
+/// drawn, which a slow answer from before a change could otherwise be.
+fn accepts_revision(seen: &std::cell::Cell<u64>, revision: u64) -> bool {
+    if revision < seen.get() {
+        return false;
+    }
+    seen.set(revision);
+    true
+}
+
+/// The daemon behind the window changed (a reopen: switch-over or
+/// fallback), or may have restarted (`resync_required`). Revisions count per
+/// daemon -- the sandbox's and the host's are separate -- so the last one
+/// drawn says nothing about the next daemon's first.
+pub(super) fn backend_changed(seen: &std::cell::Cell<u64>) {
+    seen.set(0);
+}
+
+/// Whether a failed `managed_snapshot` still draws the start area, with the
+/// unavailable line and "Set up": in a sandbox whose daemon does not answer
+/// -- the host daemon installed but stopped, attached over the host link.
+/// Otherwise "Start it" would be unreachable from the window.
+fn draws_unreachable(error: &str, sandboxed: bool) -> bool {
+    sandboxed && error == "daemon-not-running"
+}
+
+/// What the start area is drawn from when the daemon does not answer: no
+/// accounts, no sessions, and no terminal or host daemon.
+fn unreachable_snapshot() -> Value {
+    json!({"capabilities": {"terminal_launch": false, "daemon_on_host": false}})
+}
+
 pub fn refresh(app: &Rc<App>) {
     app.call("managed_snapshot", json!({}), |app, result| {
-        let Ok(snapshot) = result else { return; };
-        let revision = snapshot["revision"].as_u64().unwrap_or_default();
-        if revision < app.private_inference.managed_revision.get() { return; }
-        app.private_inference.managed_revision.set(revision);
+        let snapshot = match result {
+            Ok(snapshot) => {
+                let revision = snapshot["revision"].as_u64().unwrap_or_default();
+                if !accepts_revision(&app.private_inference.managed_revision, revision) { return; }
+                snapshot
+            }
+            // No revision to compare: the next answer is drawn whatever it is.
+            Err(error) if draws_unreachable(&error.to_string(), sandboxed()) => {
+                backend_changed(&app.private_inference.managed_revision);
+                unreachable_snapshot()
+            }
+            Err(_) => return,
+        };
         let root = &app.private_inference.managed;
         clear(root);
         root.append(&style::section(&text("title")));
@@ -1052,6 +1093,41 @@ mod tests {
         assert_eq!(
             tool_unavailable("claude"),
             "Claude Code wasn't found on this computer."
+        );
+    }
+
+    #[test]
+    fn a_new_daemon_is_drawn_from_its_first_revision() {
+        let seen = std::cell::Cell::new(0);
+        assert!(accepts_revision(&seen, 7));
+        // A slow answer from before a change on the same daemon.
+        assert!(!accepts_revision(&seen, 6));
+        // The switch-over: the host daemon counts from its own start.
+        backend_changed(&seen);
+        assert!(
+            accepts_revision(&seen, 3),
+            "the new daemon's snapshot was ignored"
+        );
+        assert!(accepts_revision(&seen, 3));
+        assert!(!accepts_revision(&seen, 2));
+    }
+
+    /// The host daemon installed but stopped: the window is attached over
+    /// the host link to a socket nobody answers. The start area still draws
+    /// its unavailable line and "Set up", so "Start it" can be reached.
+    #[test]
+    fn an_unanswered_snapshot_in_a_sandbox_still_offers_set_up() {
+        assert!(draws_unreachable("daemon-not-running", true));
+        // Other failures, and a window outside a sandbox, draw nothing new.
+        assert!(!draws_unreachable("managed-storage-unavailable", true));
+        assert!(!draws_unreachable("daemon-not-running", false));
+        let snapshot = unreachable_snapshot();
+        assert!(crate::service::offers_set_up(&snapshot, true));
+        assert!(launch_accounts(&snapshot).is_empty());
+        assert_eq!(session_destination(&snapshot), None);
+        assert_eq!(
+            crate::service::launch_press(&snapshot, true, false, false),
+            crate::service::LaunchPress::OfferService
         );
     }
 }

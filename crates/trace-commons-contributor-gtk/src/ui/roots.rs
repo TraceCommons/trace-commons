@@ -356,6 +356,57 @@ fn present_mode<F>(
     window.present();
 }
 
+/// The Tools screen on its own, for a window attached to a daemon with no
+/// session folders declared (the background service after a switch-over,
+/// owner 2026-11-17). The same screen and words first run shows at its
+/// Tools step; answers go to the attached daemon (`set_settings`), and the
+/// window closes once it confirms them.
+pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
+    super::style::install();
+    super::community_brand::install();
+    let words = trace_commons_contributor::first_run_copy::first_run_copy();
+    let window = adw::Window::builder()
+        .transient_for(&app.window)
+        .modal(true)
+        .default_width(680)
+        .default_height(720)
+        .build();
+    let weak = window.downgrade();
+    let weak_app = Rc::downgrade(app);
+    let tools = connected(app, move || {
+        if let Some(app) = weak_app.upgrade() {
+            app.refresh();
+        }
+        if let Some(window) = weak.upgrade() {
+            window.close();
+        }
+    });
+    tools.set_margin_start(32);
+    tools.set_margin_end(32);
+    tools.set_margin_top(24);
+    tools.set_margin_bottom(24);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("tc-root");
+    content.append(
+        &adw::HeaderBar::builder()
+            .title_widget(&adw::WindowTitle::new(
+                crate::copy::APP_NAME,
+                words.frame.step_tools,
+            ))
+            .build(),
+    );
+    content.append(
+        &gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&tools)
+            .build(),
+    );
+    window.set_content(Some(&content));
+    window.present();
+    window
+}
+
 /// Tools for a running daemon. Each row still requires an explicit answer;
 /// discovery alone does not grant access or change a watched source. The UI
 /// uses the existing native folder chooser so Linux portal semantics are kept.

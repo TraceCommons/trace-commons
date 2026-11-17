@@ -5,8 +5,9 @@
 //! when a dialog appears.
 //!
 //! The install command is only ever copied to the clipboard. "Start it"
-//! asks the systemd user manager to start the fixed unit; nothing else on
-//! the host is touched.
+//! asks the systemd user manager to restart the fixed unit (which starts it
+//! at once, even while it waits out `RestartSec`); nothing else on the host
+//! is touched.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -17,7 +18,7 @@ use trace_commons_contributor::daemon::service::{
 };
 use trace_commons_contributor::managed::copy::background_service as words;
 
-use crate::service::{Dialog, WATCH_INTERVAL, WatchStep, watch_step};
+use crate::service::{Dialog, Tries, WATCH_INTERVAL, WatchStep, watch_step};
 
 thread_local! {
     /// "Not now" was pressed this run: first setup and Launch stay quiet.
@@ -52,7 +53,7 @@ pub enum Ended {
 pub trait ServiceHost {
     /// Classify the service now, off the GTK thread; `done` runs on it.
     fn state(&self, done: Box<dyn FnOnce(ServiceState)>);
-    /// Stop a daemon this window runs, ask systemd to start the unit, and
+    /// Stop a daemon this window runs, ask systemd to restart the unit, and
     /// use the service once it answers (bounded); `done` runs on the GTK
     /// thread either way.
     fn switch_over(&self, done: Box<dyn FnOnce()>);
@@ -228,7 +229,10 @@ pub fn present(
     }
 
     let busy = Rc::new(Cell::new(false));
-    let switched = Rc::new(Cell::new(false));
+    // The automatic switch-overs made, and when the last one ended: one
+    // that did not bring the service up is tried again after a pause.
+    let tries = Rc::new(Cell::new(0_u32));
+    let last_ended: Rc<Cell<Option<std::time::Instant>>> = Rc::new(Cell::new(None));
     match dialog {
         Dialog::Install | Dialog::Update => {
             let waiting = parts.waiting.clone();
@@ -284,17 +288,25 @@ pub fn present(
             }
             let host_next = Rc::clone(&host);
             let busy = Rc::clone(&busy);
-            let switched = Rc::clone(&switched);
+            let tries = Rc::clone(&tries);
+            let last_ended = Rc::clone(&last_ended);
             let finish = Rc::clone(&finish);
             host.state(Box::new(move |state| {
-                match watch_step(dialog, state, switched.get()) {
+                let made = Tries {
+                    made: tries.get(),
+                    since_last: last_ended.get().map(|at| at.elapsed()),
+                };
+                match watch_step(dialog, state, made) {
                     WatchStep::Close => {
                         busy.set(false);
                         finish(Ended::Running);
                     }
                     WatchStep::SwitchOver => {
-                        switched.set(true);
-                        host_next.switch_over(Box::new(move || busy.set(false)));
+                        tries.set(tries.get() + 1);
+                        host_next.switch_over(Box::new(move || {
+                            last_ended.set(Some(std::time::Instant::now()));
+                            busy.set(false);
+                        }));
                     }
                     WatchStep::Keep => busy.set(false),
                 }
@@ -322,7 +334,7 @@ pub fn off_thread<T: Send + 'static>(
 }
 
 /// First setup: no daemon runs yet, so the facts are gathered with no
-/// window daemon, and a switch-over is only systemd's `StartUnit` and a
+/// window daemon, and a switch-over is only systemd's `RestartUnit` and a
 /// bounded wait for the unit to answer. `local` is the state directory's
 /// socket, where a unit on the host answers when there is no host link.
 pub struct FirstSetupHost {
@@ -347,7 +359,7 @@ impl ServiceHost for FirstSetupHost {
         let local = self.local.clone();
         off_thread(
             move || {
-                let _ = crate::service::start_unit();
+                let _ = crate::service::restart_unit();
                 crate::service::wait_for_service(crate::service::SWITCH_WAIT, &local);
             },
             move |()| done(),
