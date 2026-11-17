@@ -178,8 +178,8 @@ impl Shell {
         settings_button.update_property(&[gtk::accessible::Property::Label(words.settings_title)]);
         // Before the end controls, after the spacer.
         let end = toolbar.last_child();
-        toolbar.insert_before(&capsule, end.as_ref());
-        toolbar.insert_before(&settings_button, end.as_ref());
+        capsule.insert_before(&toolbar, end.as_ref());
+        settings_button.insert_before(&toolbar, end.as_ref());
         let handle = gtk::WindowHandle::new();
         handle.set_child(Some(&toolbar));
 
