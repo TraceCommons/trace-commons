@@ -782,11 +782,15 @@ impl Shell {
     /// What is asking for the inspector right now, from what this window
     /// holds (`demand::asking`): the approval it holds open for undoing (a
     /// trace's Submit, or a folder's Submit all), the folder whose Submit
-    /// all is in flight, and a selected session. The Mac's `kept` key has
-    /// no state behind it in this shell yet: it has no keep action.
+    /// all is in flight, the trace it last kept (`App::last_kept`, the
+    /// Mac's `TracesStore.lastKept`), and a selected session. This shell has
+    /// no keep action yet, so nothing sets `last_kept` and the `kept` key
+    /// never asks; it is wired so a keep opens the inspector once one
+    /// exists.
     fn demand_keys(&self, app: &Rc<App>) -> BTreeSet<String> {
         let undo = app.undo.borrow();
         let submitting = app.submitting_folder.borrow();
+        let kept = app.last_kept.borrow();
         let selection = self.inspector.selection();
         demand::keys(&demand::asking(
             undo.as_ref().map(|undo| demand::Approval {
@@ -795,7 +799,7 @@ impl Shell {
                 folder: undo.folder.as_deref(),
             }),
             submitting.as_deref(),
-            None,
+            kept.as_deref(),
             match &selection {
                 Selection::Session(id) => Some(id.as_str()),
                 Selection::Folder(_) | Selection::None => None,
