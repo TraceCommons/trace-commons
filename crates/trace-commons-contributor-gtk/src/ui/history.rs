@@ -230,7 +230,7 @@ fn render(
         (Glyph::Held, copy::QUARANTINE_HEADING, rollup.quarantined),
         (Glyph::Waiting, copy::HISTORY_WAITING_TO_BE_SCORED, waiting),
     ] {
-        style::wrap_append(&stats, &stat_card(glyph, label, count));
+        style::grid_append(&stats, &stat_card(glyph, label, count));
     }
     content.append(&stats);
 

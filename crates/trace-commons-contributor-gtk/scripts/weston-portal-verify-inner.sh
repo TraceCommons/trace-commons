@@ -187,6 +187,10 @@ else
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
     ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
+    ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
+    ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
+    ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
+    ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
