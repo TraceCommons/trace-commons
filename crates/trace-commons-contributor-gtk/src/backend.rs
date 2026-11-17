@@ -1047,7 +1047,8 @@ mod native_witness_body_tests {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
+#[cfg(debug_assertions)]
 mod sample_tests {
     use super::*;
 
@@ -1131,10 +1132,7 @@ mod sample_tests {
                 // Every line naming the module or the variant sits under the
                 // gate, directly or in a gated block or item. A gated test
                 // module is gated whole, so its lines are not read.
-                let production = text
-                    .split("#[cfg(all(test, debug_assertions))]")
-                    .next()
-                    .unwrap();
+                let production = text.split(concat!("mod sample", "_tests")).next().unwrap();
                 let lines: Vec<&str> = production.lines().collect();
                 for (i, line) in lines.iter().enumerate() {
                     let code = line.trim_start();
