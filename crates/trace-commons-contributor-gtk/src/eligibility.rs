@@ -733,7 +733,7 @@ mod tests {
             "the row does not gate its send control"
         );
         assert_eq!(
-            row.matches("actions.append(&submit)").count(),
+            row.matches("style::wrap_append(&actions, &submit)").count(),
             1,
             "the row appends its send control somewhere other than the gate"
         );
@@ -924,7 +924,9 @@ mod tests {
         );
         for control in ["submit_all", "submit_all_as"] {
             assert!(
-                row.contains(&format!("ifsendable{{bar.append(&{control});}}")),
+                row.contains(&format!(
+                    "ifsendable{{style::wrap_append(&actions,&{control});}}"
+                )),
                 "{control} is not gated on the group having something to send"
             );
             assert!(
@@ -1302,8 +1304,14 @@ mod tests {
             .expect("the send control is gated");
         let body_end = production[gate..].find('}').expect("the gate closes") + gate;
         let gated = &production[gate..body_end];
-        assert!(gated.contains("actions.append(&submit)"), "{gated}");
-        for ungated in ["actions.append(&skip)", "actions.append(&look)"] {
+        assert!(
+            gated.contains("style::wrap_append(&actions, &submit)"),
+            "{gated}"
+        );
+        for ungated in [
+            "style::wrap_append(&actions, &skip)",
+            "style::wrap_append(&actions, &look)",
+        ] {
             assert!(
                 !gated.contains(ungated),
                 "the gate swallowed a control that is not the send control: {ungated}"
