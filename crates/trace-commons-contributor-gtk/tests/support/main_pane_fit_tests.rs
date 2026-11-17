@@ -158,6 +158,11 @@ fn every_hosted_screen_fits_the_440_main_pane() {
         }
     };
     check("folders");
+    // History with a community panel: its metric strip once made the left
+    // pane's whole page stack wider than 440, clipping every left-pane page.
+    crate::ui::history::show_community_for_test(&app);
+    settle(&context);
+    check("history with a community panel");
     // Laid out, not only measured (fix pass 3): every button in each folder
     // card is drawn inside its card, and no card runs under the next. On
     // GTK 4.14 "Submit as…" hung over a card's foot and "Never" was not
