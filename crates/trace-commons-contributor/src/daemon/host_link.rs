@@ -194,8 +194,8 @@ pub(crate) struct Claim {
     /// Held, never read: dropping it releases the watcher lock.
     _lock: std::fs::File,
     /// Where to serve the host link. `None` in a sandbox, which never serves
-    /// one: a sandboxed daemon is not the host part, and its socket file left
-    /// behind would read as "host part installed".
+    /// one: a sandboxed daemon is not the host part, and a window on the host
+    /// must not attach to it as one.
     pub(crate) socket: Option<PathBuf>,
 }
 

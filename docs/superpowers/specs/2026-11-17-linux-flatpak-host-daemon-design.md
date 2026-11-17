@@ -71,6 +71,10 @@ The host link is served only:
 A failure to bind the host link is logged with a fixed label and does not stop
 the daemon: the primary socket is the contract every other client uses.
 
+Besides the socket, the directory holds `watcher.lock` and, only while the
+systemd unit is installed, the empty marker `host-unit`; see "Which daemon
+runs" below.
+
 ## Peer checks across the boundary
 
 The primary socket's only control is its 0700 directory. The host link keeps
@@ -276,7 +280,11 @@ needs them:
    back as `/run/user/<uid>/doc/<id>/<name>`), launch: the session opens in
    the host folder, not under `/run/user/<uid>/doc/`. Then revoke the
    document (`flatpak document-unexport`) and launch with the same path
-   typed in: the launch is refused with the "action failed" toast.
+   typed in: the launch is refused with the "action failed" toast. Record
+   the portal's version (`gdbus introspect --session --dest
+   org.freedesktop.portal.Documents --object-path
+   /org/freedesktop/portal/documents | grep version`): below 5 there is no
+   `GetHostPaths` and every portal-path launch is refused.
 8. Uninstall the host part, log out and in, start the app: it runs in the
    sandbox as before (roots screen), Launch off with the existing line.
 9. Another local user (or `sudo -u nobody socat - UNIX-CONNECT:...`) cannot

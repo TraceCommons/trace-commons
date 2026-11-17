@@ -91,9 +91,19 @@ pub fn needs_mapping(path: &Path, daemon_on_host: bool) -> bool {
 pub fn host_path(path: &Path, daemon_on_host: bool) -> Result<PathBuf, Unmapped> {
     let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
     host_path_with(path, daemon_on_host, root.as_deref(), |id| {
-        get_host_path(id).ok().flatten()
+        // Bounded, as `portal::spawn_request` bounds its call: a bus that
+        // never answers is a refusal, not a launch window that waits forever.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(get_host_path(&id).ok().flatten());
+        });
+        rx.recv_timeout(PORTAL_TIMEOUT).ok().flatten()
     })
 }
+
+/// How long a `GetHostPaths` answer may take.
+const PORTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn get_host_path(id: &str) -> anyhow::Result<Option<PathBuf>> {
     let connection = zbus::blocking::Connection::session()?;

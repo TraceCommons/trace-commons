@@ -20,7 +20,7 @@
 # it must not get a blanket grant of `home` to do it. So `finish-args` below
 # names exactly those two directories, read-only, and nothing wider (the one
 # other filesystem grant is the host link's runtime directory, which holds a
-# socket and a lock file, no session data; see its entry). The
+# socket, a lock file and a marker file, no session data; see its entry). The
 # design spec's wording for why -- "Trace Commons needs to read your Claude
 # Code and Codex trace files. It asks for access to those folders only."
 # -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
@@ -94,8 +94,9 @@ finish-args:
   # the host link, at $XDG_RUNTIME_DIR/trace-commons/daemon.sock, and this
   # window attaches to it instead of running a daemon in the sandbox: the
   # sandbox has no network and cannot open a host terminal. The directory
-  # holds that socket and a lock file (watcher.lock) that keeps a host daemon
-  # and an in-sandbox one from watching the same sessions -- never the host
+  # holds that socket, a lock file (watcher.lock) that keeps a host daemon
+  # and an in-sandbox one from watching the same sessions, and the empty
+  # host-unit marker the systemd unit's daemon writes -- never the host
   # state directory, which holds the device key. `:create` lets a window
   # started before the daemon see the socket when it arrives; the daemon
   # tightens the directory to 0700 and checks each peer's uid. Production

@@ -108,6 +108,7 @@ fn uninstall_at(path: &std::path::Path, runtime: Option<&std::path::Path>) -> Re
     if let Some(runtime) = runtime
         && super::host_link::forget_host_unit(runtime).is_err()
     {
+        // DRAFT, NEEDS APPROVAL (2026-11-17).
         println!("could not remove the host link marker; it clears at logout");
     }
     match std::fs::remove_file(path) {

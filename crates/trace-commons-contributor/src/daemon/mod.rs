@@ -597,6 +597,8 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
 /// What a start refused on the watcher lock says. `StartFailure::AlreadyRunning`
 /// underneath keeps the FFI label; its own words name the state directory's
 /// lock, which is not the one held here.
+///
+/// DRAFT, NEEDS APPROVAL (2026-11-17).
 #[cfg(unix)]
 const WATCHER_HELD_TEXT: &str = "another trace-commons-contributor daemon on this login already watches \
      the session folders, in the Flatpak sandbox or on the host";
@@ -687,6 +689,7 @@ fn start_host_link_with(
         // unarbitrated beside a daemon in the sandbox; the FFI reports the
         // generic start failure for an error it cannot name.
         Err(host_link::ClaimError::LockUnusable) => {
+            // DRAFT, NEEDS APPROVAL (2026-11-17).
             anyhow::bail!("the watcher lock in the runtime directory is unusable");
         }
     };
