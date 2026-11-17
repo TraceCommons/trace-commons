@@ -341,6 +341,24 @@ impl ServiceHost for FirstSetupHost {
     }
 }
 
+/// An open window: the facts come from its worker's backend, and a
+/// switch-over replaces that backend (`worker::Job::Reopen`).
+pub struct AppHost(pub std::rc::Weak<super::App>);
+
+impl ServiceHost for AppHost {
+    fn state(&self, done: Box<dyn FnOnce(ServiceState)>) {
+        if let Some(app) = self.0.upgrade() {
+            app.service_state(move |_, state| done(state));
+        }
+    }
+
+    fn switch_over(&self, done: Box<dyn FnOnce()>) {
+        if let Some(app) = self.0.upgrade() {
+            app.reopen(true, move |_| done());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

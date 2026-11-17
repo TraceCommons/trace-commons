@@ -37,10 +37,18 @@ pub enum Backend {
 pub struct Hosting {
     rt: tokio::runtime::Runtime,
     shared: Arc<DaemonShared>,
-    /// Kept alive for the life of the process: dropping it would release
-    /// the exclusive lock while the loop is still mutating the queue.
-    _embedded: daemon::EmbeddedDaemon,
+    /// The supervise loop, so [`Backend::stop`] can wait for its pass to
+    /// end before the lock is released.
+    supervisor: tokio::task::JoinHandle<()>,
+    /// Kept alive until [`Backend::stop`] (or the end of the process):
+    /// dropping it would release the exclusive lock while the loop is still
+    /// mutating the queue.
+    embedded: daemon::EmbeddedDaemon,
 }
+
+/// How long [`Backend::stop`] waits for the loop's pass, then for the
+/// runtime's tasks.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The label this shell reports when the contributor has not said which
 /// session folders to watch.
@@ -197,13 +205,14 @@ impl Backend {
             Ok(embedded) => {
                 let shared = Arc::clone(&embedded.shared);
                 let loop_shared = Arc::clone(&shared);
-                rt.spawn(async move {
+                let supervisor = rt.spawn(async move {
                     let _ = daemon::run_supervisor(loop_shared, false).await;
                 });
                 Ok(Backend::Hosting(Box::new(Hosting {
                     rt,
                     shared,
-                    _embedded: embedded,
+                    supervisor,
+                    embedded,
                 })))
             }
             // Somebody took the lock in between. That is not an error: it is
@@ -331,6 +340,40 @@ impl Backend {
     /// see [`DaemonEvent`] -- and never a payload the shell would have to
     /// trust as current state; the shell re-reads state itself, exactly as
     /// `resync_required` requires it to be able to do anyway.
+    /// Stop the daemon this window runs, if it runs one, and release its
+    /// locks -- the state directory's and the watcher lock -- so the
+    /// background service can take over. The order is the C ABI's
+    /// (`tc_daemon_stop`): ask the loop to stop, wait (bounded) for its pass
+    /// to end, then close, so nothing writes after the lock is gone. An
+    /// attached backend has nothing to stop.
+    pub fn stop(self) {
+        let Backend::Hosting(hosting) = self else {
+            return;
+        };
+        let Hosting {
+            rt,
+            shared,
+            mut supervisor,
+            embedded,
+        } = *hosting;
+        shared
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let ended = rt.block_on(async {
+            tokio::time::timeout(STOP_WAIT, &mut supervisor)
+                .await
+                .is_ok()
+        });
+        if !ended {
+            supervisor.abort();
+        }
+        drop(shared);
+        // Every task is cancelled and dropped before the lock goes.
+        rt.shutdown_timeout(STOP_WAIT);
+        embedded.close();
+    }
+
     /// The socket an attached window talks to; `None` while hosting.
     pub fn attached_socket(&self) -> Option<&std::path::Path> {
         match self {
@@ -1118,6 +1161,32 @@ mod roots_tests {
             backend.hosts_the_loop(),
             "nothing else held the lock, so this shell should be hosting"
         );
+    }
+
+    /// The switch-over to the background service stops the daemon this
+    /// window runs, and only after that may another start on the same
+    /// state directory: the lock is released, not leaked.
+    #[test]
+    fn stopping_a_hosted_daemon_releases_its_lock_for_the_next_one() {
+        use trace_commons_contributor::config::DAEMON_LOCK_FILE;
+        let dir = Scratch::new("stop-host");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        let backend = Backend::open(dir.path().to_path_buf()).expect("hosts");
+        assert!(backend.hosts_the_loop());
+        let lock_path = ConfigStore::open(dir.path().to_path_buf())
+            .unwrap()
+            .daemon_path(DAEMON_LOCK_FILE);
+        backend.stop();
+        if let Ok(lock) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            assert!(lock.try_lock().is_ok(), "the stopped daemon kept its lock");
+        }
+        let again = Backend::open(dir.path().to_path_buf()).expect("hosts again");
+        assert!(again.hosts_the_loop());
+        again.stop();
     }
 }
 

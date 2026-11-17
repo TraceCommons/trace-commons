@@ -37,6 +37,38 @@ pub enum Job {
         entry_id: String,
         needle: String,
     },
+    /// Replace the backend: stop a daemon this window runs, ask systemd to
+    /// start the background service when `start_unit`, then open again by
+    /// the usual preference order (`Backend::open`). The switch-over to the
+    /// service, and the fallback to this window's own daemon when the host
+    /// part is gone.
+    Reopen {
+        start_unit: bool,
+    },
+    /// Classify the background service (`daemon::service`) from this
+    /// backend's point of view.
+    ServiceState,
+}
+
+/// Where the window's daemon is, after a start or a reopen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attachment {
+    /// This process runs the daemon.
+    pub hosts: bool,
+    /// Attached to the host daemon over the host link.
+    pub via_host_link: bool,
+}
+
+impl Attachment {
+    fn of(backend: &Backend) -> Self {
+        let link = trace_commons_contributor::daemon::host_link::socket_path();
+        Self {
+            hosts: backend.hosts_the_loop(),
+            via_host_link: backend
+                .attached_socket()
+                .is_some_and(|socket| link.as_deref() == Some(socket)),
+        }
+    }
 }
 
 pub enum Outcome {
@@ -51,13 +83,19 @@ pub enum Outcome {
     /// and "could not look" would invite exactly that. See
     /// `crate::original_search::Outcome::Unknown`.
     SearchOriginal(Option<u32>),
+    /// The new backend's attachment, or the label it failed with (the
+    /// window then stays attached to a socket, showing its not-running
+    /// state).
+    Reopened(Result<Attachment, String>),
+    ServiceState(trace_commons_contributor::daemon::service::ServiceState),
 }
 
 pub struct Worker {
     jobs: mpsc::Sender<(u64, Job)>,
     pub results: async_channel::Receiver<(u64, Outcome)>,
     pub events: async_channel::Receiver<DaemonEvent>,
-    hosts_the_loop: bool,
+    hosts_the_loop: std::cell::Cell<bool>,
+    via_host_link: std::cell::Cell<bool>,
     next_id: std::cell::Cell<u64>,
     /// The contributor state directory this shell was started against.
     ///
@@ -89,7 +127,8 @@ impl Worker {
                 jobs,
                 results,
                 events,
-                hosts_the_loop: false,
+                hosts_the_loop: std::cell::Cell::new(false),
+                via_host_link: std::cell::Cell::new(false),
                 next_id: std::cell::Cell::new(1),
                 dir,
             },
@@ -104,16 +143,16 @@ impl Worker {
 
     async fn start_with(
         dir: std::path::PathBuf,
-        open: impl FnOnce(std::path::PathBuf) -> Result<Backend> + Send + 'static,
+        open: impl Fn(std::path::PathBuf) -> Result<Backend> + Send + 'static,
     ) -> Result<Self> {
         let (job_tx, job_rx) = mpsc::channel::<(u64, Job)>();
         let (result_tx, results) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
-        let (ready_tx, ready_rx) = async_channel::bounded::<Result<bool, String>>(1);
+        let (ready_tx, ready_rx) = async_channel::bounded::<Result<Attachment, String>>(1);
         let held = dir.clone();
 
         std::thread::spawn(move || {
-            let backend = match open(dir) {
+            let mut backend = match open(dir.clone()) {
                 Ok(b) => b,
                 Err(e) => {
                     let _ = ready_tx.send_blocking(Err(e.to_string()));
@@ -121,42 +160,37 @@ impl Worker {
                 }
             };
             if ready_tx
-                .send_blocking(Ok(backend.hosts_the_loop()))
+                .send_blocking(Ok(Attachment::of(&backend)))
                 .is_err()
             {
                 return;
             }
 
-            match backend.attached_socket().map(std::path::Path::to_path_buf) {
-                Some(socket) => {
-                    std::thread::spawn(move || {
-                        pump_events(
-                            || Backend::events_at(&socket),
-                            &event_tx,
-                            Some(EVENTS_RECONNECT),
-                        )
-                    });
-                }
-                None => {
-                    if let Ok(stream) = backend.events() {
-                        let mut stream = Some(stream);
-                        std::thread::spawn(move || {
-                            pump_events(
-                                || {
-                                    stream
-                                        .take()
-                                        .ok_or_else(|| anyhow::anyhow!("events-opened-once"))
-                                },
-                                &event_tx,
-                                None,
-                            )
-                        });
-                    }
-                }
-            }
+            let mut pump = spawn_pump(&backend, &event_tx);
 
             for (id, job) in job_rx {
                 let outcome = match job {
+                    Job::Reopen { start_unit } => {
+                        pump.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let (next, result) = reopen(backend, start_unit, &dir, &open);
+                        backend = next;
+                        pump = spawn_pump(&backend, &event_tx);
+                        Outcome::Reopened(result)
+                    }
+                    Job::ServiceState => {
+                        // Off this thread: one bounded bus call and a
+                        // `hello` must not hold up the window's calls.
+                        let hosting = backend.hosts_the_loop();
+                        let attached = backend.attached_socket().map(std::path::Path::to_path_buf);
+                        let results = result_tx.clone();
+                        std::thread::spawn(move || {
+                            let state = trace_commons_contributor::daemon::service::classify(
+                                &crate::service::gather(hosting, attached.as_deref()),
+                            );
+                            let _ = results.send_blocking((id, Outcome::ServiceState(state)));
+                        });
+                        continue;
+                    }
                     Job::Call { method, params } => Outcome::Call(
                         backend
                             .call(&method, params)
@@ -175,7 +209,7 @@ impl Worker {
             }
         });
 
-        let hosts_the_loop = ready_rx
+        let attachment = ready_rx
             .recv()
             .await
             .map_err(|_| anyhow::anyhow!("the daemon worker stopped before it started"))?
@@ -185,7 +219,8 @@ impl Worker {
             jobs: job_tx,
             results,
             events,
-            hosts_the_loop,
+            hosts_the_loop: std::cell::Cell::new(attachment.hosts),
+            via_host_link: std::cell::Cell::new(attachment.via_host_link),
             next_id: std::cell::Cell::new(1),
             dir: held,
         })
@@ -197,7 +232,28 @@ impl Worker {
     /// show the transcript at all, and which of the two quit warnings is
     /// the true one.
     pub fn hosts_the_loop(&self) -> bool {
-        self.hosts_the_loop
+        self.hosts_the_loop.get()
+    }
+
+    /// Whether the window is attached to the host daemon over the host link.
+    pub fn via_host_link(&self) -> bool {
+        self.via_host_link.get()
+    }
+
+    /// Record where the daemon is after a reopen.
+    pub fn set_attachment(&self, attachment: Attachment) {
+        self.hosts_the_loop.set(attachment.hosts);
+        self.via_host_link.set(attachment.via_host_link);
+    }
+
+    /// Replace the backend; see [`Job::Reopen`].
+    pub fn reopen(&self, start_unit: bool) -> u64 {
+        self.submit(Job::Reopen { start_unit })
+    }
+
+    /// Classify the background service; see [`Job::ServiceState`].
+    pub fn service_state(&self) -> u64 {
+        self.submit(Job::ServiceState)
     }
 
     pub fn submit(&self, job: Job) -> u64 {
@@ -228,6 +284,79 @@ impl Worker {
     }
 }
 
+/// Start the event thread for `backend`. The returned flag stops it: it
+/// opens nothing more and forwards nothing more once set.
+fn spawn_pump(
+    backend: &Backend,
+    event_tx: &async_channel::Sender<DaemonEvent>,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let event_tx = event_tx.clone();
+    let flag = std::sync::Arc::clone(&stop);
+    match backend.attached_socket().map(std::path::Path::to_path_buf) {
+        Some(socket) => {
+            std::thread::spawn(move || {
+                pump_events_until(
+                    || Backend::events_at(&socket),
+                    &event_tx,
+                    Some(EVENTS_RECONNECT),
+                    &flag,
+                )
+            });
+        }
+        None => {
+            if let Ok(stream) = backend.events() {
+                let mut stream = Some(stream);
+                std::thread::spawn(move || {
+                    pump_events_until(
+                        || {
+                            stream
+                                .take()
+                                .ok_or_else(|| anyhow::anyhow!("events-opened-once"))
+                        },
+                        &event_tx,
+                        None,
+                        &flag,
+                    )
+                });
+            }
+        }
+    }
+    stop
+}
+
+/// [`Job::Reopen`] on the worker thread. Returns the backend to use from
+/// now on: a fresh `open`, or, when that fails, an attachment to a socket so
+/// the window shows its existing not-running state rather than ending.
+fn reopen(
+    backend: Backend,
+    start_unit: bool,
+    dir: &std::path::Path,
+    open: &impl Fn(std::path::PathBuf) -> Result<Backend>,
+) -> (Backend, Result<Attachment, String>) {
+    let local = dir.join(trace_commons_contributor::config::DAEMON_SOCK_FILE);
+    let previous = backend.attached_socket().map(std::path::Path::to_path_buf);
+    backend.stop();
+    if start_unit {
+        // Whether systemd queued the start or not, the probe below and the
+        // fresh `open` decide; a failure shows as "It didn't start".
+        let _ = crate::service::start_unit();
+        crate::service::wait_for_service(crate::service::SWITCH_WAIT, &local);
+    }
+    match open(dir.to_path_buf()) {
+        Ok(next) => {
+            let attachment = Attachment::of(&next);
+            (next, Ok(attachment))
+        }
+        Err(error) => {
+            let socket = previous
+                .or_else(trace_commons_contributor::daemon::host_link::socket_path)
+                .unwrap_or(local);
+            (Backend::Attached { socket }, Err(error.to_string()))
+        }
+    }
+}
+
 /// How long the event thread waits before opening the subscription again
 /// after it could not, or after the daemon it was attached to went away.
 const EVENTS_RECONNECT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -241,13 +370,34 @@ const EVENTS_RECONNECT: std::time::Duration = std::time::Duration::from_secs(2);
 /// first attempt starts with `resync_required`, because events were missed
 /// in between. `None` (hosting the loop in-process) opens once: that stream
 /// ends only when this process stops the daemon.
+#[cfg(test)]
 pub(crate) fn pump_events(
-    mut open: impl FnMut() -> Result<Box<dyn crate::backend::EventStream>>,
+    open: impl FnMut() -> Result<Box<dyn crate::backend::EventStream>>,
     tx: &async_channel::Sender<DaemonEvent>,
     reconnect: Option<std::time::Duration>,
 ) {
+    pump_events_until(
+        open,
+        tx,
+        reconnect,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+/// [`pump_events`] until `stop` is set: after a reopen, the old backend's
+/// events must not reach the window beside the new one's.
+pub(crate) fn pump_events_until(
+    mut open: impl FnMut() -> Result<Box<dyn crate::backend::EventStream>>,
+    tx: &async_channel::Sender<DaemonEvent>,
+    reconnect: Option<std::time::Duration>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let stopped = || stop.load(std::sync::atomic::Ordering::SeqCst);
     let mut first = true;
     loop {
+        if stopped() {
+            return;
+        }
         if let Ok(mut stream) = open() {
             if !first {
                 let resync = DaemonEvent {
@@ -260,7 +410,7 @@ pub(crate) fn pump_events(
                 }
             }
             while let Some(event) = stream.next() {
-                if tx.send_blocking(event).is_err() {
+                if stopped() || tx.send_blocking(event).is_err() {
                     return;
                 }
             }
@@ -352,6 +502,24 @@ mod event_tests {
         assert_eq!(rx.recv_blocking().unwrap().name, "queue_changed");
         drop(rx);
         pump.join().unwrap();
+    }
+
+    #[test]
+    fn a_stopped_pump_opens_nothing_and_forwards_nothing() {
+        let (tx, rx) = async_channel::unbounded();
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let mut opens = 0;
+        pump_events_until(
+            || {
+                opens += 1;
+                stream(vec!["queue_changed"])
+            },
+            &tx,
+            Some(std::time::Duration::ZERO),
+            &stop,
+        );
+        assert_eq!(opens, 0);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

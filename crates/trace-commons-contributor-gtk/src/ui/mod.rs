@@ -751,6 +751,46 @@ impl App {
         );
     }
 
+    /// Classify the background service from this window's backend.
+    pub fn service_state<F>(self: &Rc<Self>, callback: F)
+    where
+        F: FnOnce(&Rc<App>, trace_commons_contributor::daemon::service::ServiceState) + 'static,
+    {
+        let id = self.worker.service_state();
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::ServiceState(state) = outcome {
+                    callback(app, state)
+                }
+            }),
+        );
+    }
+
+    /// Replace the backend (`worker::Job::Reopen`), then read everything
+    /// again from the daemon now in use. `callback` runs either way.
+    pub fn reopen<F>(self: &Rc<Self>, start_unit: bool, callback: F)
+    where
+        F: FnOnce(&Rc<App>) + 'static,
+    {
+        let id = self.worker.reopen(start_unit);
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::Reopened(result) = outcome {
+                    if let Ok(attachment) = result {
+                        app.worker.set_attachment(attachment);
+                    }
+                    // Whatever happened, the daemon may have changed: the
+                    // same "look again" as `resync_required`.
+                    app.refresh();
+                    app.poll_outstanding_previews();
+                    callback(app);
+                }
+            }),
+        );
+    }
+
     /// How many times `needle` was in the entry's pre-redaction session
     /// text. `None` for any failure -- see `worker::Outcome::SearchOriginal`.
     pub fn search_original<F>(self: &Rc<Self>, entry_id: &str, needle: &str, callback: F)
