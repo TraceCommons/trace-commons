@@ -95,6 +95,12 @@ pub struct TraceMap {
     tool_labels: RefCell<Vec<(String, gtk::Label)>>,
 }
 
+impl Default for TraceMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TraceMap {
     pub fn new() -> Self {
         let words = trace_commons_contributor::preview_copy::monitor_screens_copy();
