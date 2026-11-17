@@ -1218,6 +1218,40 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_toolbar_holds_the_toggles_and_the_gear_before_the_end_controls() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        // The toggles sit in one capsule, the gear after it, both in the
+        // toolbar row, and the desktop's end buttons stay last.
+        let capsule = shell.graph_toggle.parent().expect("the toggles are placed");
+        let toolbar = capsule.parent().expect("the capsule is in the toolbar");
+        for toggle in [
+            &shell.graph_toggle,
+            &shell.map_toggle,
+            &shell.inspector_toggle,
+        ] {
+            assert_eq!(toggle.parent().as_ref(), Some(&capsule));
+        }
+        assert_eq!(shell.settings_button.parent().as_ref(), Some(&toolbar));
+        let mut row = Vec::new();
+        let mut child = toolbar.first_child();
+        while let Some(widget) = child {
+            row.push(widget.clone());
+            child = widget.next_sibling();
+        }
+        let at = |widget: &gtk::Widget| row.iter().position(|w| w == widget).expect("in the row");
+        assert!(at(&capsule) < at(shell.settings_button.upcast_ref()));
+        assert!(
+            row.last()
+                .is_some_and(|last| last.is::<gtk::WindowControls>()),
+            "the end controls are last"
+        );
+        assert!(at(shell.settings_button.upcast_ref()) < row.len() - 1);
+        mounted.window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_strip_is_the_four_tabs_and_narrows_before_onboarding() {
         let mounted = mounted(false);
         let shell = &mounted.shell;
