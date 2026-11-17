@@ -202,12 +202,16 @@ impl RequestPeek {
         match protocol {
             Protocol::AnthropicMessages => Self::inspect_anthropic(body, raw_len, markers),
             Protocol::OpenAiResponses | Protocol::OpenAiChat => {
-                Self::inspect_openai(body, raw_len, markers)
+                Self::inspect_openai(protocol, body, raw_len, markers)
             }
         }
     }
 
     fn inspect_anthropic(body: &Value, raw_len: usize, markers: &IdentityMarkers) -> Self {
+        let text_len = raw_len.saturating_sub(inline_image_transport_len(
+            Protocol::AnthropicMessages,
+            body,
+        ));
         let messages = body.get("messages").and_then(Value::as_array);
         let system = body.get("system");
 
@@ -233,7 +237,7 @@ impl RequestPeek {
             prompt_cache: false,
             cached_prefix_tokens: 0,
             structured_output: false,
-            min_context_tokens: estimate_tokens(raw_len),
+            min_context_tokens: estimate_tokens(text_len),
             output_tokens: output_tokens(body, &["max_tokens"]),
             mid_tool_loop: anthropic_mid_tool_loop(messages),
             encrypted_reasoning: false,
@@ -252,6 +256,17 @@ impl RequestPeek {
                 for block in blocks {
                     match block.get("type").and_then(Value::as_str) {
                         Some("image") => requirements.images = true,
+                        Some("tool_result")
+                            if block.get("content").and_then(Value::as_array).is_some_and(
+                                |parts| {
+                                    parts.iter().any(|part| {
+                                        part.get("type").and_then(Value::as_str) == Some("image")
+                                    })
+                                },
+                            ) =>
+                        {
+                            requirements.images = true
+                        }
                         Some("thinking" | "redacted_thinking")
                             if block.get("signature").is_some() || block.get("data").is_some() =>
                         {
@@ -266,7 +281,10 @@ impl RequestPeek {
                         requirements.prompt_cache = true;
                         // Everything up to and including this breakpoint is
                         // cacheable; approximate it by the bytes seen so far.
-                        cached_prefix_bytes = cached_prefix_bytes.max(serialized_len_hint(message));
+                        cached_prefix_bytes =
+                            cached_prefix_bytes.max(serialized_len_hint(message).saturating_sub(
+                                message_image_transport_len(Protocol::AnthropicMessages, message),
+                            ));
                     }
                 }
                 if tool_uses_in_turn > 1 {
@@ -284,7 +302,7 @@ impl RequestPeek {
         // in practice is nearly the whole body for a long coding session.
         if requirements.prompt_cache {
             requirements.cached_prefix_tokens =
-                estimate_tokens(cached_prefix_bytes.max(raw_len / 2));
+                estimate_tokens(cached_prefix_bytes.max(text_len / 2));
         }
         if body
             .get("tools")
@@ -315,7 +333,13 @@ impl RequestPeek {
         }
     }
 
-    fn inspect_openai(body: &Value, raw_len: usize, markers: &IdentityMarkers) -> Self {
+    fn inspect_openai(
+        protocol: Protocol,
+        body: &Value,
+        raw_len: usize,
+        markers: &IdentityMarkers,
+    ) -> Self {
+        let text_len = raw_len.saturating_sub(inline_image_transport_len(protocol, body));
         // `input` is the Responses API; `messages` is Chat Completions.
         let items = body
             .get("input")
@@ -348,7 +372,7 @@ impl RequestPeek {
                 .and_then(Value::as_str)
                 .is_some_and(|t| t == "json_schema")
                 || body.pointer("/text/format/type").and_then(Value::as_str) == Some("json_schema"),
-            min_context_tokens: estimate_tokens(raw_len),
+            min_context_tokens: estimate_tokens(text_len),
             // Responses names it `max_output_tokens`; Chat Completions
             // deprecated `max_tokens` for `max_completion_tokens`, and a
             // client sending both means the newer one.
@@ -562,6 +586,104 @@ fn anthropic_system_names(system: Option<&Value>, prefix: &str) -> bool {
     }
 }
 
+/// Inline image bytes are transport, not text tokens. The provider enforces
+/// the exact visual token cost; this preflight still estimates all text and
+/// reserves the requested output. Walk only actual image-content positions so
+/// image-shaped tool arguments and JSON strings receive no text discount.
+fn inline_image_transport_len(protocol: Protocol, body: &Value) -> usize {
+    let field = if protocol == Protocol::OpenAiResponses {
+        "input"
+    } else {
+        "messages"
+    };
+    body.get(field)
+        .and_then(Value::as_array)
+        .map_or(0, |items| {
+            items
+                .iter()
+                .map(|item| {
+                    if protocol == Protocol::OpenAiResponses
+                        && item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    {
+                        item.get("output")
+                            .and_then(Value::as_array)
+                            .map_or(0, |parts| {
+                                parts
+                                    .iter()
+                                    .map(|part| image_transport_len(protocol, part))
+                                    .sum()
+                            })
+                    } else if protocol != Protocol::OpenAiResponses
+                        || matches!(
+                            item.get("type").and_then(Value::as_str),
+                            None | Some("message")
+                        )
+                    {
+                        message_image_transport_len(protocol, item)
+                    } else {
+                        0
+                    }
+                })
+                .sum()
+        })
+}
+
+fn message_image_transport_len(protocol: Protocol, message: &Value) -> usize {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map_or(0, |parts| {
+            parts
+                .iter()
+                .map(|part| {
+                    if protocol == Protocol::AnthropicMessages
+                        && part.get("type").and_then(Value::as_str) == Some("tool_result")
+                    {
+                        part.get("content")
+                            .and_then(Value::as_array)
+                            .map_or(0, |outputs| {
+                                outputs
+                                    .iter()
+                                    .map(|output| image_transport_len(protocol, output))
+                                    .sum()
+                            })
+                    } else {
+                        image_transport_len(protocol, part)
+                    }
+                })
+                .sum()
+        })
+}
+
+fn image_transport_len(protocol: Protocol, part: &Value) -> usize {
+    let kind = part.get("type").and_then(Value::as_str);
+    let url = match protocol {
+        Protocol::AnthropicMessages if kind == Some("image") => {
+            let Some(source) = part.get("source") else {
+                return 0;
+            };
+            if source.get("type").and_then(Value::as_str) != Some("base64")
+                || !source
+                    .get("media_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|media| media.starts_with("image/"))
+            {
+                return 0;
+            }
+            return source
+                .get("data")
+                .and_then(Value::as_str)
+                .map_or(0, str::len);
+        }
+        Protocol::OpenAiChat if kind == Some("image_url") => part.pointer("/image_url/url"),
+        Protocol::OpenAiResponses if kind == Some("input_image") => part.get("image_url"),
+        _ => None,
+    };
+    url.and_then(Value::as_str)
+        .filter(|url| url.starts_with("data:image/") && url.contains(','))
+        .map_or(0, str::len)
+}
+
 fn estimate_tokens(bytes: usize) -> u32 {
     u32::try_from(bytes / BYTES_PER_TOKEN_ESTIMATE).unwrap_or(u32::MAX)
 }
@@ -622,6 +744,122 @@ mod tests {
     fn peek_anthropic(body: serde_json::Value) -> RequestPeek {
         let raw = body.to_string();
         RequestPeek::inspect(Protocol::AnthropicMessages, &body, raw.len())
+    }
+
+    fn image_sizing_body(protocol: Protocol, nested: bool, payload: &str, text: &str) -> Value {
+        match protocol {
+            Protocol::AnthropicMessages => {
+                let image = json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":payload}});
+                let content = if nested {
+                    json!([{"type":"tool_result","tool_use_id":"toolu_pixel","content":[{"type":"text","text":text},image]}])
+                } else {
+                    json!([{"type":"text","text":text},image])
+                };
+                json!({"model":"fixture/vision","max_tokens":16,"messages":[{"role":"user","content":content}]})
+            }
+            Protocol::OpenAiChat => {
+                json!({"model":"fixture/vision","max_tokens":16,"messages":[{"role":"user","content":[
+                    {"type":"text","text":text},
+                    {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{payload}")}}
+                ]}]})
+            }
+            Protocol::OpenAiResponses => {
+                let image = json!({"type":"input_image","image_url":format!("data:image/png;base64,{payload}")});
+                let input = if nested {
+                    json!([{"type":"function_call_output","call_id":"call_pixel","output":[{"type":"input_text","text":text},image]}])
+                } else {
+                    json!([{"role":"user","content":[{"type":"input_text","text":text},image]}])
+                };
+                json!({"model":"fixture/vision","max_output_tokens":16,"input":input})
+            }
+        }
+    }
+
+    #[test]
+    fn inline_image_transport_size_does_not_inflate_text_context_estimates() {
+        let small = "A".repeat(64);
+        let screenshot = "A".repeat(1 << 20);
+        let text = "T".repeat(1 << 20);
+        for (protocol, nested) in [
+            (Protocol::AnthropicMessages, false),
+            (Protocol::AnthropicMessages, true),
+            (Protocol::OpenAiChat, false),
+            (Protocol::OpenAiResponses, false),
+            (Protocol::OpenAiResponses, true),
+        ] {
+            let estimate = |payload: &str, text: &str| {
+                let body = image_sizing_body(protocol, nested, payload, text);
+                RequestPeek::inspect(protocol, &body, body.to_string().len())
+                    .requirements
+                    .min_context_tokens
+            };
+            let baseline = estimate(&small, "describe the screenshot");
+            assert_eq!(
+                estimate(&screenshot, "describe the screenshot"),
+                baseline,
+                "{protocol}, nested={nested}: base64 transport bytes are not text tokens"
+            );
+            assert!(
+                estimate(&screenshot, &text) > baseline + (1 << 20) / 5,
+                "{protocol}, nested={nested}: actual text must still count toward the context window"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_images_do_not_inflate_cached_text_prefix_estimates() {
+        let estimate = |payload: &str, text: &str| {
+            let mut body = image_sizing_body(Protocol::AnthropicMessages, false, payload, text);
+            body["messages"][0]["content"][1]["cache_control"] = json!({"type":"ephemeral"});
+            let p = peek_anthropic(body);
+            assert!(p.requirements.prompt_cache);
+            p.requirements.cached_prefix_tokens
+        };
+        let baseline = estimate(&"A".repeat(64), "describe the screenshot");
+        assert_eq!(
+            estimate(&"A".repeat(1 << 20), "describe the screenshot"),
+            baseline,
+            "an encoded screenshot is not a large warm text cache"
+        );
+        assert!(
+            estimate(&"A".repeat(1 << 20), &"word ".repeat(8_000))
+                > crate::capability::CACHE_SACRIFICE_THRESHOLD_TOKENS,
+            "a genuinely large cached text prefix must retain the existing economic gate"
+        );
+    }
+
+    #[test]
+    fn image_shaped_tool_arguments_still_count_toward_text_context_estimates() {
+        for protocol in [
+            Protocol::AnthropicMessages,
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses,
+        ] {
+            let estimate = |size: usize| {
+                let arguments = json!({"type":"image","source":{"type":"base64","data":"A".repeat(size)},
+                    "image_url":format!("data:image/png;base64,{}", "A".repeat(size))});
+                let body = match protocol {
+                    Protocol::AnthropicMessages => {
+                        json!({"messages":[{"role":"assistant","content":[
+                            {"type":"tool_use","id":"toolu_pixel","name":"example","input":arguments}
+                        ]}]})
+                    }
+                    Protocol::OpenAiChat => json!({"messages":[{"role":"assistant","tool_calls":[
+                        {"id":"call_pixel","type":"function","function":{"name":"example","arguments":arguments.to_string()}}
+                    ]}]}),
+                    Protocol::OpenAiResponses => json!({"input":[
+                        {"type":"function_call","call_id":"call_pixel","name":"example","arguments":arguments.to_string()}
+                    ]}),
+                };
+                RequestPeek::inspect(protocol, &body, body.to_string().len())
+                    .requirements
+                    .min_context_tokens
+            };
+            assert!(
+                estimate(1 << 20) > estimate(64) + (1 << 20) / 5,
+                "{protocol}: image-shaped tool arguments remain ordinary text input"
+            );
+        }
     }
 
     #[test]
@@ -798,6 +1036,32 @@ mod tests {
             }],
         }));
         assert!(p.requirements.images);
+    }
+
+    #[test]
+    fn images_in_anthropic_tool_outputs_are_required_capabilities() {
+        let p = peek_anthropic(json!({"model":"fixture/vision", "messages":[
+            {"role":"assistant","content":[{"type":"tool_use","id":"toolu_pixel","name":"Read","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_pixel","content":[
+                {"type":"text","text":"synthetic screenshot"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+            ]}]}
+        ]}));
+        assert!(p.requirements.images);
+        assert!(p.requirements.mid_tool_loop);
+    }
+
+    #[test]
+    fn image_shaped_tool_arguments_and_text_are_not_image_inputs() {
+        for messages in [
+            json!([{"role":"assistant","content":[{"type":"tool_use","id":"toolu_pixel","name":"Read",
+                "input":{"type":"image","source":{"type":"base64","data":"AAAA"}}}]}]),
+            json!([{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_pixel",
+                "content":"{\"type\":\"image\",\"source\":{\"data\":\"AAAA\"}}"}]}]),
+        ] {
+            let p = peek_anthropic(json!({"model":"fixture/vision", "messages":messages}));
+            assert!(!p.requirements.images);
+        }
     }
 
     #[test]

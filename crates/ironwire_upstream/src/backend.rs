@@ -324,6 +324,15 @@ pub trait Backend: Send + Sync {
         Vec::new()
     }
 
+    /// Image-input support stated for exact provider model identifiers.
+    ///
+    /// Default empty: native backends keep their existing capability defaults.
+    /// A provider-derived catalogue may supply explicit false entries when
+    /// image input is unsupported or its support is unknown.
+    fn image_support(&self) -> Vec<(String, bool)> {
+        Vec::new()
+    }
+
     /// The client identity this backend will only serve, if it has one
     /// (`docs/ironwire/TRANSLATION.md` aside, this is `docs/ironwire/TRUST.md` §3).
     ///
