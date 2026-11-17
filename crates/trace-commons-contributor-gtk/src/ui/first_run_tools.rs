@@ -113,6 +113,25 @@ pub(super) fn build(
         }
     });
     screen.root.append(&add);
+    // "Click to add or drag & drop": a folder dropped anywhere on Tools is
+    // added as one picked with the button.
+    let drop = gtk::DropTarget::new(gtk::gio::File::static_type(), gtk::gdk::DragAction::COPY);
+    drop.connect_drop({
+        let weak = Rc::downgrade(&screen);
+        move |_, value, _, _| {
+            let (Some(screen), Ok(file)) = (weak.upgrade(), value.get::<gtk::gio::File>()) else {
+                return false;
+            };
+            match file.path() {
+                Some(path) => {
+                    screen.add_path(&path);
+                    true
+                }
+                None => false,
+            }
+        }
+    });
+    screen.root.add_controller(drop);
     screen.root.append(&screen.refused);
     screen.root.append(&screen.failure);
     screen.root.append(&screen.continue_button);
@@ -337,25 +356,33 @@ impl ToolsScreen {
             if response == gtk::ResponseType::Accept
                 && let Some(path) = chooser.file().and_then(|f| f.path())
                 && let Some(screen) = weak.upgrade()
-                && !screen.busy.get()
             {
-                let matches: Vec<Found> = discovery::describe_folder(&path)
-                    .iter()
-                    .map(Found::from)
-                    .collect();
-                let path = path.to_string_lossy().into_owned();
-                screen.refused.set_visible(false);
-                match add_outcome(&path, &matches) {
-                    AddOutcome::Added(folder) => screen.tools.borrow_mut().add(folder),
-                    AddOutcome::Ask { path, kinds } => {
-                        screen.pending.replace(Some((path, kinds)));
-                    }
-                    AddOutcome::Refused => screen.refused.set_visible(true),
-                }
-                screen.render();
+                screen.add_path(&path);
             }
             chooser.destroy();
         });
         chooser.show();
+    }
+
+    /// A folder picked or dropped: described by the core, then added, asked
+    /// about, or refused (`ToolsScreenLayout.outcome`).
+    fn add_path(self: &Rc<Self>, path: &std::path::Path) {
+        if self.busy.get() {
+            return;
+        }
+        let matches: Vec<Found> = discovery::describe_folder(path)
+            .iter()
+            .map(Found::from)
+            .collect();
+        let path = path.to_string_lossy().into_owned();
+        self.refused.set_visible(false);
+        match add_outcome(&path, &matches) {
+            AddOutcome::Added(folder) => self.tools.borrow_mut().add(folder),
+            AddOutcome::Ask { path, kinds } => {
+                self.pending.replace(Some((path, kinds)));
+            }
+            AddOutcome::Refused => self.refused.set_visible(true),
+        }
+        self.render();
     }
 }

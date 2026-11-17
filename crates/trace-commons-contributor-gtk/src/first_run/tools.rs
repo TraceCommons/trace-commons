@@ -437,6 +437,26 @@ mod tests {
     }
 
     #[test]
+    fn the_declaration_is_the_daemons_own_wire_shape() {
+        use trace_commons_contributor::daemon::settings::SourceDeclaration;
+        let mut tools = discovered();
+        let claude = tools.listed()[0].clone();
+        tools.set_watched(&claude, true);
+        let roots = tools.session_roots().unwrap();
+        assert_eq!(
+            roots["claude_source"],
+            serde_json::to_value(SourceDeclaration::Watch {
+                path: "/home/x/claude-code".into()
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            roots["codex_source"],
+            serde_json::to_value(SourceDeclaration::Off).unwrap()
+        );
+    }
+
+    #[test]
     fn without_discovery_nothing_is_declared() {
         assert!(Tools::default().session_roots().is_none());
         assert_eq!(Tools::default().trace_count(), None);

@@ -42,18 +42,37 @@ struct ReadRequests {
 }
 
 /// Forces the dark scheme while a first-run window is up and restores the
-/// person's own when it goes.
+/// person's own when the last one goes. Counted, so two windows that
+/// overlap (the roots window closing as the coordinator opens) cannot put
+/// the forced scheme back as the person's.
 pub(super) struct StageScheme;
+thread_local! {
+    static STAGE_HOLDERS: Cell<(usize, adw::ColorScheme)> =
+        const { Cell::new((0, adw::ColorScheme::Default)) };
+}
 impl StageScheme {
     pub(super) fn hold(window: &impl IsA<gtk::Window>) {
         let manager = adw::StyleManager::default();
-        let previous = manager.color_scheme();
+        STAGE_HOLDERS.with(|holders| {
+            let (count, previous) = holders.get();
+            let previous = if count == 0 {
+                manager.color_scheme()
+            } else {
+                previous
+            };
+            holders.set((count + 1, previous));
+        });
         manager.set_color_scheme(adw::ColorScheme::ForceDark);
-        window
-            .upcast_ref::<gtk::Window>()
-            .connect_destroy(move |_| {
-                adw::StyleManager::default().set_color_scheme(previous);
+        window.upcast_ref::<gtk::Window>().connect_destroy(|_| {
+            STAGE_HOLDERS.with(|holders| {
+                let (count, previous) = holders.get();
+                let count = count.saturating_sub(1);
+                holders.set((count, previous));
+                if count == 0 {
+                    adw::StyleManager::default().set_color_scheme(previous);
+                }
             });
+        });
     }
 }
 
@@ -1606,12 +1625,21 @@ impl Coordinator {
     /// sign-in or Start (`FirstRunRunner.handOverTerms`); a refusal is
     /// logged and does not stop the commit.
     fn commit(self: &Rc<Self>, commit: Commit, done: Done) {
-        if self.closed.get() || self.runner.borrow().busy() {
+        if self.closed.get() {
             return;
         }
         let Some(app) = self.app.upgrade() else {
             return;
         };
+        if self.runner.borrow().busy() {
+            // Never silently: whoever asked is told, and can ask again.
+            let line = if commit == Commit::Roots {
+                first_run_copy().folders.settings_failed
+            } else {
+                first_run_copy().uses.complete_failed
+            };
+            return done(self, Some(line.into()));
+        }
         self.set_busy(true);
         *self.done.borrow_mut() = Some(done);
         let receipt = self.receipt();
@@ -1732,7 +1760,13 @@ impl Coordinator {
                 Ok(value) => {
                     // An invite the daemon answered as not valid is dead; its
                     // own label says why.
-                    let label = value["reason_label"].as_str().unwrap_or("invite-invalid");
+                    let label = value["reason_label"].as_str().unwrap_or(
+                        if ticket.action == Action::EnrollNearAi {
+                            trace_commons_contributor::private_inference_copy::NEAR_AI_ENROLL_UNAVAILABLE
+                        } else {
+                            "invite-invalid"
+                        },
+                    );
                     c.note_lookup(&ticket.action, label);
                     Outcome::Failure(failure_copy(&ticket.action, label).into())
                 }
