@@ -164,7 +164,11 @@ mod tests {
             .find(|w| w.has_css_class("tc-map-transfer-memory"))
             .expect("the memory well");
         let first = well.first_child().expect("the well's first child");
-        assert!(first.has_css_class("tc-map-lock"), "{:?}", first.css_classes());
+        assert!(
+            first.has_css_class("tc-map-lock"),
+            "{:?}",
+            first.css_classes()
+        );
         assert!(first.is::<gtk::DrawingArea>());
     }
 }

@@ -2297,8 +2297,8 @@ mod tests {
     /// 10 by 10 box.
     #[test]
     fn the_lock_draws_ink_in_its_box() {
-        let surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 10, 10)
-            .expect("surface");
+        let surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 10, 10).expect("surface");
         {
             let cr = gtk::cairo::Context::new(&surface).expect("context");
             let ink = gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
