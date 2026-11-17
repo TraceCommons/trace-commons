@@ -607,7 +607,7 @@ fn page(title: &str) -> (gtk::Box, gtk::Box) {
         .xalign(0.0)
         .wrap(true)
         .build();
-    heading.add_css_class("tc-brand-dialog-title");
+    heading.add_css_class("tc-flow-title");
     outer.append(&heading);
     let body = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -624,7 +624,7 @@ pub(super) fn body_label(text: &str) -> gtk::Label {
         .xalign(0.0)
         .wrap(true)
         .build();
-    label.add_css_class("tc-brand-body");
+    label.add_css_class("tc-flow-body");
     label
 }
 
@@ -687,8 +687,12 @@ fn present_agent_configuration(parent: &adw::Window) {
         .margin_start(space::L)
         .margin_end(space::L)
         .build();
-    let heading = body_label(copy.title);
-    heading.add_css_class("tc-brand-dialog-title");
+    let heading = gtk::Label::builder()
+        .label(copy.title)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    heading.add_css_class("tc-flow-title");
     content.append(&heading);
     content.append(&body_label(copy.body));
     content.append(&body_label(copy.prerequisite));
@@ -773,7 +777,7 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     // second button in the footer competes with it from the one position that
     // should be uncontested. Here it is answerable where it is asked.
     let removed = gtk::Button::with_label(copy::ONBOARD_WHAT_REMOVED);
-    removed.add_css_class("tc-brand-link");
+    removed.add_css_class("tc-flow-link");
     removed.set_halign(gtk::Align::Start);
     removed.connect_clicked({
         let onboarding = onboarding.clone();
@@ -1054,7 +1058,7 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
                 .xalign(0.0)
                 .wrap(true)
                 .build();
-            title_label.add_css_class("tc-brand-emphasis");
+            title_label.add_css_class("tc-flow-emphasis");
             text.append(&title_label);
             // The description is the daemon's, verbatim.
             text.append(&body_label(&scope.description));
