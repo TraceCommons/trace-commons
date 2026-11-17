@@ -23,7 +23,7 @@ fail() {
 # The rendering fixture explicitly selects Insights and its Overview tab;
 # the connected shell's default destination is Home.
 # Require the page's own tab switcher -- an interactive control on the
-# Insights page, not the sidebar's "Insights" entry -- and the Overview's
+# Insights page, not the tab strip's "Insights" tab -- and the Overview's
 # "Tokens by day" card heading, which shows its body rendered.
 #
 # $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
@@ -169,7 +169,17 @@ else
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
-    ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion; do
+    ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
+    ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
+    ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
+    ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
+    ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
+    ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
+    ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
+    ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
+    ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
+    ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
