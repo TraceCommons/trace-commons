@@ -34,3 +34,5 @@ The normal CI server/ingest Clippy command passed with the existing allow-list. 
 Final independent review found no remaining material issues. Hosted CI results belong to the resulting PR and are separate from the local evidence above.
 
 The existing non-CUDA local-model CI job also runs the two request-restriction contract tests; they construct requests without loading a model or using a GPU.
+
+Workflow validation: actionlint and zizmor1.32.0 passed. Inserting the request-test step moved the existing pinned Playwright install by seven lines; its numeric zizmor exception was updated to the same install, with no additional exception or rule suppression.

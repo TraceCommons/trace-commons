@@ -30,5 +30,5 @@ rules:
     # binary the qualification reader accepts (its own pinned version).
     # Line-specific, so a new ad-hoc install still fails.
     ignore:
-      - ci.yml:2367
+      - ci.yml:2374
       - opencode-qualification.yml:65
