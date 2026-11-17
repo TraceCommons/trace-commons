@@ -492,16 +492,34 @@ pub fn installed() -> Vec<TerminalApp> {
         if sandboxed() {
             return vec![];
         }
-        TerminalApp::offered()
-            .iter()
-            .copied()
-            .filter(|app| app.executable().and_then(external_terminal).is_some())
-            .collect()
+        installed_among(
+            TerminalApp::offered(),
+            |name| external_terminal(name).is_some(),
+            std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()),
+        )
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         vec![]
     }
+}
+
+/// The apps among `offered` whose program `found` finds. foot is counted
+/// only when a Wayland session is present (`wayland`): under X11 it cannot
+/// start, so offering it, or standing it in for a missing default, would
+/// refuse the launch.
+#[cfg(any(windows, target_os = "linux", test))]
+fn installed_among(
+    offered: &[TerminalApp],
+    found: impl Fn(&str) -> bool,
+    wayland: bool,
+) -> Vec<TerminalApp> {
+    offered
+        .iter()
+        .copied()
+        .filter(|app| wayland || *app != TerminalApp::Foot)
+        .filter(|app| app.executable().is_some_and(&found))
+        .collect()
 }
 
 /// The last answer to "which terminal apps are installed", reused for
@@ -3169,25 +3187,41 @@ mod tests {
     #[test]
     fn tool_setup_opens_in_a_linux_terminal_as_argv() {
         let body = "printf '%s\\n' 'quoted $HOME `not-code`'";
-        for app in TerminalApp::LINUX {
+        // Literal expected heads, written from each terminal's documented
+        // flags, not from `terminal_args`, which `setup_plan` calls.
+        let expected: [(TerminalApp, &[&str]); 10] = [
+            (TerminalApp::GnomeTerminal, &["--"]),
+            (TerminalApp::Ptyxis, &["--"]),
+            (TerminalApp::Konsole, &["--hold", "-e"]),
+            (TerminalApp::Xfce4Terminal, &["--hold", "-x"]),
+            (TerminalApp::Ghostty, &["--wait-after-command=true", "-e"]),
+            (TerminalApp::Kitty, &["--hold"]),
+            (
+                TerminalApp::Wezterm,
+                &[
+                    "--config",
+                    "exit_behavior=\"Hold\"",
+                    "start",
+                    "--always-new-process",
+                    "--",
+                ],
+            ),
+            (TerminalApp::Alacritty, &["--hold", "-e"]),
+            (TerminalApp::Foot, &["--hold"]),
+            (TerminalApp::Terminator, &["--no-dbus", "-x"]),
+        ];
+        assert_eq!(
+            expected.map(|(app, _)| app),
+            TerminalApp::LINUX.map(|app| app),
+            "every Linux terminal has a literal expectation, in picker order"
+        );
+        let tail = setup_argv(body).unwrap();
+        for (app, head) in expected {
             let plan = setup_plan(app, Path::new("/usr/bin/term"), body).unwrap();
             assert_eq!(plan.program, Path::new("/usr/bin/term"));
-            let tail = setup_argv(body).unwrap();
-            assert!(plan.args.ends_with(&tail), "{app:?}: {:?}", plan.args);
-            let head = &plan.args[..plan.args.len() - tail.len()];
-            assert_eq!(
-                head,
-                terminal_args(app, None).unwrap().as_slice(),
-                "{app:?}"
-            );
-            assert!(
-                !head
-                    .iter()
-                    .any(|a| a.to_string_lossy().contains("directory")
-                        || a == "--workdir"
-                        || a == "--cwd"),
-                "{app:?}: no folder for setup"
-            );
+            let mut want: Vec<std::ffi::OsString> = head.iter().map(Into::into).collect();
+            want.extend(tail.iter().cloned());
+            assert_eq!(plan.args, want, "{app:?}");
         }
         assert_eq!(tail_of(&setup_argv(body).unwrap()), ["/bin/bash", "-lc"]);
         assert_eq!(
@@ -3204,6 +3238,29 @@ mod tests {
         // the platform ships.
         let script = setup_script("true").unwrap();
         assert!(script.ends_with(&format!("exec \"${{SHELL:-{SETUP_FALLBACK_SHELL}}}\" -l")));
+    }
+
+    /// foot is a Wayland terminal: under X11 it cannot start, so it is not
+    /// offered there, and a stand-in for a missing default skips it.
+    #[test]
+    fn foot_is_offered_only_in_a_wayland_session() {
+        let everything = |_: &str| true;
+        let with = installed_among(TerminalApp::LINUX.as_slice(), everything, true);
+        let without = installed_among(TerminalApp::LINUX.as_slice(), everything, false);
+        assert_eq!(with, TerminalApp::LINUX.to_vec());
+        assert!(with.contains(&TerminalApp::Foot));
+        assert!(!without.contains(&TerminalApp::Foot));
+        let mut rest = TerminalApp::LINUX.to_vec();
+        rest.retain(|app| *app != TerminalApp::Foot);
+        assert_eq!(without, rest);
+        // Only foot installed, no Wayland: nothing is installed, and the
+        // default is not replaced by a terminal that cannot start.
+        let only_foot = |name: &str| name == "foot";
+        assert!(installed_among(TerminalApp::LINUX.as_slice(), only_foot, false).is_empty());
+        assert_eq!(
+            installed_among(TerminalApp::LINUX.as_slice(), only_foot, true),
+            [TerminalApp::Foot]
+        );
     }
 
     #[cfg(unix)]

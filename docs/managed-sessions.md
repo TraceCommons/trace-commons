@@ -101,9 +101,7 @@ tools whose executable availability is not checked.
   are not executed by this resolver; an installed wrapper alone is unavailable.
 - App sessions open in the terminal chosen at Settings > Private AI > **Open
   sessions in** (see "Terminal choice" below). The packaged `near-ai` helper
-  must be present. **Install** and **Update** (tool setup) open in the same
-terminal on macOS and on Linux outside Flatpak; the GTK shell does not
-draw them yet. Flatpak host-terminal launching is unavailable; it requires
+  must be present. Flatpak host-terminal launching is unavailable; it requires
   an explicit host bridge, so under Flatpak the picker offers nothing and is
   not drawn. Show brings a session's Terminal tab to the front on macOS; a
   session opened in another terminal app cannot be shown.
@@ -267,6 +265,9 @@ id. The default is what shipped before the choice: Terminal on macOS and
 Windows Terminal on Windows. Linux shipped `x-terminal-emulator`, which fails
 the test, so the Linux default is GNOME Terminal.
 
+**Tool setup.** **Install** and **Update** open in the same terminal on
+macOS and on Linux outside Flatpak; the GTK shell does not draw them yet.
+
 **A missing default.** While the person has not chosen a terminal
 (`managed_terminal_chosen` false) and the default is not installed, the
 first installed terminal in picker order stands in for it: in the
@@ -286,7 +287,9 @@ terminal; and the Windows and macOS shells already propose the first
 offered terminal when the current id is not among them
 (`ProposedTerminalIndex`, `proposedTerminal`). The Linux picker order is
 therefore also the fallback order: GNOME Terminal, Ptyxis, Konsole, Xfce
-Terminal, Ghostty, kitty, WezTerm, Alacritty, foot, Terminator.
+Terminal, Ghostty, kitty, WezTerm, Alacritty, foot, Terminator. foot is
+counted only when `WAYLAND_DISPLAY` is set, so under X11 it is neither
+offered nor a stand-in.
 
 | Platform | Terminal | id | How the command and folder reach it | Evidence |
 | --- | --- | --- | --- | --- |
