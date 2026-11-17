@@ -265,11 +265,7 @@ enum DebugScreenshot {
         let insightsDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("trace-commons-capture-insights-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: insightsDirectory, withIntermediateDirectories: true)
-        renderingSampleWindows = true
-        defer {
-            renderingSampleWindows = false
-            try? FileManager.default.removeItem(at: insightsDirectory)
-        }
+        defer { try? FileManager.default.removeItem(at: insightsDirectory) }
         for shot in windowShots() {
             let traces = TracesStore(client: nil)
             traces.attach(client)
@@ -291,6 +287,14 @@ enum DebugScreenshot {
                 tab: shot.tab, mapTab: MonitorWindowView.mapTab(for: shot.tab) ?? .traces,
                 traces: traces, home: home, inference: inference,
                 insightsStore: .custom(insightsDirectory.path))
+            // Only around the synchronous render, so the live app never
+            // reads onboarding as done or its glass as painted in between.
+            renderingSampleWindows = true
+            GlassMaterial.paintsForCapture = true
+            defer {
+                renderingSampleWindows = false
+                GlassMaterial.paintsForCapture = false
+            }
             render(
                 MonitorWindowView(capture: capture, navigation: MainWindowNavigation(), missionDrafts: MissionDraftsModel())
                     .environmentObject(model)

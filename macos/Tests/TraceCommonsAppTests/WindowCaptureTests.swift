@@ -84,6 +84,8 @@ final class WindowCaptureTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         await DebugScreenshot.captureWindows(set: .normalDay, model: AppModel(), to: directory.path)
+        XCTAssertFalse(DebugScreenshot.capturesSampleWindows, "the live app would read onboarding as done")
+        XCTAssertFalse(GlassMaterial.paintsForCapture, "the live app would draw painted glass")
         let written = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
         let shots = DebugScreenshot.windowShots()
         XCTAssertEqual(written, shots.map { $0.fileName(set: .normalDay, appearance: "light") }.sorted())
