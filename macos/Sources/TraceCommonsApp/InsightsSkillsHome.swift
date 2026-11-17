@@ -12,7 +12,10 @@ enum InsightsSkillsHome {
         /// Publishers with recent public activity, most active first. Only
         /// ever filled from a verified server catalog.
         var active: [Active] = []
-        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty && week.isEmpty && active.isEmpty }
+        /// Catalog introductions without dates, ranks, or implied follows.
+        var defaultCreators: [DefaultCreator] = []
+        var context: RankingContext = .init()
+        var isEmpty: Bool { updates.isEmpty && trends.isEmpty && creators.isEmpty && week.isEmpty && active.isEmpty && defaultCreators.isEmpty }
 
         /// The feed: every item in one column, newest first, under the
         /// period it falls in. Empty periods are left out.
@@ -149,6 +152,12 @@ enum InsightsSkillsHome {
             return String(max(0, count))
         }
     }
+    struct DefaultCreator: Identifiable {
+        let publisher: DaemonData.SkillsPublisher
+        let skills: [DaemonData.CatalogSkill]
+        var id: String { publisher.id }
+    }
+
     /// Several catalog changes from one publisher in one period.
     struct Rollup: Identifiable {
         let id: String
@@ -207,7 +216,27 @@ enum InsightsSkillsHome {
                      trends: usageChanges(snapshot.usage, now: now, calendar: calendar),
                      creators: creatorChanges(snapshot, now: now),
                      week: weekTop(snapshot.usage, now: now, calendar: calendar),
-                     active: activePublishers(snapshot.catalog))
+                     active: activePublishers(snapshot.catalog),
+                     defaultCreators: defaultCreators(snapshot),
+                     context: rankingContext(snapshot, model: model))
+    }
+
+    /// Defaults introduce real catalog entries even before the first change.
+    /// Following personalizes the story mix without removing discovery.
+    private static func defaultCreators(_ snapshot: DaemonData.SkillsSnapshot) -> [DefaultCreator] {
+        guard snapshot.usage.enabled else { return [] }
+        var seen = Set<String>()
+        let creators = snapshot.defaultPublishers.compactMap { id -> DefaultCreator? in
+            guard seen.insert(id).inserted,
+                  let publisher = snapshot.catalog.publishers.first(where: { $0.id == id }) else { return nil }
+            var named = Set<String>()
+            let skills = snapshot.catalog.skills.filter {
+                $0.publisherID == id && $0.repository == publisher.repository && named.insert($0.id).inserted
+            }.sorted { $0.name == $1.name ? $0.id < $1.id : $0.name < $1.name }
+            guard !skills.isEmpty else { return nil }
+            return DefaultCreator(publisher: publisher, skills: Array(skills.prefix(3)))
+        }
+        return Array(creators.prefix(3))
     }
 
     /// The daemon's recently active publishers, in its order, resolved
@@ -296,7 +325,7 @@ enum InsightsSkillsHome {
             }
             if let candidate = candidates.sorted(by: { $0.installedID < $1.installedID }).first { items.append(candidate) }
         }
-        return Array(items.sorted { $0.checkedAt == $1.checkedAt ? $0.id < $1.id : $0.checkedAt > $1.checkedAt }.prefix(3))
+        return Array(items.sorted { $0.checkedAt == $1.checkedAt ? $0.id < $1.id : $0.checkedAt > $1.checkedAt }.prefix(12))
     }
 
     /// Partial history is read by agent and day where the daemon says
@@ -351,25 +380,60 @@ enum InsightsSkillsHome {
                          direction: current > previous ? (previous == 0 ? .started : .more) : .less, periodEnd: today,
                          daily: daily)
         }
-        return Array(items.sorted {
+        // The IPC snapshot already bounds these rows. Do not cut by raw
+        // counts before the ranker filters weak signals and scores relevance.
+        return items.sorted {
             let a = abs($0.currentUses - $0.previousUses), b = abs($1.currentUses - $1.previousUses)
             return a == b ? $0.id < $1.id : a > b
-        }.prefix(3))
+        }
     }
 
     private static func creatorChanges(_ snapshot: DaemonData.SkillsSnapshot, now: Date) -> [CreatorUpdate] {
         let followed = Set(snapshot.followedPublishers)
+        let defaults = Set(snapshot.usage.enabled ? snapshot.defaultPublishers : [])
+        // Following stays explicit. Home combines both partitions; an explicit
+        // event wins when an older daemon happens to send it in both.
+        let events = snapshot.feed.filter { followed.contains($0.publisherID) }
+            + snapshot.homeFeed.filter { defaults.contains($0.publisherID) && !followed.contains($0.publisherID) }
         let oldest = now.addingTimeInterval(-30 * 86_400)
-        let valid = snapshot.feed.compactMap { event -> CreatorUpdate? in
-            guard followed.contains(event.publisherID),
-                  ["added", "updated"].contains(event.kind), let observed = parse(event.observedAt), observed <= now, observed >= oldest,
+        let valid = events.compactMap { event -> CreatorUpdate? in
+            guard ["added", "updated"].contains(event.kind), let observed = parse(event.observedAt), observed <= now, observed >= oldest,
                   let publisher = snapshot.catalog.publishers.first(where: { $0.id == event.publisherID }),
                   let skill = snapshot.catalog.skills.first(where: { $0.id == event.skillID && $0.publisherID == event.publisherID }) else { return nil }
             return CreatorUpdate(id: event.id, event: event, skill: skill, publisher: publisher, observedAt: observed)
         }.sorted { $0.observedAt == $1.observedAt ? $0.id < $1.id : $0.observedAt > $1.observedAt }
-        // Repeated updates to one skill do not crowd out other creators/skills.
+        // Retain opportunity for every creator before the ranker batches and
+        // scores stories. The old global prefix let a single import hide all
+        // other publishers, regardless of their relevance.
         var seen = Set<String>()
-        return Array(valid.filter { seen.insert($0.publisher.id + "\u{0}" + $0.skill.id).inserted }.prefix(5))
+        var perPublisher: [String: Int] = [:]
+        return Array(valid.filter {
+            guard seen.insert($0.publisher.id + "\u{0}" + $0.skill.id).inserted,
+                  perPublisher[$0.publisher.id, default: 0] < 8 else { return false }
+            perPublisher[$0.publisher.id, default: 0] += 1
+            return true
+        }.prefix(96))
+    }
+
+    @MainActor
+    private static func rankingContext(_ snapshot: DaemonData.SkillsSnapshot, model: InsightsSkillsModel) -> RankingContext {
+        var result = RankingContext(followedPublisherIDs: Set(snapshot.followedPublishers))
+        let explicit = Set(snapshot.usage.coverage.filter { $0.status == "explicit_invocations" }.map(\.agent))
+        for group in InsightsSkillsIndex.groups(snapshot.inventory.skills) {
+            let ids = Set(snapshot.catalog.skills.filter { catalog in
+                group.installations.contains { $0.source?.repository == catalog.repository && $0.source?.path == catalog.path }
+            }.map(\.id))
+            result.installedSkillIDs.formUnion(ids)
+            guard snapshot.usage.enabled, !ids.isEmpty else { continue }
+            for row in InsightsSkillsIndex.usageRows(group, snapshot: snapshot, model: model)
+                where explicit.contains(row.agent) && ["direct", "delegated"].contains(row.population) {
+                result.catalogIDsByUsageID[row.agent + "\u{0}" + row.name, default: []].formUnion(ids)
+                if row.windows.contains(where: { $0.days == 30 && $0.invocations > 0 }) {
+                    result.usedSkillIDs.formUnion(ids)
+                }
+            }
+        }
+        return result
     }
 
     private static func dayFormatter(_ calendar: Calendar) -> DateFormatter {

@@ -159,7 +159,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked
       - name: Test security policy guards
-        run: python3 -m unittest discover -s scripts/ci/tests -p 'test_dependency_policy.py'
+        run: |
+          python3 -m unittest discover -s scripts/ci/tests -p 'test_dependency_policy.py'
+          python3 -m unittest discover -s scripts/ci/tests -p 'test_cargo_audit.py'
       - name: Audit committed lockfile with shared advisory policy
         env:
           AUDIT_LOCKFILE: ${{ matrix.lockfile }}

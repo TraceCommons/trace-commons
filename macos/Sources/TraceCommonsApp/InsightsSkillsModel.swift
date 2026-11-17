@@ -28,7 +28,11 @@ final class InsightsSkillsModel {
     private(set) var shown: DaemonData.SkillsSnapshot?
     private(set) var busy = false
     private(set) var failureKey: String?
-    var canFollow: Bool { writer != nil && !busy }
+    private(set) var pendingFollowPublisherID: String?
+    private(set) var followFailurePublisherID: String?
+    var canFollow: Bool {
+        writer != nil && !busy && shown?.enabled == true && shown?.readable == true
+    }
 
     init(reader: Reader? = nil, writer: Writer? = nil, definitionReader: DefinitionReader? = nil, evidenceReader: EvidenceReader? = nil, copy: [String: String] = [:],
          idlePollInterval: Duration = .seconds(5 * 60)) {
@@ -193,6 +197,7 @@ final class InsightsSkillsModel {
             let snapshot = try await reader(refresh)
             guard !Task.isCancelled else { return }
             invalidateDetails()
+            followFailurePublisherID = nil
             if snapshot.readable {
                 shown = snapshot
                 failureKey = snapshot.error == nil ? nil : "skills_refresh_failed"
@@ -207,18 +212,36 @@ final class InsightsSkillsModel {
     }
 
     func setFollow(publisherID: String, followed: Bool) async {
-        guard !busy, let writer, !Task.isCancelled else { return }
+        guard canFollow, let writer, !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        pendingFollowPublisherID = publisherID
+        followFailurePublisherID = nil
+        if failureKey == "skills_follow_failed" { failureKey = nil }
+        defer { pendingFollowPublisherID = nil; busy = false }
         do {
             let snapshot = try await writer(publisherID, followed)
             guard !Task.isCancelled else { return }
+            // An authoritative loss of access revokes the saved display too.
+            guard snapshot.readable, snapshot.enabled else {
+                invalidateDetails()
+                shown = snapshot.readable ? snapshot : nil
+                followFailurePublisherID = publisherID
+                failureKey = "skills_follow_failed"
+                return
+            }
+            // A readable reply alone does not confirm the requested mutation.
+            guard snapshot.followedPublishers.contains(publisherID) == followed else {
+                followFailurePublisherID = publisherID
+                failureKey = "skills_follow_failed"
+                return
+            }
             invalidateDetails()
-            guard snapshot.readable else { shown = nil; failureKey = "skills_follow_failed"; return }
             shown = snapshot
-            failureKey = snapshot.error == nil ? nil : "skills_follow_failed"
+            // Public catalog refresh errors can coexist with a persisted follow.
+            failureKey = snapshot.error == nil ? nil : "skills_refresh_failed"
         } catch {
             guard !Task.isCancelled else { return }
+            followFailurePublisherID = publisherID
             failureKey = "skills_follow_failed"
         }
     }
