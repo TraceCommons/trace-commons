@@ -646,23 +646,24 @@ pub fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
 /// A row of controls or figures that wraps onto further lines when its
 /// column is narrower than the row, so it never makes the column wider
 /// than the Monitor window's 440 main pane. Fill it with [`wrap_append`].
-pub fn wrap_row(spacing: i32) -> gtk::FlowBox {
-    gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .homogeneous(false)
-        .min_children_per_line(1)
-        .max_children_per_line(8)
-        .column_spacing(spacing as u32)
-        .row_spacing(spacing as u32)
-        .halign(gtk::Align::Start)
-        .valign(gtk::Align::Start)
-        .build()
+///
+/// Its own container, not a `GtkFlowBox`: on GTK 4.14 a flow box of
+/// buttons asked for less height than the lines it drew, clipping its last
+/// buttons ([`super::wrap_row`]).
+pub fn wrap_row(spacing: i32) -> super::wrap_row::WrapRow {
+    super::wrap_row::WrapRow::new(spacing)
 }
 
-/// Appends to a [`wrap_row`]. The flow box's own child wrapper takes no
-/// focus, so the keyboard reaches the control itself in one step.
-pub fn wrap_append(row: &gtk::FlowBox, widget: &impl IsA<gtk::Widget>) {
-    row.insert(widget, -1);
+/// Appends to a [`wrap_row`].
+pub fn wrap_append(row: &super::wrap_row::WrapRow, widget: &impl IsA<gtk::Widget>) {
+    row.append(widget);
+}
+
+/// Appends to a grid of equal tiles (a homogeneous `GtkFlowBox`). The flow
+/// box's own child wrapper takes no focus, so the keyboard reaches the tile
+/// itself in one step.
+pub fn grid_append(grid: &gtk::FlowBox, widget: &impl IsA<gtk::Widget>) {
+    grid.insert(widget, -1);
     if let Some(child) = widget.parent() {
         child.set_focusable(false);
     }
@@ -821,6 +822,52 @@ mod tests {
         ];
         for dark in [false, true] {
             assert_eq!(check(dark, &labels, 4.5), Vec::<String>::new());
+        }
+    }
+
+    /// The colour a rule for exactly `selector` in this shell's stylesheet
+    /// gives its text, if one does.
+    fn rule_colour(selector: &str) -> Option<String> {
+        let css = include_str!("style.css");
+        css.split('}').find_map(|rule| {
+            let (selectors, body) = rule.split_once('{')?;
+            let selectors: Vec<&str> = selectors
+                .rsplit("*/")
+                .next()
+                .unwrap_or(selectors)
+                .split(',')
+                .map(str::trim)
+                .collect();
+            if !selectors.contains(&selector) {
+                return None;
+            }
+            body.split(';').find_map(|line| {
+                let value = line.trim().strip_prefix("color:")?.trim();
+                Some(value.trim_start_matches('@').to_string())
+            })
+        })
+    }
+
+    /// The Traces tab's count badge with the attention glyph beside it
+    /// (`App::set_queue_count`) is text on the accent fill. `.tc-attention`
+    /// alone is gold text for a plain ground, and it comes after
+    /// `.tc-count-badge`, so without a rule of its own the badge read dark
+    /// brown on purple in light mode. The Mac's badge has one colour pair
+    /// whatever it counts (`GlassBadgeValue`).
+    #[test]
+    fn the_attention_badge_is_readable_on_its_fill() {
+        let colour = rule_colour(".tc-count-badge.tc-attention")
+            .or_else(|| rule_colour(".tc-attention"))
+            .expect("the attention badge has a colour");
+        assert_eq!(
+            rule_colour(".tc-count-badge").as_deref(),
+            Some("tc_primary_label")
+        );
+        for dark in [false, true] {
+            assert_eq!(
+                check(dark, &[(colour.as_str(), "tc_primary_fill")], 4.5),
+                Vec::<String>::new()
+            );
         }
     }
 

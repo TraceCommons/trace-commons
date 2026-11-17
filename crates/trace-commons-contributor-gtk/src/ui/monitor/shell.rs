@@ -102,6 +102,46 @@ struct NoticeSlot {
     close: gtk::Button,
 }
 
+/// The stack's own ground, the pane's colour, across the whole width of the
+/// pane from its top to the foot of the last card peeking out. The cards
+/// keep their own column, which on Home is narrower than the screen's; on
+/// the Mac the stack is exactly the tab's width and nothing of the screen
+/// shows beside it, and this ground does the same here, so no sliver of a
+/// covered heading shows at a card's side.
+const NOTICE_BACKDROP_CLASS: &str = "tc-notice-backdrop";
+
+/// Marks the surface a closable card keeps room in for its X
+/// (`.tc-notice-closable .tc-notice-surface` in `style.css`): the surface
+/// alone, not every card nested in it.
+const NOTICE_SURFACE_CLASS: &str = "tc-notice-surface";
+
+/// Puts [`NOTICE_SURFACE_CLASS`] on `card`'s surface while it carries an X
+/// and takes it off everything else in `card`. Changes a class only when it
+/// is wrong, so the card's own class watcher is not woken for nothing.
+fn mark_surface(card: &gtk::Widget, closable: bool) {
+    let surface = closable.then(|| card_surface(card)).flatten();
+    let mut all = vec![card.clone()];
+    let mut index = 0;
+    while index < all.len() {
+        let mut child = all[index].first_child();
+        while let Some(next) = child {
+            child = next.next_sibling();
+            all.push(next);
+        }
+        index += 1;
+    }
+    for widget in all {
+        let wanted = surface.as_ref() == Some(&widget);
+        if widget.has_css_class(NOTICE_SURFACE_CLASS) != wanted {
+            if wanted {
+                widget.add_css_class(NOTICE_SURFACE_CLASS);
+            } else {
+                widget.remove_css_class(NOTICE_SURFACE_CLASS);
+            }
+        }
+    }
+}
+
 /// The card's drawn surface, the first shown `tc-banner` or `tc-card` in
 /// it: where its X goes. The cards wrap it in clamps and margins.
 fn card_surface(card: &gtk::Widget) -> Option<gtk::Widget> {
@@ -505,6 +545,7 @@ impl Shell {
                     } else {
                         frame.remove_css_class("tc-notice-closable");
                     }
+                    mark_surface(&card, x);
                 }
                 for (level, plate) in plates.iter().enumerate() {
                     if let Some(plate) = plate.upgrade() {
@@ -538,10 +579,27 @@ impl Shell {
             });
         }
 
+        // The stack is the whole width of the pane and as tall as its cards
+        // are at that width, never taller than the pane (then it scrolls).
+        // Its height is measured for the width it is given: GTK 4.14's
+        // default placement measured it for its natural width, one line of
+        // buttons, and then gave it less height than the narrower card drew,
+        // clipping the Private AI offer's "Turn on".
+        notice_scroller.add_css_class(NOTICE_BACKDROP_CLASS);
         let over_content = gtk::Overlay::new();
         over_content.set_child(Some(&content_scroller));
         over_content.add_overlay(&notice_scroller);
         over_content.set_vexpand(true);
+        over_content.connect_get_child_position(|overlay, stack| {
+            let (width, height) = (overlay.width(), overlay.height());
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            let (least, _, _, _) = stack.measure(gtk::Orientation::Horizontal, -1);
+            let width = width.max(least);
+            let (_, natural, _, _) = stack.measure(gtk::Orientation::Vertical, width);
+            Some(gtk::gdk::Rectangle::new(0, 0, width, natural.min(height)))
+        });
 
         let graph = GraphFooter::new();
 
@@ -2050,10 +2108,17 @@ mod tests {
         };
         // Each card alone, in front on a tab it belongs to: an X on the
         // cards that have one, inside the card's drawn surface.
+        // Each with a card nested in it, as the consent column holds its
+        // notices: only the drawn surface keeps the X's room.
+        let mut nested = Vec::new();
         for (notice, card) in &mounted.notices {
             card.add_css_class("tc-banner");
             card.set_size_request(-1, 60);
             card.append(&gtk::Label::new(Some(&format!("{notice:?} says"))));
+            let inner = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            inner.add_css_class("tc-card");
+            card.append(&inner);
+            nested.push(inner);
         }
         shell.notices_changed();
         for notice in Notice::ALL {
@@ -2087,7 +2152,17 @@ mod tests {
                     "{notice:?}: the X {x:?} is beside the card {surface:?}, not inside it"
                 );
                 assert!(slot.frame.has_css_class("tc-notice-closable"));
+                assert!(
+                    slot.card.has_css_class(NOTICE_SURFACE_CLASS),
+                    "{notice:?}: the surface keeps no room for its X"
+                );
             }
+            assert!(
+                nested
+                    .iter()
+                    .all(|inner| !inner.has_css_class(NOTICE_SURFACE_CLASS)),
+                "{notice:?}: a card nested in the notice keeps the X's room"
+            );
             // A hidden card: no frame and no bare X.
             slot.card.set_visible(false);
             assert!(!slot.frame.get_visible(), "{notice:?}: an empty frame");
@@ -2190,5 +2265,151 @@ mod tests {
             );
         }
         mounted.window.close();
+    }
+
+    // --- Fix pass 3 on #2160: whole buttons, no slivers -------------------
+
+    use crate::ui::wrap_row::buttons_outside;
+
+    /// A card as the offers draw theirs: a title that wraps, then two
+    /// buttons in a row that wraps (`style::wrap_row`).
+    fn offer_card(card: &gtk::Box) {
+        card.add_css_class("tc-card");
+        card.set_spacing(style::space::M);
+        let title = gtk::Label::builder()
+            .label("Use Private AI for the AI requests your tools make on this computer")
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        card.append(&title);
+        let actions = style::wrap_row(style::space::M);
+        for word in ["Not now", "Turn on"] {
+            style::wrap_append(&actions, &gtk::Button::with_label(word));
+        }
+        card.append(&actions);
+    }
+
+    /// The Private AI offer on Ubuntu 24.04's GTK 4.14 lost its "Turn on":
+    /// the stack laid over the tab was measured for one width and given
+    /// another. Every button of the front card is drawn whole, inside the
+    /// stack and inside the card, however wide the pane is.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_front_cards_buttons_are_whole_at_every_pane_width() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        for (notice, card) in &mounted.notices {
+            if *notice == Notice::PrivateAiOffer {
+                offer_card(card);
+            } else {
+                card.set_visible(false);
+            }
+        }
+        shell.notices_changed();
+        shell.pick_tab(Tab::Inference);
+        let scroller = notice_scroller(shell);
+        let overlay = scroller.parent().expect("the stack is laid over the tab");
+        let front = slot(shell, Notice::PrivateAiOffer).card.clone();
+        pump_until(|| overlay.width() > 0 && scroller.height() > 0);
+        let pane = overlay.width();
+        // The pane as it opens (440), then narrowed by 60, 120 and 180.
+        for narrower in [0, 60, 120, 180] {
+            overlay.set_margin_end(narrower);
+            let expected = pane - narrower;
+            pump_until(|| overlay.width() <= expected && scroller.height() > 0);
+            pump();
+            assert_eq!(
+                scroller.width(),
+                overlay.width(),
+                "the stack is not the pane's width"
+            );
+            let outside_stack = buttons_outside(&front, scroller.upcast_ref());
+            let outside_card = buttons_outside(&front, &front);
+            assert!(
+                outside_stack.is_empty() && outside_card.is_empty(),
+                "pane {} wide: outside the stack {outside_stack:?}, outside the card \
+                 {outside_card:?}",
+                overlay.width()
+            );
+        }
+        mounted.window.close();
+    }
+
+    /// The stack's ground is the pane's colour across the pane's whole width,
+    /// so a heading the front card covers shows no sliver at the card's side
+    /// (Home's screen is wider than the notices' column), as on the Mac,
+    /// where the stack is exactly the tab's width.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_covered_heading_shows_nothing_beside_the_card() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        let page = shell
+            .content
+            .child_by_name("home")
+            .and_downcast::<gtk::Box>()
+            .expect("Home is a page");
+        // Home's own inset, narrower than the notices' column.
+        page.set_margin_start(style::space::M);
+        page.set_margin_end(style::space::M);
+        let heading = gtk::Label::builder()
+            .label("Home, a heading as wide as the screen")
+            .hexpand(true)
+            .xalign(0.0)
+            .build();
+        heading.add_css_class("title-2");
+        page.prepend(&heading);
+        for (notice, card) in &mounted.notices {
+            if *notice == Notice::Update {
+                offer_card(card);
+            } else {
+                card.set_visible(false);
+            }
+        }
+        shell.notices_changed();
+        shell.pick_tab(Tab::Home);
+        let scroller = notice_scroller(shell);
+        let overlay = scroller.parent().expect("the stack is laid over the tab");
+        pump_until(|| heading.is_mapped() && scroller.height() > 0);
+        assert!(scroller.has_css_class(NOTICE_BACKDROP_CLASS));
+        let stack = scroller.compute_bounds(&overlay).expect("placed");
+        let title = heading.compute_bounds(&overlay).expect("placed");
+        assert!(
+            title.y() < stack.y() + stack.height(),
+            "the heading {title:?} is not under the stack {stack:?}"
+        );
+        assert!(
+            stack.x() <= title.x() && stack.x() + stack.width() >= title.x() + title.width(),
+            "the heading {title:?} runs past the stack's ground {stack:?}"
+        );
+        mounted.window.close();
+    }
+
+    /// The ground is drawn: the stylesheet gives the backdrop the pane's own
+    /// colour, as `.tc-root` has.
+    #[test]
+    fn the_notice_stacks_ground_is_the_panes_colour() {
+        let css = include_str!("../style.css");
+        let rule = |selector: &str| {
+            css.split(&format!("{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        assert!(rule(".tc-root").contains("background-color: @tc_bg;"));
+        assert!(
+            rule(&format!(".{NOTICE_BACKDROP_CLASS}")).contains("background-color: @tc_bg;"),
+            "the stack's ground is not the pane's colour"
+        );
+        // The X's room is kept on the card's surface alone.
+        assert!(
+            rule(&format!(".tc-notice-closable .{NOTICE_SURFACE_CLASS}"))
+                .contains("padding-right: 48px;")
+        );
+        assert!(
+            !css.contains(".tc-notice-closable .tc-card"),
+            "every card nested in a closable notice gets the X's room"
+        );
     }
 }

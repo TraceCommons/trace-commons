@@ -645,11 +645,11 @@ fn render_week(app: &Rc<App>) {
     // The core's Contributed figure (accepted plus waiting to be scored),
     // the one every shell shows under this word. `submitted` alone is only
     // the waiting part of it.
-    style::wrap_append(
+    style::grid_append(
         &cards,
         &stat_card(Tone::Clear, copy::CONTRIBUTED, rollup.week.contributed),
     );
-    style::wrap_append(
+    style::grid_append(
         &cards,
         &stat_card(
             Tone::Held,
@@ -659,7 +659,7 @@ fn render_week(app: &Rc<App>) {
     );
     // All time, not this week: "in the commons" is a standing total, and a
     // weekly slice of it would read as the commons shrinking every Monday.
-    style::wrap_append(
+    style::grid_append(
         &cards,
         &stat_card(
             Tone::Neutral,

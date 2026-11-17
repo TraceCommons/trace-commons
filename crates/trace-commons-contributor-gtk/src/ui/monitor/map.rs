@@ -35,7 +35,8 @@
 //!   station art, the tools' logos and tints are the look slice. Colours
 //!   are the shell's status tokens and the theme's ink.
 //! - The Private AI view is drawn empty: its scene is the Private AI slice.
-//! - The legend leaves out `legend_memory`, whose word names the Mac.
+//! - The legend's memory item and the coins' lock say "this computer"
+//!   (`legend_memory_computer`) where the Mac's say "this Mac".
 //! - The core's line when the map is not current, and the other devices
 //!   on the account, are not drawn: GTK reads neither yet.
 use std::cell::{Cell, RefCell};
@@ -156,6 +157,8 @@ mod imp {
         /// The pile's coin order and openness the buttons were last
         /// allocated for.
         pub pile_at: RefCell<(Vec<String>, bool)>,
+        /// The legend's memory item, shown while the tool group is drawn.
+        pub memory_legend: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     }
 
     #[glib::object_subclass]
@@ -910,6 +913,18 @@ impl MapCanvas {
 
     fn relayout(&self) {
         self.imp().layout_scene();
+        // The lock's legend item goes with the coins that carry it, as the
+        // Mac draws `legend_memory` only with its pile.
+        let has_pile = self.imp().scene.borrow().stack.is_some();
+        if let Some(item) = self
+            .imp()
+            .memory_legend
+            .borrow()
+            .as_ref()
+            .and_then(|item| item.upgrade())
+        {
+            item.set_visible(has_pile);
+        }
         self.sync_children();
         self.update_clock();
         self.queue_allocate();
@@ -1658,7 +1673,69 @@ fn draw_pile(
         if off {
             cross(cr, centre, radius * 0.5, s, palette, alpha);
         }
+        if coin_has_lock(node.dashed, open, index) {
+            // The tool's memory stays on this computer: a pip at the coin's
+            // right edge, on the pane's ground.
+            let pip = Point::new(centre.x + radius + s, centre.y);
+            circle(cr, pip, 7.5 * s);
+            source(cr, &palette.background, 1.0);
+            let _ = cr.fill();
+            draw_lock(cr, pip, s, &palette.ink, 0.7);
+        }
     }
+}
+
+/// Whether a coin carries the lock, as `MapToolPile` draws it: every
+/// watched coin of the open pile, and only the front one of the closed
+/// pile, so the pips do not stack.
+fn coin_has_lock(dashed: bool, open: bool, index: usize) -> bool {
+    !dashed && (open || index == 0)
+}
+
+/// A small closed padlock centred on `centre`, `s` the map's scale: a body
+/// and its shackle.
+fn draw_lock(cr: &gtk::cairo::Context, centre: Point, s: f64, ink: &gtk::gdk::RGBA, alpha: f64) {
+    let (w, h) = (6.0 * s, 4.5 * s);
+    let top = centre.y - h / 2.0 + 1.2 * s;
+    source(cr, ink, alpha);
+    cr.rectangle(centre.x - w / 2.0, top, w, h);
+    let _ = cr.fill();
+    cr.new_sub_path();
+    cr.arc(
+        centre.x,
+        top,
+        1.9 * s,
+        std::f64::consts::PI,
+        std::f64::consts::TAU,
+    );
+    cr.set_line_width(1.2 * s);
+    let _ = cr.stroke();
+}
+
+/// The legend's word for the lock: memory stays on this computer. The
+/// Mac's says "this Mac".
+fn memory_legend_word() -> &'static str {
+    monitor_screens_copy().flow_map.legend_memory_computer
+}
+
+/// The legend's memory item: the coins' lock, and its word.
+fn memory_legend_item() -> gtk::Box {
+    let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let lock = gtk::DrawingArea::new();
+    lock.set_content_width(10);
+    lock.set_content_height(10);
+    lock.set_valign(gtk::Align::Center);
+    lock.set_draw_func(|area, cr, w, h| {
+        let palette = Palette::current(area);
+        let centre = Point::new(f64::from(w) / 2.0, f64::from(h) / 2.0);
+        draw_lock(cr, centre, 1.0, &palette.ink, 0.6);
+    });
+    let label = gtk::Label::new(Some(memory_legend_word()));
+    label.add_css_class("caption");
+    label.add_css_class("dim-label");
+    item.append(&lock);
+    item.append(&label);
+    item
 }
 
 // --- The pane ----------------------------------------------------------------
@@ -1912,6 +1989,15 @@ impl TraceMap {
             legend.insert(&legend_item(mode.label(), Some(mode)), -1);
         }
         legend.insert(&legend_item(flow.legend_not_watched, None), -1);
+        let memory = memory_legend_item();
+        legend.insert(&memory, -1);
+        // The flow box's own child is what takes room.
+        let memory_child = memory.parent().unwrap_or_else(|| memory.clone().upcast());
+        memory_child.set_visible(false);
+        canvas
+            .imp()
+            .memory_legend
+            .replace(Some(memory_child.downgrade()));
         row.append(&legend);
         let zoom = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         zoom.add_css_class("linked");
@@ -2143,6 +2229,33 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 mod tests {
     use super::*;
 
+    /// The legend's memory item is the shared copy's word for this
+    /// computer, never the Mac's, and only while the tool group is drawn,
+    /// as the Mac shows `legend_memory` only with its pile.
+    #[test]
+    fn the_memory_legend_says_this_computer() {
+        let flow = monitor_screens_copy().flow_map;
+        assert_eq!(memory_legend_word(), flow.legend_memory_computer);
+        assert_ne!(memory_legend_word(), flow.legend_memory);
+        let body = include_str!("map.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!body.contains("flow.legend_memory,"));
+        assert!(!body.contains("words.legend_memory)"));
+    }
+
+    /// The lock on a coin, as `MapToolPile` draws it: on every watched coin
+    /// of the open pile, and on the front coin alone of the closed one.
+    #[test]
+    fn the_lock_is_on_watched_coins_the_front_one_while_closed() {
+        assert!(coin_has_lock(false, false, 0));
+        assert!(!coin_has_lock(false, false, 1));
+        assert!(coin_has_lock(false, true, 3));
+        assert!(!coin_has_lock(true, true, 0));
+        assert!(!coin_has_lock(true, false, 0));
+    }
+
     fn entry(id: &str, project: &str, source: &str) -> QueueEntry {
         QueueEntry {
             entry_id: id.into(),
@@ -2283,6 +2396,28 @@ mod tests {
         assert_eq!(map.canvas.zoom(), map_scene::ZOOM_MAX);
         assert!(!map.zoom_in.is_sensitive());
         assert!(map.zoom_out.is_sensitive());
+
+        // The legend names the coins' lock in this computer's words, as
+        // the Mac's does with its pile drawn.
+        let flow = monitor_screens_copy().flow_map;
+        let mut labels = Vec::new();
+        let mut stack = vec![map.foot.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                labels.push((label.text().to_string(), label.is_visible()));
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                child = next.next_sibling();
+                stack.push(next);
+            }
+        }
+        assert!(map.canvas.scene().stack.is_some(), "no tool group is drawn");
+        assert!(
+            labels.contains(&(flow.legend_memory_computer.to_string(), true)),
+            "the legend's memory item is not shown: {labels:?}"
+        );
+        assert!(!labels.iter().any(|(text, _)| text == flow.legend_memory));
 
         // The map is drawn with nothing pending too (spec, "No hiding").
         map.canvas

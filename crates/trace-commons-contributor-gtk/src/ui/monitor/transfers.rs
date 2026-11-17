@@ -631,8 +631,8 @@ pub enum Tone {
 /// The card's tag, its tone and its note, by what is happening. `tool` is
 /// `None` for a batch from several tools, whose note names none.
 ///
-/// Platform difference: a keep's note, "The trace stays on this Mac...",
-/// names the Mac, so this shell draws none (and has no keep action).
+/// Platform difference: a keep's note says "this computer"
+/// (`transfer_keep_note_computer`) where the Mac's says "this Mac".
 pub fn card_state(
     action: Action,
     tool: Option<&str>,
@@ -647,7 +647,11 @@ pub fn card_state(
                 None => words.transfer_contribute_note_mixed.to_string(),
             }),
         ),
-        Action::Keep => (words.transfer_keeping, Tone::Neutral, None),
+        Action::Keep => (
+            words.transfer_keeping,
+            Tone::Neutral,
+            Some(words.transfer_keep_note_computer.to_string()),
+        ),
         Action::Dismiss => (
             words.transfer_dismissed,
             Tone::Neutral,
@@ -708,8 +712,10 @@ pub fn card_time(at: Option<DateTime<Utc>>) -> Option<String> {
 /// The line under the pad while a run plays: a contribution's gathering,
 /// "Collected 2 of 3", while several traces wait for lift-off.
 ///
-/// Platform difference: after a keep the Mac says "Kept on this Mac"; that
-/// word names the Mac, so this shell says nothing there.
+/// After a keep, once every kept trace has arrived, how many stay here.
+///
+/// Platform difference: that line says "this computer"
+/// (`kept_here_computer`) where the Mac's says "this Mac".
 pub fn line_under_pad(run: &Run, t: f64, words: &MonitorFlowMapCopy) -> Option<String> {
     let arrived = run.arrived(t);
     match run.action() {
@@ -726,8 +732,49 @@ pub fn line_under_pad(run: &Run, t: f64, words: &MonitorFlowMapCopy) -> Option<S
                     .replace("{total}", &run.transfers.len().to_string()),
             )
         }
+        Action::Keep if arrived == run.transfers.len() => Some(kept_here(words, arrived)),
         _ => None,
     }
+}
+
+/// "Kept on this computer", or how many were, as `keptHere` counts.
+fn kept_here(words: &MonitorFlowMapCopy, count: usize) -> String {
+    if count == 1 {
+        words.kept_here_one_computer.to_string()
+    } else {
+        words
+            .kept_here_computer
+            .replace("{count}", &count.to_string())
+    }
+}
+
+/// A tool's memory files, by its wire name, if they are known, and that
+/// they stay on this computer: the card's memory line.
+pub fn memory_line(
+    tool: &str,
+    words: &MonitorFlowMapCopy,
+) -> Option<(Option<&'static str>, &'static str)> {
+    let files = match tool {
+        "claude-code" => Some(words.memory_claude_code),
+        "codex" => Some(words.memory_codex),
+        "opencode" => Some(words.memory_opencode),
+        "gemini-cli" => Some(words.memory_gemini_cli),
+        "cline" => Some(words.memory_cline),
+        _ => None,
+    };
+    Some((files, words.memory_stays_computer))
+}
+
+/// The card's memory line, as `TraceTransferCard` draws it in Details: for
+/// one tool's trace, never a batch from several.
+pub fn card_memory(
+    transfer: &MapTransfer,
+    words: &MonitorFlowMapCopy,
+) -> Option<(Option<&'static str>, &'static str)> {
+    if transfer.mixed_tools {
+        return None;
+    }
+    memory_line(&transfer.tool, words)
 }
 
 #[cfg(test)]
@@ -1150,8 +1197,12 @@ mod tests {
         let (tag, _, note) = card_state(Action::Dismiss, Some("Codex"), &words);
         assert_eq!(tag, words.transfer_dismissed);
         assert_eq!(note.as_deref(), Some(words.transfer_dismiss_note));
-        // A keep's note names the Mac: none here.
-        assert_eq!(card_state(Action::Keep, None, &words).2, None);
+        // A keep's note, in this computer's words, never the Mac's.
+        let (tag, tone, note) = card_state(Action::Keep, Some("Codex"), &words);
+        assert_eq!(tag, words.transfer_keeping);
+        assert_eq!(tone, Tone::Neutral);
+        assert_eq!(note.as_deref(), Some(words.transfer_keep_note_computer));
+        assert_ne!(note.as_deref(), Some(words.transfer_keep_note));
 
         let mut kept = MapTransfer::new("1", "p1", "codex", Action::Keep);
         assert_eq!(card_folder(&kept, Some("from the map")), "from the map");
@@ -1202,7 +1253,75 @@ mod tests {
             line_under_pad(&run(1, Action::Contribute), 5.0, &words),
             None
         );
+    }
+
+    /// After a keep, once every kept trace has arrived, the pad says how
+    /// many stay here, in this computer's words, as `lineUnderPad` does.
+    #[test]
+    fn the_pad_says_what_was_kept_on_this_computer() {
+        let words = map_scene::words();
         let kept = run(2, Action::Keep);
-        assert_eq!(line_under_pad(&kept, kept.all_arrived(), &words), None);
+        assert_eq!(line_under_pad(&kept, 0.0, &words), None, "none arrived yet");
+        assert_eq!(
+            line_under_pad(&kept, kept.all_arrived(), &words).as_deref(),
+            Some(words.kept_here_computer.replace("{count}", "2").as_str())
+        );
+        let one = run(1, Action::Keep);
+        assert_eq!(
+            line_under_pad(&one, one.all_arrived(), &words).as_deref(),
+            Some(words.kept_here_one_computer)
+        );
+        assert_eq!(line_under_pad(&run(1, Action::Dismiss), 9.0, &words), None);
+    }
+
+    /// The map, its cards and its pad draw the Mac-named words only in
+    /// their `_computer` variants: no key that says "this Mac" is read.
+    #[test]
+    fn no_mac_named_map_word_is_drawn() {
+        for (file, source) in [
+            ("transfers.rs", include_str!("transfers.rs")),
+            ("transfer_card.rs", include_str!("transfer_card.rs")),
+            ("map.rs", include_str!("map.rs")),
+        ] {
+            let body = source.split("\n#[cfg(test)]").next().unwrap();
+            for key in [
+                ".legend_memory",
+                ".memory_stays",
+                ".transfer_keep_note",
+                ".kept_here_one",
+                ".kept_here",
+            ] {
+                for (at, _) in body.match_indices(key) {
+                    let rest = &body[at + key.len()..];
+                    assert!(
+                        rest.starts_with("_computer") || rest.starts_with("_one_computer"),
+                        "{file} reads {key}{}",
+                        &rest[..rest.len().min(12)]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The card's Details hold the tool's memory files and that they stay
+    /// on this computer; a batch from several tools names none.
+    #[test]
+    fn the_memory_line_names_the_files_and_this_computer() {
+        let words = map_scene::words();
+        assert_eq!(
+            memory_line("codex", &words),
+            Some((Some(words.memory_codex), words.memory_stays_computer))
+        );
+        assert_eq!(
+            memory_line("not-a-tool", &words),
+            Some((None, words.memory_stays_computer))
+        );
+        let mut mixed = MapTransfer::new("1", "f", "codex", Action::Keep);
+        mixed.mixed_tools = true;
+        assert_eq!(card_memory(&mixed, &words), None);
+        assert_eq!(
+            card_memory(&MapTransfer::new("1", "f", "cline", Action::Keep), &words),
+            Some((Some(words.memory_cline), words.memory_stays_computer))
+        );
     }
 }

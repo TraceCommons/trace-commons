@@ -54,6 +54,42 @@ fn least(widget: &impl IsA<gtk::Widget>) -> i32 {
     widget.measure(gtk::Orientation::Horizontal, -1).0
 }
 
+/// Every shown `tc-card` under `root`, outermost first.
+fn collect_cards(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if widget.is_visible() {
+            if widget.has_css_class("tc-card") {
+                found.push(widget.clone());
+            } else {
+                collect_cards(&widget, found);
+            }
+        }
+        child = widget.next_sibling();
+    }
+}
+
+/// The shown buttons under `root`.
+fn count_buttons(root: &impl IsA<gtk::Widget>) -> usize {
+    let mut count = 0;
+    let mut child = root.as_ref().first_child();
+    while let Some(widget) = child {
+        if widget.is_visible() {
+            if (widget.is::<gtk::Button>()
+                && !widget
+                    .parent()
+                    .is_some_and(|parent| parent.is::<gtk::MenuButton>()))
+                || widget.is::<gtk::MenuButton>()
+            {
+                count += 1;
+            }
+            count += count_buttons(&widget);
+        }
+        child = widget.next_sibling();
+    }
+    count
+}
+
 fn settle(context: &glib::MainContext) {
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
@@ -122,6 +158,36 @@ fn every_hosted_screen_fits_the_440_main_pane() {
         }
     };
     check("folders");
+    // Laid out, not only measured (fix pass 3): every button in each folder
+    // card is drawn inside its card, and no card runs under the next. On
+    // GTK 4.14 "Submit as…" hung over a card's foot and "Never" was not
+    // drawn.
+    shell.pick_tab(super::Tab::Traces);
+    settle(&context);
+    let traces: gtk::Widget = shell
+        .content
+        .child_by_name("queue")
+        .expect("the Traces tab");
+    let mut cards = Vec::new();
+    collect_cards(&traces, &mut cards);
+    assert!(!cards.is_empty(), "no folder card is drawn");
+    let mut buttons = 0;
+    for (index, card) in cards.iter().enumerate() {
+        buttons += count_buttons(card);
+        let outside = crate::ui::wrap_row::buttons_outside(card, card);
+        assert!(outside.is_empty(), "folder card {index}: {outside:?}");
+        if let Some(next) = cards.get(index + 1)
+            && next.parent() == card.parent()
+        {
+            let this = card.compute_bounds(&traces).expect("placed");
+            let below = next.compute_bounds(&traces).expect("placed");
+            assert!(
+                this.y() + this.height() <= below.y() + 0.5,
+                "folder card {index} {this:?} runs under the next {below:?}"
+            );
+        }
+    }
+    assert!(buttons >= 3, "the folder cards draw {buttons} buttons");
 
     // A folder opened: its sessions, each with its facts and actions.
     *app.queue_location.borrow_mut() = crate::queue_folders::Location::Project("p1".into());
@@ -140,6 +206,30 @@ fn every_hosted_screen_fits_the_440_main_pane() {
             );
         }
     }
+    // The Private AI offer, in front on its tab: "Not now" and "Turn on"
+    // both drawn whole, inside the stack laid over the tab and inside the
+    // card. On GTK 4.14 "Turn on" was clipped away.
+    let settings: crate::model::Settings =
+        serde_json::from_value(serde_json::json!({})).expect("settings decode");
+    crate::ui::queue::render_private_inference_offer(&app, &settings);
+    shell.pick_tab(super::Tab::Inference);
+    settle(&context);
+    let offer = shell
+        .notice_slots
+        .iter()
+        .find(|slot| slot.notice == super::Notice::PrivateAiOffer)
+        .expect("the offer has a slot");
+    assert!(offer.frame.is_visible(), "the offer is not in front");
+    let stack = offer
+        .frame
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .expect("the notices are in a stack that scrolls");
+    assert_eq!(count_buttons(&offer.card), 2, "the offer's two buttons");
+    let outside = crate::ui::wrap_row::buttons_outside(&offer.card, &stack);
+    assert!(outside.is_empty(), "outside the stack: {outside:?}");
+    let outside = crate::ui::wrap_row::buttons_outside(&offer.card, &offer.card);
+    assert!(outside.is_empty(), "outside the card: {outside:?}");
+
     // And the whole main pane at the least: the column the overlay the
     // notices are laid over sits in.
     let main = shell
