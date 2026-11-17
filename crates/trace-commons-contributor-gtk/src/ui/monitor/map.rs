@@ -2173,10 +2173,34 @@ mod tests {
         settle();
     }
 
+    /// Whether anything under `widget` waits on a transition.
+    fn moving(widget: &gtk::Widget) -> bool {
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            let stack_slides = next.downcast_ref::<gtk::Stack>().is_some_and(|stack| {
+                stack.transition_type() != gtk::StackTransitionType::None
+                    && stack.transition_duration() > 0
+            });
+            if next.is::<gtk::Revealer>() || stack_slides || moving(&next) {
+                return true;
+            }
+            child = next.next_sibling();
+        }
+        false
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
+    // Reduced motion: the map's slide-down revealer went with its Show/Hide
+    // button, and this pane has nothing that moves until the transfers
+    // slice. Under reduced motion it is drawn whole at once, and nothing in
+    // it waits on a transition. The graph footer's half is
+    // `graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion`.
     fn mounted_map_preserves_identity_and_accessibility() {
         gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let animations = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(false);
         let map = TraceMap::new();
         map.set_pending_read(true);
         map.set_projects_read(true);
@@ -2197,6 +2221,7 @@ mod tests {
         window.present();
         let canvas = map.canvas.clone();
         settle_until(move || canvas.width() > 0);
+        assert!(!moving(map.root.upcast_ref()), "something in the map moves");
 
         // Ten folders, then the pill; every tool a coin; this computer and
         // the library.
@@ -2274,6 +2299,7 @@ mod tests {
         map.show_view(MapView::Traces);
         assert!(map.traces_view.is_active());
         assert!(map.foot.is_visible());
+        settings.set_gtk_enable_animations(animations);
         window.close();
     }
 

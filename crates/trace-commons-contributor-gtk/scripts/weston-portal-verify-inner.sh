@@ -22,22 +22,32 @@ fail() {
 
 # The rendering fixture explicitly selects Insights and its Overview tab;
 # the connected shell's default destination is Home.
-# Require the Overview's own cards, "Cache share" and the "Tokens by day"
-# heading, which show their bodies rendered, and the unmanaged-install notice
-# that this build (from source, outside a flatpak) lays over the top of the
-# tab. The notice covers the page's own tab switcher in a 440 wide pane --
-# the notices are popovers over the tab, as decided -- so the switcher is not
-# read here. Every label and the switching itself are asserted by the mounted
-# `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
-# run above, and the notice's placement by
-# `ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to`.
+# Require the page's own tab switcher -- an interactive control on the
+# Insights page, not the tab strip's "Insights" tab -- and the Overview's
+# "Tokens by day" card heading, which shows its body rendered. The notices
+# sit above the tab's content, never over it
+# (`ui::monitor::shell::tests::mounted_a_notice_never_covers_the_tabs_first_heading`),
+# so a notice this build shows (from source, outside a flatpak) leaves the
+# switcher in the frame; no notice's text is asked for.
 #
-# $1 is a sparse-text OCR pass (`--psm 11`). The capture loop below retries
-# while the body loads.
+# $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
+# the page in a shaded bar, and Tesseract's default layout analysis skips
+# that bar entirely, so the tab names are read word by word instead of as
+# one line. The selected tab (Overview, white on the accent) is not read
+# even then -- not inverted, thresholded or upscaled either -- so the check
+# asks for two unselected tabs: "Breakdown", and "Benchmarks" as a whole
+# word. The main pane is 440 wide and never narrower, and the switcher
+# scrolls sideways inside it, so Analyze, the last tab, is off the edge of
+# the frame; it is not asked for here. Every label and the switching itself
+# are asserted by the mounted
+# `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
+# run above. Tesseract has misread tab names before ("Details" as "Deta"),
+# so only Breakdown's first letters are required. The capture loop below
+# retries while the body loads.
 insights_frame() {
-  grep -qi 'Cache share' <<< "$1" &&
-    grep -qi 'Tokens by day' <<< "$1" &&
-    grep -qi 'built from source' <<< "$1"
+  grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
+    grep -qE '(^|[[:space:]])Benchmarks([[:space:]]|$)' <<< "$1" &&
+    grep -qi 'Tokens by day' <<< "$1"
 }
 
 # `cargo test <filter> -- --exact --ignored` exits 0 when the filter matches
@@ -177,7 +187,11 @@ else
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
-    ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to; do
+    ui::monitor::shell::tests::mounted_notices_sit_above_the_tab_they_belong_to \
+    ui::monitor::shell::tests::mounted_a_notice_never_covers_the_tabs_first_heading \
+    ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
+    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
@@ -336,9 +350,9 @@ else
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
-        echo "OCR found the Overview's cards and the notice laid over the tab"
+        echo "OCR found the Insights tab switcher and the Overview's Tokens by day card"
       else
-        fail "OCR did not find the Overview's cards and the notice laid over the tab in the screenshot"
+        fail "OCR did not find the Insights tab switcher and the Overview's Tokens by day card in the screenshot"
       fi
     else
       fail "tesseract not available -- OCR text-presence check could not run"

@@ -1749,7 +1749,12 @@ impl Sheet {
                         app.refresh();
                         return;
                     }
-                    app.render_submit_response(&approve, vec![entry_id.clone()], &project_label);
+                    app.render_submit_response(
+                        &approve,
+                        vec![entry_id.clone()],
+                        &project_label,
+                        None,
+                    );
                 }
                 // A top-level refusal, which for this call means the
                 // parameters themselves were rejected -- an oversized or

@@ -10,8 +10,10 @@
 //!    controls on the side `gtk-decoration-layout` names;
 //! 2. the tab strip;
 //! 3. the breadcrumb, on the sub-pages;
-//! 4. the tab's screen, with the popover notices laid over it;
-//! 5. the graph footer, on Traces.
+//! 4. the popover notices, each with the Mac's X, in a column above the
+//!    tab's screen (`notices`);
+//! 5. the tab's screen, which fits the pane's 440 and scrolls itself;
+//! 6. the graph footer, on Traces.
 //!
 //! The screens themselves are the existing GTK views, hosted unchanged.
 //! Every decision about what is shown is `tabs`', `pane_layout`'s,
@@ -83,7 +85,39 @@ struct State {
     last_demand: RefCell<BTreeSet<String>>,
     /// The opened History row's submission id; empty for none.
     opened_history: RefCell<String>,
+    /// The notices closed with their X until the window is opened again.
+    closed: Rc<RefCell<notices::Closed>>,
     missions: bool,
+}
+
+/// One notice's place in the column: the slot `notices::shown` places,
+/// the card, and the card's X.
+struct NoticeSlot {
+    notice: Notice,
+    slot: gtk::Box,
+    card: gtk::Widget,
+    close: gtk::Button,
+}
+
+/// Everything a card says, in order: what its X closed, so that new words
+/// are a new card (`notices::Closed`).
+fn card_text(card: &gtk::Widget) -> String {
+    fn walk(widget: &gtk::Widget, text: &mut String) {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>()
+            && label.get_visible()
+        {
+            text.push_str(&label.text());
+            text.push('\n');
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            walk(&next, text);
+            child = next.next_sibling();
+        }
+    }
+    let mut text = String::new();
+    walk(card, &mut text);
+    text
 }
 
 pub struct Shell {
@@ -106,7 +140,9 @@ pub struct Shell {
     settings_button: gtk::Button,
     inspector_stack: gtk::Stack,
     history_detail: gtk::Box,
-    notice_slots: Vec<(Notice, gtk::Box)>,
+    notice_slots: Vec<NoticeSlot>,
+    /// Re-reads every notice's frame, X and the column from the cards.
+    refresh_notices: Rc<dyn Fn()>,
     settings_root: gtk::Box,
     settings_window: RefCell<Option<adw::Window>>,
     /// Set while this file moves a toggle itself, so the toggle's own
@@ -248,74 +284,139 @@ impl Shell {
         if let Some(drafts) = pages.mission_drafts {
             content.add_named(drafts, Some("mission-drafts"));
         }
-        // The screens were laid out for a wider column than the main
-        // pane's 440. One that cannot get narrower scrolls sideways inside
-        // the pane rather than pushing the pane past its width.
+        // Every screen fits the pane's 440 and scrolls itself, as on the
+        // Mac: nothing here scrolls sideways, and a screen's own height
+        // never sets the window's (the Mac's window is `WINDOW_HEIGHT`
+        // tall whatever the tab).
         let content_scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
             .child(&content)
             .build();
 
-        // The notices float over the top of the tab and push nothing down.
-        // The column is never taller than the tab's own area: past that it
-        // scrolls, so a card's Undo or acknowledge button can always be
-        // reached. With no card showing it is hidden, and takes no room and
-        // no click from the screen under it.
+        // The notices, in a column above the tab's screen: no heading or
+        // control of the tab is ever under a card. The column is never
+        // taller than `NOTICES_MAX_HEIGHT`: past that it scrolls, so a
+        // card's Undo or acknowledge button can always be reached. With no
+        // card showing it is hidden and takes no room.
         let notice_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let notice_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .propagate_natural_height(true)
-            .valign(gtk::Align::Start)
+            .max_content_height(pane_layout::NOTICES_MAX_HEIGHT as i32)
             .visible(false)
             .child(&notice_column)
             .build();
+        let closed = Rc::new(RefCell::new(notices::Closed::default()));
         let mut notice_slots = Vec::new();
         for (notice, card) in pages.notices {
+            // Three flags, each set by one owner: the slot by the tab
+            // (`notices::shown`), the frame by the card's X, the card by
+            // whatever draws it.
             let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            slot.append(&card);
+            // The X beside the card's top edge, never over its words.
+            let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            card.set_hexpand(true);
+            frame.append(&card);
+            let close = gtk::Button::from_icon_name("window-close-symbolic");
+            close.add_css_class("flat");
+            close.add_css_class("circular");
+            close.set_valign(gtk::Align::Start);
+            close.set_margin_top(style::space::L);
+            close.set_margin_end(style::space::XS);
+            close.set_tooltip_text(Some(words.close));
+            close.update_property(&[gtk::accessible::Property::Label(words.close)]);
+            close.set_visible(false);
+            frame.append(&close);
+            slot.append(&frame);
             notice_column.append(&slot);
-            notice_slots.push((notice, slot, card));
+            notice_slots.push(NoticeSlot {
+                notice,
+                slot,
+                card,
+                close,
+            });
         }
-        // Each card shows and hides itself; the column follows them.
+        // Each card shows and hides itself, and its X closes it; the
+        // frames and the column follow both.
         let follow = {
             let scroller = notice_scroller.downgrade();
+            let closed = Rc::clone(&closed);
             let cards: Vec<(
+                Notice,
                 gtk::glib::WeakRef<gtk::Box>,
                 gtk::glib::WeakRef<gtk::Widget>,
+                gtk::glib::WeakRef<gtk::Button>,
             )> = notice_slots
                 .iter()
-                .map(|(_, slot, card)| (slot.downgrade(), card.downgrade()))
+                .map(|slot| {
+                    (
+                        slot.notice,
+                        slot.slot.downgrade(),
+                        slot.card.downgrade(),
+                        slot.close.downgrade(),
+                    )
+                })
                 .collect();
             Rc::new(move || {
                 let Some(scroller) = scroller.upgrade() else {
                     return;
                 };
-                // Each widget's own flag, not `is_visible`: that one asks
-                // the ancestors too, and the column starts hidden, so no
-                // card would ever look shown and it would never open.
-                scroller.set_visible(cards.iter().any(|(slot, card)| {
-                    slot.upgrade().is_some_and(|slot| slot.get_visible())
-                        && card.upgrade().is_some_and(|card| card.get_visible())
-                }));
+                let mut any = false;
+                for (notice, slot, card, close) in &cards {
+                    let (Some(slot), Some(card), Some(close)) =
+                        (slot.upgrade(), card.upgrade(), close.upgrade())
+                    else {
+                        continue;
+                    };
+                    // Each widget's own flag, not `is_visible`: that one
+                    // asks the ancestors too, and the column starts hidden,
+                    // so no card would ever look shown.
+                    if !card.get_visible() {
+                        // The card went: when its cause recurs it is shown
+                        // again.
+                        closed.borrow_mut().forget(*notice);
+                    }
+                    let open = !closed.borrow().hides(*notice, &card_text(&card));
+                    if let Some(frame) = card.parent() {
+                        frame.set_visible(open);
+                    }
+                    close.set_visible(
+                        notice.close() != notices::Close::Own
+                            && !card.has_css_class(notices::STAYS_CLASS),
+                    );
+                    any |= slot.get_visible() && open && card.get_visible();
+                }
+                scroller.set_visible(any);
             })
         };
-        for (_, slot, card) in &notice_slots {
-            for widget in [slot.upcast_ref::<gtk::Widget>(), card] {
-                let follow = follow.clone();
-                widget.connect_visible_notify(move |_| follow());
-            }
+        for slot in &notice_slots {
+            let refresh = follow.clone();
+            slot.slot.connect_visible_notify(move |_| refresh());
+            let refresh = follow.clone();
+            slot.card.connect_visible_notify(move |_| refresh());
+            let refresh = follow.clone();
+            slot.card
+                .connect_notify_local(Some("css-classes"), move |_, _| refresh());
         }
         follow();
-        let notice_slots: Vec<(Notice, gtk::Box)> = notice_slots
-            .into_iter()
-            .map(|(notice, slot, _)| (notice, slot))
-            .collect();
-        let over_content = gtk::Overlay::new();
-        over_content.set_child(Some(&content_scroller));
-        over_content.add_overlay(&notice_scroller);
+        // Opening the window again shows every card its X closed.
+        {
+            let closed = Rc::clone(&closed);
+            let refresh = follow.clone();
+            window.connect_visible_notify(move |window| {
+                if window.get_visible() {
+                    closed.borrow_mut().clear();
+                    refresh();
+                }
+            });
+        }
+
+        let over_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        over_content.append(&notice_scroller);
+        over_content.append(&content_scroller);
         over_content.set_vexpand(true);
 
         let graph = GraphFooter::new();
@@ -391,6 +492,7 @@ impl Shell {
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
                 opened_history: RefCell::new(String::new()),
+                closed,
                 missions,
             },
             window: window.clone(),
@@ -406,6 +508,7 @@ impl Shell {
             inspector_stack,
             history_detail,
             notice_slots,
+            refresh_notices: follow,
             settings_root: pages.settings.clone(),
             settings_window: RefCell::new(None),
             syncing: Cell::new(false),
@@ -596,6 +699,41 @@ impl Shell {
             .set_default_size(width.round() as i32, self.window.height());
     }
 
+    /// The scroller the tab's screens sit in.
+    #[cfg(test)]
+    fn content_scroller(&self) -> gtk::ScrolledWindow {
+        self.content
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast()
+            .expect("the screens scroll")
+    }
+
+    // --- Notices ---------------------------------------------------------
+
+    /// A notice's X (`notices::Close`). The undo's puts the card away and
+    /// the approval still sends, as the Mac's does; without an `App` there
+    /// is no undo to put away.
+    pub fn close_notice(&self, app: Option<&Rc<App>>, notice: Notice) {
+        let Some(slot) = self.notice_slots.iter().find(|slot| slot.notice == notice) else {
+            return;
+        };
+        match notice.close() {
+            notices::Close::Session => {
+                self.state
+                    .closed
+                    .borrow_mut()
+                    .close(notice, card_text(&slot.card));
+                (self.refresh_notices)();
+            }
+            notices::Close::LetItSend => {
+                if let Some(app) = app {
+                    app.dismiss_undo();
+                }
+            }
+            notices::Close::Own => {}
+        }
+    }
+
     // --- Selection and the inspector -------------------------------------
 
     /// A selection made in the Traces list. A session is a demand on the
@@ -660,23 +798,32 @@ impl Shell {
         }
     }
 
-    /// What is asking for the inspector right now. Fed from what this
-    /// shell holds: an approval's undo window (a row's Submit or a folder's
-    /// Submit all, which this shell offers as one undo) and a selected
-    /// session. The Mac's `contributed`, `kept`, `folder-undo` and
-    /// `folder-submit` keys have no state behind them here yet.
+    /// What is asking for the inspector right now, from what this window
+    /// holds (`demand::asking`): the approval it holds open for undoing (a
+    /// trace's Submit, or a folder's Submit all), the folder whose Submit
+    /// all is in flight, the trace it last kept (`App::last_kept`, the
+    /// Mac's `TracesStore.lastKept`), and a selected session. This shell has
+    /// no keep action yet, so nothing sets `last_kept` and the `kept` key
+    /// never asks; it is wired so a keep opens the inspector once one
+    /// exists.
     fn demand_keys(&self, app: &Rc<App>) -> BTreeSet<String> {
         let undo = app.undo.borrow();
+        let submitting = app.submitting_folder.borrow();
+        let kept = app.last_kept.borrow();
         let selection = self.inspector.selection();
-        demand::keys(&demand::Asking {
-            approval_undo: undo.as_ref().map(|undo| undo.entry_ids.as_slice()),
-            approval_at: undo.as_ref().map(|undo| undo.approved_at.timestamp()),
-            review: match &selection {
+        demand::keys(&demand::asking(
+            undo.as_ref().map(|undo| demand::Approval {
+                entry_ids: undo.entry_ids.as_slice(),
+                at: undo.approved_at.timestamp(),
+                folder: undo.folder.as_deref(),
+            }),
+            submitting.as_deref(),
+            kept.as_deref(),
+            match &selection {
                 Selection::Session(id) => Some(id.as_str()),
                 Selection::Folder(_) | Selection::None => None,
             },
-            ..demand::Asking::default()
-        })
+        ))
     }
 
     /// Opens the inspector when something new asks for it. A key going
@@ -778,6 +925,21 @@ impl Shell {
             tool: tool.map(|(_, label)| label),
         });
         self.graph.set_focused(self.state.map_focus.get());
+    }
+
+    /// The Traces tab's text equivalent of its badge, as the Mac's
+    /// segment carries it: the core's decisions-owed sentence, and nothing
+    /// at zero, where there is no badge.
+    pub fn describe_traces_badge(&self, decisions_owed: Option<u64>) {
+        let Some((_, button)) = self.tabs.iter().find(|(tab, _)| *tab == Tab::Traces) else {
+            return;
+        };
+        let text = trace_commons_contributor::preview_copy::decisions_owed_text(decisions_owed);
+        if text.is_empty() {
+            button.reset_property(gtk::AccessibleProperty::Description);
+        } else {
+            button.update_property(&[gtk::accessible::Property::Description(&text)]);
+        }
     }
 
     /// The Inference tab's dot: what the listener is doing, from the
@@ -933,9 +1095,11 @@ impl Shell {
             .set_visible_child_name(if history_row { "history" } else { "traces" });
 
         let place = tabs::place(at);
-        for (notice, slot) in &self.notice_slots {
-            slot.set_visible(notices::shown(*notice, place));
+        for slot in &self.notice_slots {
+            slot.slot.set_visible(notices::shown(slot.notice, place));
         }
+        // A card's words may have changed since its X closed it.
+        (self.refresh_notices)();
 
         self.map.show_view(self.state.map_view.get());
 
@@ -986,6 +1150,16 @@ pub fn wire(app: &Rc<App>) {
             app.shell.set_inspector_shown(&app, toggle.is_active());
         }
     });
+    for slot in &shell.notice_slots {
+        let weak = Rc::downgrade(app);
+        let notice = slot.notice;
+        slot.close.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.shell.close_notice(Some(&app), notice);
+            }
+        });
+    }
+
     let weak = Rc::downgrade(app);
     shell.settings_button.connect_clicked(move |_| {
         if let Some(app) = weak.upgrade() {
@@ -1057,6 +1231,11 @@ pub fn wire(app: &Rc<App>) {
     shell.state.last_demand.replace(keys);
     shell.apply();
 }
+
+/// The hosted screens against the real `App` (`tests/support`).
+#[cfg(test)]
+#[path = "../../../tests/support/main_pane_fit_tests.rs"]
+mod fit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1485,51 +1664,46 @@ mod tests {
         mounted.window.close();
     }
 
+    fn slot(shell: &Shell, notice: Notice) -> &NoticeSlot {
+        shell
+            .notice_slots
+            .iter()
+            .find(|slot| slot.notice == notice)
+            .expect("every notice has a slot")
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
-    fn mounted_notices_are_laid_over_the_tab_they_belong_to() {
+    fn mounted_notices_sit_above_the_tab_they_belong_to() {
         let mounted = mounted(false);
         let shell = &mounted.shell;
-        let slot_shown = |notice: Notice| {
-            shell
-                .notice_slots
-                .iter()
-                .find(|(kind, _)| *kind == notice)
-                .map(|(_, slot)| slot.is_visible())
-                .expect("every notice has a slot")
-        };
-        // Each card is inside its slot, over the content and not above it.
+        // Each card is inside its slot, in the column above the content,
+        // never in an overlay laid over it.
         for (notice, card) in &mounted.notices {
-            let (_, slot) = shell
-                .notice_slots
-                .iter()
-                .find(|(kind, _)| kind == notice)
-                .unwrap();
-            assert!(card.is_ancestor(slot));
+            let slot = slot(shell, *notice);
+            assert!(card.is_ancestor(&slot.slot));
             assert!(
-                slot.ancestor(gtk::Overlay::static_type()).is_some(),
-                "{notice:?} pushes the content down"
+                slot.slot.ancestor(gtk::Overlay::static_type()).is_none(),
+                "{notice:?} is laid over the tab's content"
             );
         }
         // The undo comes first: it is the one card with a clock on it.
-        assert_eq!(shell.notice_slots[0].0, Notice::Undo);
+        assert_eq!(shell.notice_slots[0].notice, Notice::Undo);
         let scroller = shell.notice_slots[0]
-            .1
+            .slot
             .ancestor(gtk::ScrolledWindow::static_type())
             .and_downcast::<gtk::ScrolledWindow>()
             .expect("the notices are in a column that scrolls");
-        // Empty cards are showing here, so the column is too; with every
-        // card hidden it is gone, and takes no click from the tab under it.
+        // Empty cards are showing here (Update and Account are on every
+        // tab), so the column is too; with every card hidden it is gone,
+        // and takes no room from the tab under it.
         assert!(scroller.is_visible());
         for (_, card) in &mounted.notices {
             card.set_visible(false);
         }
-        assert!(
-            !scroller.is_visible(),
-            "an empty notice column still covers the tab"
-        );
-        // Cards taller than the tab scroll inside it; none is pushed out of
-        // reach under the graph footer.
+        assert!(!scroller.is_visible(), "an empty notice column takes room");
+        // Cards taller than the column's cap scroll inside it; the tab's
+        // screen keeps the rest of the pane.
         shell.pick_tab(Tab::Traces);
         for (_, card) in &mounted.notices {
             card.set_size_request(-1, 400);
@@ -1537,11 +1711,14 @@ mod tests {
         }
         let scroll = scroller.vadjustment();
         pump_until(|| scroll.upper() > 400.0);
-        let overlay = scroller.parent().expect("the column is laid over the tab");
         assert!(scroller.is_visible());
         assert!(
-            scroller.height() <= overlay.height(),
-            "the notices run past the tab's own area"
+            f64::from(scroller.height()) <= pane_layout::NOTICES_MAX_HEIGHT,
+            "the notice column grew past its cap"
+        );
+        assert!(
+            shell.content_scroller().height() > 0,
+            "the notices took the whole of the tab"
         );
         assert!(
             scroll.upper() > scroll.page_size(),
@@ -1555,14 +1732,153 @@ mod tests {
             let place = tabs::place(shell.shown());
             for notice in Notice::ALL {
                 assert_eq!(
-                    slot_shown(notice),
+                    slot(shell, notice).slot.is_visible(),
                     notices::shown(notice, place),
                     "{notice:?} on {tab:?}"
                 );
             }
-            // A safeguard is never hidden by a tab.
-            assert!(slot_shown(Notice::Health) && slot_shown(Notice::Consent));
         }
+        // Health is the Traces tab's, as on the Mac.
+        shell.pick_tab(Tab::Home);
+        assert!(!slot(shell, Notice::Health).slot.is_visible());
+        shell.pick_tab(Tab::Traces);
+        assert!(slot(shell, Notice::Health).slot.is_visible());
+        mounted.window.close();
+    }
+
+    /// The review's defect: a notice laid over the tab hid its heading. A
+    /// card showing must leave the first heading of every tab in view and
+    /// uncovered.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_notice_never_covers_the_tabs_first_heading() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        // Every tab's first line, as each screen draws its title.
+        let mut headings = Vec::new();
+        for name in ["home", "private-inference", "queue", "insights"] {
+            let page = shell
+                .content
+                .child_by_name(name)
+                .and_downcast::<gtk::Box>()
+                .expect("each tab is a page");
+            let heading = gtk::Label::new(Some(name));
+            heading.add_css_class("title-2");
+            page.prepend(&heading);
+            headings.push((name, heading));
+        }
+        // A tall card on every tab, with words in it.
+        for (notice, card) in &mounted.notices {
+            card.append(&gtk::Label::new(Some(&format!("{notice:?}"))));
+            card.set_size_request(-1, 120);
+        }
+        for (tab, (name, heading)) in Tab::ALL.into_iter().zip(&headings) {
+            shell.pick_tab(tab);
+            pump_until(|| heading.is_mapped() && heading.height() > 0);
+            let column = shell.notice_slots[0]
+                .slot
+                .ancestor(gtk::ScrolledWindow::static_type())
+                .expect("the notice column");
+            assert!(column.is_visible(), "no notice is showing on {name}");
+            let root: &gtk::Widget = shell.root.upcast_ref();
+            let notices = column.compute_bounds(root).expect("the column is laid out");
+            let title = heading
+                .compute_bounds(root)
+                .expect("the heading is laid out");
+            assert!(
+                title.y() >= notices.y() + notices.height(),
+                "a notice covers the {name} tab's heading: notices {notices:?}, heading {title:?}"
+            );
+            // And the heading is in the pane, not pushed out of it.
+            assert!(
+                f64::from(title.y() + title.height()) <= f64::from(root.height()),
+                "the {name} tab's heading is below the window"
+            );
+        }
+        mounted.window.close();
+    }
+
+    /// The Mac's X: it closes the card until the window is opened again;
+    /// the same card re-shown stays closed, new words or the card going
+    /// and coming back show it again. The consent and account cards, and
+    /// the Private AI offer, carry their own Acknowledge, Dismiss or Not
+    /// now and no extra X.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_notices_x_closes_that_card() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        let words = monitor_screens_copy();
+        shell.pick_tab(Tab::Traces);
+        let card = |notice: Notice| {
+            mounted
+                .notices
+                .iter()
+                .find(|(kind, _)| *kind == notice)
+                .map(|(_, card)| card.clone())
+                .unwrap()
+        };
+        let said = gtk::Label::new(Some("built from source"));
+        card(Notice::Update).append(&said);
+        (shell.refresh_notices)();
+        let update = slot(shell, Notice::Update);
+        let frame = update.card.parent().expect("the card's frame");
+        // An X named in the core's word, on the cards that have one.
+        for slot in &shell.notice_slots {
+            assert_eq!(
+                slot.close.get_visible(),
+                slot.notice.close() != notices::Close::Own,
+                "{:?}",
+                slot.notice
+            );
+        }
+        assert_eq!(update.close.tooltip_text().as_deref(), Some(words.close));
+        assert!(frame.is_visible());
+        // Not wired without an `App`: apply the press as its handler would.
+        shell.close_notice(None, Notice::Update);
+        assert!(!frame.is_visible(), "the X did not close the card");
+        // Only that card.
+        let health = slot(shell, Notice::Health);
+        assert!(health.card.parent().unwrap().is_visible());
+        // The same card drawn again stays closed.
+        update.card.set_visible(false);
+        update.card.set_visible(true);
+        assert!(frame.is_visible(), "a card that went and came back is new");
+        shell.close_notice(None, Notice::Update);
+        assert!(!frame.is_visible());
+        shell.apply();
+        assert!(!frame.is_visible(), "a redraw reopened a closed card");
+        // New words are a new card.
+        said.set_text("an update is ready");
+        shell.apply();
+        assert!(frame.is_visible(), "new words stayed closed");
+        // An install under way has no X.
+        update.card.add_css_class(notices::STAYS_CLASS);
+        assert!(!update.close.get_visible());
+        update.card.remove_css_class(notices::STAYS_CLASS);
+        assert!(update.close.get_visible());
+        // Opening the window again shows every closed card.
+        shell.close_notice(None, Notice::Update);
+        assert!(!frame.is_visible());
+        mounted.window.set_visible(false);
+        mounted.window.set_visible(true);
+        pump();
+        assert!(
+            frame.is_visible(),
+            "reopening the window kept the card closed"
+        );
+        mounted.window.close();
+    }
+
+    /// The main pane is 440 wide and its content needs no sideways scroll.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_main_pane_never_scrolls_sideways() {
+        let mounted = mounted(false);
+        assert_eq!(
+            mounted.shell.content_scroller().hscrollbar_policy(),
+            gtk::PolicyType::Never
+        );
         mounted.window.close();
     }
 }

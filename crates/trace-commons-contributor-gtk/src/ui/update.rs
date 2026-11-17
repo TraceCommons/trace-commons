@@ -79,6 +79,13 @@ pub fn banner_for(state: &UpdateState) -> Option<Banner> {
     }
 }
 
+/// Whether the notice for `state` keeps no X (`monitor::notices`): an
+/// install under way or finished describes work happening to the machine,
+/// as `banner_for` gives those states no dismissal.
+pub fn stays(state: &UpdateState) -> bool {
+    matches!(state, UpdateState::Installing { .. } | UpdateState::Ready)
+}
+
 /// The banner itself. Built in the same shape as the health banner in
 /// `ui::mod` -- glyph, wrapping body, one optional button -- because a
 /// contributor should not have to learn two kinds of notice bar.
@@ -181,6 +188,14 @@ fn render(app: &Rc<App>) {
             *view.action.borrow_mut() = None;
         }
     }
+    // Before it is shown, so the X is never drawn for a frame.
+    if stays(&view.state.borrow()) {
+        view.root
+            .add_css_class(super::monitor::notices::STAYS_CLASS);
+    } else {
+        view.root
+            .remove_css_class(super::monitor::notices::STAYS_CLASS);
+    }
     view.root.set_visible(true);
 }
 
@@ -276,6 +291,27 @@ mod tests {
     #[test]
     fn being_up_to_date_puts_nothing_on_screen() {
         assert!(banner_for(&UpdateState::Idle).is_none());
+    }
+
+    /// The notice's X (`monitor::notices`): never on work happening to the
+    /// machine, always on what only tells the person something.
+    #[test]
+    fn only_an_install_under_way_or_finished_keeps_the_notice_without_an_x() {
+        assert!(stays(&UpdateState::Installing { percent: 40 }));
+        assert!(stays(&UpdateState::Ready));
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Unmanaged,
+            UpdateState::Unavailable,
+            UpdateState::Available {
+                remote_commit: "abc".into(),
+            },
+            UpdateState::Failed {
+                label: crate::update::FAILED_LABEL,
+            },
+        ] {
+            assert!(!stays(&state), "{state:?}");
+        }
     }
 
     #[test]

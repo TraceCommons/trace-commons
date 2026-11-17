@@ -599,6 +599,12 @@ window.tc-glass-window {
   padding: 12px 14px;
 }
 
+/* A notice that describes work happening to the machine and so carries no
+   X (`monitor::notices::STAYS_CLASS`). A marker the shell reads; it draws
+   nothing of its own. */
+.tc-notice-stays {
+}
+
 /* --- The transcript ------------------------------------------------ */
 
 /* `mono.transcript`: 11px mono. The spec's 1.7 line-height is set by the
