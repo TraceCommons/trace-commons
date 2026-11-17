@@ -444,16 +444,20 @@ impl Retained {
     }
 }
 
+/// The vendored upstream palettes (`tests/fixtures/omarchy/`, MIT).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TOKYO: &str = include_str!("../../tests/fixtures/omarchy/tokyo-night.colors.toml");
-    const GRUVBOX: &str = include_str!("../../tests/fixtures/omarchy/gruvbox.colors.toml");
-    const LATTE: &str = include_str!("../../tests/fixtures/omarchy/catppuccin-latte.colors.toml");
-    const ROSE: &str = include_str!("../../tests/fixtures/omarchy/rose-pine.colors.toml");
-    const FLEXOKI: &str = include_str!("../../tests/fixtures/omarchy/flexoki-light.colors.toml");
-    const LEGACY: &str =
+pub(crate) mod fixtures {
+    pub(crate) const TOKYO: &str =
+        include_str!("../../tests/fixtures/omarchy/tokyo-night.colors.toml");
+    pub(crate) const GRUVBOX: &str =
+        include_str!("../../tests/fixtures/omarchy/gruvbox.colors.toml");
+    pub(crate) const LATTE: &str =
+        include_str!("../../tests/fixtures/omarchy/catppuccin-latte.colors.toml");
+    pub(crate) const ROSE: &str =
+        include_str!("../../tests/fixtures/omarchy/rose-pine.colors.toml");
+    pub(crate) const FLEXOKI: &str =
+        include_str!("../../tests/fixtures/omarchy/flexoki-light.colors.toml");
+    pub(crate) const LEGACY: &str =
         include_str!("../../tests/fixtures/omarchy/legacy-tokyo-night.colors.toml");
 
     pub(crate) const FIXTURES: [(&str, &str); 6] = [
@@ -464,6 +468,12 @@ mod tests {
         ("flexoki-light", FLEXOKI),
         ("legacy-tokyo-night", LEGACY),
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::*;
+    use super::*;
 
     fn rgb(hex: &str) -> Rgb {
         Rgb::parse(hex).unwrap()

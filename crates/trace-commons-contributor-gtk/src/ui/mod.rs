@@ -6,6 +6,7 @@
 //! application tells a contributor to install a shell extension.
 
 pub(crate) mod account_change;
+pub mod appearance;
 pub mod balance;
 pub mod community_brand;
 pub mod credential;

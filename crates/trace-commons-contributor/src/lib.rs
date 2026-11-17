@@ -7,6 +7,7 @@ pub mod account_auth;
 pub mod account_change_copy;
 pub mod account_contribution;
 pub(crate) mod antigravity;
+pub mod appearance_copy;
 pub mod attach_copy;
 pub mod brand;
 pub mod channel;
