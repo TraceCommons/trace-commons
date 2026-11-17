@@ -19,13 +19,23 @@ fi
 
 COMMON=(build-essential pkg-config git curl ca-certificates libgtk-4-dev libadwaita-1-dev
   tesseract-ocr imagemagick weston dbus-user-session xdg-desktop-portal-gtk)
-if [ ! -f /var/lib/tc-bootstrap.done ]; then
-  apt-get update
+# Debian names the screenshot tool kde-spectacle; Ubuntu's archive mirror
+# answered 404 for pool files on the first boot of 2026-11-16 (an index read
+# before the mirror settled), so a failed install refreshes and retries once.
+install_packages() {
   if [ "$FLAVOR" = kde ]; then
-    apt-get install -y "${COMMON[@]}" kde-plasma-desktop sddm plasma-workspace krdp spectacle \
+    apt-get install -y "$@" "${COMMON[@]}" kde-plasma-desktop sddm plasma-workspace krdp kde-spectacle \
       xdg-desktop-portal-kde
   else
-    apt-get install -y "${COMMON[@]}" ubuntu-desktop-minimal gnome-remote-desktop gnome-screenshot
+    apt-get install -y "$@" "${COMMON[@]}" ubuntu-desktop-minimal gnome-remote-desktop gnome-screenshot
+  fi
+}
+if [ ! -f /var/lib/tc-bootstrap.done ]; then
+  apt-get update
+  if ! install_packages; then
+    sleep 30
+    apt-get update
+    install_packages --fix-missing
   fi
   sudo -u tc -H bash -c 'curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt'
   touch /var/lib/tc-bootstrap.done
