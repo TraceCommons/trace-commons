@@ -155,6 +155,15 @@ mod tests {
         gtk::init().expect("GTK display");
         let transfer = MapTransfer::new("t1", "folder", "claude-code", Action::Contribute);
         let card = card(&transfer, None, || {});
+        // A collapsed GtkExpander keeps its child out of the widget tree,
+        // so open Details first, as the viewer does.
+        let mut all = Vec::new();
+        descendants(card.upcast_ref(), &mut all);
+        let details = all
+            .iter()
+            .find_map(|w| w.downcast_ref::<gtk::Expander>().cloned())
+            .expect("the Details expander");
+        details.set_expanded(true);
         let mut all = Vec::new();
         descendants(card.upcast_ref(), &mut all);
         let well = all
