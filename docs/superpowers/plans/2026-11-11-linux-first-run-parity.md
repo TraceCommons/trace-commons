@@ -62,3 +62,31 @@ Standalone Insights continues to use the existing local startup path.
 No dependency, backend permission or license-boundary change is required.
 Native Linux presentation and portal/auth ceremonies need retained runtime
 review; host compilation and pure tests alone do not prove visual parity.
+
+## Owner overrides, 2026-11-17
+
+The owner asked for first-run parity with the native macOS client and
+overrode two choices above. Where the bullets above say otherwise, these win:
+
+- **Sharing does not start Ask.** Uses selects neither Ask nor Automatic until
+  the person picks one (the Mac's owner decision of 2026-10-27), and its
+  action reads Skip until something is chosen. An unchosen first run still
+  commits Ask at Start, as on the Mac; nothing is preselected that grants
+  sharing.
+- **Join does not reuse the legacy Connect page.** Join is the Mac's: near.ai
+  sign-in through the planner's `Commit::SignIn` (an invite held is looked up
+  and enrolled first; without one, the near.ai login then
+  `near_ai_account_enroll`), then single-organization setup, then Start
+  sharing. The invite card shows only while an invite is held. An earlier
+  run's enrollment with no NEAR AI account cannot Start until near.ai is
+  signed in, as on the Mac.
+- **Wallet sign-in is dropped on Linux.** The wallet card and ceremony
+  (`onboarding_wallet.rs`) and the legacy Connect page are removed. Daemon
+  and server wallet support, which other shells use, is unchanged.
+
+Also changed to match the Mac: Tools gives each found tool one unticked
+check (unticked is Not used), adds folders, and holds Continue while one tool
+is watched in two rows; Traces shows counts and always continues; the folder
+rules and past traces moved from Traces to Customize on Uses; the terms are
+handed to the daemon once; and the first-run stage is dark whatever the
+desktop uses.
