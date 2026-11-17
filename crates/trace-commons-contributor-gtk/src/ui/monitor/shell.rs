@@ -414,7 +414,7 @@ impl Shell {
     }
 
     /// The map pane's view. The Private AI view is a later slice; the pane
-    /// draws the Traces placeholder for either.
+    /// draws an empty field for it.
     pub fn map_view(&self) -> MapView {
         self.state.map_view.get()
     }
@@ -583,13 +583,13 @@ impl Shell {
     pub fn select(&self, app: &Rc<App>, selection: Selection) {
         let session = matches!(selection, Selection::Session(_));
         self.inspector.select(app, selection);
-        self.map
-            .highlight(&self.inspector.selection(), &app.entries.borrow());
         if session {
             self.update_prefs(|prefs| prefs.shows_inspector = true);
         }
         self.refresh_demand(app);
         self.render_graph(app);
+        // The selection's tool is ringed on the map, the others faded.
+        self.map.render(app);
         self.apply();
     }
 
@@ -675,11 +675,18 @@ impl Shell {
     /// card, the map and the graph. Called with the queue's own render.
     pub fn render(&self, app: &Rc<App>) {
         self.inspector.render(app);
-        self.map.render(app);
         self.render_history_detail(app);
+        // The graph first: it clears the focus when nothing is selected,
+        // which the map then draws.
         self.render_graph(app);
+        self.map.render(app);
         self.refresh_demand(app);
         self.apply();
+    }
+
+    /// The selection's tool's source, for the map's ring.
+    pub fn selected_tool_id(&self, app: &Rc<App>) -> Option<String> {
+        self.selected_tool(app).map(|(source, _)| source)
     }
 
     /// The selection's tool, as `(source, display name)`: a session's own,
@@ -907,6 +914,8 @@ impl Shell {
             slot.set_visible(notices::shown(*notice, place));
         }
 
+        self.map.show_view(self.state.map_view.get());
+
         if let Some(wanted) = self.root.set_visibility(self.pane_visibility()) {
             self.resize_window(wanted);
         }
@@ -975,7 +984,23 @@ pub fn wire(app: &Rc<App>) {
         shell.state.map_view.set(MapView::Traces);
         shell.graph.set_focused(toggle.is_active());
         shell.set_map_shown(true);
+        shell.map.render(&app);
     });
+
+    // The map's view switch: the map's view only, never the tab.
+    for (toggle, view) in [
+        (&shell.map.traces_view, MapView::Traces),
+        (&shell.map.private_view, MapView::PrivateAi),
+    ] {
+        let weak = Rc::downgrade(app);
+        toggle.connect_toggled(move |toggle| {
+            let Some(app) = weak.upgrade() else { return };
+            if toggle.is_active() && !app.shell.syncing.get() {
+                app.shell.state.map_view.set(view);
+                app.shell.apply();
+            }
+        });
+    }
 
     // The widths the person leaves the panes at, for the next launch.
     let weak = Rc::downgrade(app);

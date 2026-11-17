@@ -429,6 +429,38 @@ row:selected {
   margin: 0 3px;
 }
 
+/* --- The Traces map -------------------------------------------------
+   Each node is a real button over its drawing, for focus and a screen
+   reader; the drawing is the map's own, so the button paints nothing but
+   GTK's focus ring. */
+.tc-map-node {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+}
+
+/* The "+N" pill under the folder column: a small control in the names'
+   own size. */
+.tc-map-pill {
+  min-height: 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+}
+
+/* A node's card, on hover or keyboard focus. */
+.tc-map-card {
+  background-color: @tc_surface;
+  color: @tc_ink;
+  border: 1px solid @tc_line_divider;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */

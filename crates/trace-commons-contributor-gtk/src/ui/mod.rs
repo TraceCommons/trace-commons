@@ -736,6 +736,10 @@ impl App {
     /// to any event.
     pub fn refresh(self: &Rc<Self>) {
         self.call("status", serde_json::json!({}), |app, result| {
+            // The Traces map's gate reads its own fields of the same reply,
+            // each unread one closed rather than defaulted.
+            app.shell.map.set_status(result.as_ref().ok());
+            app.shell.map.render(app);
             let result = result.map(serde_json::from_value::<Status>);
             app.home
                 .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
@@ -777,8 +781,13 @@ impl App {
         // re-ask on the next launch, which is the nagging the marker exists
         // to prevent.
         self.call("get_settings", serde_json::json!({}), |app, result| {
-            let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>)
-            else {
+            let read = result.map(serde_json::from_value::<crate::model::Settings>);
+            // The map's tools are unknown, never unset, without this read.
+            app.shell
+                .map
+                .set_settings(read.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned());
+            let Ok(Ok(settings)) = read else {
+                app.shell.map.render(app);
                 return;
             };
             // The certificate-held section's reading, from the same read.
@@ -801,13 +810,24 @@ impl App {
             queue::render(app);
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_pending_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
+        });
+        // Where each tool's sessions go, for the Traces map's commons gate:
+        // only a route the core names, for a tool it says is watched, ever
+        // draws a flow.
+        self.call("tool_destinations", serde_json::json!({}), |app, result| {
+            app.shell.map.set_destinations(result.as_ref().ok());
+            app.shell.map.render(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
