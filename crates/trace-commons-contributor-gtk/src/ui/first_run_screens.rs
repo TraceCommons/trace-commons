@@ -316,7 +316,8 @@ mod tests {
 
 /// Mounted checks of each screen, run under a Linux display:
 /// `--ignored --test-threads=1`.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod mounted_tests {
     use super::*;
     use crate::first_run::tools::{Found, Tools};
