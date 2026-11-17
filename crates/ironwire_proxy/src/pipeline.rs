@@ -96,6 +96,12 @@ pub enum PipelineError {
     /// The router found nowhere to send this.
     #[error("no route: {0}")]
     NoRoute(NoRoute),
+    /// Local translation refused every remaining route before inference.
+    #[error("request translation refused")]
+    TranslationRefused {
+        /// Backend and content-refusal labels, never request payloads.
+        rejected: Vec<(String, String)>,
+    },
     /// Every candidate backend failed.
     #[error("all backends failed")]
     AllFailed {
@@ -542,9 +548,13 @@ async fn dispatch_inner(
             ) {
                 Ok(decision) => decision,
                 Err(no_route) => {
-                    return Err(last_error.map_or(PipelineError::NoRoute(no_route), |last| {
-                        PipelineError::AllFailed { last, rejected }
-                    }));
+                    return Err(match last_error {
+                        Some(last) => PipelineError::AllFailed { last, rejected },
+                        None if !rejected.is_empty() => {
+                            PipelineError::TranslationRefused { rejected }
+                        }
+                        None => PipelineError::NoRoute(no_route),
+                    });
                 }
             }
         };
@@ -824,6 +834,7 @@ async fn dispatch_inner(
 
     Err(match last_error {
         Some(last) => PipelineError::AllFailed { last, rejected },
+        None if !rejected.is_empty() => PipelineError::TranslationRefused { rejected },
         None => PipelineError::NoRoute(NoRoute::AllExhausted),
     })
 }

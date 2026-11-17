@@ -47,8 +47,9 @@ pub const NO_ALIASING_HEADER: &str = "x-no-aliasing";
 /// Capability profile for a modern OSS model served over Chat Completions.
 ///
 /// `reasoning` and `prompt_cache` are false, and that is now only a *quality*
-/// signal — neither blocks a route (`ironwire_core::capability`). `images` is
-/// false because a text-only model genuinely cannot see them, which does.
+/// signal — neither blocks a route (`ironwire_core::capability`). Image input
+/// stays off by default; observed per-model modalities enable it only for
+/// the exact model the provider says can accept it.
 #[must_use]
 pub fn chat_capabilities(context_tokens: u32) -> Capabilities {
     Capabilities {
@@ -108,6 +109,8 @@ pub struct ChatCompletionsBackend {
     discovered: Arc<Mutex<Option<crate::Catalogue>>>,
     /// Per-model input windows from the same answer as [`Self::discovered`].
     context_windows: Arc<Mutex<Vec<(String, u32)>>>,
+    /// Explicit image declarations from the same provider catalogue.
+    image_support: Arc<Mutex<Vec<(String, bool)>>>,
     quota: Arc<Mutex<QuotaSnapshot>>,
 }
 
@@ -212,6 +215,7 @@ impl ChatCompletionsBackend {
             models,
             discovered: Arc::new(Mutex::new(None)),
             context_windows: Arc::new(Mutex::new(Vec::new())),
+            image_support: Arc::new(Mutex::new(Vec::new())),
             quota: Arc::new(Mutex::new(QuotaSnapshot::default())),
         })
     }
@@ -283,6 +287,65 @@ impl ChatCompletionsBackend {
             None => builder,
         }
     }
+}
+
+/// Exact model declarations, never a name-based guess. Multiple catalogue
+/// shapes may coexist; malformed or conflicting declarations cannot grant
+/// image support. Repeated IDs are combined conservatively for the same reason.
+fn parse_image_support(body: &[u8]) -> Vec<(String, bool)> {
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(items) = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut support = BTreeMap::new();
+    for item in items {
+        let Some(id) = item
+            .get("id")
+            .or_else(|| item.get("slug"))
+            .or_else(|| item.get("model"))
+            .and_then(Value::as_str)
+            .or_else(|| item.as_str())
+        else {
+            continue;
+        };
+        let declarations: Vec<_> = [
+            "/input_modalities",
+            "/inputModalities",
+            "/architecture/input_modalities",
+            "/architecture/inputModalities",
+            "/metadata/input_modalities",
+            "/metadata/inputModalities",
+            "/metadata/architecture/input_modalities",
+            "/metadata/architecture/inputModalities",
+        ]
+        .into_iter()
+        .filter_map(|path| item.pointer(path))
+        .collect();
+        let images = !declarations.is_empty()
+            && declarations.iter().all(|declaration| {
+                declaration.as_array().is_some_and(|modalities| {
+                    modalities.iter().all(Value::is_string)
+                        && modalities
+                            .iter()
+                            .any(|modality| modality.as_str() == Some("image"))
+                })
+            });
+        support
+            .entry(id.to_string())
+            .and_modify(|known| *known &= images)
+            .or_insert(images);
+    }
+    support.into_iter().collect()
 }
 
 /// The largest token count read from a `/models` answer. Anything above is
@@ -395,6 +458,13 @@ impl Backend for ChatCompletionsBackend {
 
     fn context_windows(&self) -> Vec<(String, u32)> {
         match self.context_windows.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn image_support(&self) -> Vec<(String, bool)> {
+        match self.image_support.lock() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
@@ -618,10 +688,26 @@ impl Backend for ChatCompletionsBackend {
         if status.is_success() {
             // The probe already has the answer in its hand; parsing it is what
             // turns a configured guess into what the endpoint actually serves.
-            if let Ok(body) = response.bytes().await
-                && let Some(models) = crate::openai_responses::parse_model_list(&body)
-                && !models.is_empty()
-            {
+            let body = response.bytes().await.ok();
+            let models = body
+                .as_deref()
+                .and_then(crate::openai_responses::parse_model_list)
+                .filter(|models| !models.is_empty());
+            let images = match (&body, &models) {
+                (Some(body), Some(models)) => parse_image_support(body)
+                    .into_iter()
+                    .filter(|(id, _)| models.iter().any(|(listed, _)| listed == id))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            // A successful refresh with unknown or unusable metadata cannot
+            // keep an earlier image permission alive. Transport failures above
+            // retain the last successful snapshot; success replaces it.
+            match self.image_support.lock() {
+                Ok(mut guard) => *guard = images,
+                Err(poisoned) => *poisoned.into_inner() = images,
+            }
+            if let (Some(body), Some(models)) = (body, models) {
                 // A discovered local model is `Fast`, whatever its name
                 // suggests. `from_model_hint` resolves an unrecognised slug to
                 // `Frontier` — right for a hosted catalogue, catastrophic here,
@@ -988,5 +1074,183 @@ mod local_tests {
             "a local backend needs no credential, so it is never 'not logged in'"
         );
         assert_eq!(status.kind, BackendKind::Local);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn images_require_explicit_well_formed_model_modalities() {
+        let body = serde_json::to_vec(&json!({"data": [
+            {"id":"a/vision", "input_modalities":["text","image"]},
+            {"id":"b/text", "input_modalities":["text"]},
+            {"id":"c/missing"},
+            {"id":"d/malformed", "input_modalities":"image"},
+            {"id":"e/mixed", "input_modalities":["image",null]},
+            {"id":"f/name-VL", "supported_features":["vision"]}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            parse_image_support(&body),
+            vec![
+                ("a/vision".into(), true),
+                ("b/text".into(), false),
+                ("c/missing".into(), false),
+                ("d/malformed".into(), false),
+                ("e/mixed".into(), false),
+                ("f/name-VL".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_provider_modalities_are_supported_without_overriding_conflicts() {
+        let body = serde_json::to_vec(&json!({"models": [
+            {"id":"a/nested", "architecture":{"input_modalities":["text","image"]}},
+            {"id":"b/camel", "architecture":{"inputModalities":["text","image"]}},
+            {"id":"c/metadata", "metadata":{"architecture":{"inputModalities":["text","image"]}}},
+            {"id":"d/conflict", "input_modalities":["text"], "architecture":{"inputModalities":["text","image"]}},
+            {"id":"e/invalid", "input_modalities":null, "architecture":{"inputModalities":["image"]}}
+        ]})).unwrap();
+        assert_eq!(
+            parse_image_support(&body),
+            vec![
+                ("a/nested".into(), true),
+                ("b/camel".into(), true),
+                ("c/metadata".into(), true),
+                ("d/conflict".into(), false),
+                ("e/invalid".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn conflicting_duplicate_model_rows_never_enable_images() {
+        let rows = json!([
+            {"id":"same", "input_modalities":["image","text"]},
+            {"id":"same", "input_modalities":["text"]},
+            {"id":"known", "input_modalities":["image","text"]}
+        ]);
+        let mut reversed = rows.as_array().unwrap().clone();
+        reversed.reverse();
+        let expected = vec![("known".into(), true), ("same".into(), false)];
+        assert_eq!(
+            parse_image_support(&serde_json::to_vec(&rows).unwrap()),
+            expected
+        );
+        assert_eq!(
+            parse_image_support(&serde_json::to_vec(&reversed).unwrap()),
+            expected
+        );
+        assert!(parse_image_support(b"invalid JSON").is_empty());
+        let mixed = json!([{"id":"same","input_modalities":["image"]},"same"]);
+        assert_eq!(
+            parse_image_support(&serde_json::to_vec(&mixed).unwrap()),
+            vec![("same".into(), false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_catalogue_can_enable_and_revoke_image_support() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for modalities in [json!(["text", "image"]), json!(["text"])] {
+                let body = json!({"data":[{"id":"vision-model","input_modalities":modalities}]})
+                    .to_string();
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                }
+                assert!(request.starts_with(b"GET /v1/models "));
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let backend = ChatCompletionsBackend::nearai(
+            None,
+            Some(format!("http://{address}/v1")),
+            Vec::new(),
+            5,
+        )
+        .unwrap();
+        assert!(
+            !backend.capabilities().images,
+            "No blanket provider-wide permission"
+        );
+        assert!(backend.image_support().is_empty());
+        backend.probe().await.unwrap();
+        assert_eq!(backend.image_support(), vec![("vision-model".into(), true)]);
+        backend.probe().await.unwrap();
+        assert_eq!(
+            backend.image_support(),
+            vec![("vision-model".into(), false)]
+        );
+        server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod image_refresh_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn a_successful_unreadable_catalogue_revokes_previous_image_permission() {
+        for unknown in ["{}", "{\"data\":[]}", "not json"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let unknown = unknown.to_string();
+            let server = tokio::spawn(async move {
+                for body in [
+                    r#"{"data":[{"id":"vision-model","input_modalities":["text","image"]}]}"#
+                        .to_string(),
+                    unknown,
+                ] {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&chunk[..n]);
+                    }
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(reply.as_bytes()).await.unwrap();
+                }
+            });
+            let backend = ChatCompletionsBackend::nearai(
+                None,
+                Some(format!("http://{address}/v1")),
+                Vec::new(),
+                5,
+            )
+            .unwrap();
+            backend.probe().await.unwrap();
+            assert_eq!(backend.image_support(), vec![("vision-model".into(), true)]);
+            backend.probe().await.unwrap();
+            assert!(
+                !backend
+                    .image_support()
+                    .iter()
+                    .any(|(_, supported)| *supported),
+                "Unknown successful metadata must not retain image permission"
+            );
+            server.await.unwrap();
+        }
     }
 }

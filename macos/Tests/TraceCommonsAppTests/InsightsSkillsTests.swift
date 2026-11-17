@@ -267,12 +267,13 @@ final class InsightsSkillsTests: XCTestCase {
 
     func testFollowUsesConfirmedSnapshotAndSerializesMutations() async {
         let gate = FollowGate()
-        let model = InsightsSkillsModel(writer: { publisher, followed in
+        let model = InsightsSkillsModel(reader: { _ in .init(enabled: true) }, writer: { publisher, followed in
             await gate.write(publisher, followed: followed)
         })
+        await model.load()
         let first = Task { await model.setFollow(publisherID: "a", followed: true) }
         while await gate.count == 0 { await Task.yield() }
-        XCTAssertNil(model.shown, "No optimistic follow state")
+        XCTAssertEqual(model.shown?.followedPublishers, [], "No optimistic follow state")
         await model.setFollow(publisherID: "b", followed: true)
         await gate.release()
         await first.value
