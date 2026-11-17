@@ -194,6 +194,25 @@ pub fn refresh(app: &Rc<App>) {
 /// whole (`monitor::map_scene::Contributions`).
 pub const HISTORY_LIMIT: usize = 50;
 
+/// Draws History with a community standing whose figures are as wide as
+/// they get, so a fit test covers the Community panel.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+pub(crate) fn show_community_for_test(app: &Rc<App>) {
+    let value = serde_json::json!({
+        "community": {
+            "rank": 1234,
+            "novelty_credit": 12_345_678.0,
+            "window_label": "30d",
+            "accepted_in_window": 12345,
+            "accept_rate": 0.98,
+            "profile_url": "https://tracecommons.example/u/someone",
+        }
+    });
+    let standing = RosterStanding::from_rollup(&value).expect("a standing decodes");
+    render(app, &HistoryRollup::default(), Some(&standing), &[]);
+}
+
 fn render(
     app: &Rc<App>,
     rollup: &HistoryRollup,
@@ -1185,10 +1204,11 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
     panel.append(&head);
 
     // 2. The metric strip: one framed box divided into four equal cells by
-    // 1px rules, which is the site's table, not a row of cards.
+    // 1px rules, which is the site's table, not a row of cards. Two rows of
+    // two: four cells in one row make the panel, and with it the whole left
+    // pane's page stack, wider than the 440 main pane.
     let strip = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .homogeneous(true)
+        .orientation(gtk::Orientation::Vertical)
         .build();
     strip.add_css_class("tc-brand-box");
     let cells = [
@@ -1212,27 +1232,36 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
                 .unwrap_or_else(dash),
         ),
     ];
-    let last = cells.len() - 1;
-    for (index, (label, value)) in cells.iter().enumerate() {
-        let cell = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        cell.add_css_class("tc-brand-cell");
-        // The 1px rule belongs to the cell that has a neighbour to its
-        // right, so the last cell simply never asks for one.
-        if index != last {
-            cell.add_css_class("tc-brand-divided");
-        }
-        // Wraps, so four cells fit a 440 pane.
-        let caption = gtk::Label::builder()
-            .label(label.to_uppercase())
-            .xalign(0.0)
-            .wrap(true)
+    for (row_index, pair) in cells.chunks(2).enumerate() {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .homogeneous(true)
             .build();
-        caption.add_css_class("tc-brand-label");
-        cell.append(&caption);
-        let figure = gtk::Label::builder().label(value).xalign(0.0).build();
-        figure.add_css_class("tc-brand-figure");
-        cell.append(&figure);
-        strip.append(&cell);
+        // The 1px rule between the rows belongs to the lower row.
+        if row_index > 0 {
+            row.add_css_class("tc-brand-ruled");
+        }
+        for (index, (label, value)) in pair.iter().enumerate() {
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            cell.add_css_class("tc-brand-cell");
+            // The 1px rule belongs to the cell that has a neighbour to its
+            // right, so the last cell of a row never asks for one.
+            if index + 1 < pair.len() {
+                cell.add_css_class("tc-brand-divided");
+            }
+            let caption = gtk::Label::builder()
+                .label(label.to_uppercase())
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            caption.add_css_class("tc-brand-label");
+            cell.append(&caption);
+            let figure = gtk::Label::builder().label(value).xalign(0.0).build();
+            figure.add_css_class("tc-brand-figure");
+            cell.append(&figure);
+            row.append(&cell);
+        }
+        strip.append(&row);
     }
     panel.append(&strip);
 
