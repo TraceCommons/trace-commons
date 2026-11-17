@@ -33,6 +33,7 @@ pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
 pub mod update;
+pub mod wrap_row;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
