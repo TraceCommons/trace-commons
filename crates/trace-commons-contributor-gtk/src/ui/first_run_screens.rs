@@ -313,3 +313,133 @@ mod tests {
         );
     }
 }
+
+/// Mounted checks of each screen, run under a Linux display:
+/// `--ignored --test-threads=1`.
+#[cfg(all(test, target_os = "linux"))]
+mod mounted_tests {
+    use super::*;
+    use crate::first_run::tools::{Found, Tools};
+    use std::{cell::RefCell, rc::Rc};
+
+    fn init() -> glib::MainContext {
+        let context = glib::MainContext::default();
+        adw::init().expect("GTK display unavailable");
+        context
+    }
+
+    fn descendants(root: &gtk::Widget) -> Vec<gtk::Widget> {
+        let mut result = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(widget) = pending.pop() {
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                pending.push(current);
+            }
+            result.push(widget);
+        }
+        result
+    }
+
+    fn buttons(root: &gtk::Box) -> Vec<String> {
+        descendants(root.upcast_ref())
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Button>().ok())
+            .filter_map(|b| b.label().map(|l| l.to_string()))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn welcome_offers_get_started_and_the_agent_prompt() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let copy = first_run_copy();
+        let root = welcome(|| {}, || {});
+        let labels = buttons(&root);
+        assert!(labels.iter().any(|l| l == copy.welcome.start));
+        assert!(labels.iter().any(|l| l == copy.agent_configuration.action));
+        assert!(!labels.iter().any(|l| l == copy.frame.continue_button));
+        let agent = agent_configuration(|| {});
+        let labels = buttons(&agent);
+        assert!(labels.iter().any(|l| l == copy.agent_configuration.copy));
+        assert!(labels.iter().any(|l| l == copy.agent_configuration.close));
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn tools_start_unticked_and_continue_waits_for_a_watch() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let mut tools = Tools::default();
+        tools.record_discovery(vec![
+            Found {
+                source: "claude-code".into(),
+                path: "/home/x/.claude/projects".into(),
+                exists: true,
+                session_count: 1,
+                total_bytes: None,
+            },
+            Found {
+                source: "codex".into(),
+                path: "/home/x/.codex/sessions".into(),
+                exists: false,
+                session_count: 0,
+                total_bytes: None,
+            },
+        ]);
+        let tools = Rc::new(RefCell::new(tools));
+        let window = gtk::Window::new();
+        let screen = super::super::first_run_tools::build(tools.clone(), &window, || {});
+        let checks: Vec<_> = descendants(screen.root.upcast_ref())
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::CheckButton>().ok())
+            .collect();
+        assert_eq!(checks.len(), 1, "a tool not found is not asked");
+        assert!(!checks[0].is_active());
+        assert!(!screen.continue_button.is_sensitive());
+        checks[0].set_active(true);
+        assert!(screen.continue_button.is_sensitive());
+        assert!(tools.borrow().watches_anything());
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn private_ai_counts_the_tools_that_can_connect() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let found = Found {
+            source: "codex".into(),
+            path: "/x".into(),
+            exists: true,
+            session_count: 0,
+            total_bytes: None,
+        };
+        let body = private_ai_body(&[found], 2);
+        let words = fill(first_run_copy().private_ai.can_connect, "total", "2");
+        assert!(
+            descendants(body.upcast_ref())
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::Label>().ok())
+                .any(|l| l.text() == words)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_uses_flow_names_its_gate_and_the_commons() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let copy = first_run_copy();
+        let flow = uses_flow(copy.uses.you_review);
+        let labels: Vec<String> = descendants(flow.upcast_ref())
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .map(|l| l.text().to_string())
+            .collect();
+        assert!(labels.iter().any(|l| l == copy.uses.you_review));
+        assert!(labels.iter().any(|l| l == copy.uses.the_commons));
+        assert!(!labels.iter().any(|l| l.contains("Mac")));
+    }
+}
