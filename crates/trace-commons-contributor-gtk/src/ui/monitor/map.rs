@@ -456,7 +456,27 @@ mod imp {
                 &self.revealed.borrow(),
                 space,
             );
+            // The lock's legend item goes with the coins that carry it, as
+            // the Mac draws `legend_memory` only with its pile. Here, where
+            // every layout passes, not only a change of inputs.
+            let has_pile = scene.stack.is_some();
             self.scene.replace(scene);
+            if let Some(item) = self
+                .memory_legend
+                .borrow()
+                .as_ref()
+                .and_then(|item| item.upgrade())
+                && item.get_visible() != has_pile
+            {
+                // Not inside this layout pass: a layout runs from the
+                // canvas's own allocation.
+                let item = item.downgrade();
+                glib::idle_add_local_once(move || {
+                    if let Some(item) = item.upgrade() {
+                        item.set_visible(has_pile);
+                    }
+                });
+            }
         }
 
         fn point_at(&self, pointer: Option<(f64, f64)>) {
@@ -911,18 +931,6 @@ impl MapCanvas {
 
     fn relayout(&self) {
         self.imp().layout_scene();
-        // The lock's legend item goes with the coins that carry it, as the
-        // Mac draws `legend_memory` only with its pile.
-        let has_pile = self.imp().scene.borrow().stack.is_some();
-        if let Some(item) = self
-            .imp()
-            .memory_legend
-            .borrow()
-            .as_ref()
-            .and_then(|item| item.upgrade())
-        {
-            item.set_visible(has_pile);
-        }
         self.sync_children();
         self.update_clock();
         self.queue_allocate();
@@ -1972,30 +1980,27 @@ impl TraceMap {
         foot.append(&clamp);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         foot.append(&row);
-        let legend = gtk::FlowBox::new();
-        legend.set_selection_mode(gtk::SelectionMode::None);
+        // The legend's items flow onto further lines as the pane narrows,
+        // as the Mac's `HistoryFilterFlow` does (`style::wrap_row`).
+        let legend = crate::ui::style::wrap_row(10);
         legend.set_hexpand(true);
         legend.set_valign(gtk::Align::End);
-        legend.set_max_children_per_line(4);
-        legend.set_column_spacing(10);
         legend.set_can_target(false);
         for mode in [
             ProjectMode::AutoUpload,
             ProjectMode::Ask,
             ProjectMode::Ignore,
         ] {
-            legend.insert(&legend_item(mode.label(), Some(mode)), -1);
+            legend.append(&legend_item(mode.label(), Some(mode)));
         }
-        legend.insert(&legend_item(flow.legend_not_watched, None), -1);
+        legend.append(&legend_item(flow.legend_not_watched, None));
         let memory = memory_legend_item();
-        legend.insert(&memory, -1);
-        // The flow box's own child is what takes room.
-        let memory_child = memory.parent().unwrap_or_else(|| memory.clone().upcast());
-        memory_child.set_visible(false);
+        memory.set_visible(false);
+        legend.append(&memory);
         canvas
             .imp()
             .memory_legend
-            .replace(Some(memory_child.downgrade()));
+            .replace(Some(memory.clone().upcast::<gtk::Widget>().downgrade()));
         row.append(&legend);
         let zoom = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         zoom.add_css_class("linked");
@@ -2012,6 +2017,30 @@ impl TraceMap {
         zoom.append(&zoom_in);
         row.append(&zoom);
         overlay.add_overlay(&foot);
+        // The foot along the pane's bottom, as tall as its legend is at the
+        // pane's width: measured for the width it is given, so a legend that
+        // wraps onto a second line gets that line's height on every GTK.
+        let placed = foot.downgrade();
+        overlay.connect_get_child_position(move |overlay, child| {
+            let foot = placed.upgrade()?;
+            if child != foot.upcast_ref::<gtk::Widget>() {
+                return None;
+            }
+            let (width, height) = (overlay.width(), overlay.height());
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            let (least, _, _, _) = foot.measure(gtk::Orientation::Horizontal, -1);
+            let width = width.max(least);
+            let (_, natural, _, _) = foot.measure(gtk::Orientation::Vertical, width);
+            let natural = natural.min(height);
+            Some(gtk::gdk::Rectangle::new(
+                0,
+                height - natural,
+                width,
+                natural,
+            ))
+        });
 
         root.append(&overlay);
         let map = Self {
@@ -2416,6 +2445,38 @@ mod tests {
             "the legend's memory item is not shown: {labels:?}"
         );
         assert!(!labels.iter().any(|(text, _)| text == flow.legend_memory));
+        // Every legend word is drawn whole inside the pane, at 480 and
+        // narrowed to 360: the legend wraps and the foot grows to hold it.
+        for narrower in [0, 120] {
+            map.root.set_margin_end(narrower);
+            settle();
+            let mut words = Vec::new();
+            let mut stack = vec![map.foot.clone().upcast::<gtk::Widget>()];
+            while let Some(widget) = stack.pop() {
+                if widget.is::<gtk::Label>() && widget.is_visible() {
+                    words.push(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(next) = child {
+                    child = next.next_sibling();
+                    stack.push(next);
+                }
+            }
+            let (w, h) = (map.root.width() as f32, map.root.height() as f32);
+            for word in &words {
+                let text = word.downcast_ref::<gtk::Label>().unwrap().text();
+                let bounds = word.compute_bounds(&map.root).expect("placed");
+                assert!(
+                    word.is_mapped()
+                        && bounds.x() >= -0.5
+                        && bounds.y() >= -0.5
+                        && bounds.x() + bounds.width() <= w + 0.5
+                        && bounds.y() + bounds.height() <= h + 0.5,
+                    "{text:?} at {bounds:?} is not inside the {w} x {h} pane"
+                );
+            }
+        }
+        map.root.set_margin_end(0);
 
         // The map is drawn with nothing pending too (spec, "No hiding").
         map.canvas
