@@ -7,7 +7,7 @@
 // next_id: Cell::new(1), dir }, job_rx, result_tx. No backend or thread opens.
 // Run the ignored test alone under the existing isolated Weston/XDG CI session:
 // cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
-// --lib ui::credential::provider_tests::wallet_provider_signals_preserve_pending_and_recover
+// --lib ui::credential::provider_tests::settings_sign_in_signals_preserve_pending_and_recover
 // -- --ignored --exact --test-threads=1
 // Uses real App/widget callbacks and its result pump with synthetic refused IPC.
 // App::build still invokes its existing desktop portal/tray helpers; use the CI
@@ -41,7 +41,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(application: &adw::Application) -> Self {
-        let dir = std::env::temp_dir().join(format!("tc-wallet-provider-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tc-settings-sign-in-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let (worker, jobs, results) = Worker::fixture(dir.clone());
         Self {
@@ -64,12 +64,6 @@ impl Fixture {
                 "near_ai_credential_start" => self.starts.borrow_mut().push((id, params)),
                 "preview_visible" => {
                     assert_eq!(params, json!({ "entry_ids": [] }));
-                    self.reply(id, Err("synthetic_read_refused".into()));
-                }
-                "native_wallet_flow" => {
-                    assert_eq!(params["action"], "open");
-                    assert_eq!(params["ingest_url"], "");
-                    assert_eq!(params["account_id"], "");
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 "near_ai_credential_status" => self.reply(
@@ -196,12 +190,12 @@ fn assert_no_login_choice(root: &gtk::Widget) {
 
 #[test]
 #[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
-fn wallet_provider_signals_preserve_pending_and_recover() {
+fn settings_sign_in_signals_preserve_pending_and_recover() {
     let context = glib::MainContext::default();
     let _owner = context.acquire().unwrap();
     adw::init().expect("GTK display unavailable");
     let application = adw::Application::builder()
-        .application_id("ai.tracecommons.WalletProviderTest")
+        .application_id("ai.tracecommons.SettingsSignInTest")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     application

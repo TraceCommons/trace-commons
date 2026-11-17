@@ -200,9 +200,9 @@ else
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::credential::provider_tests::wallet_provider_signals_preserve_pending_and_recover \
+      ui::credential::provider_tests::settings_sign_in_signals_preserve_pending_and_recover \
       -- --exact --ignored --test-threads=1; then
-    fail "wallet provider controls did not preserve pending, failure and retry behavior"
+    fail "Settings sign-in controls did not preserve pending, failure and retry behavior"
   fi
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
