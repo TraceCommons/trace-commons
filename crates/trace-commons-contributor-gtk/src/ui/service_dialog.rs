@@ -32,6 +32,12 @@ pub fn dismissed() -> bool {
     DISMISSED.with(Cell::get)
 }
 
+/// For mounted tests: set or clear "Not now" for this thread.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn set_dismissed(dismissed: bool) {
+    DISMISSED.with(|d| d.set(dismissed));
+}
+
 /// How a dialog ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -155,6 +161,7 @@ pub fn build(dialog: Dialog) -> Parts {
 /// on screen is raised instead, and `on_end` is not called for this one.
 pub fn present(
     parent: Option<&gtk::Window>,
+    application: Option<&adw::Application>,
     dialog: Dialog,
     host: Rc<dyn ServiceHost>,
     on_end: impl Fn(Ended) + 'static,
@@ -166,6 +173,11 @@ pub fn present(
     let parts = build(dialog);
     let window = parts.window.clone();
     window.set_transient_for(parent);
+    if let Some(application) = application {
+        // Before the main window exists (first setup), the application must
+        // count this window, or it would quit with none open.
+        window.set_application(Some(application));
+    }
     OPEN.with(|open| *open.borrow_mut() = Some(window.downgrade()));
 
     // Exactly one end, however the dialog goes away.
@@ -465,7 +477,7 @@ mod tests {
             fn switch_over(&self, _: Box<dyn FnOnce()>) {}
         }
         drop(parts);
-        present(None, Dialog::Install, Rc::new(Never), |_| {});
+        present(None, None, Dialog::Install, Rc::new(Never), |_| {});
         let window = OPEN
             .with(|open| open.borrow().as_ref().and_then(|w| w.upgrade()))
             .expect("open");

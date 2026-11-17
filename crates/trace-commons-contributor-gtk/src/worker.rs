@@ -83,10 +83,13 @@ pub enum Outcome {
     /// and "could not look" would invite exactly that. See
     /// `crate::original_search::Outcome::Unknown`.
     SearchOriginal(Option<u32>),
-    /// The new backend's attachment, or the label it failed with (the
-    /// window then stays attached to a socket, showing its not-running
-    /// state).
-    Reopened(Result<Attachment, String>),
+    /// Where the window's daemon is now, and the label a fresh open failed
+    /// with, if it did (the window then stays attached to a socket, showing
+    /// its not-running state).
+    Reopened {
+        attachment: Attachment,
+        error: Option<String>,
+    },
     ServiceState(trace_commons_contributor::daemon::service::ServiceState),
 }
 
@@ -172,10 +175,13 @@ impl Worker {
                 let outcome = match job {
                     Job::Reopen { start_unit } => {
                         pump.store(true, std::sync::atomic::Ordering::SeqCst);
-                        let (next, result) = reopen(backend, start_unit, &dir, &open);
+                        let (next, error) = reopen(backend, start_unit, &dir, &open);
                         backend = next;
                         pump = spawn_pump(&backend, &event_tx);
-                        Outcome::Reopened(result)
+                        Outcome::Reopened {
+                            attachment: Attachment::of(&backend),
+                            error,
+                        }
                     }
                     Job::ServiceState => {
                         // Off this thread: one bounded bus call and a
@@ -333,7 +339,7 @@ fn reopen(
     start_unit: bool,
     dir: &std::path::Path,
     open: &impl Fn(std::path::PathBuf) -> Result<Backend>,
-) -> (Backend, Result<Attachment, String>) {
+) -> (Backend, Option<String>) {
     let local = dir.join(trace_commons_contributor::config::DAEMON_SOCK_FILE);
     let previous = backend.attached_socket().map(std::path::Path::to_path_buf);
     backend.stop();
@@ -344,15 +350,12 @@ fn reopen(
         crate::service::wait_for_service(crate::service::SWITCH_WAIT, &local);
     }
     match open(dir.to_path_buf()) {
-        Ok(next) => {
-            let attachment = Attachment::of(&next);
-            (next, Ok(attachment))
-        }
+        Ok(next) => (next, None),
         Err(error) => {
             let socket = previous
                 .or_else(trace_commons_contributor::daemon::host_link::socket_path)
                 .unwrap_or(local);
-            (Backend::Attached { socket }, Err(error.to_string()))
+            (Backend::Attached { socket }, Some(error.to_string()))
         }
     }
 }

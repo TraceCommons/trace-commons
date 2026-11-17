@@ -337,13 +337,66 @@ fn finish_start(
                     gtk::glib::ControlFlow::Break
                 });
             }
-            ui::roots::present(application, dir, move || {
-                // Re-entered rather than continuing inline: the declaration
-                // is on disk now, so this is an ordinary start, and the
-                // second refusal that cannot happen would still be handled
-                // the same way if it did.
-                start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
-            });
+            let headless = drivers.exit_after_realize
+                || drivers.start_page.is_some()
+                || drivers.onboarding_page.is_some();
+            let ask_roots = {
+                let application = application.clone();
+                let drivers = drivers.clone();
+                let startup = startup.clone();
+                move || {
+                    let reentry = reentry.clone();
+                    let ask_dir = ask_dir.clone();
+                    let drivers = drivers.clone();
+                    let startup = startup.clone();
+                    ui::roots::present(&application, ask_dir.clone(), move || {
+                        // Re-entered rather than continuing inline: the
+                        // declaration is on disk now, so this is an ordinary
+                        // start, and the second refusal that cannot happen
+                        // would still be handled the same way if it did.
+                        start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
+                    });
+                }
+            };
+            if !trace_commons_contributor_gtk::service::first_setup_asks(
+                cfg!(target_os = "linux"),
+                headless,
+            ) {
+                ask_roots();
+                return;
+            }
+            // First setup: one step for the background service, only when it
+            // is not running (owner-approved flow, 2026-11-17). Running, it
+            // is a fresh start that attaches to it; "Not now", the folders.
+            let local = dir.join(trace_commons_contributor::config::DAEMON_SOCK_FILE);
+            let host: std::rc::Rc<dyn ui::service_dialog::ServiceHost> =
+                std::rc::Rc::new(ui::service_dialog::FirstSetupHost { local });
+            let application = application.clone();
+            let ask_with = host.clone();
+            host.state(Box::new(move |state| {
+                let prompt = trace_commons_contributor_gtk::service::prompt(
+                    trace_commons_contributor_gtk::service::Trigger::FirstSetup,
+                    state,
+                    ui::service_dialog::dismissed(),
+                );
+                let Some(dialog) = prompt else {
+                    ask_roots();
+                    return;
+                };
+                let restart = application.clone();
+                ui::service_dialog::present(
+                    None,
+                    Some(&application),
+                    dialog,
+                    ask_with,
+                    move |ended| match ended {
+                        ui::service_dialog::Ended::Running => {
+                            start_or_ask(&restart, dir.clone(), drivers.clone(), startup.clone())
+                        }
+                        ui::service_dialog::Ended::NotNow => ask_roots(),
+                    },
+                );
+            }));
             return;
         }
         Err(error) => {

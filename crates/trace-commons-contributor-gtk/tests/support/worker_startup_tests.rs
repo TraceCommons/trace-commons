@@ -146,8 +146,9 @@ fn a_reopen_replaces_the_backend_and_reports_the_attachment() {
     let (got, outcome) = worker.results.recv_blocking().unwrap();
     assert_eq!(got, id);
     match outcome {
-        crate::worker::Outcome::Reopened(Ok(attachment)) => {
+        crate::worker::Outcome::Reopened { attachment, error } => {
             assert!(!attachment.hosts);
+            assert_eq!(error, None);
         }
         _ => panic!("expected a reopen outcome"),
     }

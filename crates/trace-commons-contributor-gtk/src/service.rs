@@ -102,6 +102,20 @@ pub fn launch_press(
     }
 }
 
+/// Whether first setup asks about the service before the folders screen:
+/// on Linux, unless a headless driver (`--exit-after-realize`,
+/// `--start-page`, `--onboarding-page`) runs, which expects that screen.
+pub fn first_setup_asks(on_linux: bool, headless_driver: bool) -> bool {
+    on_linux && !headless_driver
+}
+
+/// Whether a window attached to the host daemon goes back to running its
+/// own: the host part is gone (no socket answers, no unit marker), and the
+/// last try did not already fail with the link in this same state.
+pub fn falls_back(via_host_link: bool, link: LinkState, last_try_failed: bool) -> bool {
+    via_host_link && link == LinkState::Absent && !last_try_failed
+}
+
 /// What the open dialog does after a fresh look at the service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchStep {
@@ -413,6 +427,41 @@ mod tests {
             watch_step(Dialog::Update, ServiceState::TooOld, false),
             WatchStep::Keep
         );
+    }
+
+    #[test]
+    fn first_setup_asks_on_linux_unless_a_headless_driver_runs() {
+        assert!(first_setup_asks(true, false));
+        assert!(!first_setup_asks(false, false));
+        // The container smoke run expects the roots screen.
+        assert!(!first_setup_asks(true, true));
+    }
+
+    /// Every way a dialog can come up, named. There is no app-start
+    /// trigger: an ordinary start never shows one (owner, 2026-11-17). A new
+    /// variant has to be added here, on purpose.
+    #[test]
+    fn no_trigger_is_an_ordinary_app_start() {
+        for trigger in [Trigger::FirstSetup, Trigger::Launch, Trigger::SetUp] {
+            let named = match trigger {
+                Trigger::FirstSetup => "first setup, before the folders are declared",
+                Trigger::Launch => "Launch pressed",
+                Trigger::SetUp => "Set up pressed",
+            };
+            assert!(!named.contains("start of the app"));
+        }
+    }
+
+    #[test]
+    fn the_window_falls_back_only_when_the_host_part_is_gone() {
+        assert!(falls_back(true, LinkState::Absent, false));
+        // Down is a host daemon restarting or stopped: stay attached.
+        assert!(!falls_back(true, LinkState::Down, false));
+        assert!(!falls_back(true, LinkState::Listening, false));
+        // Not attached over the host link: nothing to fall back from.
+        assert!(!falls_back(false, LinkState::Absent, false));
+        // A fallback that could not open stays quiet until the link changes.
+        assert!(!falls_back(true, LinkState::Absent, true));
     }
 
     #[test]

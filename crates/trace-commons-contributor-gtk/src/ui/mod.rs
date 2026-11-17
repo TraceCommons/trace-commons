@@ -347,6 +347,10 @@ pub struct App {
 /// tune it further -- see the design's "Priority" section.
 const SCROLL_SETTLE_DEBOUNCE_MS: u64 = 250;
 
+/// How often a Flatpak window attached to the host daemon checks that the
+/// host part is still there.
+const FALLBACK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl App {
     pub fn build(application: &adw::Application, worker: Worker) -> Rc<Self> {
         // Before any widget is built, so nothing is ever drawn in the
@@ -542,6 +546,7 @@ impl App {
         app.wire_quit();
         app.wire_health_action();
         app.wire_tray();
+        app.wire_service_fallback();
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -751,6 +756,46 @@ impl App {
         );
     }
 
+    /// In a Flatpak attached to the host daemon: when the host part is gone
+    /// (uninstalled, or the login's runtime directory cleared), quietly go
+    /// back to running the daemon in the sandbox. Private AI then shows its
+    /// unavailable line again. Nothing is shown about it.
+    fn wire_service_fallback(self: &Rc<Self>) {
+        if !trace_commons_contributor::daemon::host_link::runs_sandboxed() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let busy = Rc::new(Cell::new(false));
+        let failed = Rc::new(Cell::new(false));
+        glib::timeout_add_local(FALLBACK_INTERVAL, move || {
+            let Some(app) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if busy.get() {
+                return glib::ControlFlow::Continue;
+            }
+            let link = trace_commons_contributor::daemon::host_link::socket_path()
+                .map(|sock| trace_commons_contributor::daemon::host_link::probe(&sock))
+                .unwrap_or(trace_commons_contributor::daemon::host_link::LinkState::Absent);
+            if link != trace_commons_contributor::daemon::host_link::LinkState::Absent {
+                failed.set(false);
+            }
+            if crate::service::falls_back(app.worker.via_host_link(), link, failed.get()) {
+                busy.set(true);
+                let busy = Rc::clone(&busy);
+                let failed = Rc::clone(&failed);
+                app.reopen(false, move |app| {
+                    busy.set(false);
+                    // Still on the host link: the sandbox could not start
+                    // its own daemon (no folders declared there). Quiet
+                    // until the link changes.
+                    failed.set(app.worker.via_host_link());
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     /// Classify the background service from this window's backend.
     pub fn service_state<F>(self: &Rc<Self>, callback: F)
     where
@@ -777,10 +822,8 @@ impl App {
         self.callbacks.borrow_mut().insert(
             id,
             Box::new(move |app, outcome| {
-                if let Outcome::Reopened(result) = outcome {
-                    if let Ok(attachment) = result {
-                        app.worker.set_attachment(attachment);
-                    }
+                if let Outcome::Reopened { attachment, .. } = outcome {
+                    app.worker.set_attachment(attachment);
                     // Whatever happened, the daemon may have changed: the
                     // same "look again" as `resync_required`.
                     app.refresh();

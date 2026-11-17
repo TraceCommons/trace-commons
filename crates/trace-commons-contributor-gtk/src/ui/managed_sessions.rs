@@ -257,8 +257,18 @@ pub fn refresh(app: &Rc<App>) {
         let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let launch_app = Rc::clone(app);
         let launch_snapshot = snapshot.clone();
-        let launch = button("launch", move || launch_dialog(&launch_app, &launch_snapshot));
-        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && !launch_accounts(&snapshot).is_empty());
+        // In a Flatpak without the host daemon, Launch offers the background
+        // service until "Not now" (owner-approved flow, 2026-11-17).
+        let sandboxed = sandboxed();
+        let has_accounts = !launch_accounts(&snapshot).is_empty();
+        let launch = button("launch", move || {
+            match crate::service::launch_press(&launch_snapshot, sandboxed, has_accounts, super::service_dialog::dismissed()) {
+                crate::service::LaunchPress::Open => launch_dialog(&launch_app, &launch_snapshot),
+                crate::service::LaunchPress::OfferService => offer_service(&launch_app, crate::service::Trigger::Launch),
+                crate::service::LaunchPress::Unavailable => {}
+            }
+        });
+        launch.set_sensitive(crate::service::launch_press(&snapshot, sandboxed, has_accounts, super::service_dialog::dismissed()) != crate::service::LaunchPress::Unavailable);
         controls.append(&launch);
         let add_app = Rc::clone(app);
         let terminal = snapshot["capabilities"]["terminal_launch"] == true;
@@ -283,6 +293,13 @@ pub fn refresh(app: &Rc<App>) {
         let destination = session_destination(&snapshot);
         *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
+        if crate::service::offers_set_up(&snapshot, sandboxed) {
+            let a = Rc::clone(app);
+            let set_up = gtk::Button::with_label(trace_commons_contributor::managed::copy::background_service::SET_UP);
+            set_up.set_halign(gtk::Align::Start);
+            set_up.connect_clicked(move |_| offer_service(&a, crate::service::Trigger::SetUp));
+            root.append(&set_up);
+        }
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
@@ -329,6 +346,50 @@ pub fn refresh(app: &Rc<App>) {
         }
         root.append(&style::section(&text("global_title")));
         style::append_body(root, text("global_scope"));
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A mounted test's stand-in for `/.flatpak-info`.
+    static TEST_SANDBOXED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether this window runs in a Flatpak sandbox.
+fn sandboxed() -> bool {
+    #[cfg(test)]
+    if let Some(sandboxed) = TEST_SANDBOXED.with(std::cell::Cell::get) {
+        return sandboxed;
+    }
+    trace_commons_contributor::daemon::host_link::runs_sandboxed()
+}
+
+/// Look at the background service and show its dialog when `trigger` calls
+/// for one. Ended either way, the Private AI area is drawn again: after
+/// "Not now" Launch goes quiet; after a switch-over it reads the host
+/// daemon (the reopen already refreshed everything).
+fn offer_service(app: &Rc<App>, trigger: crate::service::Trigger) {
+    app.service_state(move |app, state| {
+        let Some(dialog) =
+            crate::service::prompt(trigger, state, super::service_dialog::dismissed())
+        else {
+            refresh(app);
+            return;
+        };
+        let host: Rc<dyn super::service_dialog::ServiceHost> =
+            Rc::new(super::service_dialog::AppHost(Rc::downgrade(app)));
+        let weak = Rc::downgrade(app);
+        super::service_dialog::present(
+            Some(app.window.upcast_ref()),
+            None,
+            dialog,
+            host,
+            move |_| {
+                if let Some(app) = weak.upgrade() {
+                    refresh(&app);
+                }
+            },
+        );
     });
 }
 
@@ -626,6 +687,110 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         w.close();
     }));
     window.present();
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mounted_tests {
+    use super::*;
+    use crate::worker::{Job, Outcome, Worker};
+    use trace_commons_contributor::managed::copy::background_service as words;
+
+    fn texts(root: &gtk::Widget, out: &mut Vec<(String, bool)>) {
+        if let Some(label) = root.downcast_ref::<gtk::Label>() {
+            out.push((label.label().to_string(), true));
+        }
+        if let Some(button) = root.downcast_ref::<gtk::Button>() {
+            out.push((
+                button.label().map(|l| l.to_string()).unwrap_or_default(),
+                button.is_sensitive(),
+            ));
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            texts(&widget, out);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// In a sandbox whose daemon is not the host daemon, the start area
+    /// keeps its unavailable line and adds "Set up"; Launch offers the
+    /// service until "Not now", then goes quiet while "Set up" stays.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_sandbox_start_area_shows_unavailable_and_set_up() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.ServiceSetUpTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, jobs, results) = Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        TEST_SANDBOXED.with(|s| s.set(Some(true)));
+        let snapshot = json!({
+            "revision": 1,
+            "accounts": [{"id": "a1", "tool": "claude", "connection": "near_ai", "label": "A", "auth_state": "ready"}],
+            "sessions": [],
+            "capabilities": {"terminal_launch": false, "daemon_on_host": false},
+        });
+        let render = |dismissed: bool| -> Vec<(String, bool)> {
+            crate::ui::service_dialog::set_dismissed(dismissed);
+            app.private_inference.managed_revision.set(0);
+            refresh(&app);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                while let Ok((id, job)) = jobs.try_recv() {
+                    let reply = match job {
+                        Job::Call { method, .. } if method == "managed_snapshot" => {
+                            Ok(snapshot.clone())
+                        }
+                        _ => Err("synthetic-refused".to_string()),
+                    };
+                    let _ = results.try_send((id, Outcome::Call(reply.map_err(Into::into))));
+                }
+                let mut out = Vec::new();
+                texts(app.private_inference.managed.upcast_ref(), &mut out);
+                if out.iter().any(|(t, _)| t == words::SET_UP) {
+                    return out;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the start area was not drawn"
+                );
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let shown = render(false);
+        assert!(
+            shown
+                .iter()
+                .any(|(t, _)| *t == text("terminal_unavailable"))
+        );
+        assert!(shown.iter().any(|(t, on)| *t == words::SET_UP && *on));
+        assert!(
+            shown.iter().any(|(t, on)| *t == text("launch") && *on),
+            "Launch offers the service"
+        );
+        let shown = render(true);
+        assert!(
+            shown.iter().any(|(t, on)| *t == words::SET_UP && *on),
+            "Set up stays after Not now"
+        );
+        assert!(
+            shown.iter().any(|(t, on)| *t == text("launch") && !*on),
+            "Launch is quiet after Not now"
+        );
+        TEST_SANDBOXED.with(|s| s.set(None));
+        crate::ui::service_dialog::set_dismissed(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
