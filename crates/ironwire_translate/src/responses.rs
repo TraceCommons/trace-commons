@@ -146,6 +146,28 @@ fn parse_item(item: &Value, turns: &mut Vec<Turn>) {
                     .unwrap_or_else(|| json!({})),
             },
         ),
+        // A structured image output must not become text before the emitter
+        // can report the unsupported cross-wire content.
+        Some("function_call_output")
+            if item
+                .get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part.get("type").and_then(Value::as_str) == Some("input_image"))
+                }) =>
+        {
+            push_block(
+                turns,
+                Role::User,
+                Block::Unknown {
+                    origin: ME,
+                    kind: "images in tool output".into(),
+                    raw: item.clone(),
+                },
+            )
+        }
         Some("function_call_output") => push_block(
             turns,
             Role::User,
@@ -805,5 +827,21 @@ mod tests {
         let ir = parse_request(&json!({"input": "hello"}));
         assert_eq!(ir.turns.len(), 1);
         assert!(matches!(&ir.turns[0].blocks[0], Block::Text(t) if t == "hello"));
+    }
+    #[test]
+    fn image_tool_outputs_round_trip_but_refuse_a_foreign_wire() {
+        let output = json!({"type":"function_call_output","call_id":"call_pixel",
+            "output":[{"type":"input_text","text":"synthetic screenshot"},
+                {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"}]});
+        let ir = parse_request(&json!({"input":[output.clone()]}));
+        assert!(
+            matches!(&ir.turns[0].blocks[0], Block::Unknown { origin, kind, raw }
+            if *origin == ME && kind == "images in tool output" && raw == &output)
+        );
+        let (native, dropped) = emit_request(&ir, "fixture/vision");
+        assert_eq!(native["input"][0], output);
+        assert!(dropped.unknown_blocks.is_empty());
+        let (_, dropped) = crate::chat::emit_request(&ir, "fixture/vision");
+        assert_eq!(dropped.unknown_blocks, ["images in tool output"]);
     }
 }
