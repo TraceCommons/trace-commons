@@ -557,8 +557,10 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
 
 /// The value the skin gives a `@define-color` that the standard sheet
 /// defines as a literal. `None` keeps the standard value; only the neutral
-/// translucent scrims are kept, since they darken or lighten whatever
-/// ground they sit on.
+/// translucent overlays are kept (`tc_scrim`, and `tc_selected` under
+/// selected rows), since they darken or lighten whatever ground they sit on
+/// and every ink keeps its contrast through them. The theme's `selection`
+/// colour is used for selected text, in the scoped rule.
 fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
     let hex = |c: omarchy::Rgb| Some(c.hex());
     match name {
@@ -597,7 +599,6 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),
         "tc_surface2" => hex(p.inset),
-        "tc_selected" => hex(p.selection),
         "tc_ink" => hex(p.ink),
         "tc_muted" => hex(p.muted),
         "tc_ink_tertiary" => hex(p.tertiary),
@@ -1386,7 +1387,6 @@ mod tests {
             ("error_fg_color", "error_bg_color"),
             ("destructive_fg_color", "destructive_bg_color"),
             ("tc_redaction_fg", "tc_redaction_bg"),
-            ("tc_ink", "tc_selected"),
         ];
         let glass_grounds = [
             "tc_glass_pane",

@@ -110,7 +110,7 @@ without both the palette is invalid.
 | glass scene (map) | `darker_background` | mix(bg, black, 25%) dark / mix(bg, fg, 8%) light | |
 | control hover / row hover | derived | mix(surface, fg, 8%) / mix(bg, fg, 6%) | |
 | `tc_ink`, glass ink, toolbar glyph | `foreground` | required | 4.5 on every ground |
-| strong text | `bright_foreground` | foreground | 4.5 on every ground |
+| strong text (feeds selected text only; no `@define-color` uses it) | `bright_foreground` | foreground | 4.5 on every ground |
 | `tc_muted`, glass secondary ink | derived: mix(fg, bg, 30%) | `light_foreground` is not used: whether it sits closer to or further from the background than `foreground` differs from theme to theme | 4.5 on every ground |
 | `tc_ink_tertiary`, hidden toolbar glyph | derived: mix(fg, bg, 40%) | | 4.5 on every ground |
 | `tc_line`, `tc_line_divider` (decorative) | `muted` | dark_foreground, then mix(bg, fg, 20%) | none (decorative) |
@@ -123,7 +123,8 @@ without both the palette is invalid.
 | `tc_status_outside` / `_text` | `red` | | 3 / 4.5 |
 | held (`tc_blue`, `tc_blue_text`, `tc_blue_icon`) | `blue` | accent | 3 / 4.5 |
 | `tc_on_status` | background | | 4.5 against each status fill |
-| `tc_selected`, text selection background | `selection` | mix(bg, accent, 25%) | ink 4.5 on it |
+| text selection background (scoped rule only) | `selection` | mix(bg, accent, 25%) | ink 4.5 on it |
+| `tc_selected` (selected rows), `tc_scrim` | kept: the standard neutral translucent overlays | | every ink keeps its contrast through them |
 | selection text | `bright_foreground` | | 4.5 on selection |
 | redaction wash / ink | mix(bg, yellow, 25%) / ink | | 4.5 |
 | gold highlight (preview excerpt) | yellow at 30% alpha | | |
@@ -176,6 +177,18 @@ redaction tags and highlighted excerpt. The graph footer and the monitor
 glyphs already draw in the widget's CSS colour and follow without change.
 After each reload the shell redraws every drawing area in every window,
 because a dark-to-dark switch fires no `dark` notification.
+
+Known limit: the transcript preview's redaction tags and highlighted
+excerpt take their colours when the preview is rendered. A preview already
+open keeps the old colours until it is opened again; everything else
+follows a switch live.
+
+Off is off: with Standard chosen the loaded sheet is `stylesheet(dark)`,
+and the branch leaves that function, the token blocks, `style.css` and
+`brand_tokens.rs` untouched (no diff against `linux-mac-look`), so the
+standard look is byte-identical. Whether to reload is decided by comparing
+the palette the provider holds with the one that should show, so turning
+the skin off and on again with an unchanged theme loads it again.
 
 ## Live reload
 
@@ -253,7 +266,8 @@ In `trace_commons_contributor::appearance_copy`:
 - The Omarchy stylesheet for every fixture: same define names, no standard
   literal left, the existing contrast matrix in `style.rs` holds, and it
   parses with GTK's CSS parser (the parse test is `#[ignore]`d like the
-  existing display tests and run on Linux).
+  existing display tests; `scripts/weston-portal-verify-inner.sh` runs it
+  beside `both_schemes_parse_with_insights_styles` in the Linux weston job).
 - Drawing: `inks()` in Standard equals today's constants; with a palette it
   returns the palette's colours, and the map palette, History glyphs and the
   mark read it.

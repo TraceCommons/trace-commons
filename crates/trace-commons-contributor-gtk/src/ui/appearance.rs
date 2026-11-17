@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 
-use super::omarchy::{self, Offered, Palette, Retained};
+use super::omarchy::{self, Palette, Retained};
 
 /// The class every toplevel carries while the skin is on. Rules only the
 /// skin has are scoped under it.
@@ -131,8 +131,30 @@ impl Debounce {
     }
 }
 
+/// Which palette the stylesheet provider holds now: `None` is the
+/// standard sheet. Reloading is decided by comparing it with what should be
+/// showing, not by what the last read did, so turning the skin back on with
+/// an unchanged theme still loads it.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    palette: Option<Palette>,
+}
+
+impl Loaded {
+    /// What to load, if anything: `Some(None)` is the standard sheet,
+    /// `Some(Some(p))` the skin for `p`, `None` nothing to do.
+    pub fn sync(&mut self, wanted: Option<&Palette>) -> Option<Option<Palette>> {
+        if self.palette.as_ref() == wanted {
+            return None;
+        }
+        self.palette = wanted.cloned();
+        Some(self.palette.clone())
+    }
+}
+
 #[derive(Default)]
 struct State {
+    loaded: Loaded,
     chosen: Appearance,
     retained: Retained,
     monitors: Vec<gtk::gio::FileMonitor>,
@@ -207,13 +229,31 @@ fn apply(choice: Appearance) {
         }
         Appearance::Standard => {
             STATE.with(|state| state.borrow_mut().monitors.clear());
-            restore_scheme();
-            super::style::reload();
-            tag_windows(false);
-            redraw_all();
-            notify();
+            show();
         }
     }
+}
+
+/// Bring the provider, the libadwaita scheme, the window class and the
+/// drawing in line with what should be showing now. Reloads only when that
+/// differs from what is loaded, so an unrelated file event costs a read and
+/// nothing else.
+fn show() {
+    let wanted = active_palette();
+    let change = STATE.with(|state| state.borrow_mut().loaded.sync(wanted.as_ref()));
+    tag_windows(wanted.is_some());
+    if let Some(now) = change {
+        match now {
+            Some(palette) => adw::StyleManager::default().set_color_scheme(match palette.mode {
+                omarchy::Mode::Dark => adw::ColorScheme::ForceDark,
+                omarchy::Mode::Light => adw::ColorScheme::ForceLight,
+            }),
+            None => restore_scheme(),
+        }
+        super::style::reload();
+        redraw_all();
+    }
+    notify();
 }
 
 fn restore_scheme() {
@@ -226,7 +266,7 @@ fn restore_scheme() {
 }
 
 /// Resolve and read the palette now, keep the last valid one on failure,
-/// re-arm the monitors on whatever exists now, and reload if it changed.
+/// re-arm the monitors on whatever exists now, and show the result.
 fn reread() {
     if chosen() != Appearance::Omarchy {
         return;
@@ -234,33 +274,14 @@ fn reread() {
     let dirs = omarchy::theme_dirs(&omarchy::Env::from_process());
     let read = omarchy::resolve(&dirs);
     let resolved = read.as_ref().ok().map(|(dir, _)| dir.clone());
-    let offered = STATE.with(|state| {
+    STATE.with(|state| {
         state
             .borrow_mut()
             .retained
             .offer(read.map(|(_, palette)| palette))
     });
     arm(&watch_targets(&dirs, resolved.as_deref(), Path::exists));
-    match offered {
-        Offered::Replaced => {
-            if let Some(palette) = active_palette() {
-                adw::StyleManager::default().set_color_scheme(match palette.mode {
-                    omarchy::Mode::Dark => adw::ColorScheme::ForceDark,
-                    omarchy::Mode::Light => adw::ColorScheme::ForceLight,
-                });
-            }
-            super::style::reload();
-            tag_windows(true);
-            redraw_all();
-        }
-        Offered::Unchanged | Offered::KeptLast => tag_windows(true),
-        Offered::NoneYet => {
-            restore_scheme();
-            super::style::reload();
-            tag_windows(false);
-        }
-    }
-    notify();
+    show();
 }
 
 fn arm(targets: &[PathBuf]) {
@@ -529,6 +550,31 @@ mod tests {
         }
         // GTK's "nothing selected" is not a choice of the skin.
         assert_eq!(choice_at(gtk::INVALID_LIST_POSITION), Appearance::Standard);
+    }
+
+    /// Omarchy on, off, then on again with the theme unchanged: the third
+    /// step has to load the skin again even though the palette read is the
+    /// same one kept from the first.
+    #[test]
+    fn the_loaded_sheet_follows_the_choice_both_ways() {
+        use crate::ui::omarchy::{
+            self,
+            fixtures::{LATTE, TOKYO},
+        };
+        let tokyo = omarchy::parse(TOKYO, false).unwrap();
+        let latte = omarchy::parse(LATTE, false).unwrap();
+        let mut loaded = Loaded::default();
+        // Standard at launch: nothing to load.
+        assert_eq!(loaded.sync(None), None);
+        assert_eq!(loaded.sync(Some(&tokyo)), Some(Some(tokyo.clone())));
+        // The same palette again, or a failed read that keeps it: nothing.
+        assert_eq!(loaded.sync(Some(&tokyo)), None);
+        // Off.
+        assert_eq!(loaded.sync(None), Some(None));
+        // On again, same theme: loaded again.
+        assert_eq!(loaded.sync(Some(&tokyo)), Some(Some(tokyo.clone())));
+        // A switch to another theme.
+        assert_eq!(loaded.sync(Some(&latte)), Some(Some(latte)));
     }
 
     #[test]
