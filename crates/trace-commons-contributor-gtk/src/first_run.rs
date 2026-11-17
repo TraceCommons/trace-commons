@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 pub mod join;
 pub mod org;
+pub mod rules;
 pub mod tools;
 pub mod uses;
 
@@ -152,6 +153,14 @@ impl Action {
 /// Validate the daemon's action-specific acknowledgement before advancing.
 /// Authentication and startup use separate coordinator adapters and cannot be
 /// acknowledged by an arbitrary JSON success response.
+/// Whether the daemon refused the accepted terms handed to it
+/// (`FirstRunRunner.handOverTerms`): an error, or an answer that is not the
+/// `terms_accept` object (`DaemonClient.termsAccept`). Logged, never a
+/// failure of the first run.
+pub fn terms_handoff_refused(result: &Result<Value, String>) -> bool {
+    !result.as_ref().is_ok_and(Value::is_object)
+}
+
 pub fn acknowledged(action: &Action, value: &Value) -> bool {
     match action {
         Action::SetSourceSettings(roots) => {
@@ -584,6 +593,15 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_terms_handoff_is_refused_unless_the_daemon_answers_its_object() {
+        assert!(terms_handoff_refused(&Err("terms-version-stale".into())));
+        assert!(terms_handoff_refused(&Ok(json!(null))));
+        assert!(terms_handoff_refused(&Ok(json!(false))));
+        assert!(!terms_handoff_refused(&Ok(json!({"held": true}))));
+        assert!(!terms_handoff_refused(&Ok(json!({"held": false}))));
+    }
+
     use super::*;
     #[test]
     fn acknowledgements_reject_generic_success_and_partial_results() {

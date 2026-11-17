@@ -6,9 +6,7 @@
 //! this file draws it and makes the calls.
 //!
 //! The stage is dark whatever the desktop uses, as the Mac forces its
-//! first-run stage dark (`OnboardingCoordinatorView`). libadwaita's scheme
-//! is app-wide, so [`StageScheme`] forces it while the window is up and
-//! puts the person's own back when it closes.
+//! first-run stage dark (`OnboardingCoordinatorView`): see [`super::stage`].
 use super::{
     App,
     first_run_screens::{self as screens, fill, page},
@@ -19,6 +17,7 @@ use super::{
 use crate::{
     first_run::{
         Account, Action, Commit, Outcome, Rule, Runner, Sharing, State, Step, Ticket, join, org,
+        rules,
         tools::Tools,
         uses::{self, ScopeOption},
     },
@@ -41,53 +40,7 @@ struct ReadRequests {
     pending: std::collections::BTreeMap<String, (u64, DeferredRead)>,
 }
 
-/// Forces the dark scheme while a first-run window is up and restores the
-/// person's own when the last one goes. Counted, so two windows that
-/// overlap (the roots window closing as the coordinator opens) cannot put
-/// the forced scheme back as the person's.
-pub(super) struct StageScheme;
-thread_local! {
-    static STAGE_HOLDERS: Cell<(usize, adw::ColorScheme)> =
-        const { Cell::new((0, adw::ColorScheme::Default)) };
-}
-impl StageScheme {
-    pub(super) fn hold(window: &impl IsA<gtk::Window>) {
-        let manager = adw::StyleManager::default();
-        STAGE_HOLDERS.with(|holders| {
-            let (count, previous) = holders.get();
-            let previous = if count == 0 {
-                manager.color_scheme()
-            } else {
-                previous
-            };
-            holders.set((count + 1, previous));
-        });
-        manager.set_color_scheme(adw::ColorScheme::ForceDark);
-        // GTK 4 emits `destroy` at dispose, which waits for the last
-        // reference; `gtk_window_destroy` unrealizes at once. Release on
-        // whichever comes first, exactly once per hold.
-        let held = Rc::new(Cell::new(true));
-        let release = move || {
-            if !held.replace(false) {
-                return;
-            }
-            STAGE_HOLDERS.with(|holders| {
-                let (count, previous) = holders.get();
-                let count = count.saturating_sub(1);
-                holders.set((count, previous));
-                if count == 0 {
-                    adw::StyleManager::default().set_color_scheme(previous);
-                }
-            });
-        };
-        let window = window.upcast_ref::<gtk::Window>();
-        window.connect_unrealize({
-            let release = release.clone();
-            move |_| release()
-        });
-        window.connect_destroy(move |_| release());
-    }
-}
+pub(super) use super::stage::StageScheme;
 
 pub(super) struct Coordinator {
     app: Weak<App>,
@@ -126,6 +79,13 @@ pub(super) struct Coordinator {
     invite_dead: Cell<bool>,
     org_checked: Cell<bool>,
     auto_started: Cell<bool>,
+    /// Whether a signed-in NEAR AI account was held when Join last drew.
+    forward: Cell<bool>,
+    /// The daemon's answer for the invite looked up, for its pay range.
+    lookup: RefCell<Option<Value>>,
+    /// The optional referral code under near.ai's Sign in, sent with the
+    /// NEAR AI enrollment.
+    referral: RefCell<String>,
 }
 
 fn name(step: Step) -> &'static str {
@@ -190,6 +150,8 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         .default_height(720)
         .build();
     StageScheme::hold(&window);
+    // The roots window's handoff ends once this window holds the stage.
+    StageScheme::end_handoff();
     let stack = gtk::Stack::builder()
         .vexpand(true)
         .vhomogeneous(false)
@@ -242,6 +204,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         invite_dead: Cell::new(false),
         org_checked: Cell::new(false),
         auto_started: Cell::new(false),
+        forward: Cell::new(false),
+        lookup: RefCell::new(None),
+        referral: RefCell::new(String::new()),
     });
     if let Some(handed) = super::roots::take_first_run_handoff() {
         let mut state = c.state.borrow_mut();
@@ -558,14 +523,23 @@ impl Coordinator {
             (tools.trace_count(), tools.total_bytes())
         };
         if let Some(count) = found {
-            let label = if count == 1 {
-                copy.frame.session_count_one.to_owned()
-            } else {
-                fill(copy.frame.session_count, "count", &count.to_string())
-            };
-            let figure = gtk::Label::builder().label(&label).xalign(0.0).build();
+            // The Mac's count over "traces on this Mac", for any computer
+            // (owner, 2026-11-17).
+            let figure = gtk::Label::builder()
+                .label(count.to_string())
+                .xalign(0.0)
+                .build();
             figure.add_css_class("tc-flow-title");
-            self.traces_body.append(&figure);
+            let caption = body_label(copy.traces.on_this_computer);
+            caption.add_css_class("tc-meta");
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            column.append(&figure);
+            column.append(&caption);
+            column.update_property(&[gtk::accessible::Property::Label(&format!(
+                "{count} {}",
+                copy.traces.on_this_computer
+            ))]);
+            self.traces_body.append(&column);
         }
         let earns = self
             .state
@@ -853,29 +827,37 @@ impl Coordinator {
                     label.set_tooltip_text(Some(&project.project_path));
                     row.append(&label);
                     let mut group: Option<gtk::CheckButton> = None;
-                    for (index, rule) in [Rule::Ask, Rule::Automatic, Rule::Never]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        if rule == Rule::Automatic && project.is_unresolved_bucket {
-                            continue;
-                        }
+                    // The daemon's mode shows until the person picks; only a
+                    // pick is written (`RulesScreenLayout.rule`).
+                    let shown = rules::shown_rule(&c.state.borrow(), &project);
+                    let arms = body_label(copy.uses.automatic_after_sign_in);
+                    arms.add_css_class("tc-meta");
+                    arms.set_visible(rules::arms_after_sign_in(&c.state.borrow(), &project));
+                    let project = Rc::new(project);
+                    for rule in rules::offerable_modes(&project) {
+                        let index = match rule {
+                            Rule::Ask => 0,
+                            Rule::Automatic => 1,
+                            Rule::Never => 2,
+                        };
                         let check = gtk::CheckButton::with_label(choices.choices[index].label);
                         check.set_group(group.as_ref());
                         if group.is_none() {
                             group = Some(check.clone());
                         }
-                        // Only an explicit override selects a radio button.
-                        check.set_active(
-                            c.state.borrow().rules.get(&project.project_id).copied() == Some(rule),
-                        );
-                        let id = project.project_id.clone();
+                        check.set_active(shown == Some(rule));
                         check.connect_toggled({
                             let weak = Rc::downgrade(&c);
+                            let project = project.clone();
+                            let arms = arms.clone();
                             move |check| {
                                 if check.is_active() {
                                     if let Some(c) = weak.upgrade() {
-                                        c.state.borrow_mut().rules.insert(id.clone(), rule);
+                                        rules::pick(&mut c.state.borrow_mut(), &project, rule);
+                                        arms.set_visible(rules::arms_after_sign_in(
+                                            &c.state.borrow(),
+                                            &project,
+                                        ));
                                         c.update_uses_action();
                                     }
                                 }
@@ -883,6 +865,9 @@ impl Coordinator {
                         });
                         row.append(&check);
                     }
+                    // Automatic picked before sign-in is armed at Start, and
+                    // says so in Uses' words (`armsAfterSignIn`).
+                    row.append(&arms);
                     let history = gtk::Box::new(gtk::Orientation::Vertical, 8);
                     let more = gtk::Expander::builder()
                         .label(copy.rules.past_sessions)
@@ -1053,6 +1038,13 @@ impl Coordinator {
         let copy = first_run_copy();
         clear(&self.join_body);
         let state = self.state.borrow().clone();
+        // As the Mac's Join when its account goes: the organization check
+        // and its one automatic Start may run again.
+        let forward = join::can_forward(&state);
+        if join::forward_lost(self.forward.replace(forward), forward) {
+            self.org_checked.set(false);
+            self.auto_started.set(false);
+        }
         // near.ai, the one way in (owner, 2026-10-12).
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
         card.add_css_class("tc-card");
@@ -1090,12 +1082,17 @@ impl Coordinator {
         }
         card.append(&actions);
         self.join_body.append(&card);
+        self.join_body.append(&self.referral_field());
         if join::shows_invite_card(&state) {
             self.join_body.append(&self.invite_card(&state));
         }
         let required_known = self.required().is_some();
-        self.start
-            .set_sensitive(join::can_start(&state, required_known, self.busy.get()));
+        self.start.set_sensitive(join::can_start(
+            &state,
+            required_known,
+            self.busy.get(),
+            sharing_available(&state),
+        ));
     }
 
     fn invite_card(self: &Rc<Self>, state: &State) -> gtk::Box {
@@ -1152,7 +1149,7 @@ impl Coordinator {
                 fill(
                     &fill(copy.join.invite_joined, "host", &host),
                     "pay_range",
-                    copy.join.unknown,
+                    &join::pay_range(self.lookup.borrow().as_ref(), &copy.join),
                 ),
                 "tc-clear",
             ))
@@ -1169,6 +1166,48 @@ impl Coordinator {
             card.append(&label);
         }
         card
+    }
+
+    /// The optional referral code under near.ai's Sign in (referral spec
+    /// section 6), in the core's words; a code that is not one is said under
+    /// the field, and never stops the sign-in.
+    fn referral_field(self: &Rc<Self>) -> gtk::Box {
+        let words = trace_commons_contributor::referral_copy::referral_copy();
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.append(&eyebrow(words.sign_up_label));
+        let entry = gtk::Entry::builder()
+            .placeholder_text(words.field_placeholder)
+            .hexpand(true)
+            .sensitive(!self.busy.get())
+            .build();
+        entry.set_text(&self.referral.borrow());
+        entry.update_property(&[gtk::accessible::Property::Label(words.sign_up_label)]);
+        let problem = body_label("");
+        problem.add_css_class("tc-refused");
+        let show = {
+            let problem = problem.clone();
+            move |typed: &str| match join::referral_problem(typed) {
+                Some(line) => {
+                    problem.set_label(line);
+                    problem.set_visible(true);
+                }
+                None => problem.set_visible(false),
+            }
+        };
+        show(&self.referral.borrow());
+        entry.connect_changed({
+            let weak = Rc::downgrade(self);
+            move |entry| {
+                let text = entry.text().to_string();
+                show(&text);
+                if let Some(c) = weak.upgrade() {
+                    *c.referral.borrow_mut() = text;
+                }
+            }
+        });
+        column.append(&entry);
+        column.append(&problem);
+        column
     }
 
     /// "Look up": the host is read here; the daemon looks the invite up and
@@ -1253,7 +1292,12 @@ impl Coordinator {
                 let ready = c.state.borrow().clone();
                 if outcome == org::Outcome::Ready
                     && !c.auto_started.replace(true)
-                    && join::can_start(&ready, c.required().is_some(), false)
+                    && join::can_start(
+                        &ready,
+                        c.required().is_some(),
+                        false,
+                        sharing_available(&ready),
+                    )
                 {
                     c.start();
                 }
@@ -1494,6 +1538,7 @@ impl Coordinator {
             .default_width(580)
             .default_height(600)
             .build();
+        StageScheme::hold(&dialog);
         let next = gtk::Button::with_label(first_run_copy().frame.continue_button);
         body.append(&next);
         let acknowledged = Rc::new(Cell::new(false));
@@ -1675,7 +1720,7 @@ impl Coordinator {
         };
         match receipt.filter(|_| hand_over) {
             Some(receipt) => app.call("terms_accept", receipt.params(), move |_, result| {
-                if result.is_err() {
+                if crate::first_run::terms_handoff_refused(&result) {
                     eprintln!("trace-commons-shell: terms-handoff-refused");
                 }
                 run();
@@ -1749,11 +1794,19 @@ impl Coordinator {
             });
             return;
         }
-        let Some((method, params)) = ticket.action.ipc() else {
+        let Some((method, mut params)) = ticket.action.ipc() else {
             let line = failure_copy(&ticket.action, "");
             self.resolved(ticket, Outcome::Failure(line.into()));
             return;
         };
+        if ticket.action == Action::EnrollNearAi {
+            if let Some(code) = join::sent_referral_code(&self.referral.borrow()) {
+                params["referral_code"] = json!(code);
+            }
+        }
+        if matches!(ticket.action, Action::LookupInvite(_)) {
+            self.lookup.borrow_mut().take();
+        }
         let weak = Rc::downgrade(self);
         let generation = self.generation.get();
         app.call(method, params, move |_, result| {
@@ -1762,6 +1815,9 @@ impl Coordinator {
             };
             let outcome = match result {
                 Ok(value) if crate::first_run::acknowledged(&ticket.action, &value) => {
+                    if matches!(ticket.action, Action::LookupInvite(_)) {
+                        *c.lookup.borrow_mut() = Some(value);
+                    }
                     Outcome::Success
                 }
                 Ok(_) if matches!(ticket.action, Action::GrantAutomatic { .. }) => {
@@ -1815,6 +1871,14 @@ impl Coordinator {
         let failure = self.runner.borrow().failure.clone();
         self.finish_commit(failure);
     }
+}
+
+/// The core's words for the sharing path chosen are all there.
+fn sharing_available(state: &State) -> bool {
+    uses::sharing_available(
+        state.sharing,
+        &consent_copy::automatic_contribution_copy(None),
+    )
 }
 
 fn parse_options(result: Result<Value, String>) -> Option<Vec<ScopeOption>> {
@@ -1973,6 +2037,7 @@ mod read_tests {
 
 #[cfg(test)]
 mod dark_tests {
+    use super::super::stage::{STAGE_CLASS, StageMode, current_mode};
     use super::*;
 
     fn luminance(c: &gtk::gdk::RGBA) -> f64 {
@@ -1992,6 +2057,38 @@ mod dark_tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
+    fn settle(context: &gtk::glib::MainContext) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The ground a window is painted on: a probe label coloured with
+    /// libadwaita's `--window-bg-color` (scoped mode) or the palette's
+    /// `tc_bg` (app-wide mode), read where it sits.
+    fn ground(root: &gtk::Box) -> gtk::gdk::RGBA {
+        if current_mode() == StageMode::AppWide {
+            return root.style_context().lookup_color("tc_bg").expect("tc_bg");
+        }
+        let probe = gtk::Label::new(Some("probe"));
+        probe.add_css_class("tc-test-ground-probe");
+        root.append(&probe);
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(".tc-test-ground-probe { color: var(--window-bg-color); }");
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().unwrap(),
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while std::time::Instant::now() < end {
+            gtk::glib::MainContext::default().iteration(false);
+        }
+        probe.style_context().color()
+    }
+
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn welcome_is_readable_in_dark_and_title_is_larger_than_body() {
@@ -1999,14 +2096,23 @@ mod dark_tests {
         let context = gtk::glib::MainContext::default();
         let _owner = context.acquire().unwrap();
         adw::init().expect("GTK display unavailable");
-        // The person's desktop is light; the stage forces dark on its own.
+        // The person's desktop is light; the stage is dark on its own.
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
         super::super::style::install();
         super::super::community_brand::install();
         let copy = first_run_copy();
         let window = adw::Window::builder().default_width(680).build();
         StageScheme::hold(&window);
-        assert!(adw::StyleManager::default().is_dark());
+        match current_mode() {
+            StageMode::AppWide => assert!(adw::StyleManager::default().is_dark()),
+            StageMode::Scoped => {
+                assert!(window.has_css_class(STAGE_CLASS));
+                assert!(
+                    !adw::StyleManager::default().is_dark(),
+                    "the scheme stays the person's"
+                );
+            }
+        }
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
         let welcome = page(copy.welcome.title);
@@ -2015,15 +2121,15 @@ mod dark_tests {
         root.append(&welcome);
         window.set_content(Some(&root));
         window.present();
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
-        while std::time::Instant::now() < end {
-            context.iteration(false);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        settle(&context);
         let title = welcome.first_child().unwrap();
-        let ground = root.style_context().lookup_color("tc_bg").expect("tc_bg");
+        let ground = ground(&root);
         let body_colour = body.style_context().color();
         let title_colour = title.style_context().color();
+        assert!(
+            luminance(&ground) < 0.2,
+            "the stage ground {ground} is dark"
+        );
         assert!(
             contrast(&body_colour, &ground) >= 4.5,
             "body {body_colour} on {ground}"
@@ -2049,5 +2155,63 @@ mod dark_tests {
             !adw::StyleManager::default().is_dark(),
             "the person's scheme is put back"
         );
+    }
+
+    /// GTK 4.16 and libadwaita 1.6 or later: the stage is dark and the main
+    /// window beside it keeps the person's light scheme. Below that the
+    /// stage is app-wide and this has nothing to check: it says so and
+    /// passes, so the weston job (GTK 4.14) runs it as a no-op.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_scoped_stage_leaves_the_main_window_light() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        if current_mode() != StageMode::Scoped {
+            eprintln!(
+                "not run: GTK {}.{} / libadwaita {}.{} uses the app-wide stage",
+                gtk::major_version(),
+                gtk::minor_version(),
+                adw::major_version(),
+                adw::minor_version()
+            );
+            return;
+        }
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
+        super::super::style::install();
+        let body_in = |window: &adw::Window| {
+            let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            root.add_css_class("tc-root");
+            let label = body_label("Ag");
+            root.append(&label);
+            window.set_content(Some(&root));
+            window.present();
+            (root, label)
+        };
+        let main = adw::Window::builder().default_width(400).build();
+        let (main_root, main_label) = body_in(&main);
+        let stage = adw::Window::builder().default_width(400).build();
+        StageScheme::hold(&stage);
+        let (stage_root, stage_label) = body_in(&stage);
+        settle(&context);
+        assert!(!adw::StyleManager::default().is_dark());
+        let (main_ground, stage_ground) = (ground(&main_root), ground(&stage_root));
+        assert!(
+            luminance(&main_ground) > 0.5,
+            "main ground {main_ground} is light"
+        );
+        assert!(
+            luminance(&stage_ground) < 0.2,
+            "stage ground {stage_ground} is dark"
+        );
+        assert!(contrast(&main_label.style_context().color(), &main_ground) >= 4.5);
+        assert!(contrast(&stage_label.style_context().color(), &stage_ground) >= 4.5);
+        assert_ne!(
+            main_label.style_context().color(),
+            stage_label.style_context().color()
+        );
+        stage.destroy();
+        main.destroy();
     }
 }

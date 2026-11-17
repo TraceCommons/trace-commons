@@ -442,7 +442,7 @@ fn load(provider: &gtk::CssProvider, dark: bool) {
 /// The whole stylesheet for one scheme: the generated accent and status
 /// roles first, since the palette refers to them by name, then the palette,
 /// then the rules.
-fn stylesheet(dark: bool) -> String {
+pub(super) fn stylesheet(dark: bool) -> String {
     let (brand, tokens) = if dark {
         (brand_tokens::DARK_CSS, DARK_TOKENS)
     } else {

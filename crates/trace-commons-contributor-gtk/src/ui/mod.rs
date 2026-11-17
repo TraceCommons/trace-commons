@@ -29,6 +29,7 @@ pub mod queue;
 pub mod roots;
 pub mod settings;
 pub(crate) mod shortcuts;
+mod stage;
 pub mod style;
 mod terminal_choice;
 pub mod update;

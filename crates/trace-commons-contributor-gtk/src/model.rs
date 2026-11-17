@@ -780,6 +780,11 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// The modes the daemon would set for this project (`offerable_modes`),
+    /// wire values. Absent from an older daemon, which then offers what the
+    /// row itself allows (`first_run::rules::offerable_modes`).
+    #[serde(default)]
+    pub offerable_modes: Option<Vec<String>>,
     /// How many of this project's sessions are waiting. Always present.
     #[serde(default)]
     pub pending_count: u64,

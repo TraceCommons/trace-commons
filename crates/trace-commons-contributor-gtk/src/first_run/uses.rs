@@ -70,6 +70,24 @@ pub fn choose_sharing(state: &mut State, sharing: Sharing) {
     state.grant_ready = false;
 }
 
+/// Whether the core's words for the sharing path are all there
+/// (`UsesScreenLayout.sharingLine` is not the fallback): Ask needs its
+/// detail (its first line may be empty, cut 2026-11-04); Automatic needs its
+/// title, its detail and the scrub's words. Without them Start stays off.
+pub fn sharing_available(
+    sharing: Sharing,
+    grant: &trace_commons_contributor::consent_copy::AutomaticGrantCopy,
+) -> bool {
+    match sharing {
+        Sharing::Ask => !grant.path_ask_first_detail.is_empty(),
+        Sharing::Automatic => {
+            !grant.path_automatic_title.is_empty()
+                && !grant.path_automatic_detail.is_empty()
+                && (grant.patterns_only.is_some() || grant.model_scrubbed.is_some())
+        }
+    }
+}
+
 /// The required use among the scopes, as its locked line shows.
 pub fn include_required(state: &mut State, required: Option<&str>) {
     if let Some(name) = required {
@@ -160,5 +178,26 @@ mod tests {
         assert_eq!(state.scopes, ["floor"]);
         include_required(&mut state, None);
         assert_eq!(state.scopes, ["floor"]);
+    }
+
+    #[test]
+    fn a_path_missing_its_words_reads_the_fallback() {
+        let mut grant = trace_commons_contributor::consent_copy::automatic_contribution_copy(None);
+        assert!(sharing_available(Sharing::Ask, &grant));
+        assert!(sharing_available(Sharing::Automatic, &grant));
+        let mut ask = grant.clone();
+        ask.path_ask_first_title = "";
+        assert!(
+            sharing_available(Sharing::Ask, &ask),
+            "an empty Ask title is present"
+        );
+        ask.path_ask_first_detail = "";
+        assert!(!sharing_available(Sharing::Ask, &ask));
+        grant.patterns_only = None;
+        grant.model_scrubbed = None;
+        assert!(
+            !sharing_available(Sharing::Automatic, &grant),
+            "no scrub words"
+        );
     }
 }

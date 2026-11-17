@@ -160,6 +160,9 @@ fn present_mode<F>(
                     screen.finish((!ok).then_some(copy::ROOTS_FAILED));
                 }
                 if ok {
+                    // Held until the coordinator holds it, so the person's
+                    // scheme does not flash between the two windows.
+                    super::stage::StageScheme::begin_handoff(std::time::Duration::from_secs(30));
                     if let Some(window) = window.upgrade() {
                         window.close();
                     }

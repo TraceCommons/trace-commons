@@ -160,10 +160,15 @@ pub(super) fn build(
 
 impl ToolsScreen {
     fn discover(self: &Rc<Self>) {
+        // The core's loading line, for any computer (owner, 2026-11-17).
+        let loading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let spinner = gtk::Spinner::new();
         spinner.start();
-        // A spinner alone: the core's loading line says "this Mac".
-        self.rows.append(&spinner);
+        loading.append(&spinner);
+        let line = gtk::Label::new(Some(first_run_copy().folders.loading_this_computer));
+        line.add_css_class("tc-meta");
+        loading.append(&line);
+        self.rows.append(&loading);
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let found: Vec<Found> = discovery::probe_this_machine()

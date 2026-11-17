@@ -233,7 +233,8 @@ pub(super) fn uses_flow(gate: &str) -> gtk::Box {
     root.append(&area);
     let captions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     captions.set_homogeneous(true);
-    for text in ["", gate, copy.uses.the_commons] {
+    // The Mac's "This Mac", for any computer (owner, 2026-11-17).
+    for text in [copy.uses.this_computer, gate, copy.uses.the_commons] {
         let label = gtk::Label::new(Some(text));
         label.add_css_class("tc-meta");
         captions.append(&label);
@@ -441,6 +442,7 @@ mod mounted_tests {
             .collect();
         assert!(labels.iter().any(|l| l == copy.uses.you_review));
         assert!(labels.iter().any(|l| l == copy.uses.the_commons));
+        assert!(labels.iter().any(|l| l == copy.uses.this_computer));
         assert!(!labels.iter().any(|l| l.contains("Mac")));
     }
 }

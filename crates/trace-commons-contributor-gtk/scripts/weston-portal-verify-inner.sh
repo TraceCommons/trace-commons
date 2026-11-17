@@ -171,6 +171,7 @@ else
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion \
     ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
     ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
     ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \

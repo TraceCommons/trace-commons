@@ -1025,14 +1025,27 @@ mod tests {
     #[test]
     fn this_computer_captions_are_the_mac_words_for_any_computer() {
         let copy = first_run_copy();
-        let swap = |mac: &str| mac.replace("this Mac", "this computer").replace("This Mac", "This computer");
+        let swap = |mac: &str| {
+            mac.replace("this Mac", "this computer")
+                .replace("This Mac", "This computer")
+        };
         assert_eq!(copy.uses.this_mac, "This Mac");
         assert_eq!(copy.uses.this_computer, swap(copy.uses.this_mac));
         assert_eq!(copy.traces.on_this_mac, "traces on this Mac");
         assert_eq!(copy.traces.on_this_computer, swap(copy.traces.on_this_mac));
-        assert_eq!(copy.folders.loading, "Looking for coding tools on this Mac…");
-        assert_eq!(copy.folders.loading_this_computer, swap(copy.folders.loading));
-        for computer in [copy.uses.this_computer, copy.traces.on_this_computer, copy.folders.loading_this_computer] {
+        assert_eq!(
+            copy.folders.loading,
+            "Looking for coding tools on this Mac…"
+        );
+        assert_eq!(
+            copy.folders.loading_this_computer,
+            swap(copy.folders.loading)
+        );
+        for computer in [
+            copy.uses.this_computer,
+            copy.traces.on_this_computer,
+            copy.folders.loading_this_computer,
+        ] {
             assert!(!computer.contains("Mac"), "{computer}");
         }
     }
