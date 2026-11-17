@@ -730,7 +730,8 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     window.present();
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod mounted_tests {
     use super::*;
     use crate::worker::{Job, Outcome, Worker};
