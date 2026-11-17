@@ -33,11 +33,15 @@ pub enum TerminalApp {
     Alacritty,
     Warp,
     Rex,
+    Ptyxis,
+    Xfce4Terminal,
+    Foot,
+    Terminator,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 11] = [
+    pub const ALL: [TerminalApp; 15] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -49,6 +53,10 @@ impl TerminalApp {
         TerminalApp::Alacritty,
         TerminalApp::Warp,
         TerminalApp::Rex,
+        TerminalApp::Ptyxis,
+        TerminalApp::Xfce4Terminal,
+        TerminalApp::Foot,
+        TerminalApp::Terminator,
     ];
     /// macOS, in the order a picker shows them.
     pub const MACOS: [TerminalApp; 8] = [
@@ -63,14 +71,20 @@ impl TerminalApp {
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
-    /// Linux, in the order a picker shows them.
-    pub const LINUX: [TerminalApp; 6] = [
+    /// Linux, in the order a picker shows them. Also the order a missing
+    /// default falls back in ([`effective`]): the desktops' own terminals
+    /// first (GNOME's old and new, KDE's, Xfce's), then the rest.
+    pub const LINUX: [TerminalApp; 10] = [
         TerminalApp::GnomeTerminal,
+        TerminalApp::Ptyxis,
         TerminalApp::Konsole,
+        TerminalApp::Xfce4Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Kitty,
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
+        TerminalApp::Foot,
+        TerminalApp::Terminator,
     ];
 
     /// The apps this platform offers, in picker order. Empty where managed
@@ -101,6 +115,10 @@ impl TerminalApp {
             TerminalApp::Alacritty => "alacritty",
             TerminalApp::Warp => "warp",
             TerminalApp::Rex => "rex",
+            TerminalApp::Ptyxis => "ptyxis",
+            TerminalApp::Xfce4Terminal => "xfce4_terminal",
+            TerminalApp::Foot => "foot",
+            TerminalApp::Terminator => "terminator",
         }
     }
 
@@ -128,6 +146,10 @@ impl TerminalApp {
             TerminalApp::Alacritty => "Alacritty",
             TerminalApp::Warp => "Warp",
             TerminalApp::Rex => "Rex",
+            TerminalApp::Ptyxis => "Ptyxis",
+            TerminalApp::Xfce4Terminal => "Xfce Terminal",
+            TerminalApp::Foot => "foot",
+            TerminalApp::Terminator => "Terminator",
         }
     }
 
@@ -160,6 +182,10 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("kitty"),
             TerminalApp::Wezterm => Some("wezterm"),
             TerminalApp::Alacritty => Some("alacritty"),
+            TerminalApp::Ptyxis => Some("ptyxis"),
+            TerminalApp::Xfce4Terminal => Some("xfce4-terminal"),
+            TerminalApp::Foot => Some("foot"),
+            TerminalApp::Terminator => Some("terminator"),
             TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
                 None
             }
@@ -334,6 +360,10 @@ pub enum TerminalSetting {
     Alacritty,
     Warp,
     Rex,
+    Ptyxis,
+    Xfce4Terminal,
+    Foot,
+    Terminator,
     #[serde(other)]
     Unrecognized,
 }
@@ -365,6 +395,10 @@ impl TerminalSetting {
             TerminalSetting::Alacritty => TerminalApp::Alacritty,
             TerminalSetting::Warp => TerminalApp::Warp,
             TerminalSetting::Rex => TerminalApp::Rex,
+            TerminalSetting::Ptyxis => TerminalApp::Ptyxis,
+            TerminalSetting::Xfce4Terminal => TerminalApp::Xfce4Terminal,
+            TerminalSetting::Foot => TerminalApp::Foot,
+            TerminalSetting::Terminator => TerminalApp::Terminator,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -385,8 +419,44 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::Alacritty => TerminalSetting::Alacritty,
             TerminalApp::Warp => TerminalSetting::Warp,
             TerminalApp::Rex => TerminalSetting::Rex,
+            TerminalApp::Ptyxis => TerminalSetting::Ptyxis,
+            TerminalApp::Xfce4Terminal => TerminalSetting::Xfce4Terminal,
+            TerminalApp::Foot => TerminalSetting::Foot,
+            TerminalApp::Terminator => TerminalSetting::Terminator,
         }
     }
+}
+
+/// The terminal a launch, a tool setup and the snapshot use: the stored
+/// `setting`, except that while the person has not chosen one (`chosen`
+/// false) and the platform's default is not among `installed`, the first
+/// installed app in picker order ([`TerminalApp::offered`]). Computed each
+/// time and never saved, so it does not mark a terminal chosen, and the
+/// default comes back as soon as it is installed. A choice the person made
+/// is never replaced, nor is a value this build does not know: either is
+/// refused at launch, as macOS refuses a chosen app it cannot find.
+///
+/// Why: the default exists only because Linux had to name one when the
+/// choice arrived (GNOME Terminal), and GNOME now ships Ptyxis instead, so
+/// on a stock Ubuntu 25.10+ or Fedora desktop the default was refused on
+/// every launch although an offered terminal was installed. macOS and
+/// Windows never reach the fallback: their defaults (Terminal, Windows
+/// Terminal) ship with the system.
+pub fn effective(
+    setting: TerminalSetting,
+    chosen: bool,
+    installed: &[TerminalApp],
+) -> TerminalSetting {
+    if chosen || setting != TerminalSetting::default() {
+        return setting;
+    }
+    if setting.app().is_some_and(|app| installed.contains(&app)) {
+        return setting;
+    }
+    TerminalApp::offered()
+        .iter()
+        .find(|app| installed.contains(app))
+        .map_or(setting, |app| TerminalSetting::from(*app))
 }
 
 /// An AppleScript string literal's body. Escaped independently of the
@@ -1002,6 +1072,39 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             }
             args.extend(["--hold".into(), "-e".into()]);
         }
+        // `-d, --working-directory`, then `-- PROGRAM ARGUMENTS`. Ptyxis
+        // quotes each argument after `--` with `g_shell_quote` and parses
+        // the result back with `g_shell_parse_argv` (src/main.c), an exact
+        // round trip with no expansion, and implies a new instance.
+        TerminalApp::Ptyxis => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.push("--".into());
+        }
+        // `--working-directory=directory`, `-H, --hold` "Causes the
+        // terminal to be kept around after the child command has
+        // terminated", and `-x, --execute` "Execute the remainder of the
+        // command line inside the terminal", so it is last.
+        TerminalApp::Xfce4Terminal => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.extend(["--hold".into(), "-x".into()]);
+        }
+        // `foot [OPTIONS] <command> [COMMAND OPTIONS]`: `--working-directory`,
+        // `--hold` "Remain open after child process exits"; option parsing
+        // stops at the first non-option (`+` in its getopt string), the
+        // helper's absolute path.
+        TerminalApp::Foot => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.push("--hold".into());
+        }
+        // `-u, --no-dbus` first: handed to a running Terminator over D-Bus,
+        // the command is joined into one string a shell runs. Then
+        // `--working-directory` and `-x, --execute` "Run the rest of the
+        // command line instead of the default shell", last. Terminator has no option that holds the window.
+        TerminalApp::Terminator => {
+            args.push("--no-dbus".into());
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.push("-x".into());
+        }
         TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
             return None;
         }
@@ -1016,7 +1119,8 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
 ///
 /// Windows Terminal reads a `;` anywhere in its command line as the start
 /// of another command, so any argument holding one is refused rather than
-/// escaped.
+/// escaped. Ptyxis refuses a folder holding `%`, `#` or `?` (see
+/// [`program_plan`]).
 #[cfg(any(windows, target_os = "linux", test))]
 fn plan(
     app: TerminalApp,
@@ -1056,6 +1160,18 @@ fn program_plan(
     args.extend(command);
     if app == TerminalApp::WindowsTerminal
         && args.iter().any(|arg| arg.to_string_lossy().contains(';'))
+    {
+        return Err(ManagedError::InvalidRequest);
+    }
+    // Ptyxis makes its folder `file://` and the path, unescaped, and reads
+    // it back as a URI (src/ptyxis-application.c): `%41` becomes `A`, and
+    // `#` or `?` ends the path. Refused rather than opened elsewhere.
+    if app == TerminalApp::Ptyxis
+        && cwd
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(|b| matches!(b, b'%' | b'#' | b'?'))
     {
         return Err(ManagedError::InvalidRequest);
     }
@@ -1333,22 +1449,33 @@ fn destination_for(choice: TerminalSetting) -> Option<&'static str> {
 }
 
 /// Tool maintenance opens a terminal without needing a managed-session helper,
-/// account, profile, ticket or credential. Currently offered by native macOS.
+/// account, profile, ticket or credential. Offered on macOS, and on Linux
+/// outside a Flatpak sandbox. Not on Windows, whose terminal has no
+/// `/bin/bash` to run the vendors' scripts.
 pub fn tool_setup_available() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(target_os = "macos") || (cfg!(target_os = "linux") && supported())
 }
+
+/// The login shell setup ends in when `$SHELL` is unset: the one each
+/// platform ships as its default.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const SETUP_FALLBACK_SHELL: &str = if cfg!(target_os = "macos") {
+    "/bin/zsh"
+} else {
+    "/bin/bash"
+};
 
 /// The script tool setup runs under `/bin/bash -lc`: the vendor's
 /// commands, then a login shell, so their output stays visible in every
-/// supported macOS terminal. The body is built by `tool_setup`, never
-/// accepted as an IPC parameter.
-#[cfg(any(target_os = "macos", test))]
+/// supported terminal. The body is built by `tool_setup`, never accepted
+/// as an IPC parameter.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn setup_script(body: &str) -> Result<String, ManagedError> {
     if body.is_empty() || body.len() > 16_384 || body.contains('\0') {
         return Err(ManagedError::InvalidRequest);
     }
     Ok(format!(
-        "PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"; export PATH; {body}; exec \"${{SHELL:-/bin/zsh}}\" -l"
+        "PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"; export PATH; {body}; exec \"${{SHELL:-{SETUP_FALLBACK_SHELL}}}\" -l"
     ))
 }
 
@@ -1360,13 +1487,29 @@ fn setup_shell_command(body: &str) -> Result<String, ManagedError> {
 }
 
 /// The setup script as argv, for a terminal that takes one.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn setup_argv(body: &str) -> Result<Vec<std::ffi::OsString>, ManagedError> {
     Ok(vec![
         "/bin/bash".into(),
         "-lc".into(),
         setup_script(body)?.into(),
     ])
+}
+
+/// How a Linux terminal opens tool setup: its own arguments with no
+/// folder, then `/bin/bash -lc` and the script, each one argv element.
+/// Windows Terminal is refused: setup is not offered there.
+#[cfg(any(target_os = "linux", test))]
+fn setup_plan(app: TerminalApp, program: &Path, body: &str) -> Result<Plan, ManagedError> {
+    if !program.is_absolute() || app == TerminalApp::WindowsTerminal {
+        return Err(ManagedError::InvalidRequest);
+    }
+    let mut args = terminal_args(app, None).ok_or(ManagedError::InvalidRequest)?;
+    args.extend(setup_argv(body)?);
+    Ok(Plan {
+        program: program.to_path_buf(),
+        args,
+    })
 }
 
 pub fn launch_tool_setup(
@@ -1388,7 +1531,22 @@ pub fn launch_tool_setup(
         )?;
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        if !supported() {
+            return Err(ManagedError::UnsupportedVersion);
+        }
+        let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
+        if !installed.contains(&app) {
+            return Err(ManagedError::TerminalNotFound);
+        }
+        let program = app
+            .executable()
+            .and_then(external_terminal)
+            .ok_or(ManagedError::TerminalNotFound)?;
+        spawn_plan(&setup_plan(app, &program, body)?)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (choice, installed, body);
         Err(ManagedError::TerminalNotFound)
@@ -2229,11 +2387,15 @@ mod tests {
             TerminalApp::LINUX.map(TerminalApp::name),
             [
                 "GNOME Terminal",
+                "Ptyxis",
                 "Konsole",
+                "Xfce Terminal",
                 "Ghostty",
                 "kitty",
                 "WezTerm",
-                "Alacritty"
+                "Alacritty",
+                "foot",
+                "Terminator"
             ]
         );
     }
@@ -2719,6 +2881,34 @@ mod tests {
                 "-e"
             ]
         );
+        // Ptyxis quotes everything after `--` with `g_shell_quote` and
+        // parses it back with `g_shell_parse_argv`, an exact round trip.
+        assert_eq!(
+            head(TerminalApp::Ptyxis),
+            ["--working-directory=/home/x/My Projects/app", "--"]
+        );
+        assert_eq!(
+            head(TerminalApp::Xfce4Terminal),
+            [
+                "--working-directory=/home/x/My Projects/app",
+                "--hold",
+                "-x"
+            ]
+        );
+        assert_eq!(
+            head(TerminalApp::Foot),
+            ["--working-directory=/home/x/My Projects/app", "--hold"]
+        );
+        // `--no-dbus`: a running Terminator handed the command over D-Bus
+        // joins it into one string a shell parses.
+        assert_eq!(
+            head(TerminalApp::Terminator),
+            [
+                "--no-dbus",
+                "--working-directory=/home/x/My Projects/app",
+                "-x"
+            ]
+        );
         // Terminal and iTerm2 are opened by script, never by argv.
         for app in [TerminalApp::Terminal, TerminalApp::Iterm2] {
             assert_eq!(plan_for(app, cwd), Err(ManagedError::InvalidRequest));
@@ -2738,6 +2928,10 @@ mod tests {
                 TerminalApp::Kitty,
                 TerminalApp::Wezterm,
                 TerminalApp::Alacritty,
+                TerminalApp::Ptyxis,
+                TerminalApp::Xfce4Terminal,
+                TerminalApp::Foot,
+                TerminalApp::Terminator,
             ] {
                 let plan = plan_for(app, &cwd).unwrap();
                 let tail = helper_tail();
@@ -2851,6 +3045,13 @@ mod tests {
         assert_eq!(TerminalApp::Kitty.executable(), Some("kitty"));
         assert_eq!(TerminalApp::Wezterm.executable(), Some("wezterm"));
         assert_eq!(TerminalApp::Alacritty.executable(), Some("alacritty"));
+        assert_eq!(TerminalApp::Ptyxis.executable(), Some("ptyxis"));
+        assert_eq!(
+            TerminalApp::Xfce4Terminal.executable(),
+            Some("xfce4-terminal")
+        );
+        assert_eq!(TerminalApp::Foot.executable(), Some("foot"));
+        assert_eq!(TerminalApp::Terminator.executable(), Some("terminator"));
         assert_eq!(TerminalApp::Terminal.executable(), None);
         assert_eq!(TerminalApp::Iterm2.executable(), None);
     }
@@ -2911,5 +3112,244 @@ mod tests {
     #[test]
     fn the_probe_finds_terminal_on_this_mac() {
         assert!(installed().contains(&TerminalApp::Terminal));
+    }
+
+    /// Ptyxis turns its working directory into `file://` and the folder
+    /// with nothing escaped, then reads it back as a URI: `%41` would
+    /// become `A`, and `#` or `?` would end the path. A folder holding any
+    /// of the three is refused for Ptyxis rather than opened somewhere
+    /// else, as a `;` is for Windows Terminal; every other terminal takes it.
+    #[cfg(unix)]
+    #[test]
+    fn ptyxis_refuses_a_folder_its_uri_would_change() {
+        for cwd in ["/home/x/100%41", "/home/x/issue #1", "/home/x/why?"] {
+            let cwd = Path::new(cwd);
+            assert_eq!(
+                plan_for(TerminalApp::Ptyxis, cwd),
+                Err(ManagedError::InvalidRequest),
+                "{cwd:?}"
+            );
+            for app in [
+                TerminalApp::GnomeTerminal,
+                TerminalApp::Xfce4Terminal,
+                TerminalApp::Foot,
+                TerminalApp::Terminator,
+            ] {
+                assert!(plan_for(app, cwd).is_ok(), "{app:?} {cwd:?}");
+            }
+        }
+        // The command after `--` is not a URI: a `%` there is fine.
+        let config = plan(
+            TerminalApp::Ptyxis,
+            Path::new("/usr/bin/ptyxis"),
+            Path::new("/opt/100%41/near-ai"),
+            Path::new("/home/x/c#fg?"),
+            Path::new("/home/x"),
+            Uuid::nil(),
+            "abcdef01",
+        );
+        assert!(config.is_ok());
+    }
+
+    /// Tool setup opens in every Linux terminal as argv: the terminal's
+    /// own flags with no folder, then `/bin/bash -lc` and the script as one
+    /// element. Windows Terminal is not offered for setup.
+    #[cfg(unix)]
+    #[test]
+    fn tool_setup_opens_in_a_linux_terminal_as_argv() {
+        let body = "printf '%s\\n' 'quoted $HOME `not-code`'";
+        for app in TerminalApp::LINUX {
+            let plan = setup_plan(app, Path::new("/usr/bin/term"), body).unwrap();
+            assert_eq!(plan.program, Path::new("/usr/bin/term"));
+            let tail = setup_argv(body).unwrap();
+            assert!(plan.args.ends_with(&tail), "{app:?}: {:?}", plan.args);
+            let head = &plan.args[..plan.args.len() - tail.len()];
+            assert_eq!(
+                head,
+                terminal_args(app, None).unwrap().as_slice(),
+                "{app:?}"
+            );
+            assert!(
+                !head
+                    .iter()
+                    .any(|a| a.to_string_lossy().contains("directory")
+                        || a == "--workdir"
+                        || a == "--cwd"),
+                "{app:?}: no folder for setup"
+            );
+        }
+        assert_eq!(tail_of(&setup_argv(body).unwrap()), ["/bin/bash", "-lc"]);
+        assert_eq!(
+            setup_plan(TerminalApp::WindowsTerminal, Path::new("/x/wt.exe"), body),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert_eq!(
+            setup_plan(TerminalApp::Konsole, Path::new("konsole"), body),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert!(setup_plan(TerminalApp::Konsole, Path::new("/usr/bin/konsole"), "").is_err());
+        assert!(setup_plan(TerminalApp::Konsole, Path::new("/usr/bin/konsole"), "a\0b").is_err());
+        // The login shell the script ends in, when `$SHELL` is unset, is one
+        // the platform ships.
+        let script = setup_script("true").unwrap();
+        assert!(script.ends_with(&format!("exec \"${{SHELL:-{SETUP_FALLBACK_SHELL}}}\" -l")));
+    }
+
+    #[cfg(unix)]
+    fn tail_of(argv: &[std::ffi::OsString]) -> Vec<&str> {
+        argv[..2].iter().map(|a| a.to_str().unwrap()).collect()
+    }
+
+    /// The default terminal is replaced by the first installed one, in
+    /// picker order, only while the person has not chosen one and the
+    /// default is not installed. A choice the person made, or one this
+    /// build does not know, is never replaced: it is refused at launch.
+    #[test]
+    fn a_missing_default_falls_back_only_when_nothing_was_chosen() {
+        let default = TerminalSetting::default();
+        let offered = TerminalApp::offered();
+        let others: Vec<TerminalApp> = offered
+            .iter()
+            .copied()
+            .filter(|app| Some(*app) != default.app())
+            .collect();
+        // Installed: the default is kept.
+        assert_eq!(effective(default, false, offered), default);
+        // Nothing installed: the default stays, and a launch is refused.
+        assert_eq!(effective(default, false, &[]), default);
+        if let Some(first) = others.first() {
+            // Missing and not chosen: the first installed, in picker order,
+            // whatever order the probe answered in.
+            let reversed: Vec<TerminalApp> = others.iter().rev().copied().collect();
+            assert_eq!(
+                effective(default, false, &reversed),
+                TerminalSetting::from(*first)
+            );
+            // Chosen: kept, missing or not.
+            assert_eq!(effective(default, true, &reversed), default);
+            // Another app the person chose is never replaced.
+            let last = TerminalSetting::from(*others.last().unwrap());
+            assert_eq!(effective(last, false, &[]), last);
+            assert_eq!(effective(last, true, &others[..0]), last);
+        }
+        // An unknown stored value is refused, never replaced.
+        assert_eq!(
+            effective(TerminalSetting::Unrecognized, false, offered),
+            TerminalSetting::Unrecognized
+        );
+        // An app only another platform offers is never a fallback.
+        for app in TerminalApp::ALL {
+            if !offered.contains(&app) {
+                assert_ne!(
+                    effective(default, false, &[app]),
+                    TerminalSetting::from(app),
+                    "{app:?}"
+                );
+            }
+        }
+    }
+
+    /// The real terminals, on a Linux desktop: for each offered terminal
+    /// installed here, open [`plan`] with a stub helper that writes its
+    /// working directory and every argument to a file and exits, and check
+    /// that the folder and each argument arrived whole. Run by
+    /// `scripts/linux/managed-terminal-launch-smoke.sh` inside a graphical
+    /// session; never in CI, which has no display. Windows that hold after
+    /// the stub exits stay open: close them by hand.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "starts every installed Linux terminal; run on a Linux desktop"]
+    fn real_linux_terminals_receive_the_folder_and_every_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        if !cfg!(target_os = "linux") {
+            panic!("starts real terminals: run on a Linux desktop only");
+        }
+        let apps = installed_by_path();
+        assert!(
+            !apps.is_empty(),
+            "no offered terminal is installed here; nothing was tested"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        // A folder with spaces, both quotes, `$`, a backtick and a leading
+        // dash in its last component.
+        let folder = root.join("-e it's \"q\" $HOME `x` dir");
+        std::fs::create_dir_all(&folder).unwrap();
+        let config = root.join("config $dir; 'x'");
+        let session = Uuid::new_v4();
+        let ticket = "abcdef0123456789";
+        let mut tested = vec![];
+        let mut failed = vec![];
+        for (app, program) in apps {
+            // foot is a Wayland terminal only.
+            if app == TerminalApp::Foot && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+                eprintln!("skipped foot: no Wayland session");
+                continue;
+            }
+            let out = root.join(format!("{}.out", app.id()));
+            let stub = root.join(format!("stub {}", app.id()));
+            std::fs::write(
+                &stub,
+                format!(
+                    "#!/bin/sh\n{{ pwd -P; printf '%s\\n' \"$#\"; printf '%s\\0' \"$@\"; }} > '{0}.tmp' && mv '{0}.tmp' '{0}'\n",
+                    out.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = plan(app, &program, &stub, &config, &folder, session, ticket).unwrap();
+            let mut child = std::process::Command::new(&plan.program)
+                .args(&plan.args)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !out.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let _ = child.try_wait();
+            tested.push(app.name());
+            let Ok(bytes) = std::fs::read(&out) else {
+                failed.push(format!("{}: the stub never ran", app.name()));
+                continue;
+            };
+            let mut expected = Vec::new();
+            expected.extend_from_slice(folder.as_os_str().as_encoded_bytes());
+            expected.push(b'\n');
+            let args = helper_args(&config, session, ticket);
+            expected.extend_from_slice(format!("{}\n", args.len()).as_bytes());
+            for arg in &args {
+                expected.extend_from_slice(arg.as_encoded_bytes());
+                expected.push(0);
+            }
+            if bytes != expected {
+                failed.push(format!(
+                    "{}: got {:?}, want {:?}",
+                    app.name(),
+                    String::from_utf8_lossy(&bytes),
+                    String::from_utf8_lossy(&expected)
+                ));
+            }
+        }
+        eprintln!("terminals started: {tested:?}");
+        assert!(!tested.is_empty(), "no terminal was started");
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// The offered terminals found on `PATH`, with their programs: what
+    /// [`installed`] answers outside a sandbox.
+    #[cfg(unix)]
+    fn installed_by_path() -> Vec<(TerminalApp, PathBuf)> {
+        TerminalApp::LINUX
+            .into_iter()
+            .filter_map(|app| {
+                let name = app.executable()?;
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .filter(|p| p.is_absolute())
+                    .map(|p| p.join(name))
+                    .find(|p| p.is_file())
+                    .map(|p| (app, p))
+            })
+            .collect()
     }
 }
