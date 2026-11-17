@@ -52,8 +52,8 @@ impl LiveController {
         snapshot.local_development = true;
         snapshot.reason = "local-development";
         snapshot.title = "Local compute development";
-        snapshot.detail =
-            "Explicit local test worker only. No production pool or earnings are enabled.";
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P324).
+        snapshot.detail = "Local test worker only. No pool, no earnings.";
         snapshot.can_enable = !settings.consent_granted();
         snapshot.can_resume = settings.consent_granted();
         let view = Arc::new(Mutex::new(View {
@@ -148,8 +148,8 @@ impl LiveController {
                 snapshot.state = ComputeState::Draining;
                 snapshot.title = "Stopping compute";
                 snapshot.reason = stop.reason.label();
-                snapshot.detail =
-                    "A resource or user stop is pending. Worker termination is not yet confirmed.";
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P312).
+                snapshot.detail = "Waiting for the worker to stop.";
             }
         }
         if !snapshot.worker_stopped
@@ -161,7 +161,8 @@ impl LiveController {
         {
             snapshot.state = ComputeState::Stale;
             snapshot.title = "Compute status is stale";
-            snapshot.detail = "The worker has not provided a fresh authenticated status. Work progress is unknown.";
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P306).
+            snapshot.detail = "Progress unknown.";
         }
         snapshot
     }
@@ -331,7 +332,7 @@ mod tests {
         let stale = live.snapshot();
         assert_eq!(stale.state, ComputeState::Stale);
         assert!(stale.telemetry_age_ms.unwrap() >= 7000);
-        assert!(stale.detail.contains("progress is unknown"));
+        assert_eq!(stale.detail, "Progress unknown.");
     }
 }
 impl Actor {
@@ -374,10 +375,22 @@ impl Actor {
             (wire::State::Draining, _) => ComputeState::Draining,
             _ => ComputeState::Waiting,
         };
-        self.message(state, "authenticated-status", match state {
-            ComputeState::Training => "Worker reports training", ComputeState::Serving => "Worker reports serving",
-            ComputeState::Draining => "Compute is draining", _ => "Waiting for compute work",
-        }, "A fresh signed worker response confirms endpoint liveness and reported assignment, not workload progress or a hard memory limit.");
+        self.message(
+            state,
+            "authenticated-status",
+            match state {
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P332).
+                ComputeState::Training => "Training",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P333).
+                ComputeState::Serving => "Serving",
+                ComputeState::Draining => "Compute is draining",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P342).
+                _ => "Waiting for work",
+            },
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P303).
+            // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
+            "",
+        );
         self.update(|view| {
             view.last_seen = Some(Instant::now());
             view.telemetry_epoch = epoch;
@@ -391,7 +404,8 @@ impl Actor {
             ComputeState::Draining,
             "draining",
             "Stopping compute",
-            "Waiting for worker termination. Coordinator acknowledgement is tracked separately.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P327).
+            "Waiting for the worker to stop.",
         );
         let report = self.worker.stop_with_urgency(self.resource.urgency()).await;
         self.running = !report.stopped;
@@ -410,14 +424,25 @@ impl Actor {
             view.snapshot.admission = None;
         });
         if report.stopped {
-            self.message(if self.settings.consent_granted() { ComputeState::Paused } else { ComputeState::Disabled },
-                "worker-stopped", "Compute is stopped", "The owned worker has exited. An acknowledged drain is shown only when received from the authenticated worker.");
+            self.message(
+                if self.settings.consent_granted() {
+                    ComputeState::Paused
+                } else {
+                    ComputeState::Disabled
+                },
+                "worker-stopped",
+                "Compute is stopped",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P304).
+                "The worker has exited.",
+            );
         } else {
             self.message(
                 ComputeState::Error,
                 "worker-stop-failed",
-                "Compute could not be stopped",
-                "The app still owns the worker. Keep the app open and retry stopping compute.",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P334).
+                "Couldn't stop compute",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P308).
+                "Keep the app open.",
             );
         }
         report
@@ -435,7 +460,8 @@ impl Actor {
                             ComputeState::Error,
                             "settings-invalid-or-unsaved",
                             "Compute settings could not be saved",
-                            "Check the RAM scheduling allowance and try again.",
+                            // Approved by the owner 2026-11-04 (Settings copy pass 2, P346).
+                            "The RAM allowance is invalid or wasn't saved.",
                         );
                         return;
                     }
@@ -448,7 +474,9 @@ impl Actor {
                         ComputeState::Disabled,
                         "consent-required",
                         "Compute is disabled",
-                        "Enable compute with separate consent before resuming.",
+                        // Approved by the owner 2026-11-04 (Settings copy pass 2, P313).
+                        // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
+                        "",
                     );
                 } else if !self.running {
                     self.start().await;
@@ -470,7 +498,8 @@ impl Actor {
                             ComputeState::Disabled,
                             "consent-revoked",
                             "Compute is disabled",
-                            "Compute consent has been revoked.",
+                            // Approved by the owner 2026-11-04 (Settings copy pass 2, P328).
+                            "Consent withdrawn.",
                         );
                     }
                 } else {
@@ -478,7 +507,8 @@ impl Actor {
                         ComputeState::Error,
                         "settings-write-failed",
                         "Compute settings could not be saved",
-                        "The previous consent setting remains. Retry disabling compute.",
+                        // Approved by the owner 2026-11-04 (Settings copy pass 2, P318).
+                        "Nothing changed.",
                     );
                 }
             }
@@ -502,7 +532,8 @@ impl Actor {
             ComputeState::Starting,
             "starting",
             "Starting local compute",
-            "Verifying the worker and waiting for authenticated readiness.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P319).
+            "Checking the worker.",
         );
         self.update(|view| {
             view.last_seen = None;
@@ -541,9 +572,22 @@ impl Actor {
                             stop.reason.detail(),
                         );
                     } else if already_running {
-                        self.message(ComputeState::Error, "worker-already-running", "Another local worker is still running", "A previous app session may still own a compute worker. Stop that worker through its owning app, or restart the machine if the app crashed, then explicitly Resume. This app will not adopt or kill an unknown process.");
+                        self.message(
+                            ComputeState::Error,
+                            "worker-already-running",
+                            // Approved by the owner 2026-11-04 (Settings copy pass 2, P335).
+                            "Another worker is running",
+                            // Approved by the owner 2026-11-04 (Settings copy pass 2, P302).
+                            "Stop it from the app that started it, or restart the computer.",
+                        );
                     } else {
-                        self.message(ComputeState::Error, "worker-start-failed", "Compute could not start", "The local worker failed verification or authenticated readiness. It has been stopped; check the local test setup before resuming.");
+                        self.message(
+                            ComputeState::Error,
+                            "worker-start-failed",
+                            "Compute could not start",
+                            // Approved by the owner 2026-11-04 (Settings copy pass 2, P307).
+                            "The worker failed its checks and was stopped.",
+                        );
                     }
                 }
             }
@@ -605,10 +649,24 @@ impl Actor {
                         Ok(status) => { failures = 0; self.observe(status, epoch); }
                         Err(_) => {
                             failures += 1;
-                            self.message(ComputeState::Stale, "worker-status-unavailable", "Compute status is stale", "A fresh authenticated status is unavailable. Work progress is unknown.");
+                            self.message(
+                                ComputeState::Stale,
+                                "worker-status-unavailable",
+                                "Compute status is stale",
+                                // Approved by the owner 2026-11-04 (Settings copy pass 2, P310).
+                                "Progress unknown.",
+                            );
                             if failures >= 3 {
                                 let report = self.stop().await;
-                                if report.stopped { self.message(ComputeState::Error, "worker-status-lost", "Compute stopped after losing status", "Resume explicitly after checking the local worker setup."); }
+                                if report.stopped {
+                                    self.message(
+                                        ComputeState::Error,
+                                        "worker-status-lost",
+                                        "Compute stopped after losing status",
+                                        // Approved by the owner 2026-11-04 (Settings copy pass 2, P325).
+                                        "Check the worker setup.",
+                                    );
+                                }
                                 self.controls();
                             }
                         }

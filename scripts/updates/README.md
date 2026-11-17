@@ -50,7 +50,7 @@ Two families:
 
 | Slug | Artifact | Consumed by |
 |---|---|---|
-| `macos-universal` | `Near.ai-<v>.dmg` | Sparkle (via the appcast, not this file) |
+| `macos-universal` | `Gateway-<v>.dmg` | Sparkle (via the appcast, not this file) |
 | `windows-x86_64` | `trace-commons-windows-x86_64-<v>.zip` | nothing installed; written only when the `windows` job ran, which an `app-v*` tag push no longer does |
 | `linux-x86_64` | flatpak repo | never written; the flatpak portal follows the OSTree repo |
 | `windows-x86_64-cli` | `trace-commons-contributor-x86_64-pc-windows-msvc.exe` | the CLI self-updater |

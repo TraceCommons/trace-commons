@@ -83,11 +83,26 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
         public let receipts: String?
         public let attestedBodies: String?
         public let session: SessionCopy
+        /// The tooltip on `route`, present only on the witness route.
+        /// Approved by the owner 2026-11-04 (Settings copy pass 2, P175).
+        public let witnessRouteTooltip: String?
+        /// The tooltip on `receipts` while receipts are checked.
+        /// Approved by the owner 2026-11-04 (Settings copy pass 2, P174).
+        public let receiptsCheckedTooltip: String?
+        /// The tooltip on `receipts` while receipts are unchecked.
+        /// Approved by the owner 2026-11-04 (Settings copy pass 2, P173).
+        public let receiptsUncheckedTooltip: String?
+
+        /// The one tooltip the receipts line carries, if any.
+        public var receiptsTooltip: String? { receiptsCheckedTooltip ?? receiptsUncheckedTooltip }
 
         enum CodingKeys: String, CodingKey {
             case title, route, witness, receipts, session
             case localFilter = "local_filter"
             case attestedBodies = "attested_bodies"
+            case witnessRouteTooltip = "disclosure_witness_route_tooltip"
+            case receiptsCheckedTooltip = "disclosure_receipts_checked_tooltip"
+            case receiptsUncheckedTooltip = "disclosure_receipts_unchecked_tooltip"
         }
     }
 
@@ -99,6 +114,8 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
     /// silently dropped here.
     public static let consumedCopyFields = [
         "title", "route", "witness", "local_filter", "receipts", "attested_bodies", "session",
+        "disclosure_witness_route_tooltip", "disclosure_receipts_checked_tooltip",
+        "disclosure_receipts_unchecked_tooltip",
     ]
     /// The same, for the nested `copy.witness` block -- where the
     /// both-enclaves and origin sentences live.
@@ -133,7 +150,8 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
             lines += [w.heading, w.addressLabel, w.signingLabel, w.measurementsLabel, w.check, w.origin]
         }
         if lines.contains(where: \.isEmpty) { return false }
-        let optional = [c.localFilter, c.receipts, c.attestedBodies, c.witness?.classifier]
+        let optional = [c.localFilter, c.receipts, c.attestedBodies, c.witness?.classifier,
+                        c.witnessRouteTooltip, c.receiptsCheckedTooltip, c.receiptsUncheckedTooltip]
         if optional.contains(where: { $0?.isEmpty == true }) { return false }
         if (facts.witness == nil) != (c.witness == nil) { return false }
         if let w = c.witness, (w.classifier != nil) != sendsToWitness { return false }

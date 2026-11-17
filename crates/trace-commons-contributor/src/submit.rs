@@ -33,15 +33,15 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL;
 use crate::witness::inference_record::{self, InferenceAttestationRecord};
 use crate::witness::status::{
     WitnessLastResult, certificate_obtained_for, n_of_m_from_certificate, record_last_result,
 };
 use crate::witness::transport::{
-    GrantedConsent, HttpWitnessTransport, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER,
-    WitnessedEnvelope, parse_witnessed_envelope,
+    GrantedConsent, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessedEnvelope,
+    parse_witnessed_envelope,
 };
-use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
 /// Select the witness profile from source bytes before receipt lookup or HTTP.
 /// The signup flag enables account-bound evidence, but existing unbound history
@@ -243,6 +243,9 @@ pub enum SubmitOutcome {
         session_ref: String,
         size_bytes: Option<usize>,
         limit_bytes: Option<usize>,
+        /// `(windows_needed, windows_allowed)` when the witness refused the
+        /// session as too large to review; `None` for every other refusal.
+        review_limits: Option<(u64, u64)>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -250,7 +253,7 @@ pub enum SubmitOutcome {
     /// The witness certified this session, and its verdict is one a person
     /// has to see before it goes to the commons. Nothing was uploaded. Only
     /// returned when the caller asked for it with
-    /// [`SubmitContext::hold_witnessed_unless_low_risk`]; the certified
+    /// [`SubmitContext::hold_witnessed_unless_unattended_allowed`]; the certified
     /// response travels with it so the caller can keep it.
     HeldForReview {
         reason_label: String,
@@ -275,8 +278,6 @@ pub enum SubmitOutcome {
     },
 }
 
-/// The label an unattended witnessed session is held under when its
-/// certificate's residual-risk verdict is not `low`.
 /// The label `--remediate-quarantined` is refused under for a session whose
 /// receipt came from the versioned pipeline (`processing`). The server's
 /// quarantine remediation works on a legacy submission record, not a
@@ -285,18 +286,21 @@ pub enum SubmitOutcome {
 /// (processing)" said nothing.
 pub const REASON_REMEDIATION_UNSUPPORTED_FOR_TENANT: &str = "remediation-unsupported-for-tenant";
 
+/// The label an unattended witnessed session is held under when its
+/// certificate's residual-risk verdict does not let it go without a person
+/// (`verdict_allows_unattended`): `high`, or no readable verdict.
 pub const REASON_WITNESS_RISK_REVIEW_REQUIRED: &str = "witness-risk-review-required";
 
 /// The R5 hold, decided: `Some` when the caller asked for it, this call ran
-/// the witness itself (`record` is set only then), and the verdict is not
-/// `low`.
+/// the witness itself (`record` is set only then), and the verdict does not
+/// let an unattended session go (`verdict_allows_unattended`).
 fn held_for_review(
     hold: bool,
     witnessed: Option<&WitnessedEnvelope>,
     record: Option<InferenceAttestationRecord>,
 ) -> Option<SubmitOutcome> {
     let (response, record) = (witnessed?, record?);
-    if !hold || verdict_is_low(response) {
+    if !hold || verdict_allows_unattended(response) {
         return None;
     }
     Some(SubmitOutcome::HeldForReview {
@@ -316,30 +320,35 @@ fn held_for_review(
 /// A body that cannot be serialized for the unsure-span detector is held as
 /// `looks-unsure`: an unreadable body counts as unsure.
 ///
-/// `pinnable` is whether the caller may pin these bytes as a local preview:
-/// true on the local-redaction path, false for a witnessed envelope.
+/// `witnessed` is whether these are the bytes of a witness certificate that
+/// was checked against the configured witness. On a witnessed envelope
+/// nothing matched does not hold (`second_look::RedactionWitness`); the
+/// verdict hold ran before this. A local-redaction envelope may be pinned as
+/// a local preview; a witnessed one is not.
 fn held_for_second_look(
     hold: Option<u32>,
     envelope: &TraceContributionEnvelope,
-    pinnable: bool,
+    witnessed: bool,
 ) -> Option<SubmitOutcome> {
-    use crate::daemon::second_look::{self, Scrub};
+    use crate::daemon::second_look::{self, RedactionWitness, Scrub};
     let subagents_dropped = hold?;
     let counts = built_scrub_counts(
         &envelope.privacy.redaction_counts,
         crate::daemon::preview::body_of(envelope),
     );
     let scrub = Scrub::Scrubbed(counts);
+    let witness = RedactionWitness::from_present(witnessed);
     let reason_label = second_look::unattended_hold(
         crate::daemon::settings::ScrubCheck::Automatic,
         scrub,
         subagents_dropped,
+        witness,
     )?;
     Some(SubmitOutcome::HeldForSecondLook {
         reason_label: reason_label.to_string(),
-        reasons: second_look::second_look_reasons(scrub, subagents_dropped),
+        reasons: second_look::second_look_reasons(scrub, subagents_dropped, witness),
         counts,
-        envelope: pinnable.then(|| Box::new(envelope.clone())),
+        envelope: (!witnessed).then(|| Box::new(envelope.clone())),
     })
 }
 
@@ -362,17 +371,28 @@ fn built_scrub_counts(
 }
 
 /// Whether a certificate's verdict lets an unattended session go without a
-/// person. Only `low`: `medium` is quarantined unless an operator opted in
-/// and `high` always is, so sending either unattended trades a person's look
-/// for a server-side quarantine. A certificate with no readable verdict is
-/// not `low`.
-pub(crate) fn verdict_is_low(response: &WitnessedEnvelope) -> bool {
+/// person: `low` or `medium`, spelled exactly so.
+///
+/// Owner decision, 2026-11-05. The witness rates a session `medium` whenever
+/// anything was redacted or the envelope carries message text, tool payloads
+/// or a correction (`residual_risk` in the protocol crate), which is every
+/// real coding trace; holding `medium` held all of Automatic. `high` means
+/// something survived redaction, a key finding could not be rewritten, or
+/// coverage was incomplete, and that still waits for a person. A certificate
+/// with no readable verdict, or any other value, holds: this fails closed.
+///
+/// The one predicate for every unattended send: the fresh witness run's hold
+/// (`held_for_review`), the pinned-review path in the uploader, and the
+/// release of holds parked under the old rule
+/// (`daemon::release_witness_risk_holds_once`). A person's own approve never
+/// reads it.
+pub(crate) fn verdict_allows_unattended(response: &WitnessedEnvelope) -> bool {
     serde_json::from_str::<serde_json::Value>(&response.certificate_json)
         .ok()
         .and_then(|c| {
             c.get("residual_risk_verdict")
                 .and_then(|v| v.as_str())
-                .map(|v| v == "low")
+                .map(|v| matches!(v, "low" | "medium"))
         })
         .unwrap_or(false)
 }
@@ -438,6 +458,7 @@ fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
         session_ref: session_ref.to_string(),
         size_bytes: None,
         limit_bytes: None,
+        review_limits: None,
     }
 }
 
@@ -450,6 +471,7 @@ fn refused_for_size(session_ref: &str, size_bytes: usize, limit_bytes: usize) ->
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
         limit_bytes: Some(crate::envelope::clamp_envelope_limit(limit_bytes)),
+        review_limits: None,
     }
 }
 
@@ -618,21 +640,284 @@ pub async fn submit_sessions(
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
 ) -> Result<Vec<SubmitOutcome>> {
+    submit_sessions_with_progress(store, cfg, sessions, opts, |_, _, _| {}).await
+}
+
+/// The witness labels after which a batch stops contacting the witness.
+///
+/// Each says the witness cannot take work right now -- it did not answer in
+/// time, could not be reached, could not complete a review, or asked to be
+/// left alone -- and the next session would meet the same answer only after
+/// waiting for it again: up
+/// to `WITNESS_REVIEW_TIMEOUT` each, which across a `--since 48h` batch was
+/// an hour of silence. A session skipped this way is `Failed` under the same
+/// label, never sent anywhere and never refused: running `submit` again
+/// tries it.
+pub const WITNESS_BATCH_STOP_LABELS: [&str; 5] = [
+    "witness_timeout",
+    "witness_unreachable",
+    trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE,
+    trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED,
+    REASON_WITNESS_SATURATED,
+];
+
+/// Whether a witness failure label says its evidence could not be fetched,
+/// so nothing was judged: the witness ran past its deadline
+/// (`witness_timeout`), could not be reached or answered that it cannot
+/// serve right now (`witness_unreachable`: a `5xx` such as `503
+/// witness_signing_unavailable`, or a gateway with nothing behind it), could
+/// not complete classification or redaction (`witness_classifier_unavailable`
+/// or `witness_redaction_failed`), or did not hand over its attestation
+/// (`witness_attestation_unavailable`: a non-success answer, a body with no
+/// quote, a broken connection) or Intel's
+/// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
+/// never refused, and the daemon retries it with a per-trace backoff while
+/// preserving its approval. A busy witness (`witness_saturated`) is not
+/// covered: it names its own retry delay and has its own path.
+///
+/// Fetching or serving is the only thing these labels say failed. Evidence that was
+/// fetched and did not verify has labels of its own
+/// ([`witness_trust_hold`]), and every other witness label is a
+/// judgement or a local refusal that stays one. Nothing is uploaded without a
+/// verified witness either way.
+#[must_use]
+pub fn witness_failure_is_transient(label: &str) -> bool {
+    WITNESS_TRANSIENT_LABELS.contains(&label)
+}
+
+/// The labels [`witness_failure_is_transient`] accepts. Several places map
+/// each of them by name (copy, holds, the witness-blocked report, batch
+/// stops); `every_transient_witness_label_has_an_answer_at_every_site`
+/// fails until a label added here is given one at each.
+pub const WITNESS_TRANSIENT_LABELS: [&str; 6] = [
+    "witness_timeout",
+    "witness_unreachable",
+    trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE,
+    trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED,
+    "witness_attestation_unavailable",
+    "witness_collateral_unavailable",
+];
+
+/// The label to hold a session for a person under when the witness's
+/// evidence was fetched and did not verify, or `None` for any other label.
+///
+/// - [`REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`]: the witness reports a
+///   measurement outside the accepted set
+///   ([`crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL`]). A new
+///   accepted list can cure it, so it is the hold that list clears.
+/// - [`REASON_WITNESS_NOT_TRUSTED`]: the quote is not a genuine one
+///   (`witness_quote_unverified`), is not bound to this client's nonce
+///   (`witness_quote_replayed`), names another signer than the pinned one
+///   (`witness_signer_unexpected`), or the certificate on the witness's
+///   answer does not verify or does not match its bytes
+///   (`witness_certificate_unverified`, `witness_certificate_mismatched`).
+///
+/// Never retried, since asking again gets the same evidence, and never a
+/// terminal refusal of the trace: the daemon revokes the approval and a
+/// person decides. Nothing is sent meanwhile. The `submit` command still
+/// reports the specific label.
+#[must_use]
+pub fn witness_trust_hold(label: &str) -> Option<&'static str> {
+    if label == crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL {
+        return Some(REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED);
+    }
+    matches!(
+        label,
+        "witness_quote_unverified"
+            | "witness_quote_replayed"
+            | "witness_signer_unexpected"
+            | "witness_certificate_unverified"
+            | "witness_certificate_mismatched"
+    )
+    .then_some(REASON_WITNESS_NOT_TRUSTED)
+}
+
+/// See [`witness_trust_hold`]. One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`.
+pub const REASON_WITNESS_NOT_TRUSTED: &str = "witness-not-trusted";
+
+/// See [`witness_trust_hold`]. One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`, and the only witness hold a new
+/// accepted list releases.
+pub const REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED: &str = "witness-measurement-not-accepted";
+
+/// The label to stop a batch on, if `outcome` is one of
+/// [`WITNESS_BATCH_STOP_LABELS`].
+fn witness_batch_stop(outcome: &SubmitOutcome) -> Option<&'static str> {
+    let label = match outcome {
+        SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label } => {
+            reason_label.as_str()
+        }
+        _ => return None,
+    };
+    WITNESS_BATCH_STOP_LABELS
+        .into_iter()
+        .find(|stop| *stop == label)
+}
+
+/// A short, label-only word for one outcome, for the CLI's per-session
+/// progress line: no session path, id or text.
+#[must_use]
+pub fn outcome_progress_label(outcome: &SubmitOutcome) -> String {
+    match outcome {
+        SubmitOutcome::Submitted { .. } => "ok".to_string(),
+        SubmitOutcome::AlreadySubmitted { .. } => "already-submitted".to_string(),
+        SubmitOutcome::SkippedParseFailure { reason_label } => format!("skipped ({reason_label})"),
+        SubmitOutcome::Refused { reason_label, .. } => format!("refused ({reason_label})"),
+        SubmitOutcome::Failed { reason_label } => format!("failed ({reason_label})"),
+        SubmitOutcome::HeldForReview { reason_label, .. }
+        | SubmitOutcome::HeldForSecondLook { reason_label, .. } => {
+            format!("held ({reason_label})")
+        }
+    }
+}
+
+/// [`submit_sessions`], calling `progress(n, total, None)` as session `n`
+/// starts and `progress(n, total, Some(outcome))` when it ends, so a person
+/// running a batch -- or one session that waits minutes on a witness --
+/// sees it move.
+pub async fn submit_sessions_with_progress(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
+    opts: &SubmitOptions,
+    mut progress: impl FnMut(usize, usize, Option<&SubmitOutcome>),
+) -> Result<Vec<SubmitOutcome>> {
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
     }
-    let mut ctx = crate::daemon::run_blocking(|| {
-        SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
-    })?;
-    let mut outcomes = Vec::with_capacity(sessions.len());
-    for (source, session_ref) in sessions {
-        // The CLI's `submit`: a person ran the command, so the receipt says a
-        // person approved it, with the `--verdict` they passed (K7). Set per
-        // session because `submit_loaded` takes it one-shot.
-        ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
-        outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
+    // One pipeline per lane, so sessions go through the witness and ingest
+    // side by side rather than each waiting for the one before. Each mints
+    // its own claim and runs the canary once.
+    let lanes = CLI_SUBMIT_CONCURRENCY.min(sessions.len()).max(1);
+    let mut contexts = Vec::with_capacity(lanes);
+    for _ in 0..lanes {
+        contexts.push(crate::daemon::run_blocking(|| {
+            SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
+        })?);
     }
-    Ok(outcomes)
+    let lanes: Vec<_> = contexts
+        .into_iter()
+        .map(|mut ctx| {
+            async move |(source, session_ref): (Box<dyn TraceSource>, SessionRef)| {
+                // The CLI's `submit`: a person ran the command, so the
+                // receipt says a person approved it, with the `--verdict`
+                // they passed (K7). Set per session because `submit_loaded`
+                // takes it one-shot.
+                ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
+                ctx.submit_one(source.as_ref(), &session_ref).await
+            }
+        })
+        .collect();
+    run_batch(sessions, lanes, &mut progress).await
+}
+
+/// Sessions one CLI `submit` works on at once. Two: a witnessed session
+/// can take minutes, and the witness serves a handful of requests at a time
+/// for every contributor, so more would mostly queue on its side.
+pub const CLI_SUBMIT_CONCURRENCY: usize = 2;
+
+/// The batch loop behind [`submit_sessions_with_progress`]: each lane takes
+/// the next session as it finishes the last, so up to `lanes.len()` are in
+/// flight at once. After a [`WITNESS_BATCH_STOP_LABELS`] outcome no session
+/// not yet started reaches `submit` at all. Outcomes come back in the
+/// order the sessions were given; progress is reported per session, by its
+/// position, as it starts and as it ends. A fail-closed precondition (`Err`)
+/// stops every lane from taking more and is returned.
+async fn run_batch<S, F>(
+    sessions: Vec<S>,
+    lanes: Vec<F>,
+    progress: &mut impl FnMut(usize, usize, Option<&SubmitOutcome>),
+) -> Result<Vec<SubmitOutcome>>
+where
+    F: AsyncFnMut(S) -> Result<SubmitOutcome>,
+{
+    use std::sync::Mutex;
+    let total = sessions.len();
+    let work = Mutex::new(
+        sessions
+            .into_iter()
+            .enumerate()
+            .collect::<std::collections::VecDeque<_>>(),
+    );
+    let outcomes: Mutex<Vec<Option<SubmitOutcome>>> =
+        Mutex::new((0..total).map(|_| None).collect());
+    let stopped: Mutex<Option<&'static str>> = Mutex::new(None);
+    let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    let progress = Mutex::new(progress);
+    let report = |n: usize, outcome: Option<&SubmitOutcome>| {
+        (progress.lock().expect("progress lock"))(n, total, outcome);
+    };
+    let lane = async |mut submit: F| {
+        loop {
+            if failed.lock().expect("batch lock").is_some() {
+                return;
+            }
+            let Some((index, session)) = work.lock().expect("batch lock").pop_front() else {
+                return;
+            };
+            let stop = *stopped.lock().expect("batch lock");
+            let outcome = match stop {
+                // Fail closed: nothing is redacted locally in the witness's
+                // place and nothing is sent.
+                Some(label) => SubmitOutcome::Failed {
+                    reason_label: label.to_string(),
+                },
+                None => {
+                    report(index + 1, None);
+                    match submit(session).await {
+                        Ok(outcome) => {
+                            if let Some(label) = witness_batch_stop(&outcome) {
+                                stopped.lock().expect("batch lock").get_or_insert(label);
+                            }
+                            outcome
+                        }
+                        Err(e) => {
+                            failed.lock().expect("batch lock").get_or_insert(e);
+                            return;
+                        }
+                    }
+                }
+            };
+            report(index + 1, Some(&outcome));
+            outcomes.lock().expect("batch lock")[index] = Some(outcome);
+        }
+    };
+    let mut running: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> =
+        lanes.into_iter().map(|f| Box::pin(lane(f)) as _).collect();
+    // Join every lane, polling each that has not finished.
+    std::future::poll_fn(|cx| {
+        running.retain_mut(|lane| lane.as_mut().poll(cx).is_pending());
+        if running.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    drop(running);
+    if let Some(e) = failed.into_inner().expect("batch lock") {
+        return Err(e);
+    }
+    Ok(outcomes
+        .into_inner()
+        .expect("batch lock")
+        .into_iter()
+        .map(|o| o.expect("every session has an outcome"))
+        .collect())
+}
+
+/// What [`SubmitContext::witness_for_pin`] produced.
+pub(crate) enum WitnessForPin {
+    /// The witness certified this session's raw contribution.
+    Witnessed {
+        response: Box<WitnessedEnvelope>,
+        attested_inference: Box<InferenceAttestationRecord>,
+    },
+    /// Nothing was certified, and this is the outcome to report: a refusal,
+    /// a busy witness (`Failed` under [`REASON_WITNESS_SATURATED`]), or the
+    /// claim's own refusal.
+    Outcome(SubmitOutcome),
 }
 
 /// A long-lived submit pipeline: everything `submit_sessions` used to hoist
@@ -671,10 +956,10 @@ pub struct SubmitContext<'a> {
     approved_witness: Option<WitnessedEnvelope>,
     approved_token_bundle: Option<crate::token_bundle::TokenBundleReview>,
     /// Set by the daemon for a session approved on the contributor's behalf:
-    /// a witnessed envelope whose verdict is not `low` is returned as
-    /// `HeldForReview` instead of uploaded. One-shot, like the approvals
-    /// above. See the spec's R5.
-    hold_unless_low_risk: bool,
+    /// a witnessed envelope whose verdict does not let it go unattended
+    /// (`verdict_allows_unattended`) is returned as `HeldForReview` instead
+    /// of uploaded. One-shot, like the approvals above. See the spec's R5.
+    hold_unless_unattended_allowed: bool,
     /// Set by the daemon for a session approved on the contributor's behalf
     /// under the Automatic Scrub check (K4 of #1118): the envelope, once
     /// built and past every refusal, is held instead of uploaded when its
@@ -722,6 +1007,10 @@ pub struct SubmitContext<'a> {
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
     /// borrows the context immutably; there is no concurrency here.
     last_witness_retry_after: std::sync::atomic::AtomicU32,
+    /// The counts a witness gave when it refused the last submission as too
+    /// large to review, `(windows_needed, windows_allowed)`; `None`
+    /// otherwise. Reset like `last_witness_retry_after`.
+    last_witness_review_limits: std::sync::Mutex<Option<(u64, u64)>>,
     /// The wait ingest's rate limit asked for on the last submission, in
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
@@ -730,6 +1019,12 @@ pub struct SubmitContext<'a> {
     /// (or a body `retry_after_seconds`) on the most recent submission; zero
     /// for none. Reset like `last_rate_limit_retry_after`.
     last_unavailable_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, ingest named when it refused the last
+    /// submission with `account_limit_reached` (the body's
+    /// `retry_after_seconds`, or `Retry-After`); zero for none, which is
+    /// what ingest sends when the allowance has no reset. Reset like
+    /// `last_rate_limit_retry_after`. Unclamped; the daemon caps it.
+    last_account_limit_retry_after: std::sync::atomic::AtomicU32,
     /// When the last submission started sending to ingest, or `None` if it
     /// stopped before any send (a hold, a local refusal, a classifier
     /// failure, a dry run). Reset at the start of each submission. The
@@ -757,6 +1052,11 @@ pub struct SubmitContext<'a> {
     /// shipped build.
     #[cfg(test)]
     witness_override: Option<(WitnessedEnvelope, InferenceAttestationRecord)>,
+    /// Refusal labels `witness_envelope` returns, one per call, before the
+    /// override is consulted. Lets a test drive the refusal-then-retry
+    /// branch in `submit_loaded`. Compiled out of every shipped build.
+    #[cfg(test)]
+    witness_refusals: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -809,7 +1109,7 @@ impl<'a> SubmitContext<'a> {
             approved_envelope: None,
             approved_witness: None,
             approved_token_bundle: None,
-            hold_unless_low_risk: false,
+            hold_unless_unattended_allowed: false,
             hold_unless_scrub_clear: None,
             large_session_permit: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
@@ -817,13 +1117,17 @@ impl<'a> SubmitContext<'a> {
             background_witness: false,
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_witness_review_limits: std::sync::Mutex::new(None),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_account_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
             #[cfg(test)]
             witness_override: None,
+            #[cfg(test)]
+            witness_refusals: Default::default(),
         })
     }
 
@@ -889,11 +1193,13 @@ impl<'a> SubmitContext<'a> {
     }
 
     /// Hold, rather than upload, the next witnessed session whose
-    /// certificate's verdict is not `low`. For sessions nobody reviewed:
-    /// the witness is the first point at which their risk is known, so this
-    /// hold stops the upload to the commons but not the send to the witness.
-    pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
-        self.hold_unless_low_risk = true;
+    /// certificate's verdict does not let it go unattended
+    /// (`verdict_allows_unattended`: anything but `low` or `medium`). For
+    /// sessions nobody reviewed: the witness is the first point at which
+    /// their risk is known, so this hold stops the upload to the commons but
+    /// not the send to the witness.
+    pub(crate) fn hold_witnessed_unless_unattended_allowed(&mut self) {
+        self.hold_unless_unattended_allowed = true;
     }
 
     /// Hold, rather than upload, the next session if the envelope built for
@@ -933,6 +1239,8 @@ impl<'a> SubmitContext<'a> {
             .witness
             .clone()
             .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?;
+        // Enrollment must already be pinned; signed runtime routing is
+        // resolved after grant, lease and receipt prerequisites below.
         let trust = settings
             .trust()
             .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
@@ -997,16 +1305,15 @@ impl<'a> SubmitContext<'a> {
         let raw = witness_input_for_profile(raw, &self.effective_cfg, true);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, &token);
         let granted = GrantedConsent { scopes, uses };
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            std::time::Duration::from_secs(120),
-        )?
-        .with_admission_evidence(true)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-        let payload = crate::witness::witness_token_session(
-            &transport,
+        let payload = crate::witness::configuration::witness_token_session(
+            self.cfg,
+            &settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: true,
+                background: false,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             crate::witness::TokenBundleSession {
                 url: &settings.url,
                 trust: &trust,
@@ -1104,7 +1411,18 @@ impl<'a> SubmitContext<'a> {
         {
             anyhow::bail!("witness_expected_measurement");
         }
-        if settings.admission_evidence && !include_inference_bodies {
+        // Enrollment can support admission evidence without requiring it for
+        // ordinary history. Select from the captured source before applying
+        // body-export consent: withholding a bound call must not downgrade it.
+        let admission_profile = admission_profile_for_request(
+            settings.admission_evidence,
+            transcript
+                .attested_call
+                .as_deref()
+                .map(|call| call.request_body()),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if admission_profile && !include_inference_bodies {
             anyhow::bail!("admission_receipt_unavailable");
         }
         // A verdict and a correction have nowhere to go on this profile. The
@@ -1115,7 +1433,7 @@ impl<'a> SubmitContext<'a> {
         // set from these arguments and validate against themselves, so a
         // silent drop leaves an entry that reads approved-with-correction
         // while the certified envelope carries neither.
-        if settings.admission_evidence
+        if admission_profile
             && (self.opts.verdict.is_some()
                 || correction
                     .map(str::trim)
@@ -1344,7 +1662,7 @@ impl<'a> SubmitContext<'a> {
         raw: RawTraceContribution,
         attested: Option<&crate::routing::attested::AttestedCall>,
         token: &ClaimToken,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> std::result::Result<
         (
             TraceContributionEnvelope,
@@ -1357,10 +1675,21 @@ impl<'a> SubmitContext<'a> {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
-        let trust = settings
+        // Runtime endpoint pins are resolved after receipt/profile selection;
+        // malformed enrollment pins retain their distinct refusal label.
+        settings
             .trust()
             .map_err(|_| "witness_expected_measurement_malformed")?;
 
+        #[cfg(test)]
+        if let Some(label) = self
+            .witness_refusals
+            .lock()
+            .expect("witness refusals")
+            .pop_front()
+        {
+            return Err(label);
+        }
         #[cfg(test)]
         if let Some((response, record)) = self.witness_override.clone() {
             let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
@@ -1371,17 +1700,6 @@ impl<'a> SubmitContext<'a> {
             settings.admission_evidence,
             attested.map(|call| call.request_body()),
         )?;
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            std::time::Duration::from_secs(120),
-        )
-        .map_err(|e| e.refusal_label())?
-        .with_admission_evidence(admission_profile)
-        .with_background_workload(self.background_witness)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
         // must have its receipt and cannot switch to the window on failure.
@@ -1405,11 +1723,15 @@ impl<'a> SubmitContext<'a> {
         // history or execution claims. Keep the ordinary invited profile intact.
         let raw = witness_input_for_profile(raw, &self.effective_cfg, admission_profile);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
-        let response = witness_session(
-            &transport,
-            &settings.url,
-            &trust,
-            now.timestamp().max(0) as u64,
+        let response = crate::witness::configuration::witness_session(
+            self.cfg,
+            settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: admission_profile,
+                background: self.background_witness,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             raw,
             attested,
             &GrantedConsent { scopes, uses },
@@ -1420,11 +1742,241 @@ impl<'a> SubmitContext<'a> {
                 self.last_witness_retry_after
                     .store(retry_after_secs, std::sync::atomic::Ordering::Relaxed);
             }
+            if let crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } = e
+            {
+                *self
+                    .last_witness_review_limits
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some((windows_needed, windows_allowed));
+            }
             e.refusal_label()
         })?;
 
         let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
         Ok((parsed, response, attested_inference, shipped))
+    }
+
+    /// Send one raw contribution to the configured witness and return its
+    /// certified envelope, or the outcome to report instead.
+    ///
+    /// The witnessed arm of `submit_loaded`, shared with the daemon's
+    /// witness worker (`daemon::witness_worker`) so the two cannot drift:
+    /// the measurement pin is judged before the claim is minted, the claim
+    /// is minted before anything raw is sent, and a busy witness is a
+    /// retry, never a refusal. `Err` is a fail-closed precondition.
+    async fn witness_raw(
+        &mut self,
+        settings: &WitnessSettings,
+        raw: RawTraceContribution,
+        transcript: &crate::source::SessionTranscript,
+        now: DateTime<Utc>,
+    ) -> Result<
+        std::result::Result<
+            (
+                TraceContributionEnvelope,
+                WitnessedEnvelope,
+                InferenceAttestationRecord,
+            ),
+            SubmitOutcome,
+        >,
+    > {
+        // The pin is judged BEFORE the mint, which is before anything
+        // reaches the network. An unpinned client cannot judge any quote it
+        // receives, so minting a claim for a submission that was always
+        // going to be refused would spend a round trip to learn nothing.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => {}
+            Ok(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                    &transcript.session_hash,
+                )));
+            }
+            Err(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: "witness_expected_measurement_malformed".to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    "witness_expected_measurement_malformed",
+                    &transcript.session_hash,
+                )));
+            }
+        }
+        // The claim is minted BEFORE anything raw is sent. The grants have
+        // to be inside the certified bytes, and a stamp afterwards is a byte
+        // change the certificate does not cover.
+        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
+            Ok(token) => token,
+            Err(outcome) => return Ok(Err(outcome)),
+        };
+        // Kept only when a signed accepted list could be fetched (a trusted
+        // list key is compiled in), for the one retry below.
+        let retry_raw = (!crate::witness::accepted_list::trusted_keys(self.store.dir()).is_empty())
+            .then(|| raw.clone());
+        let mut witnessed_outcome = self
+            .witness_envelope(
+                settings,
+                raw,
+                transcript.attested_call.as_deref(),
+                &token,
+                now,
+            )
+            .await;
+        // A measurement refusal is decided from the quote, before anything
+        // raw is sent. Before reporting it, fetch the signed accepted list
+        // once (spaced); only if a newer list was stored is the witness asked
+        // again, once, under the widened trust.
+        if let (Err(WITNESS_EXPECTED_MEASUREMENT_CONTROL), Some(retry_raw)) =
+            (&witnessed_outcome, retry_raw)
+        {
+            if crate::witness::accepted_list::refresh_on_refusal(self.cfg, self.store.dir(), now)
+                .await
+            {
+                witnessed_outcome = self
+                    .witness_envelope(
+                        settings,
+                        retry_raw,
+                        transcript.attested_call.as_deref(),
+                        &token,
+                        now,
+                    )
+                    .await;
+            }
+        }
+        match witnessed_outcome {
+            // The record is dropped on the CLI path: the CLI keeps no
+            // per-entry store to write it to. The daemon's review path and
+            // its witness worker are where it is kept.
+            Ok((parsed, response, attested_inference, shipped)) => {
+                // `parse_witnessed_envelope` inside `witness_envelope` is
+                // what verified this certificate against the bytes that came
+                // back, so reaching here IS "obtained and verified" -- there
+                // is no other way in.
+                record_last_result(WitnessLastResult::Certified {
+                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
+                });
+                self.last_receipt_shipped = shipped;
+                Ok(Ok((parsed, response, attested_inference)))
+            }
+            Err(label) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: label.to_string(),
+                    certificate_obtained: certificate_obtained_for(label),
+                });
+                // A busy witness judged nothing. The session is held for a
+                // retry, never refused for it.
+                if label == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: REASON_WITNESS_SATURATED.to_string(),
+                    }));
+                }
+                // Nor one whose evidence could not be fetched: `Failed`,
+                // which the daemon retries (`witness_failure_is_transient`).
+                if witness_failure_is_transient(label) {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: label.to_string(),
+                    }));
+                }
+                let mut outcome = refused(label, &transcript.session_hash);
+                if label
+                    == trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+                    && let SubmitOutcome::Refused { review_limits, .. } = &mut outcome
+                {
+                    *review_limits = self.last_witness_review_limits();
+                }
+                Ok(Err(outcome))
+            }
+        }
+    }
+
+    /// The witness half of a daemon upload, on its own: build the raw
+    /// contribution an approved entry would send, with the approval's own
+    /// verdict and correction, and have the witness certify it. Nothing is
+    /// uploaded; the daemon pins the certified bytes on the approved entry
+    /// and a later upload pass sends exactly those (see
+    /// `daemon::witness_worker`).
+    ///
+    /// Runs the same canary and size gates `submit_loaded` runs before its
+    /// witness call, in the same order. `Err` is a fail-closed precondition
+    /// (`SubmitPreconditionFailure`), as there.
+    pub(crate) async fn witness_for_pin(
+        &mut self,
+        transcript: &crate::source::SessionTranscript,
+        verdict: Option<crate::envelope::ContributorVerdict>,
+        correction: Option<&str>,
+        large_session_permit: Option<crate::large_session_gate::LargeSessionPermit>,
+    ) -> Result<WitnessForPin> {
+        self.last_receipt_shipped = ReceiptShipped::NoCall;
+        self.last_witness_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        let Some(settings) = self.cfg.witness.clone() else {
+            return Ok(WitnessForPin::Outcome(refused(
+                "witness-not-configured",
+                &transcript.session_hash,
+            )));
+        };
+        let redactor = match build_redactor_with(
+            &self.effective_cfg,
+            transcript.cwd.as_deref(),
+            self.near_ai.clone(),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                return Ok(WitnessForPin::Outcome(refused(
+                    "pii-filter-unavailable",
+                    &transcript.session_hash,
+                )));
+            }
+        };
+        if !self.canary_checked {
+            canary_self_test_async(&redactor)
+                .await
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
+            self.canary_checked = true;
+            self.canary_runs += 1;
+        }
+        let now = Utc::now();
+        let raw = crate::envelope::build_raw_contribution_with_correction(
+            transcript,
+            &self.effective_cfg,
+            now,
+            verdict,
+            correction,
+        );
+        let envelope_limit = self.store.envelope_limit_bytes();
+        if raw_contribution_size_ok(&raw, envelope_limit).is_err() {
+            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            return Ok(WitnessForPin::Outcome(refused_for_size(
+                &transcript.session_hash,
+                size,
+                envelope_limit,
+            )));
+        }
+        // The build is done. A large session's permit goes before the
+        // witness call, which can take minutes, so a preview of another
+        // large session is not held up behind the network.
+        drop(large_session_permit);
+        Ok(
+            match self.witness_raw(&settings, raw, transcript, now).await? {
+                Ok((_, response, attested_inference)) => WitnessForPin::Witnessed {
+                    response: Box::new(response),
+                    attested_inference: Box::new(attested_inference),
+                },
+                Err(outcome) => WitnessForPin::Outcome(outcome),
+            },
+        )
     }
 
     /// What the most recent `submit_loaded` receipt fetch produced.
@@ -1489,6 +2041,17 @@ impl<'a> SubmitContext<'a> {
         self.upload_provenance = Some((approved_unattended, approved_verdict));
     }
 
+    /// The counts the witness gave when it refused the most recent
+    /// submission as too large to review, `(windows_needed,
+    /// windows_allowed)`, or `None` if it did not.
+    #[must_use]
+    pub fn last_witness_review_limits(&self) -> Option<(u64, u64)> {
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -1509,6 +2072,19 @@ impl<'a> SubmitContext<'a> {
     pub fn last_unavailable_retry_after(&self) -> Option<u32> {
         Some(
             self.last_unavailable_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
+    /// The wait, in seconds, ingest named for a spent account allowance on
+    /// the most recent submission, or `None` if it named none or did not
+    /// refuse it so. Meaningful immediately after a submission returns
+    /// `Failed` with `account_limit_reached`.
+    #[must_use]
+    pub fn last_account_limit_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_account_limit_retry_after
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
         .filter(|secs| *secs > 0)
@@ -1578,9 +2154,15 @@ impl<'a> SubmitContext<'a> {
         self.last_sent_witness = None;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .last_witness_review_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_unavailable_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_account_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_ingest_send_at = None;
         let opts = self.opts;
@@ -1600,7 +2182,8 @@ impl<'a> SubmitContext<'a> {
             Some((unattended, verdict)) => (Some(unattended), verdict),
             None => (None, None),
         };
-        let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
+        let hold_unless_unattended_allowed =
+            std::mem::take(&mut self.hold_unless_unattended_allowed);
         let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
         // Held until the envelope is built and checked, and dropped before
         // either upload below; every early return drops it too.
@@ -1704,9 +2287,10 @@ impl<'a> SubmitContext<'a> {
                         .trust()
                         .map(|trust| !trust.is_pinned())
                         .unwrap_or(true)
-                        || crate::witness::transport::verify_certificate(
+                        || crate::witness::configuration::verify_review_certificate(
+                            settings,
+                            self.store.dir(),
                             &response,
-                            &settings.signing_address,
                         )
                         .is_err()
                         || approved.submission_id
@@ -1784,85 +2368,13 @@ impl<'a> SubmitContext<'a> {
                         }
                     }
                     Some(settings) => {
-                        // The pin is judged BEFORE the mint, which is before
-                        // anything reaches the network. An unpinned client
-                        // cannot judge any quote it receives, so minting a
-                        // claim for a submission that was always going to be
-                        // refused would spend a round trip to learn nothing.
-                        match settings.trust() {
-                            Ok(trust) if trust.is_pinned() => {}
-                            Ok(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
-                                    &transcript.session_hash,
-                                ));
-                            }
-                            Err(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: "witness_expected_measurement_malformed".to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    "witness_expected_measurement_malformed",
-                                    &transcript.session_hash,
-                                ));
-                            }
-                        }
-                        // The claim is minted BEFORE anything raw is sent. The
-                        // grants have to be inside the certified bytes, and a
-                        // stamp afterwards is a byte change the certificate
-                        // does not cover.
-                        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
-                            Ok(token) => token,
-                            Err(outcome) => return Ok(outcome),
-                        };
-                        match self
-                            .witness_envelope(
-                                &settings,
-                                raw,
-                                transcript.attested_call.as_deref(),
-                                &token,
-                                now,
-                            )
-                            .await
-                        {
-                            // The record is dropped on this path: the CLI keeps
-                            // no per-entry store to write it to. The daemon's
-                            // review path is where it is kept.
-                            Ok((parsed, response, attested_inference, shipped)) => {
-                                // `parse_witnessed_envelope` inside
-                                // `witness_envelope` is what verified this
-                                // certificate against the bytes that came
-                                // back, so reaching here IS "obtained and
-                                // verified" -- there is no other way in.
-                                record_last_result(WitnessLastResult::Certified {
-                                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
-                                });
-                                self.last_receipt_shipped = shipped;
+                        match self.witness_raw(&settings, raw, &transcript, now).await? {
+                            Ok((parsed, response, attested_inference)) => {
                                 witnessed = Some(response);
                                 witnessed_record = Some(attested_inference);
                                 parsed
                             }
-                            Err(label) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: label.to_string(),
-                                    certificate_obtained: certificate_obtained_for(label),
-                                });
-                                // A busy witness judged nothing. The session
-                                // is held for a retry, never refused for it.
-                                if label
-                                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
-                                {
-                                    return Ok(SubmitOutcome::Failed {
-                                        reason_label: REASON_WITNESS_SATURATED.to_string(),
-                                    });
-                                }
-                                return Ok(refused(label, &transcript.session_hash));
-                            }
+                            Err(outcome) => return Ok(outcome),
                         }
                     }
                 }
@@ -1898,7 +2410,7 @@ impl<'a> SubmitContext<'a> {
             }
             // A dry run reports what the real send would do, hold included.
             if let Some(held) =
-                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_some())
             {
                 return Ok(held);
             }
@@ -1972,7 +2484,7 @@ impl<'a> SubmitContext<'a> {
         // than held. `witnessed_record` is set only when this call ran the
         // witness itself, never for a certificate a person already reviewed.
         if let Some(held) = held_for_review(
-            hold_unless_low_risk,
+            hold_unless_unattended_allowed,
             witnessed.as_ref(),
             witnessed_record.take(),
         ) {
@@ -1983,7 +2495,7 @@ impl<'a> SubmitContext<'a> {
         // commons. The scrub is read off the envelope that would be sent, so
         // it is always a real count, never "not yet scrubbed".
         if let Some(held) =
-            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_some())
         {
             return Ok(held);
         }
@@ -2018,6 +2530,11 @@ impl<'a> SubmitContext<'a> {
                         uploaded_bytes,
                     };
                     self.store.append_receipt(&receipt)?;
+                    crate::daemon::first_trace::observe_for_config(
+                        self.store,
+                        self.cfg,
+                        std::iter::once(receipt.submitted_at),
+                    );
                     self.receipts.push(receipt);
                     return Ok(SubmitOutcome::Submitted {
                         submission_id: envelope.submission_id,
@@ -2037,6 +2554,7 @@ impl<'a> SubmitContext<'a> {
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
         let mut unavailable_retry_after = None;
+        let mut account_limit_retry_after = None;
         self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
@@ -2048,9 +2566,14 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
             &mut unavailable_retry_after,
+            &mut account_limit_retry_after,
             envelope_limit,
         )
         .await;
+        if let Some(seconds) = account_limit_retry_after {
+            self.last_account_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
@@ -2073,6 +2596,11 @@ impl<'a> SubmitContext<'a> {
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
+                        crate::daemon::first_trace::observe_for_config(
+                            self.store,
+                            self.cfg,
+                            std::iter::once(r.submitted_at),
+                        );
                         self.receipts.push(r);
                         Ok(SubmitOutcome::Submitted {
                             submission_id: envelope.submission_id,
@@ -2103,8 +2631,26 @@ pub async fn status(
     store: &ConfigStore,
     cfg: &ContributorConfig,
 ) -> Result<Vec<TraceSubmissionStatusUpdate>> {
+    status_reporting(store, cfg, None).await
+}
+
+/// [`status`], also carrying the daemon's count of submissions the witness
+/// blocked (`trace_commons_protocol::witness_blocked`) in the
+/// `x-trace-witness-blocked` header of the first status request.
+///
+/// A report with nothing in it is not sent. A report with something in it
+/// is sent even when there are no receipts yet, as one request asking about
+/// no submissions: the device the witness has kept from ever uploading is
+/// the one whose count matters most. `Err` means the report may not have
+/// arrived, and the caller keeps it for the next read.
+pub async fn status_reporting(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    witness_blocked: Option<&trace_commons_protocol::witness_blocked::WitnessBlockedCounts>,
+) -> Result<Vec<TraceSubmissionStatusUpdate>> {
+    let mut report_header = witness_blocked.and_then(|counts| counts.header_value());
     let receipts = store.load_receipts().context("loading receipts")?;
-    if receipts.is_empty() {
+    if receipts.is_empty() && report_header.is_none() {
         return Ok(Vec::new());
     }
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
@@ -2123,19 +2669,45 @@ pub async fn status(
     let client = build_ingest_client(cfg, &token).context("building ingest client")?;
 
     let mut updates = Vec::new();
-    for chunk in ids.chunks(500) {
+    // One empty chunk when there are no receipts, so a pending report still
+    // has a request to ride on.
+    let chunks: Vec<&[Uuid]> = if ids.is_empty() {
+        vec![&[]]
+    } else {
+        ids.chunks(500).collect()
+    };
+    for chunk in chunks {
         let req = TraceSubmissionStatusRequest {
             submission_ids: chunk.to_vec(),
         };
-        let mut chunk_updates: Vec<TraceSubmissionStatusUpdate> = client
-            .call_json(
-                Method::POST,
-                "/v1/contributors/me/submission-status",
-                &[],
-                Some(&req),
-            )
-            .await
-            .context("fetching submission status")?;
+        let mut chunk_updates: Vec<TraceSubmissionStatusUpdate> = match report_header.take() {
+            None => client
+                .call_json(
+                    Method::POST,
+                    "/v1/contributors/me/submission-status",
+                    &[],
+                    Some(&req),
+                )
+                .await
+                .context("fetching submission status")?,
+            Some(value) => {
+                let body = serde_json::to_vec(&req).context("encoding status request")?;
+                let text = client
+                    .call_bytes(
+                        Method::POST,
+                        "/v1/contributors/me/submission-status",
+                        &[],
+                        &body,
+                        &[(
+                            trace_commons_protocol::witness_blocked::WITNESS_BLOCKED_HEADER,
+                            value.as_str(),
+                        )],
+                    )
+                    .await
+                    .context("fetching submission status")?;
+                serde_json::from_str(&text).context("reading submission status")?
+            }
+        };
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
@@ -2609,6 +3181,13 @@ pub(crate) async fn checked_local_redaction(
         {
             return REASON_TRANSIENT_REDACTION;
         }
+        if error
+            .downcast_ref::<crate::envelope::RedactionPanicked>()
+            .is_some()
+        {
+            tracing::warn!("refusing session: redaction panicked");
+            return crate::envelope::REASON_REDACTION_PANICKED;
+        }
         // Named refusals survive; everything else is a condition of the
         // machine and stays generic. A credential the contributor typed and a
         // filter backend that collapsed two metadata keys are both things a
@@ -2635,7 +3214,17 @@ pub(crate) fn validate_local_envelope(
     envelope_limit: usize,
 ) -> std::result::Result<(), &'static str> {
     envelope_size_ok(envelope, envelope_limit).map_err(|_| "session-too-large")?;
-    if envelope_has_residual_secret(redactor, envelope).map_err(|_| "secret-scan-failed")? {
+    if envelope_has_residual_secret(redactor, envelope).map_err(|error| {
+        if error
+            .downcast_ref::<crate::envelope::RedactionPanicked>()
+            .is_some()
+        {
+            tracing::warn!("refusing session: redaction panicked");
+            crate::envelope::REASON_REDACTION_PANICKED
+        } else {
+            "secret-scan-failed"
+        }
+    })? {
         return Err("secret-leak-detected");
     }
     Ok(())
@@ -2644,7 +3233,8 @@ pub(crate) fn validate_local_envelope(
 /// Re-scan a finished envelope for a residual secret shape. Returns
 /// `Ok(Some(Refused))` (emitting the same `refusing session` warn every
 /// caller relies on) when the redactor's re-scan still finds a secret shape
-/// in the serialized envelope, else `Ok(None)`. This is the single seam both
+/// in the serialized envelope, or `redaction-panicked` when the scan itself
+/// panicked, else `Ok(None)`. This is the single seam both
 /// the dry-run and real submit paths route through, so deleting either call
 /// site removes the fail-closed guard entirely -- callers must `continue` on
 /// `Some(_)`.
@@ -2653,11 +3243,38 @@ fn residual_secret_refusal(
     envelope: &TraceContributionEnvelope,
     session_ref: &str,
 ) -> Result<Option<SubmitOutcome>> {
-    if envelope_has_residual_secret(redactor, envelope)? {
-        tracing::warn!("refusing session: secret survived redaction");
-        return Ok(Some(refused("secret-leak-detected", session_ref)));
+    match envelope_has_residual_secret(redactor, envelope) {
+        Ok(true) => {
+            tracing::warn!("refusing session: secret survived redaction");
+            Ok(Some(refused("secret-leak-detected", session_ref)))
+        }
+        Ok(false) => Ok(None),
+        Err(error) => residual_scan_error_outcome(error, session_ref),
     }
-    Ok(None)
+}
+
+/// What a residual scan that did not finish means for the session.
+///
+/// A panic in the scan is refused, for that session alone, under
+/// `redaction-panicked`: the same input panics again on every pass, and as
+/// an error it would end the upload pass each time. Every other error (an
+/// envelope that would not serialize) propagates as before, so the pass
+/// reports it and a later pass retries.
+fn residual_scan_error_outcome(
+    error: anyhow::Error,
+    session_ref: &str,
+) -> Result<Option<SubmitOutcome>> {
+    if error
+        .downcast_ref::<crate::envelope::RedactionPanicked>()
+        .is_some()
+    {
+        tracing::warn!("refusing session: redaction panicked");
+        return Ok(Some(refused(
+            crate::envelope::REASON_REDACTION_PANICKED,
+            session_ref,
+        )));
+    }
+    Err(error)
 }
 
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
@@ -2882,6 +3499,9 @@ async fn upload_with_retry(
     // Written with the wait a `503` asked for (`Retry-After` or the body's
     // `retry_after_seconds`), clamped like the rate limit's.
     unavailable_retry_after: &mut Option<u32>,
+    // Written with the wait ingest named when it refused the upload with
+    // `account_limit_reached`, unclamped; left `None` when it named none.
+    account_limit_retry_after: &mut Option<u32>,
     // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
@@ -2982,6 +3602,9 @@ async fn upload_with_retry(
                 // constant for the variant that was recognised, never the
                 // string the server sent.
                 if let Some(refusal) = admission_refusal(&e) {
+                    if refusal == AdmissionRefusal::AccountLimitReached {
+                        *account_limit_retry_after = account_limit_retry_hint(&e, Utc::now());
+                    }
                     return Err(refusal.label().to_string());
                 }
                 // Sending too fast is not a verdict on the session. The
@@ -3036,6 +3659,24 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
         }
         _ => None,
     }
+}
+
+/// The wait ingest named on an `account_limit_reached` refusal: the body's
+/// `retry_after_seconds`, else `Retry-After`. `None` for none or zero, which
+/// is what ingest sends when the allowance has no reset. Unclamped.
+fn account_limit_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let OcError::ServerLabel {
+        body, retry_after, ..
+    } = e
+    else {
+        return None;
+    };
+    crate::retry_jitter::server_retry_after(
+        body_retry_after_seconds(body),
+        retry_after.as_deref(),
+        now,
+    )
+    .filter(|secs| *secs > 0)
 }
 
 /// The seconds to wait if this error is ingest's per-principal upload rate
@@ -3163,6 +3804,29 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a panic in the residual scan becomes a refusal; any other scan
+    /// error still ends the pass as it did, so a later pass retries it.
+    #[test]
+    fn only_a_panicking_residual_scan_refuses_its_session() {
+        let outcome = residual_scan_error_outcome(
+            anyhow::Error::new(crate::envelope::RedactionPanicked),
+            "session-ref",
+        )
+        .unwrap();
+        match outcome {
+            Some(SubmitOutcome::Refused { reason_label, .. }) => {
+                assert_eq!(reason_label, crate::envelope::REASON_REDACTION_PANICKED);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let error = residual_scan_error_outcome(
+            anyhow::anyhow!("envelope-serialize-failed"),
+            "session-ref",
+        )
+        .expect_err("a serialize failure keeps propagating");
+        assert_eq!(error.to_string(), "envelope-serialize-failed");
+    }
 
     #[test]
     fn the_upload_timeout_grows_with_the_body() {
@@ -3433,6 +4097,52 @@ mod tests {
         );
     }
 
+    /// The wait ingest names on `account_limit_reached` is read from the
+    /// body, else `Retry-After`, unclamped; none (an allowance with no
+    /// reset) or zero is no hint.
+    #[test]
+    fn an_account_limit_refusal_carries_its_wait() {
+        let now = Utc::now();
+        let refusal = |body: &str, header: Option<&str>| OcError::ServerLabel {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            label: "account_limit_reached".into(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        };
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":172800}"#,
+                    Some("5")
+                ),
+                now
+            ),
+            Some(172_800)
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(r#"{"error":"account_limit_reached"}"#, Some("120")),
+                now
+            ),
+            Some(120)
+        );
+        assert_eq!(
+            account_limit_retry_hint(&refusal(r#"{"error":"account_limit_reached"}"#, None), now),
+            None
+        );
+        assert_eq!(
+            account_limit_retry_hint(
+                &refusal(
+                    r#"{"error":"account_limit_reached","retry_after_seconds":0}"#,
+                    None
+                ),
+                now
+            ),
+            None
+        );
+    }
+
     #[test]
     fn admission_projection_omits_unsigned_history_but_preserves_submission_identity() {
         let cfg = crate::commands::unenrolled_preview_config();
@@ -3591,7 +4301,14 @@ mod tests {
             None,
         );
         artifact
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let mut changed = response;
         changed.envelope_bytes.push(b' '); // Same JSON value, different certified bytes.
@@ -3606,13 +4323,21 @@ mod tests {
         assert_ne!(changed.digest().unwrap(), artifact.digest().unwrap());
         assert!(
             changed
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
         assert!(
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     "sha256:another-contribution",
                     &fingerprint,
                     None,
@@ -3632,7 +4357,14 @@ mod tests {
         // a round trip that lost the admission headers would still satisfy
         // the digest and fail here.
         restored
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let opts = review_options();
         let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
@@ -3660,6 +4392,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_review_upload_uses_current_signed_rotation_and_honors_withdrawal() {
+        use crate::witness::{accepted_list, configuration};
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_accepted_list::{ListSignature, key_id_for};
+        use trace_commons_protocol::witness_configuration::WitnessConfiguration;
+
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let rotated_signer = cfg.witness.as_ref().unwrap().signing_address.clone();
+        let anchor = configuration::COMMONS_ENROLLMENT_URLS[0];
+        let settings = cfg.witness.as_mut().unwrap();
+        settings.url = anchor.into();
+        settings.signing_address = "0x1111111111111111111111111111111111111111".into();
+        store.save_config(&cfg).unwrap();
+        let enrollment_bytes = std::fs::read(store.dir().join("contributor.json")).unwrap();
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[79; 32]).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        accepted_list::set_test_keys(store.dir(), vec![public]);
+        let now = Utc::now();
+        let mut document: WitnessConfiguration = serde_json::from_value(serde_json::json!({
+            "schema":"trace-commons.witness-configuration.v1", "version":2,
+            "issued_at":now, "enrollment_urls":[anchor, "https://replacement.example"],
+            "endpoints":[{"url":"https://replacement.example", "entries":[{
+                "measurements":format!("mrtd={}", "aa".repeat(48)),
+                "signing_address":rotated_signer,
+                "not_before":now - chrono::Duration::minutes(1),
+                "not_after":now + chrono::Duration::hours(1)
+            }]}]
+        }))
+        .unwrap();
+        let publish = |document: &WitnessConfiguration| {
+            let payload = document.canonical_payload().unwrap();
+            let signature = ListSignature {
+                key_id: key_id_for(&public),
+                signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+            };
+            let signed = serde_json::to_vec(
+                &serde_json::json!({"payload":payload,"signatures":[signature]}),
+            )
+            .unwrap();
+            configuration::install(store.dir(), &signed, &[public], anchor).unwrap();
+        };
+        publish(&document);
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        // Also model a concurrent queued operation that has not loaded the
+        // first operation's eventual receipt. Policy must still be rechecked.
+        let mut concurrent = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        concurrent
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        assert!(matches!(
+            context.submit_loaded(transcript.clone()).await.unwrap(),
+            SubmitOutcome::Submitted { .. }
+        ));
+        assert_eq!(
+            capture.lock().unwrap().bodies.as_slice(),
+            &[artifact.response().envelope_bytes.clone()]
+        );
+        assert_eq!(claim_requests.lock().unwrap().len(), 1);
+        document.version += 1;
+        document.endpoints.clear();
+        publish(&document);
+        assert!(
+            matches!(concurrent.submit_loaded(transcript).await.unwrap(), SubmitOutcome::Refused { reason_label, .. } if reason_label == "witness-review-stale")
+        );
+        assert_eq!(
+            capture.lock().unwrap().bodies.len(),
+            1,
+            "withdrawal must prevent a stale in-flight context from sending"
+        );
+        assert_eq!(
+            std::fs::read(store.dir().join("contributor.json")).unwrap(),
+            enrollment_bytes
+        );
+    }
+
+    #[tokio::test]
     async fn witness_review_survives_restart_and_uploads_exact_certified_bytes() {
         let capture = Arc::new(Mutex::new(CapturedUpload::default()));
         let issuer = spawn(stub_issuer()).await;
@@ -3670,7 +4489,14 @@ mod tests {
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
         let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
         artifact
-            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .validate(
+                &cfg,
+                store.dir(),
+                &transcript.session_hash,
+                &fingerprint,
+                None,
+                None,
+            )
             .unwrap();
         let entry_id = crate::daemon::queue::entry_id_for(&transcript.session_hash);
         crate::daemon::approved_envelope::save_witnessed(&store, entry_id, &artifact).unwrap();
@@ -3766,18 +4592,33 @@ mod tests {
         let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
         assert!(
             artifact
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_ok()
         );
         assert!(
             artifact
-                .validate(&cfg, "foreign-source", &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    "foreign-source",
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
         assert!(
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     "changed-settings",
                     None,
@@ -3789,6 +4630,7 @@ mod tests {
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     &fingerprint,
                     Some("worked"),
@@ -3800,6 +4642,7 @@ mod tests {
             artifact
                 .validate(
                     &cfg,
+                    store.dir(),
                     &transcript.session_hash,
                     &fingerprint,
                     None,
@@ -3810,7 +4653,14 @@ mod tests {
         cfg.tenant_id.push_str("-foreign");
         assert!(
             artifact
-                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .validate(
+                    &cfg,
+                    store.dir(),
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    None
+                )
                 .is_err()
         );
     }
@@ -4110,6 +4960,52 @@ mod tests {
         }
     }
 
+    /// Witness failures split by cause. Fetching the evidence failed
+    /// (timeout, no connection, the attestation or collateral not obtained):
+    /// nothing was judged, so it is retried. The evidence was fetched and did
+    /// not verify: never retried, held for a person under one of two labels.
+    /// A measurement outside the accepted set can be cured by a new accepted
+    /// list, so it has its own; a quote, nonce, signer or certificate that
+    /// does not verify is `witness-not-trusted`. No label is both retried and
+    /// held, and the rest are neither.
+    #[test]
+    fn witness_failures_split_into_fetch_and_trust() {
+        let fetch = [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ];
+        let held = [
+            (
+                crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
+            ),
+            ("witness_quote_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_quote_replayed", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_signer_unexpected", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_mismatched", REASON_WITNESS_NOT_TRUSTED),
+        ];
+        for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
+            assert_eq!(
+                witness_failure_is_transient(label),
+                fetch.contains(&label),
+                "{label}"
+            );
+            assert_eq!(
+                witness_trust_hold(label),
+                held.iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, hold)| *hold),
+                "{label}"
+            );
+        }
+        assert!(!witness_failure_is_transient(REASON_WITNESS_SATURATED));
+    }
+
     #[tokio::test]
     async fn transient_classifier_failure_is_failed_without_uploading_the_session() {
         let classifier = spawn(Router::new().route(
@@ -4384,7 +5280,9 @@ mod tests {
                 session_ref,
                 size_bytes,
                 limit_bytes,
+                review_limits,
             } => {
+                assert_eq!(review_limits, None);
                 assert_eq!(reason_label, "session-too-large");
                 assert_eq!(session_ref, "sha256:abc");
                 assert_eq!(size_bytes, Some(MAX_ENVELOPE_BYTES + 1));
@@ -4395,6 +5293,128 @@ mod tests {
         let refusal = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1, MAX_ENVELOPE_BYTES);
         assert!(!outcomes_have_failure(std::slice::from_ref(&refusal), true));
         assert!(outcomes_have_failure(&[refusal], false));
+    }
+
+    #[tokio::test]
+    async fn a_batch_stops_contacting_the_witness_after_it_times_out() {
+        for stop in WITNESS_BATCH_STOP_LABELS {
+            let mut attempted = Vec::new();
+            let mut seen = Vec::new();
+            let mut started = Vec::new();
+            let outcomes = run_batch(
+                vec![1, 2, 3, 4],
+                vec![async |n: u32| {
+                    attempted.push(n);
+                    Ok(if n == 2 {
+                        refused(stop, "hash")
+                    } else {
+                        SubmitOutcome::Failed {
+                            reason_label: "unrelated".to_string(),
+                        }
+                    })
+                }],
+                &mut |done, total, outcome: Option<&SubmitOutcome>| {
+                    if let Some(outcome) = outcome {
+                        seen.push((done, total, outcome_progress_label(outcome)));
+                    } else {
+                        started.push(done);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                attempted,
+                vec![1, 2],
+                "{stop}: later sessions were still sent"
+            );
+            assert_eq!(outcomes.len(), 4);
+            for skipped in &outcomes[2..] {
+                assert!(
+                    matches!(skipped, SubmitOutcome::Failed { reason_label } if reason_label == stop),
+                    "{skipped:?}"
+                );
+            }
+            assert_eq!(
+                seen.iter().map(|(d, t, _)| (*d, *t)).collect::<Vec<_>>(),
+                vec![(1, 4), (2, 4), (3, 4), (4, 4)],
+                "every session reports progress"
+            );
+            assert_eq!(
+                started,
+                vec![1, 2],
+                "a session announces itself before it waits, and a skipped one never starts"
+            );
+        }
+    }
+
+    /// `submit` works on [`CLI_SUBMIT_CONCURRENCY`] sessions at once: a slow
+    /// session (a witness taking minutes) no longer holds up the next one.
+    /// Outcomes keep the order the sessions were given, and every session
+    /// reports its start and its end by position.
+    #[tokio::test]
+    async fn a_batch_works_on_sessions_side_by_side() {
+        let live = std::sync::atomic::AtomicUsize::new(0);
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        let mut started = Vec::new();
+        let mut ended = Vec::new();
+        let lane = || {
+            async |n: u32| {
+                let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                most.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                // The first session is slow; the rest are quick.
+                let ms = if n == 1 { 400 } else { 50 };
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(SubmitOutcome::Failed {
+                    reason_label: format!("s{n}"),
+                })
+            }
+        };
+        let outcomes = run_batch(
+            vec![1, 2, 3, 4, 5],
+            (0..CLI_SUBMIT_CONCURRENCY).map(|_| lane()).collect(),
+            &mut |done, total, outcome: Option<&SubmitOutcome>| {
+                assert_eq!(total, 5);
+                match outcome {
+                    None => started.push(done),
+                    Some(_) => ended.push(done),
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            most.load(std::sync::atomic::Ordering::SeqCst),
+            CLI_SUBMIT_CONCURRENCY
+        );
+        let labels: Vec<String> = outcomes.iter().map(outcome_progress_label).collect();
+        assert_eq!(
+            labels,
+            ["s1", "s2", "s3", "s4", "s5"].map(|l| format!("failed ({l})"))
+        );
+        // The quick sessions finished while the slow first one ran.
+        assert_ne!(ended.first(), Some(&1), "the slow session held up the rest");
+        started.sort_unstable();
+        ended.sort_unstable();
+        assert_eq!(started, vec![1, 2, 3, 4, 5]);
+        assert_eq!(ended, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn a_batch_carries_on_past_an_ordinary_refusal() {
+        let mut attempted = 0;
+        run_batch(
+            vec![1, 2, 3],
+            vec![async |_n: u32| {
+                attempted += 1;
+                Ok(refused("witness_attestation_unavailable", "hash"))
+            }],
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempted, 3);
     }
 
     #[test]
@@ -5479,6 +6499,138 @@ mod tests {
         );
     }
 
+    /// A submission-status route that records the witness-blocked header of
+    /// every request it answers (`None` when absent) and the ids asked for.
+    fn stub_submission_status_recording(
+        seen: Arc<Mutex<Vec<(Option<String>, usize)>>>,
+        fail: bool,
+    ) -> Router {
+        use axum::response::IntoResponse as _;
+        Router::new().route(
+            "/v1/contributors/me/submission-status",
+            post(
+                move |headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        let header = headers
+                            .get(trace_commons_protocol::witness_blocked::WITNESS_BLOCKED_HEADER)
+                            .map(|v| v.to_str().unwrap().to_string());
+                        let ids = req["submission_ids"].as_array().unwrap().len();
+                        seen.lock().unwrap().push((header, ids));
+                        if fail {
+                            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        Json(serde_json::json!([])).into_response()
+                    }
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn status_reporting_sends_a_pending_report_with_no_receipts() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), false)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        // Nothing to report and no receipts: no request at all.
+        let empty = trace_commons_protocol::witness_blocked::WitnessBlockedCounts::default();
+        assert!(
+            status_reporting(&store, &cfg, Some(&empty))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            status_reporting(&store, &cfg, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(seen.lock().unwrap().is_empty());
+
+        // A report and no receipts: one request, asking about nothing.
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 2,
+            timed_out: 0,
+            unreachable: 5,
+        };
+        assert!(
+            status_reporting(&store, &cfg, Some(&report))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(Some("busy=2,unreachable=5".to_string()), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reporting_rides_the_first_chunk_only_and_status_sends_none() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), false)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        // 501 receipts: two chunks.
+        for _ in 0..501 {
+            store
+                .append_receipt(&crate::config::Receipt {
+                    submission_id: Uuid::new_v4(),
+                    session_hash: "sha256:test".to_string(),
+                    source: "claude-code".to_string(),
+                    submitted_at: Utc::now(),
+                    status: "submitted".to_string(),
+                    approved_unattended: None,
+                    approved_verdict: None,
+                    uploaded_bytes: None,
+                })
+                .unwrap();
+        }
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 0,
+            timed_out: 1,
+            unreachable: 0,
+        };
+        status_reporting(&store, &cfg, Some(&report)).await.unwrap();
+        status(&store, &cfg).await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (Some("timed_out=1".to_string()), 500),
+                (None, 1),
+                (None, 500),
+                (None, 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reporting_fails_when_ingest_refuses_so_the_report_is_kept() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), true)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 1,
+            timed_out: 0,
+            unreachable: 0,
+        };
+        assert!(status_reporting(&store, &cfg, Some(&report)).await.is_err());
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn upload_refuses_ingest_host_off_allowlist_before_any_request() {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -5940,6 +7092,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_explicit_review_needs_neither_receipt_nor_body_export() {
+        for legacy_call in [false, true] {
+            let (_dir, store, mut cfg, capture, witnessed) = r5_setup("low").await;
+            cfg.witness.as_mut().unwrap().admission_evidence = true;
+            cfg.inference_receipt_endpoint = None;
+            let options = review_options();
+            let mut context = SubmitContext::new(&store, &cfg, &options, None).unwrap();
+            context.witness_override = Some((
+                witnessed,
+                InferenceAttestationRecord::uncertified(inference_record::REASON_NO_ATTESTED_CALL),
+            ));
+            let selection = fixture_selection();
+            let (source, reference) = &selection[0];
+            let mut transcript = source.load(reference).unwrap();
+            let (call, _bodies) = receipt_fixture_call();
+            if legacy_call {
+                transcript.attested_call = Some(Arc::new(call));
+            }
+            let (response, inference) = context
+                .prepare_witnessed_review(&transcript, None, false)
+                .await
+                .expect("ordinary history must not require inference receipt or body consent");
+            crate::witness::transport::verify_certificate(
+                &response,
+                &cfg.witness.as_ref().unwrap().signing_address,
+            )
+            .unwrap();
+            assert!(
+                response.admission.is_none(),
+                "ordinary history claims no admission evidence"
+            );
+            assert_eq!(
+                inference,
+                InferenceAttestationRecord::uncertified(if legacy_call {
+                    inference_record::REASON_BODIES_WITHHELD
+                } else {
+                    inference_record::REASON_NO_ATTESTED_CALL
+                })
+            );
+            assert!(
+                capture.lock().unwrap().bodies.is_empty(),
+                "review does not upload to ingest"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn admission_review_without_body_consent_refuses_before_claim_or_witness() {
         let (_dir, store) = crate::config::tests_support::temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
@@ -5964,7 +7163,11 @@ mod tests {
         let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let selection = fixture_selection();
         let (source, reference) = &selection[0];
-        let transcript = source.load(reference).unwrap();
+        let mut transcript = source.load(reference).unwrap();
+        let (call, _bodies) = receipt_fixture_call_with_request(
+            r#"{"model":"fixture","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#,
+        );
+        transcript.attested_call = Some(Arc::new(call));
         let error = context
             .prepare_witnessed_review(&transcript, None, false)
             .await
@@ -6124,7 +7327,9 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "witness_attestation_unavailable",
+                // The projected session fits, so it gets as far as the
+                // network and meets the closed port: no connection at all.
+                "witness_unreachable",
                 "witness_payload_too_large"
             ],
             "the admission profile must reach the witness carrying only the bound call, \
@@ -6455,17 +7660,24 @@ mod tests {
         w
     }
 
-    /// R5: an unattended session is held on any verdict but `low`, and a
-    /// certificate with no readable verdict counts as not `low`.
+    /// R5 (owner decision, 2026-11-05): an unattended session goes on a
+    /// `low` or `medium` verdict and is held on `high`. Anything else --
+    /// another spelling, an unknown value, a non-string, no verdict, a
+    /// certificate that does not parse -- holds.
     #[test]
-    fn only_a_low_verdict_lets_an_unattended_session_through() {
+    fn a_low_or_medium_verdict_lets_an_unattended_session_through_and_nothing_else_does() {
         let record =
             || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
         for (verdict, held) in [
             (Some("low"), false),
-            (Some("medium"), true),
+            (Some("medium"), false),
             (Some("high"), true),
             (Some("LOW"), true),
+            (Some("Medium"), true),
+            (Some("medium "), true),
+            (Some(""), true),
+            (Some("none"), true),
+            (Some("critical"), true),
             (None, true),
         ] {
             let w = witnessed_with_verdict(verdict);
@@ -6480,9 +7692,25 @@ mod tests {
                 "{verdict:?}"
             );
         }
-        let mut garbled = witnessed_with_verdict(Some("low"));
+        let mut garbled = witnessed_with_verdict(Some("medium"));
         garbled.certificate_json = "not json".into();
         assert!(held_for_review(true, Some(&garbled), Some(record())).is_some());
+        let mut not_a_string = witnessed_with_verdict(None);
+        not_a_string.certificate_json = r#"{"residual_risk_verdict":2}"#.into();
+        assert!(held_for_review(true, Some(&not_a_string), Some(record())).is_some());
+        for (verdict, allows) in [
+            (Some("low"), true),
+            (Some("medium"), true),
+            (Some("high"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                verdict_allows_unattended(&witnessed_with_verdict(verdict)),
+                allows,
+                "{verdict:?}"
+            );
+        }
+        assert!(!verdict_allows_unattended(&garbled));
     }
 
     /// Only when asked, and only for a certificate this call obtained: a
@@ -6491,9 +7719,13 @@ mod tests {
     fn the_hold_applies_only_when_asked_and_only_to_a_fresh_certificate() {
         let record =
             || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
-        let medium = witnessed_with_verdict(Some("medium"));
-        assert!(held_for_review(false, Some(&medium), Some(record())).is_none());
-        assert!(held_for_review(true, Some(&medium), None).is_none());
+        // `high`, the verdict that holds an unattended session: a person's
+        // own Submit (not asked) and a person's reviewed certificate (no
+        // record) still go, exactly as before the medium change.
+        let high = witnessed_with_verdict(Some("high"));
+        assert!(held_for_review(true, Some(&high), Some(record())).is_some());
+        assert!(held_for_review(false, Some(&high), Some(record())).is_none());
+        assert!(held_for_review(true, Some(&high), None).is_none());
         assert!(held_for_review(true, None, Some(record())).is_none());
     }
 
@@ -6573,9 +7805,9 @@ mod tests {
     }
 
     /// Reviewed on #1029: the R5 wiring, through the uploader rather than
-    /// around it. Removing `hold_witnessed_unless_low_risk()` from the
+    /// around it. Removing `hold_witnessed_unless_unattended_allowed()` from the
     /// uploader left every earlier test green. An unattended session the
-    /// witness rates `medium` must come back held with its certified review
+    /// witness rates `high` must come back held with its certified review
     /// saved and nothing sent; and a person's approve of that entry must send
     /// exactly those certified bytes, without running the witness again.
     /// Reviewed on #1139: the Scrub check's hold on the real send path, not
@@ -6646,6 +7878,65 @@ mod tests {
         assert!(state.prior_uploads.is_empty());
     }
 
+    /// The envelope about to be sent decides it: a witnessed one where
+    /// nothing personal matched goes, a locally redacted one waits, and a
+    /// trimmed one waits either way. Only the local envelope is pinned.
+    #[tokio::test]
+    async fn nothing_matched_holds_only_an_envelope_no_witness_checked() {
+        use crate::daemon::second_look::{
+            REASON_NOTHING_MATCHED, REASON_SECOND_LOOK_REVIEW_REQUIRED, REASON_TRIMMED_TO_FIT,
+        };
+        let cfg = cfg_for("http://127.0.0.1:1", "http://127.0.0.1:1", "device");
+        let mut envelope = baseline_envelope(&cfg).await;
+        // Nothing personal removed, only paths; a body with nothing unsure.
+        envelope.privacy.redaction_counts = [("local_path".to_string(), 2)].into();
+        let body = crate::daemon::preview::body_of(&envelope).unwrap();
+        assert_eq!(
+            crate::daemon::second_look::ScrubCounts::of(&envelope.privacy.redaction_counts, &body)
+                .unsure_spans,
+            0,
+            "the fixture has nothing that looks unsure"
+        );
+
+        assert!(held_for_second_look(Some(0), &envelope, true).is_none());
+
+        let Some(SubmitOutcome::HeldForSecondLook {
+            reason_label,
+            reasons,
+            envelope: pinned,
+            ..
+        }) = held_for_second_look(Some(0), &envelope, false)
+        else {
+            panic!("a local envelope where nothing matched waits");
+        };
+        assert_eq!(reason_label, REASON_SECOND_LOOK_REVIEW_REQUIRED);
+        assert_eq!(reasons, vec![REASON_NOTHING_MATCHED]);
+        assert!(pinned.is_some());
+
+        let Some(SubmitOutcome::HeldForSecondLook {
+            reasons,
+            envelope: pinned,
+            ..
+        }) = held_for_second_look(Some(1), &envelope, true)
+        else {
+            panic!("a trimmed witnessed envelope waits");
+        };
+        assert_eq!(
+            reasons,
+            vec![REASON_TRIMMED_TO_FIT],
+            "nothing matched is not a reason"
+        );
+        assert!(
+            pinned.is_none(),
+            "a witnessed envelope is never pinned as a local one"
+        );
+
+        assert!(
+            held_for_second_look(None, &envelope, false).is_none(),
+            "not asked"
+        );
+    }
+
     /// A body that cannot be serialized for the unsure-span detector counts
     /// as unreadable, and unreadable holds: the check is never skipped.
     #[test]
@@ -6659,16 +7950,166 @@ mod tests {
             crate::daemon::second_look::unattended_hold(
                 crate::daemon::settings::ScrubCheck::Automatic,
                 crate::daemon::second_look::Scrub::Scrubbed(counts),
-                0
+                0,
+                crate::daemon::second_look::RedactionWitness::Present,
             ),
-            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED),
+            "unreadable holds even on a witnessed envelope"
         );
     }
 
+    /// A signed accepted list for the R5 witness, served beside the stub
+    /// ingest, signed with a throwaway key registered for `store`'s dir.
+    fn r5_accepted_list(store: &crate::config::ConfigStore) -> Vec<u8> {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+        use trace_commons_protocol::witness_accepted_list::{
+            AcceptedEntry, AcceptedList, ListSignature, WITNESS_ACCEPTED_LIST_SCHEMA,
+            assemble_signed_list, key_id_for,
+        };
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        crate::witness::accepted_list::set_test_keys(store.dir(), vec![public]);
+        let payload = AcceptedList {
+            schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+            version: 1,
+            issued_at: Utc::now(),
+            witness_url: "https://no-repeat-witness.invalid".into(),
+            entries: vec![AcceptedEntry {
+                measurements: format!("mrtd={}", "bb".repeat(48)),
+                signing_address: format!("0x{}", "22".repeat(20)),
+                not_before: Utc::now() - chrono::Duration::hours(1),
+                not_after: Utc::now() + chrono::Duration::days(1),
+                commit: None,
+            }],
+        }
+        .canonical_payload()
+        .unwrap();
+        let signature = ListSignature {
+            key_id: key_id_for(&public),
+            signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+        };
+        assemble_signed_list(payload, vec![signature])
+    }
+
+    /// `r5_setup("low")`, with the ingest stub also serving `list` (or 404).
+    async fn refusal_setup(
+        serve_list: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::config::ConfigStore,
+        ContributorConfig,
+        Arc<Mutex<CapturedUpload>>,
+        WitnessedEnvelope,
+    ) {
+        let (dir, store, mut cfg, _, witnessed) = r5_setup("low").await;
+        let list = r5_accepted_list(&store);
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let mut router = stub_ingest_raw(capture.clone(), 200);
+        if serve_list {
+            router = router.route(
+                trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+                axum::routing::get(move || {
+                    let list = list.clone();
+                    async move { list }
+                }),
+            );
+        }
+        cfg.ingest_url = spawn(router).await;
+        store.save_config(&cfg).unwrap();
+        (dir, store, cfg, capture, witnessed)
+    }
+
     #[tokio::test]
-    async fn an_unattended_medium_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
+    async fn a_measurement_refusal_fetches_the_list_and_retries_once_when_it_is_newer() {
         use crate::daemon::uploader::{UploadDecision, Uploader};
-        let (_dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (_dir, store, cfg, capture, witnessed) = refusal_setup(true).await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_refusals
+            .lock()
+            .unwrap()
+            .push_back(WITNESS_EXPECTED_MEASUREMENT_CONTROL);
+        ctx.witness_override = Some((
+            witnessed,
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        assert!(ctx.witness_refusals.lock().unwrap().is_empty());
+        assert_eq!(capture.lock().unwrap().bodies.len(), 1);
+        // The list was stored, and widens trust from now on.
+        let trust = crate::witness::accepted_list::trust_with_accepted(
+            cfg.witness.as_ref().unwrap(),
+            store.dir(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(trust.accepted.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_measurement_refusal_with_no_newer_list_is_reported_without_a_retry() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = refusal_setup(false).await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_refusals
+            .lock()
+            .unwrap()
+            .push_back(WITNESS_EXPECTED_MEASUREMENT_CONTROL);
+        // Would succeed if asked again; it must not be.
+        ctx.witness_override = Some((
+            witnessed,
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        // Held for a person under the measurement hold (#1964), which a newer
+        // accepted list releases; never a terminal refusal.
+        assert_eq!(
+            decision,
+            UploadDecision::ApprovalStale {
+                reason_label: REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()
+            }
+        );
+        assert!(capture.lock().unwrap().bodies.is_empty(), "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn an_unattended_high_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = r5_setup("high").await;
         let (source, reference) = fixture_selection().remove(0);
         let entry = r5_unattended_entry(&cfg, &reference);
         let settings = crate::daemon::settings::DaemonSettings::default();
@@ -6758,17 +8199,17 @@ mod tests {
 
     /// Reviewed on #1029: the hold applied only when the uploader ran the
     /// witness itself. A contributor who opened a witness review on a
-    /// waiting session in an automatic project, saw a verdict that was not
-    /// `low`, and closed it without approving left the entry pinned; the
+    /// waiting session in an automatic project, saw a `high` verdict, and
+    /// closed it without approving left the entry pinned; the
     /// watcher then approved it on their behalf, and the upload pass sent the
     /// certified bytes with no hold and nobody's approve.
     ///
     /// Driven through `drain_approved`, so it also pins that pass's handling
     /// of the hold: the entry must end waiting, held, and still pinned.
     #[tokio::test]
-    async fn an_unattended_approval_of_a_pinned_medium_review_is_held_by_the_upload_pass() {
+    async fn an_unattended_approval_of_a_pinned_high_review_is_held_by_the_upload_pass() {
         use crate::daemon::queue::QueueState;
-        let (_dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (_dir, store, cfg, capture, witnessed) = r5_setup("high").await;
         let (_, reference) = fixture_selection().remove(0);
         let mut entry = r5_unattended_entry(&cfg, &reference);
         let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
@@ -6858,6 +8299,274 @@ mod tests {
             shared.queue.lock().unwrap().get(id).unwrap().state,
             QueueState::Uploaded
         );
+        assert_eq!(
+            capture.lock().unwrap().bodies,
+            vec![witnessed.envelope_bytes.clone()]
+        );
+    }
+
+    /// The daemon an R5 drain runs in: the fixture sources declared, and the
+    /// R5 project set to Automatic.
+    fn r5_shared(
+        store: &crate::config::ConfigStore,
+        dir: &tempfile::TempDir,
+    ) -> std::sync::Arc<crate::daemon::ipc::DaemonShared> {
+        let shared =
+            std::sync::Arc::new(crate::daemon::ipc::DaemonShared::load(store.clone()).unwrap());
+        {
+            let mut s = shared.settings.lock().unwrap();
+            s.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/claude-code"),
+            });
+            s.codex_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: dir.path().join("no-codex"),
+            });
+        }
+        shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(
+                R5_PROJECT_KEY,
+                crate::daemon::policy::ProjectMode::AutoUpload,
+                Utc::now(),
+            )
+            .unwrap();
+        shared
+    }
+
+    /// Owner decision, 2026-11-05: an unattended session the witness rates
+    /// `medium` is sent without a person, carrying exactly the certified
+    /// bytes. `medium` is what every real coding trace gets (anything
+    /// redacted, or any message text), so holding it held all of Automatic.
+    #[tokio::test]
+    async fn an_unattended_medium_verdict_uploads_the_certified_bytes_without_a_person() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_override = Some((
+            witnessed.clone(),
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        assert_eq!(
+            capture.lock().unwrap().bodies,
+            vec![witnessed.envelope_bytes.clone()]
+        );
+    }
+
+    /// The pinned-review twin of the test above: a review a contributor
+    /// opened and closed on a waiting session in an automatic project, rated
+    /// `medium`, is sent by the upload pass once the watcher approves it on
+    /// their behalf -- the certified bytes, with no second witness run (the
+    /// config's witness does not exist).
+    #[tokio::test]
+    async fn an_unattended_approval_of_a_pinned_medium_review_is_sent_by_the_upload_pass() {
+        use crate::daemon::queue::QueueState;
+        let (dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (_, reference) = fixture_selection().remove(0);
+        let mut entry = r5_unattended_entry(&cfg, &reference);
+        let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            witnessed.clone(),
+            entry.session_hash.clone(),
+            entry.approved_inputs.clone().unwrap(),
+            None,
+            None,
+            None,
+        );
+        entry.previewed_envelope_digest = Some(artifact.digest().unwrap());
+        let id = entry.entry_id;
+        let shared = r5_shared(&store, &dir);
+        shared
+            .queue
+            .lock()
+            .unwrap()
+            .upsert(entry.clone(), 10)
+            .unwrap();
+        crate::daemon::approved_envelope::save_witnessed(&store, id, &artifact).unwrap();
+
+        crate::daemon::drain_approved_for_test(&shared, Utc::now())
+            .await
+            .unwrap();
+
+        let sent = shared.queue.lock().unwrap().get(id).unwrap().clone();
+        assert_eq!(sent.state, QueueState::Uploaded, "{sent:?}");
+        assert_eq!(
+            capture.lock().unwrap().bodies,
+            vec![witnessed.envelope_bytes.clone()]
+        );
+    }
+
+    /// Holds parked under the old rule, which held `medium`: on the
+    /// daemon's first tick, a hold whose own pinned certificate says
+    /// `medium` goes back to waiting with its pin, and once re-approved on
+    /// the contributor's behalf the upload pass sends those certified bytes.
+    /// A `high` hold stays, and so does every hold whose verdict cannot be
+    /// read off the review it is pinned to: the artifact missing, or stored
+    /// bytes that do not hash to the pin. Once per process: a second run
+    /// releases nothing.
+    #[tokio::test]
+    async fn parked_medium_witness_holds_are_released_once_and_high_ones_stay() {
+        use crate::daemon::approved_envelope::{WitnessReviewArtifact, save_witnessed};
+        use crate::daemon::queue::{QueueEntry, QueueState};
+        let (dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (_, reference) = fixture_selection().remove(0);
+        let medium = r5_unattended_entry(&cfg, &reference);
+        let inputs = medium.approved_inputs.clone().unwrap();
+        let artifact_for = |w: &WitnessedEnvelope, session_hash: &str| {
+            WitnessReviewArtifact::new(
+                w.clone(),
+                session_hash.to_string(),
+                inputs.clone(),
+                None,
+                None,
+                None,
+            )
+        };
+        let mut high_witnessed = witnessed.clone();
+        let mut c: serde_json::Value =
+            serde_json::from_str(&high_witnessed.certificate_json).unwrap();
+        c["residual_risk_verdict"] = serde_json::json!("high");
+        high_witnessed.certificate_json = c.to_string();
+        let other = |tag: &str| QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: format!("sha256:{tag}"),
+            path: dir.path().join(format!("{tag}.jsonl")),
+            ..medium.clone()
+        };
+        let (high, missing, mismatched) = (other("high"), other("missing"), other("mismatched"));
+
+        let medium_artifact = artifact_for(&witnessed, &medium.session_hash);
+        let high_artifact = artifact_for(&high_witnessed, &high.session_hash);
+        let missing_artifact = artifact_for(&witnessed, &missing.session_hash);
+        let mismatched_artifact = artifact_for(&witnessed, &mismatched.session_hash);
+        let medium_pin = medium_artifact.digest().unwrap();
+        let pins = [
+            (medium.entry_id, medium_pin.clone()),
+            (high.entry_id, high_artifact.digest().unwrap()),
+            (missing.entry_id, missing_artifact.digest().unwrap()),
+            (
+                mismatched.entry_id,
+                format!(
+                    "{}{}",
+                    crate::daemon::approved_envelope::WITNESS_PIN_PREFIX,
+                    "00".repeat(32)
+                ),
+            ),
+        ];
+
+        let shared = r5_shared(&store, &dir);
+        {
+            let mut q = shared.queue.lock().unwrap();
+            for e in [&medium, &high, &missing, &mismatched] {
+                q.upsert(e.clone(), 10).unwrap();
+            }
+            for (id, pin) in &pins {
+                assert!(q.hold_with_witness_pin(
+                    *id,
+                    REASON_WITNESS_RISK_REVIEW_REQUIRED,
+                    pin,
+                    None,
+                    None
+                ));
+            }
+        }
+        // After `DaemonShared::load`, whose sweep drops unpinned review bytes.
+        save_witnessed(&store, medium.entry_id, &medium_artifact).unwrap();
+        save_witnessed(&store, high.entry_id, &high_artifact).unwrap();
+        save_witnessed(&store, mismatched.entry_id, &mismatched_artifact).unwrap();
+
+        let now = Utc::now();
+        let mut done = false;
+        assert_eq!(
+            crate::daemon::release_witness_risk_holds_once(&shared, now, &mut done),
+            1
+        );
+        assert!(done);
+        {
+            let q = shared.queue.lock().unwrap();
+            let released = q.get(medium.entry_id).unwrap();
+            assert_eq!(released.state, QueueState::Pending);
+            assert_eq!(released.reason_label, None);
+            assert!(!released.held_for_review());
+            assert_eq!(released.discovered_at, now);
+            assert_eq!(
+                released.previewed_envelope_digest.as_deref(),
+                Some(medium_pin.as_str()),
+                "the certified review stays pinned"
+            );
+            for kept in [&high, &missing, &mismatched] {
+                let kept = q.get(kept.entry_id).unwrap();
+                assert!(kept.held_for_review(), "{kept:?}");
+                assert_eq!(
+                    kept.reason_label.as_deref(),
+                    Some(REASON_WITNESS_RISK_REVIEW_REQUIRED)
+                );
+            }
+        }
+
+        // Once per process: put the medium hold back and run again.
+        assert!(shared.queue.lock().unwrap().hold_with_witness_pin(
+            medium.entry_id,
+            REASON_WITNESS_RISK_REVIEW_REQUIRED,
+            &medium_pin,
+            None,
+            None
+        ));
+        assert_eq!(
+            crate::daemon::release_witness_risk_holds_once(&shared, now, &mut done),
+            0
+        );
+        assert!(
+            shared
+                .queue
+                .lock()
+                .unwrap()
+                .get(medium.entry_id)
+                .unwrap()
+                .held_for_review()
+        );
+        assert_eq!(crate::daemon::release_witness_risk_holds(&shared, now), 1);
+
+        // What the watcher does next under the standing opt-in, then the
+        // upload pass: the certified bytes go, the high hold does not.
+        assert!(shared.queue.lock().unwrap().approve_unattended(
+            medium.entry_id,
+            &cfg.consent_scopes,
+            Some(&inputs)
+        ));
+        assert!(!shared.queue.lock().unwrap().approve_unattended(
+            high.entry_id,
+            &cfg.consent_scopes,
+            Some(&inputs)
+        ));
+        crate::daemon::drain_approved_for_test(&shared, Utc::now())
+            .await
+            .unwrap();
+        let q = shared.queue.lock().unwrap();
+        assert_eq!(q.get(medium.entry_id).unwrap().state, QueueState::Uploaded);
+        assert!(q.get(high.entry_id).unwrap().held_for_review());
         assert_eq!(
             capture.lock().unwrap().bodies,
             vec![witnessed.envelope_bytes.clone()]
@@ -7065,6 +8774,7 @@ mod tests {
             &mut envelope,
             &cfg,
             witnessed,
+            &mut None,
             &mut None,
             &mut None,
             MAX_ENVELOPE_BYTES,
@@ -7286,6 +8996,7 @@ pub fn outcomes_to_json(
                     session_ref,
                     size_bytes,
                     limit_bytes,
+                    ..
                 } => serde_json::json!({
                     "outcome": "refused",
                     "reason": reason_label,
@@ -7447,6 +9158,11 @@ pub async fn post_attestation(
             "trace-commons-contributor/",
             env!("CARGO_PKG_VERSION")
         ))
+        // A collector that accepts the connection and never answers must
+        // not hold the command open: this was the one client on the submit
+        // path with no timeout. The document is a few kilobytes.
+        .connect_timeout(StdDuration::from_secs(15))
+        .timeout(StdDuration::from_secs(30))
         .build()
     {
         Ok(client) => client,

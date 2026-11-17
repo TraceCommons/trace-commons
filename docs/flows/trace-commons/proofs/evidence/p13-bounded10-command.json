@@ -1,0 +1,16 @@
+{
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/client_learning.qnt",
+    "--invariant",
+    "P13",
+    "--max-steps",
+    "10",
+    "--server-endpoint",
+    "localhost:8833"
+  ],
+  "cwd": "/private/tmp/tc-p13-bounded-20261106",
+  "modelSHA256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
+  "started": 1794004577.798401
+}

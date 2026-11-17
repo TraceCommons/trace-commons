@@ -13,9 +13,15 @@ read-only from the database. Script:
   is **exactly** one of `FULL_REDACTION_PIPELINE_VERSIONS` in
   `crates/trace-commons-protocol/src/trace_contribution.rs`. At the time of
   writing:
+  - `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2`
+  - `ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2`
+  - `ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3`
   - `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1`
   - `ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1`
   - `ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2`
+
+  The first three name a pipeline with the structural classifier skip
+  (2026-11-05); the last three, the same pipelines before it.
 - **Does not pass:** no certificate; the bare deterministic identifier
   (a `deterministic-only` witness); `+privacy-filter-sidecar-v1` (could fall
   back silently); `full-pipeline` (the witness's startup mode name, never a

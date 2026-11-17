@@ -288,6 +288,10 @@ pub(crate) fn switch_identity(
     write_switch_journal(store, &journal)?;
     let steps = || -> Result<()> {
         fail_point(store, 1)?;
+        // A rollback may lose the old display date, safely returning it to
+        // unknown. Never restore another enrollment's observation from the
+        // credential journal or let A -> B -> A revive an earlier date.
+        crate::daemon::first_trace::reset_locked(store, new_config, chrono::Utc::now())?;
         write(store, &store.daemon_path("contributor.json"), &config_bytes)?;
         fail_point(store, 2)?;
         write(

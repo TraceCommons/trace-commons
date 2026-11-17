@@ -6,6 +6,16 @@ import XCTest
 final class DaemonDataContractWireTests: XCTestCase {
     private func frame(_ result: String) -> String { #"{"id":0,"result":\#(result)}"# }
 
+    func testStatusDecodesAuthoritativeFirstTraceAge() async throws {
+        let transport = FakeTransport(response: frame(#"{"first_trace_at":"2027-01-11T08:00:00Z"}"#))
+        let status = try await LiveDaemonClient(transport: transport).status()
+        XCTAssertEqual(status.firstTraceAt, Date(timeIntervalSince1970: 1_799_654_400))
+        for result in ["{}", #"{"first_trace_at":null}"#] {
+            let missing = try await LiveDaemonClient(transport: FakeTransport(response: frame(result))).status()
+            XCTAssertNil(missing.firstTraceAt, "older or unreadable state cannot supply an age")
+        }
+    }
+
     func testToolDestinationsPreservesObservedRoutesAndConfiguredHubEvidence() async throws {
         let transport = FakeTransport(response: frame(#"{"tools":[],"ledger_readable":true,"observed_destinations":[{"route":"outside","to":"unknown","via":"local_proxy","basis":"observed"}],"hub":{"kind":"owned_loopback","state":"running_answered_elsewhere","port":43127,"owned":true,"basis":"configured"}}"#))
         let result = try await LiveDaemonClient(transport: transport).toolDestinations()
@@ -464,8 +474,8 @@ final class DaemonDataContractWireTests: XCTestCase {
     /// approve leaves out. Manual Scrub check is not on it: the daemon
     /// approves those sessions when a person approves their folder.
     func testHeldForReviewMirrorsTheDaemonsList() throws {
-        func entry(_ reason: String) throws -> DaemonData.QueueEntry {
-            let json = #"{"entry_id":"e","source":"codex","project_id":"p","project_label":"p","state":"pending","reason_label":"\#(reason)"}"#
+        func entry(_ reason: String, state: String = "pending") throws -> DaemonData.QueueEntry {
+            let json = #"{"entry_id":"e","source":"codex","project_id":"p","project_label":"p","state":"\#(state)","reason_label":"\#(reason)"}"#
             return try DaemonDataDecoding.decoder().decode(DaemonData.QueueEntry.self, from: Data(json.utf8))
         }
         for reason in [
@@ -473,8 +483,19 @@ final class DaemonDataContractWireTests: XCTestCase {
             "witness-risk-review-required",
             "privacy-filter-transient-exhausted",
             "second-look-review-required",
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+            "witness-not-trusted",
+            "witness-measurement-not-accepted",
         ] {
             XCTAssertTrue(try entry(reason).heldForReview, reason)
+            // Only a pending entry is held: an approved one under the label
+            // is still being retried, as the daemon's `held_for_review` says.
+            XCTAssertFalse(try entry(reason, state: "approved").heldForReview, reason)
         }
         for reason in ["scrub-check-manual", "returned-from-keep", "kept-on-this-mac", "scopes-changed"] {
             XCTAssertFalse(try entry(reason).heldForReview, reason)

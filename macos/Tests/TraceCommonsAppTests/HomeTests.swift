@@ -61,6 +61,26 @@ final class HomeTests: XCTestCase {
         return store
     }
 
+    /// A figure is loading until its first reply, then a number, or unknown
+    /// when the read failed: never the same as a zero or a dash.
+    func test_aFigureIsLoadingUntilItsFirstReply() async {
+        let loaded = HomeStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+        XCTAssertTrue(loaded.isLoading("history_rollup", "commons_credit_summary"))
+        await loaded.load()
+        XCTAssertFalse(loaded.isLoading("history_rollup"))
+        XCTAssertFalse(loaded.isLoading("history_rollup", "commons_credit_summary"))
+
+        // A failed read has answered: unknown, not loading.
+        let down = await store(.coreDown)
+        XCTAssertFalse(down.isLoading("history_rollup"))
+        XCTAssertNotNil(down.failures["history_rollup"])
+
+        // A new client starts the wait again.
+        loaded.attach(SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+    }
+
     /// Every sample set loads; the core-down set records failures instead of
     /// drawing zeros.
     func test_theStoreLoadsEverySampleSet() async {
@@ -91,6 +111,55 @@ final class HomeTests: XCTestCase {
         XCTAssertEqual(HomeFormat.count(nil), "—")
         XCTAssertEqual(HomeFormat.count(0), "0")
         XCTAssertEqual(HomeFormat.points(nil), "—")
+    }
+
+    /// Credit is a whole number where it is whole, and keeps one decimal
+    /// where it is not: "0", not "0.0", beside whole-number counts.
+    func test_pointsAreWholeWhereWhole() {
+        XCTAssertEqual(HomeFormat.points(0), "0")
+        XCTAssertEqual(HomeFormat.points(48), "48")
+        XCTAssertEqual(HomeFormat.points(12.5), "12.5")
+    }
+
+    /// History's Contributed and Held cards, together, from one rollup in
+    /// the daemon's shape: 56 accepted, 1 waiting and 3 held read
+    /// Contributed 57 beside Held 3, which add up to the 60 traces there
+    /// are, with nothing counted twice. The cards draw exactly these
+    /// (`HistoryParityTests` pins the calls).
+    func test_historyContributedAndHeldCardsDoNotOverlap() throws {
+        let rollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
+            $0["all_time"] = ["submitted": 1, "accepted": 56, "quarantined": 3, "withdrawn": 0, "other": 0,
+                              "contributed": 57]
+            $0["quarantined"] = 3
+        }
+        let contributed = HomeFormat.contributed(rollup)
+        let held = HomeFormat.count(rollup.quarantined)
+        XCTAssertEqual(contributed, "57")
+        XCTAssertEqual(held, "3")
+        XCTAssertEqual(try XCTUnwrap(Int(contributed)) + (try XCTUnwrap(Int(held))), 60)
+        // Its credit card is not Final while the waiting one is unscored.
+        let tile = HomeFormat.creditTile(
+            final: 48, pending: 0, accepted: rollup.allTime?.accepted, submitted: rollup.allTime?.submitted,
+            credit: nil)
+        XCTAssertEqual(tile.detail, MonitorWords.pending)
+    }
+
+    /// The review's cases, through the core's formatter: half away from
+    /// zero as the digest and Windows round (4.25 is 4.3, never 4.2), a
+    /// sliver above zero is "<0.1" (never "0" beside "credit pending"),
+    /// no "-0", and the same thousands comma as `count` (owner, #1962).
+    func test_pointsFollowTheCoresRuleAtTheEdges() {
+        XCTAssertEqual(HomeFormat.points(0.05), "0.1")
+        XCTAssertEqual(HomeFormat.points(0.04), "<0.1")
+        XCTAssertEqual(HomeFormat.points(-0.04), "0")
+        XCTAssertEqual(HomeFormat.points(4.25), "4.3")
+        XCTAssertEqual(HomeFormat.points(12.25), "12.3")
+        XCTAssertEqual(HomeFormat.points(1234.5), "1,234.5")
+        XCTAssertEqual(HomeFormat.count(1234), "1,234")
+        XCTAssertEqual(HomeFormat.count(999), "999")
+        // The pending accessory guards on a figure above zero and now never
+        // prints a zero for one.
+        XCTAssertFalse(HomeFormat.points(0.04).hasPrefix("0"))
     }
 
     /// A recorded reply, decoded after `edit` is applied to its JSON object
@@ -224,6 +293,25 @@ final class HomeTests: XCTestCase {
         XCTAssertFalse(meta.contains(MonitorWords.withdrawn))
         let bare = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(#"{"submission_id":"b"}"#.utf8))
         XCTAssertEqual(HomeFormat.rowMeta(bare), "\u{2014}")
+    }
+
+    /// A previous account's row says so after its tool and day; a row
+    /// from an older daemon, without the field, is the current account's.
+    func test_aPreviousAccountsRowSaysSo() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let row = try decoder.decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-03-14T15:00:00Z","source":"claude-code","previous_account":true}"#.utf8))
+        XCTAssertTrue(row.isPreviousAccount)
+        let day = try XCTUnwrap(row.submittedAt).formatted(.dateTime.month(.abbreviated).day())
+        XCTAssertEqual(HomeFormat.rowMeta(row),
+                       InferenceTabView.toolName("claude-code") + " \u{00B7} " + day + " \u{00B7} " + HomeFormat.previousAccount)
+        let current = try decoder.decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"b","previous_account":false}"#.utf8))
+        XCTAssertFalse(current.isPreviousAccount)
+        let legacy = try decoder.decode(DaemonData.HistoryRow.self, from: Data(#"{"submission_id":"c"}"#.utf8))
+        XCTAssertNil(legacy.previousAccount)
+        XCTAssertFalse(legacy.isPreviousAccount)
+        XCTAssertEqual(HomeFormat.rowMeta(legacy), "\u{2014}")
     }
 
     /// Ron's filter wraps onto a second line when the pane is too narrow

@@ -1,5 +1,16 @@
 [workspace]
 members = [
+    "crates/ironwire_agents",
+    "crates/ironwire_catalog",
+    "crates/ironwire_core",
+    "crates/ironwire_creds",
+    "crates/ironwire_ledger",
+    "crates/ironwire_privacy",
+    "crates/ironwire_proxy",
+    "crates/ironwire_translate",
+    "crates/ironwire_update",
+    "crates/ironwire_upstream",
+    "crates/ironwire_usage",
     "crates/trace-commons-attestation",
     "crates/trace-commons-build-info",
     "crates/trace-commons-client-server-tests",
@@ -11,6 +22,7 @@ members = [
     "crates/trace-commons-gate-api",
     "crates/trace-commons-gate-enclave",
     "crates/trace-commons-ingest",
+    "crates/trace-commons-ingest-contributor-tests",
     "crates/trace-commons-mark",
     "crates/trace-commons-operator-client",
     "crates/trace-commons-protocol",
@@ -35,13 +47,70 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 # Raised from 1.92 on 2026-09-06. trace-commons-contributor takes an
-# unconditional (not optional, not feature-gated) git dependency on
-# ironwire_proxy, and the ironwire_*/ironclaw_* crates it pulls in declare
-# rust-version = 1.96. There is no way to build the contributor CLI below
-# this floor while that dependency exists.
+# unconditional (not optional, not feature-gated) dependency on
+# ironwire_proxy, and the ironwire_*/ironclaw_* crates it pulls in were
+# written against rust-version = 1.96 (the ironwire_* crates, in this
+# workspace since 2026-11-10, inherit this value). There is no way to build
+# the contributor CLI below this floor while that dependency exists.
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TraceCommons/trace-commons"
+
+# Shared by the ironwire_* crates, imported from nearai/ironwire at b234896
+# (2026-11-10, a squashed snapshot; this repository is now their source of
+# truth). Only those crates inherit these entries and lints; the
+# trace-commons-* crates declare their own.
+[workspace.dependencies]
+ironwire_core = { path = "crates/ironwire_core", version = "0.1.0" }
+ironwire_creds = { path = "crates/ironwire_creds", version = "0.1.0" }
+ironwire_ledger = { path = "crates/ironwire_ledger", version = "0.1.0" }
+ironwire_usage = { path = "crates/ironwire_usage", version = "0.1.0" }
+ironwire_catalog = { path = "crates/ironwire_catalog", version = "0.1.0" }
+ironwire_agents = { path = "crates/ironwire_agents", version = "0.1.0" }
+ironwire_update = { path = "crates/ironwire_update", version = "0.1.0" }
+ironwire_privacy = { path = "crates/ironwire_privacy", version = "0.1.0" }
+ironwire_translate = { path = "crates/ironwire_translate", version = "0.1.0" }
+ironwire_upstream = { path = "crates/ironwire_upstream", version = "0.1.0" }
+ironwire_proxy = { path = "crates/ironwire_proxy", version = "0.1.0" }
+
+# Reused from nearai/ironclaw rather than reimplemented: credential discovery
+# and refresh for the CLI-managed logins, provider error classification, and
+# the price table. Cargo.lock pins the revision.
+ironclaw_llm = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+ironclaw_common = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+ironclaw_safety = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-util = "0.3"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "process"] }
+tokio-util = { version = "0.7" }
+toml = "0.9"
+semver = "1"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
 
 # Debug info, in two tiers. The `test` profile inherits both.
 #

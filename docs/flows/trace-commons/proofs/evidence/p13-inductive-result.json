@@ -1,0 +1,16 @@
+{
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/client_learning.qnt",
+    "--inductive-invariant",
+    "P13",
+    "--server-endpoint",
+    "localhost:8833"
+  ],
+  "cwd": "/private/tmp/tc-p13-inductive-retry-20261106",
+  "modelSHA256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
+  "started": 1794004539.841197,
+  "exitCode": 1,
+  "elapsedSeconds": 23.350922107696533
+}

@@ -1,0 +1,285 @@
+# HELP trace_commons_operational_promotion_ready Whether operational promotion gates have no blockers.
+# TYPE trace_commons_operational_promotion_ready gauge
+trace_commons_operational_promotion_ready{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_promotion_blocking_gates Count of blocking operational promotion gates.
+# TYPE trace_commons_operational_promotion_blocking_gates gauge
+trace_commons_operational_promotion_blocking_gates{tenant_storage_ref="<tenant>"} 1
+# HELP trace_commons_operational_promotion_warning_gates Count of warning operational promotion gates.
+# TYPE trace_commons_operational_promotion_warning_gates gauge
+trace_commons_operational_promotion_warning_gates{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_promotion_gate Individual operational promotion gate values by severity and gate name.
+# TYPE trace_commons_operational_promotion_gate gauge
+trace_commons_operational_promotion_gate{tenant_storage_ref="<tenant>",severity="blocking",gate="credit_settlement_central_issuer_profile_incomplete"} 1
+# HELP trace_commons_operational_postgres_rls_readiness Safe PostgreSQL RLS readiness flags by subcheck.
+# TYPE trace_commons_operational_postgres_rls_readiness gauge
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="diagnostics_available"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="ready"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="policy_coverage"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="rls_enabled"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="force_rls_enabled"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="policy_expression_current"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="runtime_role_non_bypassing"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="runtime_role_not_table_owner"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="runtime_role_expected_hash_configured"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="runtime_role_expected_hash_matched"} 0
+trace_commons_operational_postgres_rls_readiness{tenant_storage_ref="<tenant>",state="tenant_context_transaction_local"} 0
+# HELP trace_commons_operational_postgres_rls_gap_tables Safe aggregate PostgreSQL RLS table-gap counts by gap kind.
+# TYPE trace_commons_operational_postgres_rls_gap_tables gauge
+trace_commons_operational_postgres_rls_gap_tables{tenant_storage_ref="<tenant>",gap="missing_policy_tables"} 0
+trace_commons_operational_postgres_rls_gap_tables{tenant_storage_ref="<tenant>",gap="rls_disabled_tables"} 0
+trace_commons_operational_postgres_rls_gap_tables{tenant_storage_ref="<tenant>",gap="force_rls_disabled_tables"} 0
+trace_commons_operational_postgres_rls_gap_tables{tenant_storage_ref="<tenant>",gap="policy_expression_mismatch_tables"} 0
+# HELP trace_commons_operational_object_store_readiness Safe artifact object-store readiness flags.
+# TYPE trace_commons_operational_object_store_readiness gauge
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="configured"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="io_enabled"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="object_primary_eligible"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="plaintext_compatibility_allowed"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="versioning_required"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="object_versioning_supported"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="restore_after_delete_supported"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="remote_object_deleter_required"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="remote_object_deleter_configured"} 0
+trace_commons_operational_object_store_readiness{tenant_storage_ref="<tenant>",state="remote_object_deleter_ready"} 1
+# HELP trace_commons_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.
+# TYPE trace_commons_operational_ranking_worker_actionable_skips gauge
+trace_commons_operational_ranking_worker_actionable_skips{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.
+# TYPE trace_commons_operational_withdrawal_completion_pending gauge
+trace_commons_operational_withdrawal_completion_pending{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.
+# TYPE trace_commons_operational_revocation_propagation_latest_run gauge
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="recorded"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="dry_run"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="checked"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="completed"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="failed"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="skipped"} 0
+trace_commons_operational_revocation_propagation_latest_run{tenant_storage_ref="<tenant>",state="pending"} 0
+# HELP trace_commons_operational_revocation_propagation_readiness Safe revocation-propagation infrastructure readiness flags.
+# TYPE trace_commons_operational_revocation_propagation_readiness gauge
+trace_commons_operational_revocation_propagation_readiness{tenant_storage_ref="<tenant>",state="worker_cache_invalidator_required"} 0
+trace_commons_operational_revocation_propagation_readiness{tenant_storage_ref="<tenant>",state="worker_cache_invalidator_configured"} 0
+trace_commons_operational_revocation_propagation_readiness{tenant_storage_ref="<tenant>",state="worker_cache_invalidator_ready"} 1
+# HELP trace_commons_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.
+# TYPE trace_commons_operational_rollout_smoke_missing_evidence gauge
+trace_commons_operational_rollout_smoke_missing_evidence{tenant_storage_ref="<tenant>"} 23
+# HELP trace_commons_operational_rollout_smoke_recorded_evidence Count of required rollout smoke checks with captured rehearsal evidence.
+# TYPE trace_commons_operational_rollout_smoke_recorded_evidence gauge
+trace_commons_operational_rollout_smoke_recorded_evidence{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_rollout_smoke_passed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence passed.
+# TYPE trace_commons_operational_rollout_smoke_passed_evidence gauge
+trace_commons_operational_rollout_smoke_passed_evidence{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_rollout_smoke_failed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence failed.
+# TYPE trace_commons_operational_rollout_smoke_failed_evidence gauge
+trace_commons_operational_rollout_smoke_failed_evidence{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_rollout_smoke_stale_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.
+# TYPE trace_commons_operational_rollout_smoke_stale_evidence gauge
+trace_commons_operational_rollout_smoke_stale_evidence{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_rollout_smoke_check Latest rollout-smoke evidence state for each required check.
+# TYPE trace_commons_operational_rollout_smoke_check gauge
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="submit_status",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="tenant_canary_isolation",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="contributor_credit",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="reviewer_metadata",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="replay_export_selection",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="audit_reads",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="db_reconciliation_clean",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="rollback_flag_drill",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="key_rotation_drill",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="audit_chain_verification",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="revocation_propagation",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="retention_dry_run",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="vector_index",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="analytics_release",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="benchmark_pipeline",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="ranking_model_readiness",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="credit_settlement",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="object_primary_reads",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="object_store_migration",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="postgres_rls_readiness",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="delayed_credit_reversal",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="object_deletion_refs",state="missing"} 1
+trace_commons_operational_rollout_smoke_check{tenant_storage_ref="<tenant>",check_name="worker_queue_invalidation",state="missing"} 1
+# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.
+# TYPE trace_commons_operational_submissions_total gauge
+trace_commons_operational_submissions_total{tenant_storage_ref="<tenant>"} 2
+# HELP trace_commons_operational_submissions_by_status Submission counts by corpus status.
+# TYPE trace_commons_operational_submissions_by_status gauge
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="accepted"} 2
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="quarantined"} 0
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="rejected"} 0
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="revoked"} 0
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="expired"} 0
+trace_commons_operational_submissions_by_status{tenant_storage_ref="<tenant>",status="purged"} 0
+# HELP trace_commons_operational_review_sla Review queue pressure counts by SLA state.
+# TYPE trace_commons_operational_review_sla gauge
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="quarantined_total"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="fresh"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="due"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="overdue"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="urgent"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="assigned"} 0
+trace_commons_operational_review_sla{tenant_storage_ref="<tenant>",state="expired_leases"} 0
+# HELP trace_commons_operational_export_jobs_total Export job rows visible to operational summary.
+# TYPE trace_commons_operational_export_jobs_total gauge
+trace_commons_operational_export_jobs_total{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_export_infrastructure Safe export-worker infrastructure readiness flags.
+# TYPE trace_commons_operational_export_infrastructure gauge
+trace_commons_operational_export_infrastructure{tenant_storage_ref="<tenant>",state="scheduler_enabled"} 1
+# HELP trace_commons_operational_retention_jobs_total Retention job rows visible to operational summary.
+# TYPE trace_commons_operational_retention_jobs_total gauge
+trace_commons_operational_retention_jobs_total{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_retention_infrastructure Safe retention-worker infrastructure readiness flags.
+# TYPE trace_commons_operational_retention_infrastructure gauge
+trace_commons_operational_retention_infrastructure{tenant_storage_ref="<tenant>",state="scheduler_enabled"} 0
+# HELP trace_commons_operational_analytics_release_readiness Safe analytics broad-release readiness flags.
+# TYPE trace_commons_operational_analytics_release_readiness gauge
+trace_commons_operational_analytics_release_readiness{tenant_storage_ref="<tenant>",state="min_cell_count_configured"} 0
+trace_commons_operational_analytics_release_readiness{tenant_storage_ref="<tenant>",state="broad_release_noise_configured"} 0
+trace_commons_operational_analytics_release_readiness{tenant_storage_ref="<tenant>",state="broad_release_ready"} 0
+# HELP trace_commons_operational_vector_entries Vector-entry counts by operational state.
+# TYPE trace_commons_operational_vector_entries gauge
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="total"} 0
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="active"} 0
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="invalidated"} 0
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="deleted"} 0
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="accepted_current_derived"} 2
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="accepted_current_with_active_vector"} 0
+trace_commons_operational_vector_entries{tenant_storage_ref="<tenant>",state="nearest_neighbor_policy_gaps"} 0
+# HELP trace_commons_operational_vector_infrastructure Safe vector infrastructure readiness flags.
+# TYPE trace_commons_operational_vector_infrastructure gauge
+trace_commons_operational_vector_infrastructure{tenant_storage_ref="<tenant>",state="private_embedder_configured"} 0
+trace_commons_operational_vector_infrastructure{tenant_storage_ref="<tenant>",state="private_embedder_required"} 0
+trace_commons_operational_vector_infrastructure{tenant_storage_ref="<tenant>",state="private_searcher_configured"} 0
+trace_commons_operational_vector_infrastructure{tenant_storage_ref="<tenant>",state="private_searcher_required"} 0
+trace_commons_operational_vector_infrastructure{tenant_storage_ref="<tenant>",state="scheduler_enabled"} 0
+# HELP trace_commons_operational_benchmarks Benchmark lifecycle counts by operational state.
+# TYPE trace_commons_operational_benchmarks gauge
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="total"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_submitter_configured"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_submitter_auth_configured"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_confirmer_configured"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_confirmer_auth_configured"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_adapter_auth_required"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="external_evaluator_configured"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="publishable"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="publishable_without_external_evaluator"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_outbox_pending_without_submitter"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_outbox_pending_without_submitter_auth"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_outbox_submitted_without_confirmer"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_outbox_submitted_without_confirmer_auth"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="registry_outbox_failed"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="published"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="revoked"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="external_registry_adapter_gap"} 0
+trace_commons_operational_benchmarks{tenant_storage_ref="<tenant>",state="external_registry_invalidation_gap"} 0
+# HELP trace_commons_operational_ranking_models Ranking model counts by readiness state.
+# TYPE trace_commons_operational_ranking_models gauge
+trace_commons_operational_ranking_models{tenant_storage_ref="<tenant>",state="active"} 0
+trace_commons_operational_ranking_models{tenant_storage_ref="<tenant>",state="monitored"} 0
+trace_commons_operational_ranking_models{tenant_storage_ref="<tenant>",state="at_risk"} 0
+# HELP trace_commons_operational_ranking_backtests Ranking model-target backtest counts by outcome.
+# TYPE trace_commons_operational_ranking_backtests gauge
+trace_commons_operational_ranking_backtests{tenant_storage_ref="<tenant>",state="evaluated"} 0
+trace_commons_operational_ranking_backtests{tenant_storage_ref="<tenant>",state="passing"} 0
+trace_commons_operational_ranking_backtests{tenant_storage_ref="<tenant>",state="failing"} 0
+# HELP trace_commons_operational_ranking_adjudication Ranking label-adjudication issue counts.
+# TYPE trace_commons_operational_ranking_adjudication gauge
+trace_commons_operational_ranking_adjudication{tenant_storage_ref="<tenant>",state="issue_groups"} 0
+trace_commons_operational_ranking_adjudication{tenant_storage_ref="<tenant>",state="disputed_label_groups"} 0
+trace_commons_operational_ranking_adjudication{tenant_storage_ref="<tenant>",state="absolute_conflicts"} 0
+trace_commons_operational_ranking_adjudication{tenant_storage_ref="<tenant>",state="preference_conflicts"} 0
+# HELP trace_commons_operational_ranking_credit_readiness Ranking-derived credit event counts by readiness state.
+# TYPE trace_commons_operational_ranking_credit_readiness gauge
+trace_commons_operational_ranking_credit_readiness{tenant_storage_ref="<tenant>",state="pending"} 0
+trace_commons_operational_ranking_credit_readiness{tenant_storage_ref="<tenant>",state="ready"} 0
+trace_commons_operational_ranking_credit_readiness{tenant_storage_ref="<tenant>",state="blocked"} 0
+# HELP trace_commons_operational_ranking_evaluator_readiness Ranking evaluator adapter readiness flags.
+# TYPE trace_commons_operational_ranking_evaluator_readiness gauge
+trace_commons_operational_ranking_evaluator_readiness{tenant_storage_ref="<tenant>",state="process_evaluator_configured"} 0
+# HELP trace_commons_operational_ranking_calibration_dataset_manifest_conflicts Active ranking calibration dataset manifest conflict count.
+# TYPE trace_commons_operational_ranking_calibration_dataset_manifest_conflicts gauge
+trace_commons_operational_ranking_calibration_dataset_manifest_conflicts{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_ranking_reason_counts Ranking readiness reason-code counts by report.
+# TYPE trace_commons_operational_ranking_reason_counts gauge
+# HELP trace_commons_operational_ranking_worker_runs Ranking worker-run counts by operational status.
+# TYPE trace_commons_operational_ranking_worker_runs gauge
+trace_commons_operational_ranking_worker_runs{tenant_storage_ref="<tenant>",status="running"} 0
+trace_commons_operational_ranking_worker_runs{tenant_storage_ref="<tenant>",status="stale_running"} 0
+trace_commons_operational_ranking_worker_runs{tenant_storage_ref="<tenant>",status="failed"} 0
+# HELP trace_commons_operational_ranking_worker_runs_by_kind Ranking worker-run counts by automation kind and operational status.
+# TYPE trace_commons_operational_ranking_worker_runs_by_kind gauge
+# HELP trace_commons_operational_ranking_worker_run_totals Ranking worker-run aggregate item counts by state.
+# TYPE trace_commons_operational_ranking_worker_run_totals gauge
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="checked"} 0
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="succeeded"} 0
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="skipped_existing"} 0
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="skipped_model_risk"} 0
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="skipped_ineligible"} 0
+trace_commons_operational_ranking_worker_run_totals{tenant_storage_ref="<tenant>",state="pending_after"} 0
+# HELP trace_commons_operational_ranking_worker_run_reason_counts Ranking worker-run skip and blocker reason-code counts.
+# TYPE trace_commons_operational_ranking_worker_run_reason_counts gauge
+# HELP trace_commons_operational_near_credit_outbox NEAR non-transferable credit receipt outbox counts by operational state.
+# TYPE trace_commons_operational_near_credit_outbox gauge
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="total"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="disabled"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="pending"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="submitted"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="confirmed"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="failed"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="pending_without_submitter"} 0
+trace_commons_operational_near_credit_outbox{tenant_storage_ref="<tenant>",state="submitted_without_confirmer"} 0
+# HELP trace_commons_operational_near_credit_adapters Safe NEAR credit adapter readiness flags.
+# TYPE trace_commons_operational_near_credit_adapters gauge
+trace_commons_operational_near_credit_adapters{tenant_storage_ref="<tenant>",state="submitter_configured"} 0
+trace_commons_operational_near_credit_adapters{tenant_storage_ref="<tenant>",state="submitter_auth_configured"} 0
+trace_commons_operational_near_credit_adapters{tenant_storage_ref="<tenant>",state="confirmer_configured"} 0
+trace_commons_operational_near_credit_adapters{tenant_storage_ref="<tenant>",state="confirmer_auth_configured"} 0
+trace_commons_operational_near_credit_adapters{tenant_storage_ref="<tenant>",state="adapter_auth_required"} 0
+# HELP trace_commons_operational_delayed_credit_events_total Delayed credit ledger events visible to operational summary.
+# TYPE trace_commons_operational_delayed_credit_events_total gauge
+trace_commons_operational_delayed_credit_events_total{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_delayed_credit_reversal_events_total Delayed credit reversal ledger events visible to operational summary.
+# TYPE trace_commons_operational_delayed_credit_reversal_events_total gauge
+trace_commons_operational_delayed_credit_reversal_events_total{tenant_storage_ref="<tenant>"} 0
+# HELP trace_commons_operational_credit_risk Credit settlement risk projection aggregates without account refs.
+# TYPE trace_commons_operational_credit_risk gauge
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="accounts"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="returned_accounts"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="truncated"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="pending_accounts"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="held_accounts"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="over_cap_accounts"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="pending_credit_micros"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="held_credit_micros"} 0
+trace_commons_operational_credit_risk{tenant_storage_ref="<tenant>",state="over_cap_credit_micros"} 0
+# HELP trace_commons_operational_credit_settlement_readiness Credit settlement governance readiness states.
+# TYPE trace_commons_operational_credit_settlement_readiness gauge
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="central_issuer_profile_required"} 1
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="central_issuer_profile_ready"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="central_issuer_profile_missing_control_count"} 19
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="managed_eddsa_signed_tokens_required"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="tenant_access_grants_required"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="account_cap_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="account_cap_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="policy_allowlist_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="policy_allowlist_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="held_account_count"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="over_cap_account_count"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="risk_summary_truncated"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_contract_required"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_contract_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_contract_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_submitter_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_submitter_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_confirmer_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_confirmer_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_adapter_auth_required"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_submitter_auth_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_submitter_auth_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_confirmer_auth_configured"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="near_confirmer_auth_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="issuer_approval_required"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="issuer_approval_missing"} 0
+trace_commons_operational_credit_settlement_readiness{tenant_storage_ref="<tenant>",state="scheduler_enabled"} 0

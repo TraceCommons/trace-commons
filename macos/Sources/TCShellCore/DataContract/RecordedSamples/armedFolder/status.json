@@ -3,6 +3,7 @@
   "logged_in": true,
   "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "first_trace_at": null,
   "account_state": "ok",
   "account_state_reason": null,
   "near_ai_login_unconfirmed": false,
@@ -11,6 +12,8 @@
     "debugging_evaluation"
   ],
   "consent_hold": null,
+  "terms_hold": false,
+  "terms_version_owed": null,
   "paused": false,
   "queue_depth": 3,
   "queue_capacity_used": 3,
@@ -41,7 +44,9 @@
   "grant_voids": [],
   "witness_capacity": {
     "waiting_sessions": 0,
-    "next_retry_at": null
+    "next_retry_at": null,
+    "privacy_check_sessions": 0,
+    "checking_sessions": 0
   },
   "legacy_invite_migration": {
     "offered": false,

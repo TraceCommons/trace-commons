@@ -25,14 +25,19 @@ struct HarnessListSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if titled {
                 GlassSectionRule(copy.harnessesTitle)
+                    .helpIfAny(copy.harnessesPrecedenceTooltip)
             }
             // Says the choice is per tool AND that the list is what this app
             // knows how to look for. Without the second half a contributor
             // whose tool is missing concludes it cannot be connected.
-            Text(copy.harnessesWhat)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // Cut by the owner 2026-11-04 (Settings copy pass 2, P177): an
+            // empty line draws nothing.
+            if !copy.harnessesWhat.isEmpty {
+                Text(copy.harnessesWhat)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // What today's calls cost, and -- inseparably -- what that
             // figure leaves out. Both are drawn, or neither is: an amount
             // nobody could read draws no line, and the scope sentence alone

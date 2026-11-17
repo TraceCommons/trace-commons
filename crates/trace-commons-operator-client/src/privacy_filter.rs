@@ -455,8 +455,7 @@ mod tests {
     /// the prior process state even on panic. Used serially to avoid
     /// cross-test races on shared environment.
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        crate::env_mutation_lock()
     }
 
     struct EnvGuard {
@@ -464,6 +463,7 @@ mod tests {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvGuard {
+        #[allow(unsafe_code)]
         fn capture(keys: &[&str]) -> Self {
             let lock = env_test_lock();
             let snapshot = keys
@@ -471,6 +471,7 @@ mod tests {
                 .map(|k| (k.to_string(), std::env::var(k).ok()))
                 .collect();
             for key in keys {
+                // SAFETY: caller holds `crate::env_mutation_lock` for the lifetime of `EnvGuard`.
                 unsafe { std::env::remove_var(key) };
             }
             EnvGuard {
@@ -478,16 +479,25 @@ mod tests {
                 _lock: lock,
             }
         }
+        #[allow(unsafe_code)]
         fn set(&self, key: &str, value: &str) {
+            // SAFETY: `self._lock` holds `crate::env_mutation_lock`.
             unsafe { std::env::set_var(key, value) };
         }
     }
     impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             for (key, prior) in &self.keys {
                 match prior {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
+                    Some(value) => {
+                        // SAFETY: `self._lock` holds `crate::env_mutation_lock` until fields drop.
+                        unsafe { std::env::set_var(key, value) }
+                    }
+                    None => {
+                        // SAFETY: `self._lock` holds `crate::env_mutation_lock` until fields drop.
+                        unsafe { std::env::remove_var(key) }
+                    }
                 }
             }
         }

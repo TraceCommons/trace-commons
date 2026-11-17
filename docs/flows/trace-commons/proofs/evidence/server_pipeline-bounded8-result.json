@@ -1,0 +1,21 @@
+{
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/server_pipeline.qnt",
+    "--invariants",
+    "P6,P7,P8",
+    "--max-steps",
+    "8",
+    "--server-endpoint",
+    "localhost:8840",
+    "--verbosity",
+    "2",
+    "--out-itf",
+    "/private/tmp/tc-quint-proof-checks/server-bounded-final/server_pipeline/counterexample.itf.json"
+  ],
+  "code": -15,
+  "timedOut": true,
+  "modelSha256": "b637efc035cf624c3c73f5bf574a860935e0386ffd0317369a5b89d5c669117f",
+  "elapsed": 120.03624291700544
+}

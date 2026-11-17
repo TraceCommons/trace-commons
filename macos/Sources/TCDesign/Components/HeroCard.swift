@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A hero promotion (owner, 2026-10-12): a saturated gradient ground, a
@@ -34,6 +35,10 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// a plain panel, so the caller's content can hold buttons of its own
     /// (owner, 2026-10-29: Home's Traces hero's steps each open a tab).
     private let actionOnPill: Bool
+    /// A narrow card's form (product owner, 2026-11-07): the title in the
+    /// smaller title type and no subtitle, so the card takes less of a
+    /// narrow window. The caller decides when, from the width it has.
+    private let compact: Bool
     private let graphic: Graphic
     private let content: Content
     @State private var hovering = false
@@ -44,6 +49,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
         contentSpansGraphic: Bool = false, titleSpansGraphic: Bool = false, actionOnPill: Bool = false,
+        compact: Bool = false,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -56,6 +62,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.contentSpansGraphic = contentSpansGraphic
         self.titleSpansGraphic = titleSpansGraphic
         self.actionOnPill = actionOnPill
+        self.compact = compact
         self.graphic = graphic()
         self.content = content()
     }
@@ -63,11 +70,16 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// The card's least height, and how much of its width the words take:
     /// the rest is the graphic's. The words set the card's height, so a
     /// longer title or a wrapped line never pushes the action off the card.
+    /// The words run over the graphic's left part, to about three quarters
+    /// of Home's card (Ron, 2026-11-09; 150 before).
     static var minHeight: CGFloat { 156 }
-    static var graphicReserve: CGFloat { 150 }
-    /// How much of the large graphic shows through (owner, 2026-10-19: at
-    /// full strength it competed with the words).
-    static var graphicOpacity: Double { 0.5 }
+    static var graphicReserve: CGFloat { 90 }
+    /// The graphic's own width, behind the words and past the card's
+    /// trailing edge; it stays where it was when the words grew.
+    static var graphicWidth: CGFloat { 210 }
+    /// How much of the large graphic shows through: all of it. A pixel graphic
+    /// carries its own transparency in its cells (Ron, 2026-11-05).
+    static var graphicOpacity: Double { 1 }
 
     /// How far a title that runs the card's width stops short of its
     /// trailing edge for the close button: the X's whole target, less the
@@ -89,6 +101,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
+    /// The compact card's title (`compact`).
+    static var compactTitleType: GlassTypeStyle { GlassTokens.TypeScale.title.weight(.heavy) }
 
     public var body: some View {
         Group {
@@ -117,11 +131,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         return words
             .padding(.trailing, contentSpansGraphic ? 0 : Self.graphicReserve)
-            .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: compact ? nil : Self.minHeight, alignment: .leading)
             .background(alignment: .trailing) {
                 // Behind the words, sized to the card, past its edges.
                 graphic
-                    .frame(width: Self.graphicReserve + 60)
+                    .frame(width: Self.graphicWidth)
                     .frame(maxHeight: .infinity)
                     .opacity(Self.graphicOpacity)
                     .accessibilityHidden(true)
@@ -129,11 +143,6 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
             .background {
                 ZStack {
                     shape.fill(gradient.linear)
-                    // A soft light behind the graphic, so it sits in the
-                    // ground rather than on it.
-                    RadialGradient(
-                        colors: [GlassTokens.Color.heroInk.color.opacity(0.22), .clear],
-                        center: UnitPoint(x: 0.82, y: 0.4), startRadius: 0, endRadius: 170)
                     if hovering {
                         shape.fill(GlassTokens.Color.heroInk.color.opacity(0.06))
                     }
@@ -147,11 +156,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 Text(title)
-                    .glassType(Self.titleType)
+                    .glassType(compact ? Self.compactTitleType : Self.titleType)
                     .foregroundStyle(GlassTokens.Color.heroInk.color)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
-                if let subtitle {
+                if let subtitle, !compact {
                     Text(subtitle)
                         .glassType(GlassTokens.TypeScale.label.weight(.regular))
                         .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(0.88))
@@ -211,28 +220,35 @@ struct GlassHeroClose: View {
     }
 }
 
-/// A hero's graphic built from a symbol: the symbol large and bright,
-/// tilted, in heroInk, alone (owner, 2026-10-12: no sparkles around it).
+/// A hero's graphic built from a symbol or image: large and bright, tilted,
+/// in heroInk, alone (owner, 2026-10-12: no sparkles around it), on the pixel
+/// grid (`GlassPixelGlyph`; Ron, 2026-11-05).
 /// It is larger than the card is tall and set past its trailing and
 /// bottom edges, so the card's border cuts it off (owner, 2026-10-12, as
 /// the reference does).
 public struct GlassHeroSymbol: View {
-    private let systemImage: String
+    private let source: GlassPixelGlyph.Source
 
     public init(_ systemImage: String) {
-        self.systemImage = systemImage
+        source = .symbol(systemImage, weight: .bold)
+    }
+
+    public init(image: NSImage) {
+        source = .image(image)
     }
 
     public var body: some View {
-        let ink = GlassTokens.Color.heroInk.color
-        ZStack {
-            Image(systemName: systemImage)
-                .glassGlyph(Self.symbolSize, weight: .bold)
-                .foregroundStyle(LinearGradient(
-                    colors: [ink.opacity(0.95), ink.opacity(0.35)], startPoint: .top, endPoint: .bottom))
-                .rotationEffect(.degrees(-12))
-                .shadow(color: .black.opacity(0.25), radius: 18, y: 10)
-        }
+        GlassPixelGlyph(
+            source, size: Self.symbolSize,
+            // The pixel field's own blues, strong enough that the whole shape
+            // reads at the contrast the field's corner has: a glyph is spread
+            // over the card where the field is massed in one corner.
+            palette: Self.tints.map { $0.opacity(Self.brightCells) },
+            dimmed: Self.tints.map { $0.opacity(Self.dimCells) },
+            cell: Self.cell)
+        // The whole grid tilts: tilting the source and sampling it instead
+        // breaks straight edges into stairs.
+        .rotationEffect(.degrees(Self.angle))
         // Past the card's trailing and bottom edges.
         .offset(Self.bleed)
     }
@@ -241,4 +257,14 @@ public struct GlassHeroSymbol: View {
     /// whole graphic is pushed past its trailing and bottom edges.
     static var symbolSize: CGFloat { 190 }
     static var bleed: CGSize { CGSize(width: 46, height: 34) }
+    /// The promotions' tilt.
+    static var angle: Double { -12 }
+    /// The pixel field's pitch, its three blues (`GetStartedCardField`), and
+    /// the cells' strengths.
+    static var cell: CGFloat { 6 }
+    static var tints: [GlassRGBA] {
+        [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1, GlassTokens.Color.firstRunBeamCore]
+    }
+    static var brightCells: Double { 0.46 }
+    static var dimCells: Double { 0.32 }
 }

@@ -92,13 +92,13 @@ public sealed class AccountAttentionTests
         AccountAttention unreadable = Assert.IsType<AccountAttention>(AccountAttentions.For(Unreadable));
         AccountAttention refused = Assert.IsType<AccountAttention>(AccountAttentions.For(RefusedWithLogin));
 
-        Assert.Equal("This app's account needs attention", unreadable.Title);
+        Assert.Equal("Needs attention", unreadable.Title);
         Assert.Equal(unreadable.Title, refused.Title);
         Assert.Equal(
-            "This app can't read its account details on this computer. Set it up again to keep sending traces.",
+            "Can't read the account details, so traces can't be sent.",
             unreadable.Body);
         Assert.Equal(
-            "This app can no longer reach the service it was set up with. Update the app, or set it up again.",
+            "Can no longer reach the service this app was set up with. An update may fix it.",
             refused.Body);
         Assert.Null(unreadable.PrivateAi);
         Assert.Equal("Private AI still works with your NEAR AI account.", refused.PrivateAi);
@@ -119,7 +119,8 @@ public sealed class AccountAttentionTests
             attention.ConfirmBody);
         Assert.Equal("Set up again", attention.ConfirmAction);
         Assert.Equal("Cancel", attention.ConfirmCancel);
-        Assert.Equal("Nothing changed. Try again.", attention.Failed);
+        // Owner dropped "Try again." 2026-11-04 (Settings copy pass 2, P57).
+        Assert.Equal("Nothing changed.", attention.Failed);
     }
 
     /// <summary>

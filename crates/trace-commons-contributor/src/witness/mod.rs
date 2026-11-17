@@ -41,8 +41,12 @@
 //! image is not reproducibly buildable and has never been reproduced. No text
 //! in this module may say "verifiable against source".
 
+pub mod accepted_list;
+pub mod configuration;
 pub mod inference_record;
 pub mod status;
+#[cfg(test)]
+pub(crate) mod test_jobs;
 pub mod transport;
 pub mod verify;
 
@@ -107,6 +111,24 @@ pub struct WitnessTrust {
     /// Every measurement set that is admitted. Empty means nothing is
     /// pinned, which is a refusal and never a pass.
     pub measurements: Vec<ExpectedMeasurements>,
+    /// Further (signing address, measurement set) pairs admitted by a
+    /// verified signed accepted-measurements list, already filtered to the
+    /// entries valid now and to this witness URL
+    /// (`accepted_list::trust_with_accepted`). Each is judged as a pair: its
+    /// measurement admits only a quote naming its own address.
+    ///
+    /// Never counted by [`Self::is_pinned`]: a list adds candidates beside
+    /// the sign-up pins and never makes an unpinned client pinned.
+    pub accepted: Vec<AcceptedWitnessPin>,
+}
+
+/// One pair admitted by the signed accepted-measurements list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedWitnessPin {
+    /// The address the quote must name and the certificate must recover to.
+    pub signing_address: String,
+    /// The measurement set admitted for that address.
+    pub measurements: ExpectedMeasurements,
 }
 
 impl WitnessTrust {
@@ -169,8 +191,9 @@ pub enum WitnessTrustError {
         control: &'static str,
         reported: Option<String>,
     },
-    /// The contribution is larger than this client will send. Refused
-    /// locally, before anything is offered.
+    /// The contribution is larger than this client will send, refused
+    /// locally before anything is offered, or larger than the witness
+    /// accepts (`413 witness_request_too_large`).
     #[error("the contribution is larger than the witness path will carry")]
     WitnessPayloadTooLarge,
     /// The certificate's digest does not cover the bytes the witness
@@ -181,12 +204,16 @@ pub enum WitnessTrustError {
     /// The certificate's signature does not recover to the pinned address.
     #[error("the witness certificate did not verify")]
     WitnessCertificateUnverified,
-    /// A witness response could not be read as a certificate and an envelope.
+    /// A witness response could not be read as a certificate and an envelope,
+    /// or the witness refused with a client error this build does not
+    /// recognise. A witness that cannot serve is [`Self::WitnessUnreachable`].
     #[error("the witness response was malformed")]
     WitnessResponseMalformed,
     /// The witness declined the receipt behind an evidence-bearing request:
     /// its signer, its model, or the size of the request it covers is outside
-    /// what that deployment accepts.
+    /// what that deployment accepts. Also the witness's own attested-inference
+    /// refusals (`403 witness_inference_*`): a receipt missing, unverified or
+    /// too large for its policy is the same decision.
     ///
     /// A decision, not a fault. It is the refusal a rollout produces most
     /// often -- a signer not yet trusted, a model not yet accepted -- and
@@ -212,11 +239,57 @@ pub enum WitnessTrustError {
     /// `503 witness_saturated` pair of the pacing contract
     /// (`trace_commons_protocol::witness_pacing`).
     ///
-    /// The only retryable witness refusal. Nothing about the session was
-    /// judged, so it is held and tried again after `retry_after_secs` --
+    /// Nothing about the session was judged, so it is held and tried
+    /// again after `retry_after_secs` --
     /// the witness's own `Retry-After`, bounded -- never refused.
     #[error("the witness is busy")]
     WitnessSaturated { retry_after_secs: u32 },
+    /// The witness did not answer within this client's deadline, or told
+    /// this client its own request deadline ran out
+    /// (`504 witness_request_timed_out`). Nothing was certified.
+    ///
+    /// Apart from [`Self::WitnessAttestationUnavailable`] because the two
+    /// read differently in a log: that one is the quote endpoint; this one
+    /// is any witness call that was waited on and never answered.
+    #[error("the witness did not answer in time")]
+    WitnessTimeout,
+    /// The witness could not be connected to at all (DNS, refused or reset
+    /// connection, or a TLS handshake that failed), or it, or the gateway in
+    /// front of it, answered that it cannot serve right now: a `5xx`
+    /// without a more specific recognised cause, such as `503
+    /// witness_signing_unavailable`, or a gateway `404` with no instance
+    /// behind it. Nothing was certified, and the same request may succeed
+    /// later.
+    #[error("the witness could not be reached")]
+    WitnessUnreachable,
+    /// The witness answered `503 witness_classifier_unavailable`: its
+    /// privacy classifier could not complete the review through its own
+    /// retries or classify budget. Nothing was certified; a later review
+    /// may succeed. Keep this distinct from a failed witness connection.
+    #[error("the witness's privacy classifier is unavailable")]
+    WitnessClassifierUnavailable,
+    /// The witness answered `503 witness_redaction_failed`: an accepted
+    /// review failed during redaction. This is not a connection failure or
+    /// a final judgement about the trace; a later review may succeed.
+    #[error("the witness could not complete redaction")]
+    WitnessRedactionFailed,
+    /// The witness answered `422 witness_trace_too_large_for_review`: the
+    /// session needs more classifier requests than one review can make, so
+    /// it was refused before any was made. Final for this session; the same
+    /// session needs the same requests next time. The two counts are the
+    /// witness's, kept so a person can be told how far over it is.
+    #[error("the session is too large for the witness to review")]
+    WitnessTraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
+    /// The witness answered `422 witness_text_unclassifiable`: its privacy
+    /// classifier could not classify some of this session's text, so
+    /// nothing was certified. About this session's content, not the witness
+    /// being down: the session is refused and the pass goes on to the next.
+    /// A newer build offers it again, since a witness improvement may fix it.
+    #[error("the witness's privacy classifier could not classify this session")]
+    WitnessTextUnclassifiable,
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -258,6 +331,20 @@ impl WitnessTrustError {
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
+            Self::WitnessTimeout => "witness_timeout",
+            Self::WitnessUnreachable => "witness_unreachable",
+            Self::WitnessClassifierUnavailable => {
+                trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE
+            }
+            Self::WitnessRedactionFailed => {
+                trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED
+            }
+            Self::WitnessTextUnclassifiable => {
+                trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE
+            }
+            Self::WitnessTraceTooLargeForReview { .. } => {
+                trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW
+            }
             // The wire label itself, like the admission refusal below.
             Self::WitnessSaturated { .. } => {
                 trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
@@ -277,7 +364,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 15] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 21] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -293,6 +380,12 @@ impl WitnessTrustError {
         "witness_body_not_stripped",
         "admission_evidence_refused",
         trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
+        "witness_timeout",
+        "witness_unreachable",
+        trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE,
+        trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED,
+        trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW,
+        trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE,
     ];
 
     /// Recognise a refusal label that has been through a `String`.
@@ -361,15 +454,31 @@ pub async fn witness_session(
     crate::envelope::raw_contribution_size_ok(&raw, transport.envelope_limit_bytes())
         .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
 
+    let verified = probe_witness(transport, url, trust, now_unix).await?;
+
+    transport::witness_contribution(transport, &verified, raw, attested, granted).await
+}
+
+/// Read only: a fresh nonce, DCAP verification, and endpoint-scoped paired pins.
+/// No raw bytes can be sent by this helper.
+pub(crate) async fn probe_witness(
+    transport: &dyn transport::WitnessTransport,
+    url: &str,
+    trust: &WitnessTrust,
+    now_unix: u64,
+) -> Result<verify::VerifiedWitness, WitnessTrustError> {
+    if !trust.is_pinned() {
+        return Err(WitnessTrustError::WitnessMeasurementUnpinned {
+            control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+            reported: None,
+        });
+    }
     let nonce = transport::WitnessNonce::fresh()?;
     let evidence = transport.attestation(&nonce).await?;
     let quote = hex::decode(evidence.quote_hex.trim())
         .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
     let collateral = transport.collateral(&quote).await?;
-
-    let verified = verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)?;
-
-    transport::witness_contribution(transport, &verified, raw, attested, granted).await
+    verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)
 }
 
 /// Inputs for an explicitly approved token-bundle witness request.

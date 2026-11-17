@@ -1,0 +1,27 @@
+{
+  "model": "server_settlement",
+  "command": [
+    "python3",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+    "server_settlement",
+    "--skill-root",
+    "/private/tmp/tc-flow-promises-tools/plugins",
+    "--out",
+    "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_settlement/check"
+  ],
+  "exitCode": -15,
+  "timedOut": true,
+  "elapsedSeconds": 120.01,
+  "budgetSeconds": 120,
+  "budgetKind": "wall-clock process budget; no model constraint",
+  "modelSha256": "8f8350008deab8b9077bf556b99461503f2733c9a922941962f51f4a025606bc",
+  "configSha256": "704c961fa8e96a83c06aa743a88831c0c74c4693c1e7b2ec8e5211832cc731eb",
+  "viewSha256": "7c8e49bcfe813b0cc9294b05770c7e575a9e4686bc96a741c2bbc520553e60e5",
+  "artifactsChangedDuringRun": false,
+  "results": [
+    {
+      "definition": "P9",
+      "status": "not checked"
+    }
+  ]
+}

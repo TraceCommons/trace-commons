@@ -126,10 +126,9 @@ extension PrivateAISection {
             .toggleStyle(GlassToggleStyle(.settings))
             // It takes no second write while one is in flight.
             .disabled(model.insightsLedgerFeedBusy)
-            Text(InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // The ledger feed's explanation (`analytics_feed_ledger`) is not
+            // drawn here: Insights keeps it. Approved by the owner 2026-11-04
+            // (Settings copy pass 2, P189).
             if let refusal = model.insightsLedgerFeedRefusal {
                 GlassNotice(tone: .outside) { Text(refusal) }
             }
@@ -147,6 +146,7 @@ struct RouteDisclosureGlassBody: View {
         let copy = disclosure.copy
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             sentence(copy.route)
+                .helpIfAny(copy.witnessRouteTooltip ?? "")
             if let line = copy.localFilter { sentence(line) }
             if let facts = disclosure.facts.witness, let witness = copy.witness {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
@@ -160,7 +160,7 @@ struct RouteDisclosureGlassBody: View {
                 }
             }
             if let line = copy.attestedBodies { sentence(line) }
-            if let line = copy.receipts { sentence(line) }
+            if let line = copy.receipts { sentence(line).helpIfAny(copy.receiptsTooltip ?? "") }
         }
         // Each paragraph and each witness row is its own VoiceOver stop.
         .accessibilityElement(children: .contain)

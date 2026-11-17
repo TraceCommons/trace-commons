@@ -122,14 +122,14 @@ impl ManagedHistory {
             let sqlite_path = sqlite_root
                 .join(home.file_name().ok_or(ManagedHistoryError)?)
                 .join("ledger.sqlite");
-            let conn = Connection::open_with_flags(
+            let mut conn = Connection::open_with_flags(
                 &sqlite_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY
                     | OpenFlags::SQLITE_OPEN_NO_MUTEX
                     | OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )?;
             conn.busy_timeout(Duration::from_millis(50))?;
-            conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
+            conn.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
             // Newer IronWire ledgers write a `failure` code for a request that
             // failed inside the proxy. Those are not calls. Older ledgers have
             // no such column and every row is read as before. Asked per home:

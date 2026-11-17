@@ -153,6 +153,10 @@ final class ComponentContractTests: XCTestCase {
         XCTAssertEqual(both.mark, .count(.count(120), status: .ask))
         let unknown = GlassSegment("Traces", value: 1, badgeValue: .unknown, dot: .ask)
         XCTAssertEqual(unknown.mark, .count(.unknown, status: .ask))
+        // Loading is a mark of its own, not a count and not the unknown dash.
+        let loading = GlassSegment("Traces", value: 1, badgeValue: .loading)
+        XCTAssertEqual(loading.mark, .count(.loading, status: nil))
+        XCTAssertNotEqual(GlassBadgeValue.loading, .unknown)
         XCTAssertEqual(GlassSegment("Traces", value: 1, badge: 3).mark, .count(.count(3), status: nil))
         XCTAssertEqual(GlassSegment("Private AI", value: 2, dot: .outside).mark, .dot(.outside))
         // Zero is no count: the dot alone.

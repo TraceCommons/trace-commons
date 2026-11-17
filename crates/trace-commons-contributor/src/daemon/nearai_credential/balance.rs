@@ -1068,6 +1068,65 @@ mod tests {
         assert!(report.to_value()["remaining_nanos"].is_null());
     }
 
+    /// The Spent, Limit and left lines a shell draws, from the service's
+    /// reply carried through to the wire `private_inference_balance` sends,
+    /// not from a subtraction in the test: the reply's own `remaining` for
+    /// the 0.24.0 review's case ($130.00 limit, $18.185 spent). The lines
+    /// add up on the cents shown. The reply's `*_display` strings are not
+    /// read by the daemon; the values here are only for the reply's shape.
+    #[tokio::test]
+    async fn the_spent_and_left_lines_from_a_reply_add_up_to_the_limit() {
+        use crate::private_inference_copy::{
+            balance_limit_line, balance_remaining_line, balance_spent_line,
+        };
+        let s = shared();
+        with_session(&s, "rt_first");
+        let mut balance = a_balance();
+        balance["spend_limit"] = serde_json::json!(130_000_000_000i64);
+        balance["spend_limit_display"] = serde_json::json!("$130.00");
+        balance["total_spent"] = serde_json::json!(18_185_000_000i64);
+        balance["total_spent_display"] = serde_json::json!("$18.19");
+        balance["remaining"] = serde_json::json!(111_815_000_000i64);
+        balance["remaining_display"] = serde_json::json!("$111.82");
+        let stub = stub(one_org(), balance).await;
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+
+        let body = read_with(&s, &api).await.to_value();
+        let scale = u8::try_from(body["scale"].as_u64().unwrap()).unwrap();
+        let remaining = body["remaining_nanos"].as_i64();
+        let limit = body["spend_limit_nanos"].as_i64();
+        let spent = body["total_spent_nanos"].as_i64();
+        assert_eq!(balance_limit_line(limit, scale), "Limit: $130.00");
+        assert_eq!(balance_spent_line(spent, remaining, scale), "Spent: $18.19");
+        assert_eq!(balance_remaining_line(remaining, scale), "$111.81 left");
+    }
+
+    /// The same reply with no ceiling: no remaining figure, so Spent is
+    /// floored like every other amount, with nothing to add up with.
+    #[tokio::test]
+    async fn the_spent_line_from_a_reply_with_no_ceiling_is_floored() {
+        use crate::private_inference_copy::balance_spent_line;
+        let s = shared();
+        with_session(&s, "rt_first");
+        let mut balance = a_balance();
+        balance["total_spent"] = serde_json::json!(18_185_000_000i64);
+        balance["remaining"] = serde_json::Value::Null;
+        balance["spend_limit"] = serde_json::Value::Null;
+        let stub = stub(one_org(), balance).await;
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+
+        let body = read_with(&s, &api).await.to_value();
+        let scale = u8::try_from(body["scale"].as_u64().unwrap()).unwrap();
+        assert_eq!(
+            balance_spent_line(
+                body["total_spent_nanos"].as_i64(),
+                body["remaining_nanos"].as_i64(),
+                scale
+            ),
+            "Spent: $18.18"
+        );
+    }
+
     #[tokio::test]
     async fn an_organization_with_no_ceiling_reports_nothing_rather_than_zero() {
         let s = shared();

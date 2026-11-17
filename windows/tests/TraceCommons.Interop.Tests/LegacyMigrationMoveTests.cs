@@ -59,7 +59,8 @@ public sealed class LegacyMigrationMoveTests
     public void TheRefusalLineIsTheCoresForTheLabel()
     {
         string line = Assert.IsType<string>(LegacyMigrationOffers.RefusalLine("legacy_migration_tenant_pooled"));
-        Assert.Contains("shared by many people", line);
+        // Owner dropped "by many people" 2026-11-04 (Settings copy pass 2, P9).
+        Assert.Contains("is shared", line);
         // An unknown label still gets a sentence from the core.
         Assert.False(string.IsNullOrEmpty(LegacyMigrationOffers.RefusalLine("no_such_label")));
     }

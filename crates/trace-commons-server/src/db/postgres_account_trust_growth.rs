@@ -139,6 +139,27 @@ impl PgBackend {
             .collect())
     }
 
+    /// Re-derives this account's carried age through V157's definer
+    /// function, under the account's tenant context. The function writes
+    /// only a changed carry, so an unchanged one moves no generation.
+    pub async fn refresh_account_trust_carried_age(
+        &self,
+        account: &TrustAccount,
+    ) -> Result<u32, DatabaseError> {
+        let tenant = account.tenant_id();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let carried: i32 = tx
+            .query_one(
+                "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+                &[&tenant, &account.account_id()],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(u32::try_from(carried).unwrap_or(0))
+    }
+
     /// Every fact of this account, with the gate fields and the
     /// first-in-cluster boolean the rule reads (V86). Tenant-scoped.
     pub async fn account_trust_evaluation_inputs(
@@ -269,6 +290,7 @@ impl PgBackend {
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_fact_candidates(text,uuid,bigint)'),'EXECUTE')
             AND has_function_privilege(current_user,to_regprocedure('public.trace_record_account_trust_fact(text,uuid,text,uuid)'),'EXECUTE')
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_evaluation_inputs(text,uuid)'),'EXECUTE')
+            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_refresh_carried_age(text,uuid)'),'EXECUTE')
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
             AND NOT has_table_privilege(current_user,'public.trace_account_trust_evaluations','INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(current_user,'public.trace_account_trust_facts','INSERT,UPDATE,DELETE')

@@ -43,7 +43,7 @@ BINARIES=(
     "trace-commons-tenant"
 )
 EXPECTED_COUNTS=(
-    "8"
+    "12"
     "12"
     "8"
     "12"
@@ -126,7 +126,7 @@ main() {
         check_subcommand_help "${BINARIES[$i]}" "${REPRESENTATIVE_SUBCMDS[$i]}"
     done
 
-    echo "SmokeOperatorBinariesOK: review=8 admin=12 worker=8 tenant=12"
+    echo "SmokeOperatorBinariesOK: review=12 admin=12 worker=8 tenant=12"
 }
 
 main "$@"

@@ -31,9 +31,39 @@ pub(crate) struct ClassifySpan {
     pub(crate) category: String,
     pub(crate) start: usize,
     pub(crate) end: usize,
-    #[serde(default)]
+    // Preserve an absent score without changing the in-process span API.
+    // NaN is a private sentinel, never emitted as a confidence value.
+    #[serde(default = "unavailable_classifier_score")]
     pub(crate) score: f64,
 }
+pub(crate) fn unavailable_classifier_score() -> f64 {
+    f64::NAN
+}
+
+fn confidence_millionths(score: f64) -> Option<u32> {
+    (score.is_finite() && (0.0..=1.0).contains(&score))
+        .then(|| (score * 1_000_000.0).round() as u32)
+}
+
+/// Whether a span's codepoint offsets `[start, end)` lie inside a text of
+/// `codepoints` codepoints.
+///
+/// The one range rule. `apply_spans` refuses a span that breaks it, and the
+/// NEAR AI adapter refuses an answer that breaks it before the answer can be
+/// cached, so nothing a cache holds can be refused when it is applied.
+pub(crate) fn span_fits(start: usize, end: usize, codepoints: usize) -> bool {
+    start <= end && end <= codepoints
+}
+
+/// Whether every span fits `text` by [`span_fits`].
+#[cfg(feature = "near-ai-privacy-filter")]
+pub(crate) fn spans_fit(text: &str, spans: &[ClassifySpan]) -> bool {
+    let codepoints = text.chars().count();
+    spans
+        .iter()
+        .all(|span| span_fits(span.start, span.end, codepoints))
+}
+
 pub(crate) fn apply_spans(
     backend: &'static str,
     text: &str,
@@ -55,8 +85,11 @@ pub(crate) fn apply_spans(
     // span (matches sidecar accounting). Offsets are converted from
     // codepoint indices to byte offsets here.
     let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
+    let mut findings = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.start > span.end || span.end >= boundaries.len() {
+        // Defense in depth: an answer from the NEAR AI cache has already
+        // passed this rule, but every backend's spans meet it here too.
+        if !span_fits(span.start, span.end, boundaries.len() - 1) {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!("{backend} privacy classifier returned out-of-range span"),
             });
@@ -65,9 +98,19 @@ pub(crate) fn apply_spans(
             category: span.category.clone(),
             start: boundaries[span.start],
             end: boundaries[span.end],
-            score: span.score,
+            // Missing scores previously defaulted to zero. Keep the same
+            // replacement-category selection while retaining absence below.
+            score: if span.score.is_nan() { 0.0 } else { span.score },
         });
         let label = safe_privacy_filter_label(Some(&span.category), &mut report);
+        findings.push(crate::private_edit_map::PrivatePrivacyFinding {
+            original: crate::token_distribution::ByteSpan {
+                start: boundaries[span.start] as u64,
+                end: boundaries[span.end] as u64,
+            },
+            category: label.clone(),
+            confidence_millionths: confidence_millionths(span.score),
+        });
         *by_label.entry(label.clone()).or_insert(0u32) += 1;
         report.increment(format!("privacy_filter:{label}"));
         if label.eq_ignore_ascii_case("secret") {
@@ -130,6 +173,7 @@ pub(crate) fn apply_spans(
                     .into_bytes(),
                 })
                 .collect(),
+            findings,
         )),
         redacted_text,
         summary: SafePrivacyFilterSummary {
@@ -154,11 +198,13 @@ pub(crate) fn apply_spans(
 /// repeated characters, from 5 bytes to 8 KB. `cl100k_base` matched only 6 of
 /// 9 on the same short set, so the choice is not arbitrary and should not be
 /// changed without re-running that comparison.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn classifier_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
     static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
     BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
 }
 /// Count the tokens the classifier will charge for `text`.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn classifier_token_count(text: &str) -> Option<usize> {
     classifier_bpe().map(|bpe| bpe.encode_ordinary(text).len())
 }
@@ -173,6 +219,7 @@ pub(crate) fn classifier_token_count(text: &str) -> Option<usize> {
 /// Falls back to a conservative byte split if the tokenizer is unavailable:
 /// under-filling requests costs throughput, over-filling costs 502s, so the
 /// safe direction is down.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops::Range<usize>> {
     if classifier_bpe().is_none() {
         // No tokenizer: fall back to the dense-content byte equivalent, which
@@ -252,6 +299,7 @@ pub(crate) fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops:
 /// always on char boundaries and covering the whole input. Windows prefer to
 /// end at a newline within the limit (PII rarely spans lines); a run with no
 /// newline under the limit is hard-split at the nearest lower char boundary.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
     let max_bytes = max_bytes.max(1);
     let mut ranges = Vec::new();
@@ -321,6 +369,116 @@ mod tests {
             score,
         }
     }
+    #[test]
+    fn private_findings_preserve_raw_overlap_categories_and_confidence() {
+        let result = apply_spans(
+            "test",
+            "abcdefghij",
+            &[
+                span("private_email", 1, 5, 0.4),
+                span("private_phone", 3, 7, 0.973834),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
+        let edits = result.private_edits.unwrap();
+        assert_eq!(edits.0.len(), 1);
+        assert_eq!(edits.1.len(), 2);
+        assert_eq!(
+            edits.1[0].original,
+            crate::token_distribution::ByteSpan { start: 1, end: 5 }
+        );
+        assert_eq!(edits.1[0].category, "private_email");
+        assert_eq!(edits.1[0].confidence_millionths, Some(400_000));
+        assert_eq!(
+            edits.1[1].original,
+            crate::token_distribution::ByteSpan { start: 3, end: 7 }
+        );
+        assert_eq!(edits.1[1].category, "private_phone");
+        assert_eq!(edits.1[1].confidence_millionths, Some(973_834));
+        assert_eq!(format!("{:?}", edits.1[1]), "<private privacy finding>");
+    }
+
+    #[test]
+    fn private_findings_use_utf8_bytes_after_window_codepoint_offsets() {
+        let result = apply_windowed_spans(
+            "test",
+            "é😀Alice",
+            &[(2, vec![span("private_person", 0, 5, 0.5)])],
+        )
+        .unwrap()
+        .unwrap();
+        let edits = result.private_edits.unwrap();
+        assert_eq!(
+            edits.1[0].original,
+            crate::token_distribution::ByteSpan { start: 6, end: 11 }
+        );
+        assert_eq!(edits.0[0].original, edits.1[0].original);
+    }
+
+    #[test]
+    fn missing_and_invalid_confidence_is_unavailable_but_zero_is_preserved() {
+        let missing: ClassifySpan =
+            serde_json::from_str(r#"{"category":"private_person","start":0,"end":5}"#).unwrap();
+        assert!(missing.score.is_nan());
+        let result = apply_spans("test", "Alice", &[missing]).unwrap().unwrap();
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            let result = apply_spans("test", "Alice", &[span("private_person", 0, 5, score)])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result.private_edits.unwrap().1[0].confidence_millionths,
+                None
+            );
+        }
+        assert_eq!(confidence_millionths(0.0), Some(0));
+        assert_eq!(confidence_millionths(1.0), Some(1_000_000));
+    }
+
+    #[test]
+    fn missing_confidence_keeps_legacy_overlap_replacement_selection() {
+        let spans: Vec<ClassifySpan> = serde_json::from_str(
+            r#"[{"category":"private_email","start":1,"end":5},
+                {"category":"private_phone","start":3,"end":7,"score":0.9}]"#,
+        )
+        .unwrap();
+        let result = apply_spans("test", "abcdefghij", &spans).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
+    }
+
+    #[test]
+    fn private_findings_are_allowlisted_and_never_serialized() {
+        let result = apply_spans(
+            "test",
+            "Alice",
+            &[span("untrusted-sensitive-category", 0, 5, 0.973834)],
+        )
+        .unwrap()
+        .unwrap();
+        let private = result.private_edits.as_ref().unwrap();
+        assert_eq!(private.1[0].category, "unknown");
+        assert_eq!(format!("{private:?}"), "<private redaction map>");
+        let serialized = serde_json::to_string(&result).unwrap();
+        for excluded in [
+            "private_edits",
+            "confidence_millionths",
+            "973834",
+            "untrusted-sensitive-category",
+            "Alice",
+        ] {
+            assert!(!serialized.contains(excluded));
+        }
+    }
+
     #[test]
     fn replaces_single_span() {
         let text = "email me at alice@example.com please";
@@ -417,5 +575,190 @@ mod tests {
             let label = safe_privacy_filter_label(Some(raw), &mut r);
             assert_eq!(label, raw, "{raw} should pass through allow-list");
         }
+    }
+}
+
+/// The tokenizer windowing the self-hosted backend uses. These tests lived
+/// with the NEAR AI adapter until it stopped windowing by tokens (it sizes
+/// windows by request body now); the fixtures are sized for the 32,000-token
+/// budget that backend used, which is why that number appears here.
+#[cfg(all(test, feature = "self-hosted-privacy-filter"))]
+mod tokenizer_window_tests {
+    use super::*;
+
+    const MAX_CLASSIFY_INPUT_TOKENS: usize = 32_000;
+
+    /// The tokenizer must be the one the endpoint actually charges against.
+    /// These counts are the endpoint's own `usage.input_tokens`, recorded
+    /// 2026-08-27; `cl100k_base` disagrees on several of them.
+    #[test]
+    fn tokenizer_reproduces_the_endpoints_own_counts() {
+        let cases: &[(&str, usize)] = &[
+            ("hello", 1),
+            ("hello world", 2),
+            ("The quick brown fox jumps over the lazy dog.", 10),
+            ("alice@example.com", 3),
+            ("/usr/local/lib/python3.11/site-packages/", 11),
+            ("a7f3c9d2e1b48856f0c1d2e3a4b5c6d7", 29),
+            ("tenant_id submission_id auth_principal_ref", 8),
+            ("supercalifragilisticexpialidocious", 10),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                classifier_token_count(text),
+                Some(*expected),
+                "token count drifted from the endpoint's accounting for {text:?}"
+            );
+        }
+    }
+
+    /// The property the whole change exists for: no window may exceed the
+    /// budget, whatever the content's token density.
+    #[test]
+    fn every_window_fits_the_token_budget() {
+        let prose = "Please email alice@example.com about invoice 12345. ".repeat(600);
+        let dense = (0..600)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(400);
+
+        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
+            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
+            for range in &ranges {
+                let tokens = classifier_token_count(&text[range.clone()]).expect("tokenizer");
+                assert!(
+                    tokens <= MAX_CLASSIFY_INPUT_TOKENS,
+                    "{label}: window of {tokens} tokens exceeds the budget of {}",
+                    MAX_CLASSIFY_INPUT_TOKENS
+                );
+            }
+        }
+    }
+
+    /// Ranges must be contiguous and cover the whole field: a gap would drop
+    /// text from classification entirely, which is a silent privacy hole
+    /// rather than a performance bug.
+    #[test]
+    fn token_windows_cover_the_whole_field_without_gaps() {
+        let text = (0..300)
+            .map(|i| format!("line {i} with alice@example.com and /var/log/f{i}.log"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = chunk_token_ranges(&text, MAX_CLASSIFY_INPUT_TOKENS);
+
+        assert_eq!(ranges.first().expect("at least one window").start, 0);
+        assert_eq!(ranges.last().expect("at least one window").end, text.len());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "gap or overlap between windows");
+        }
+        let rebuilt: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(rebuilt, text, "windows must reconstruct the field exactly");
+    }
+
+    /// Budgeting in tokens is what lets sparse content travel in FEWER
+    /// requests than dense content of the same size -- the thing a byte
+    /// budget structurally cannot do, and the reason dense windows used to
+    /// 502 while prose windows of identical size were fine.
+    #[test]
+    fn sparse_content_packs_into_fewer_windows_than_dense() {
+        // Line-delimited on purpose. The greedy packer this test is about
+        // works on line segments; an UNBROKEN run takes the bisection path
+        // instead, which halves until each piece fits and so quantises the
+        // window count to a power of two. Two inputs of very different token
+        // density then land on the same count -- prose at 149k tokens and
+        // dense at 250k both produced 8 windows -- and the comparison says
+        // nothing. The original fixtures were single lines and passed only
+        // because, at the old 1,000-token budget, they happened to fall in
+        // different bisection bands.
+        // Sized from measurement: at 16,000 lines prose is ~176k tokens (~6
+        // windows) and dense ~256k (~8), a margin of two. At 4,000 both round
+        // to 2 and tie; a margin of one is fragile to packing slack.
+        let lines = 16_000;
+        let prose = "The agent reviewed the report and summarised the findings.\n".repeat(lines);
+        let dense = (0..lines)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs\n"))
+            .collect::<String>();
+
+        let prose_tokens = classifier_token_count(&prose).expect("tokenizer");
+        let dense_tokens = classifier_token_count(&dense).expect("tokenizer");
+        assert!(
+            prose_tokens > MAX_CLASSIFY_INPUT_TOKENS && dense_tokens > MAX_CLASSIFY_INPUT_TOKENS,
+            "both fixtures must exceed the budget or neither splits"
+        );
+        assert!(
+            dense_tokens > prose_tokens,
+            "the dense fixture must actually be denser: prose {prose_tokens}, dense {dense_tokens}"
+        );
+
+        let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
+        let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
+        assert!(
+            prose_windows < dense_windows,
+            "prose took {prose_windows} windows and dense took {dense_windows}; \
+             token budgeting should give sparse content larger windows"
+        );
+    }
+
+    /// A single line longer than the budget still has to be split, or one
+    /// base64 blob or long log line stalls its whole field.
+    #[test]
+    fn an_oversized_single_line_is_split() {
+        // Size the fixture FROM the budget. A literal repeat count was sized
+        // for a 1,000-token budget and silently stopped exceeding it when the
+        // budget rose to 32,000 -- the test still passed its inner assertion
+        // while no longer testing splitting at all.
+        let unit = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7";
+        let unit_tokens = classifier_token_count(unit).expect("tokenizer");
+        let repeats = (MAX_CLASSIFY_INPUT_TOKENS / unit_tokens) * 2 + 8;
+        let one_line = unit.repeat(repeats);
+        assert!(!one_line.contains('\n'));
+        assert!(
+            classifier_token_count(&one_line).expect("tokenizer") > MAX_CLASSIFY_INPUT_TOKENS,
+            "fixture must exceed the budget or this test proves nothing"
+        );
+        let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
+        assert!(ranges.len() > 1, "an oversized single line must be split");
+        for range in &ranges {
+            let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
+            assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_cover_text_and_respect_limit() {
+        let text = "line one\nline two\nline three\n";
+        let ranges = chunk_byte_ranges(text, 12);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, text.len());
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev, "ranges must be contiguous");
+            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(joined, text, "windows must reconstruct the input");
+        // Newline-preferring: no window splits mid-line here.
+        for r in &ranges {
+            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
+        // A single line longer than the limit must still be split, on a
+        // char boundary, into covering windows.
+        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
+        let ranges = chunk_byte_ranges(&text, 8);
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev);
+            assert!(r.end - r.start <= 8);
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        assert_eq!(prev, text.len());
     }
 }

@@ -64,6 +64,15 @@ final class ReengageDeclarationTests: XCTestCase {
         XCTAssertEqual(recorder.calls.count, 2)
     }
 
+    @MainActor
+    func testFeatureSubscriptionDoesNotDeclareNotificationPermission() {
+        let declaration = ReengageDeclaration(token: 1) { token, _ in token }
+        declaration.update(accepts: ["feature_flags_changed"])
+        XCTAssertFalse(declaration.isDeclared)
+        declaration.update(accepts: ["feature_flags_changed", "reengage_due"])
+        XCTAssertTrue(declaration.isDeclared)
+    }
+
     private let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
 
     /// The app wires it: against a real daemon, a postable status declares

@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-vector-replay` — operator CLI that rebuilds a tenant's local
 //! vector index from PostgreSQL audit data + the encrypted artifact store.
 //!

@@ -3,6 +3,8 @@
 
 //! TraceCommons hosted server crate.
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod account_ceremony;
 pub mod account_login_change;
 pub mod account_native_auth;
@@ -27,6 +29,7 @@ pub mod credit_numbers;
 pub mod credit_quality;
 pub mod db;
 pub mod dedup_assign;
+pub mod dedup_inline;
 pub mod dedup_simhash;
 pub mod driver_liveness;
 pub mod error;
@@ -62,6 +65,7 @@ pub mod register_stats;
 pub mod rescore_distribution;
 pub mod reward_participant;
 pub mod secrets;
+pub mod skills_catalog;
 pub mod starter_advance_report;
 pub mod starter_plausibility;
 pub mod trace_artifact_gcs;

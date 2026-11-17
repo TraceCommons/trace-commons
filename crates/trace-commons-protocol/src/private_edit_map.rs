@@ -2,7 +2,23 @@
 use crate::token_distribution::{ByteSpan, RedactionEdit};
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct PrivateRedactionEdits(pub Vec<RedactionEdit>);
+pub struct PrivateRedactionEdits(pub Vec<RedactionEdit>, pub Vec<PrivatePrivacyFinding>);
+
+/// One classifier finding before overlapping replacement spans are collapsed.
+/// Coordinates refer to the exact classified input, in UTF-8 bytes. These
+/// findings are private process-local evidence, never contribution metadata.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PrivatePrivacyFinding {
+    pub original: ByteSpan,
+    pub category: String,
+    pub confidence_millionths: Option<u32>,
+}
+
+impl std::fmt::Debug for PrivatePrivacyFinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<private privacy finding>")
+    }
+}
 impl std::fmt::Debug for PrivateRedactionEdits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("<private redaction map>")
@@ -87,7 +103,7 @@ impl EditMap {
                 replacement: inserted,
             });
         }
-        (result.len() <= 4096).then_some(PrivateRedactionEdits(result))
+        (result.len() <= 4096).then_some(PrivateRedactionEdits(result, Vec::new()))
     }
 }
 
@@ -107,6 +123,7 @@ mod tests {
         map.apply(&[edit(4, 8, "hidden")]).unwrap();
         let edits = map.finish(b"aa <hidden>aa").unwrap();
         assert_eq!(edits.0.len(), 1);
+        assert!(edits.1.is_empty());
         assert_eq!(edits.0[0].original, ByteSpan { start: 3, end: 9 });
         assert_eq!(edits.0[0].replacement, b"<hidden>");
         assert_eq!(format!("{edits:?}"), "<private redaction map>");

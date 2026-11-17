@@ -115,7 +115,7 @@ async fn the_status_line_reads_the_model_claude_code_sends_on_stdin() {
     })
     .await
     .unwrap();
-    assert!(line.starts_with("ironwire"), "{line:?}");
+    assert!(line.starts_with("claude -> near.ai"), "{line:?}");
     assert!(!line.contains(" for "), "{line:?}");
 
     route.shutdown().await;

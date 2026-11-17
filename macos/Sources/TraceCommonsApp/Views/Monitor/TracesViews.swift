@@ -83,8 +83,8 @@ struct TracesTreeView: View, Equatable {
         /// the lazy stack has no such row until then.
         var scrollTarget: String?
     }
-    /// A mode change waiting on the core's confirmation: arming always,
-    /// ignoring when the folder has sessions waiting. It carries the core's
+    /// A mode change waiting on the core's confirmation: ignoring when the
+    /// folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
     @State private var confirming: Confirmation?
     /// The one row menu open, if any: a folder's "..." menu, a folder's
@@ -133,20 +133,17 @@ struct TracesTreeView: View, Equatable {
 
         enum Words {
             case ignore(ProjectIgnoreCopy)
-            case arm(ProjectArmingCopy)
         }
 
         var title: String {
             switch words {
             case .ignore(let copy): copy.title
-            case .arm(let copy): copy.question
             }
         }
 
         var body: String {
             switch words {
             case .ignore(let copy): copy.body
-            case .arm(let copy): copy.body
             }
         }
     }
@@ -400,15 +397,7 @@ struct TracesTreeView: View, Equatable {
                 actions: [
                     // #1146's "Keep project", from the core.
                     .cancel(copy.keep, action: cancel),
-                    .destructive(copy.button) { apply(pending.folder, pending.mode) },
-                ],
-                onCancel: cancel)
-        case .arm(let copy):
-            return GlassConfirmation(
-                title: pending.title, message: pending.body,
-                actions: [
-                    .cancel(copy.decline, action: cancel),
-                    GlassModalAction(copy.confirm, isDefault: true) { apply(pending.folder, pending.mode) },
+                    .destructive(copy.button, help: copy.ignoreProjectTooltip) { apply(pending.folder, pending.mode) },
                 ],
                 onCancel: cancel)
         }
@@ -417,18 +406,14 @@ struct TracesTreeView: View, Equatable {
     // MARK: Folder modes
 
     /// The route every folder mode change takes, from the tree's switch and
-    /// menu and from the Folder inspector's picker alike. Arming always asks
-    /// first, in the core's words; ignoring asks when it would clear waiting
-    /// sessions, with their count; Ask is a direct call. With no words
+    /// menu and from the Folder inspector's picker alike. Automatic is a
+    /// direct call, with no confirmation box (owner, 2026-11-11); ignoring
+    /// asks when it would clear waiting sessions, with their count; Ask is a
+    /// direct call. With no words
     /// from the core a change that needs them is not made: the confirmation
     /// is never shown without what it says.
     static func modeChange(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) -> ModeChange {
         guard mode != folder.mode else { return .noop }
-        if mode == .autoUpload {
-            guard let copy = ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
-                project: folder.label, count: 0)) else { return .unavailable }
-            return .confirm(Confirmation(folder: folder, mode: mode, words: .arm(copy)))
-        }
         if mode == .ignore && !folder.sessions.isEmpty {
             guard let copy = ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
                 project: folder.label, pending: folder.sessions.count)) else { return .unavailable }
@@ -453,7 +438,7 @@ struct TracesTreeView: View, Equatable {
     /// A folder row's Automatic switch (owner, 2026-10-30): on at
     /// Automatic, off at Ask, when the core offers the other; nil at Never
     /// or for a folder the core lists no mode for. Turning it on arms the
-    /// folder through `modeChange`, so the core's arming question is asked.
+    /// folder through `modeChange`.
     nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
         // Traces with no project: a switch that stays off (owner,
         // 2026-10-30); pressing it says why.
@@ -823,6 +808,9 @@ struct TracesTreeView: View, Equatable {
             onSubmit: store.maySubmitSession(entry, folderIgnored: off)
                 ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,
             onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
+            // A refused Submit is said under the row it was pressed on. A
+            // selected row's review card says it already (`TracesRefusal`).
+            refusal: selected ? nil : TracesStore.rowRefusal(store, entryId: entry.entryId),
             spoken: $spoken
         )
         .equatable()
@@ -1255,6 +1243,9 @@ struct TracesSessionRow: View, Equatable {
     /// Nil while the session cannot be sent: the pill is drawn turned off.
     let onSubmit: (() -> Void)?
     let onMenu: () -> Void
+    /// Why the last Submit on this row did not go through, in the core's
+    /// words, or nil. Drawn under the row, where the press was.
+    var refusal: String? = nil
     /// As `TracesFolderRow.spoken`.
     let spoken: AccessibilityFocusState<String?>.Binding
 
@@ -1264,7 +1255,7 @@ struct TracesSessionRow: View, Equatable {
                 && lhs.flag == rhs.flag && lhs.selected == rhs.selected && lhs.off == rhs.off && lhs.acting == rhs.acting
                 && lhs.pill == rhs.pill && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen
                 && lhs.help == rhs.help && lhs.toolName == rhs.toolName && lhs.tags == rhs.tags
-                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil)
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && lhs.refusal == rhs.refusal
         }
     }
 
@@ -1300,6 +1291,9 @@ struct TracesSessionRow: View, Equatable {
             }
             if let tags {
                 NudgeRowTags(tags: tags)
+            }
+            if let refusal {
+                GlassAlert(refusal)
             }
         }
     }

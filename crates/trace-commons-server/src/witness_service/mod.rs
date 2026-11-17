@@ -65,9 +65,12 @@
 //! [`WitnessRequest`] and [`WitnessResponse`] have hand-written `Debug`
 //! impls that withhold every content-bearing field, for the same reason.
 
+pub mod diagnostics;
 pub mod enclave;
 pub mod http;
 pub mod inference;
+pub mod jobs;
+pub mod prefetch;
 pub mod surface;
 
 use async_trait::async_trait;
@@ -194,6 +197,39 @@ pub enum WitnessError {
     /// partial redaction, which is worse than signing nothing.
     #[error("the witness could not complete the redaction")]
     RedactionFailed,
+    /// The redaction did not complete because the prose-PII classifier
+    /// stayed unavailable through the adapter's retries (a transport error,
+    /// a timeout, a 5xx or rate limit), or
+    /// because the request's classify budget ran out before a call could
+    /// start -- which can happen in the classify queue with no call made.
+    ///
+    /// A refusal exactly as [`Self::RedactionFailed`] is -- nothing is
+    /// certified -- named apart so an operator and a client can tell a
+    /// classifier outage from a pass that refused the trace. Only a failure
+    /// the classifier adapter itself typed as transient lands here; a panic,
+    /// a permanent classifier refusal or a residual secret never does.
+    #[error("the witness's privacy classifier was unavailable")]
+    ClassifierUnavailable,
+    /// The prose-PII classifier's answer for some of the text could not be
+    /// verified or corrected, so the redaction did not complete. A refusal
+    /// like the others -- nothing is certified -- and, unlike them, about
+    /// the content: the classifier answers that text the same way every
+    /// time, so a client must not read it as the witness being down.
+    #[error("the witness's privacy classifier could not classify the text")]
+    TextUnclassifiable,
+    /// The trace needs more classifier requests than one review can make at
+    /// the configured pace, so it was refused before any was made.
+    ///
+    /// The one variant that carries numbers, by owner decision (2026-11-13):
+    /// the two counts go back to the submitting client in the refusal body
+    /// so a person can be told how far over the trace is. They are counts
+    /// of classifier requests, not content, and they never reach a log --
+    /// `Display` (and so `Debug`) is the label alone.
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
     /// The witness could not bind a digest to the artifact it produced.
     #[error("the witness could not bind a digest to the artifact it produced")]
     ArtifactBindingFailed,
@@ -277,6 +313,122 @@ impl std::fmt::Debug for WitnessError {
 #[error("unavailable")]
 pub struct SeamUnavailable;
 
+/// Polls a redaction future and turns a panic inside it into
+/// [`SeamUnavailable`], so [`witness`] refuses the request.
+///
+/// Without it a panic unwinds out of the request's task: the connection
+/// drops, the client reads that as the witness being down, and asks again
+/// with the same transcript on its next pass, forever. The panic payload is
+/// never read; it can carry transcript text.
+///
+/// Asserting unwind safety is sound because the unwound frames hold only the
+/// request's own input and a shared `&DeterministicTraceRedactor`, whose one
+/// lock (the NEAR AI filter's `window_cache`) recovers from poisoning with
+/// `into_inner`.
+struct RefuseOnPanic<F: std::future::Future> {
+    inner: std::pin::Pin<Box<F>>,
+}
+
+impl<T, E, F: std::future::Future<Output = Result<T, E>>> std::future::Future for RefuseOnPanic<F> {
+    type Output = Result<T, SeamUnavailable>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.as_mut().poll(cx)
+        })) {
+            Ok(std::task::Poll::Ready(result)) => {
+                std::task::Poll::Ready(result.map_err(|_| SeamUnavailable))
+            }
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(SeamUnavailable)),
+        }
+    }
+}
+
+/// Why a contribution's redaction did not complete: the structured seam's
+/// error.
+///
+/// Two answers where the other seams have one. [`SeamUnavailable`] carries
+/// nothing so no seam can pick its own refusal; this one may say only
+/// whether the prose classifier was unavailable, which it learns from the
+/// adapter's own typed transience
+/// ([`trace_commons_protocol::trace_contribution::TraceContributionError::is_transient`]), never from a message. Both
+/// are refusals: there is no variant that certifies anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RedactionUnavailable {
+    /// The pass refused or broke: a permanent classifier refusal, a
+    /// deterministic refusal, a panic.
+    #[error("the redaction did not complete")]
+    Failed,
+    /// The prose classifier stayed unavailable through its retries.
+    #[error("the privacy classifier was unavailable")]
+    ClassifierUnavailable,
+    /// The trace needs more classifier requests than one review allows; see
+    /// [`WitnessError::TraceTooLargeForReview`].
+    #[error("the trace needs more classifier requests than one review allows")]
+    TraceTooLargeForReview {
+        windows_needed: u64,
+        windows_allowed: u64,
+    },
+    /// The classifier's answer for some of the text could not be verified
+    /// or corrected (`TraceContributionError::UnclassifiableText`).
+    #[error("the privacy classifier could not classify the text")]
+    TextUnclassifiable,
+}
+
+impl From<SeamUnavailable> for RedactionUnavailable {
+    fn from(SeamUnavailable: SeamUnavailable) -> Self {
+        Self::Failed
+    }
+}
+
+impl From<RedactionUnavailable> for WitnessError {
+    fn from(error: RedactionUnavailable) -> Self {
+        match error {
+            RedactionUnavailable::Failed => WitnessError::RedactionFailed,
+            RedactionUnavailable::ClassifierUnavailable => WitnessError::ClassifierUnavailable,
+            RedactionUnavailable::TextUnclassifiable => WitnessError::TextUnclassifiable,
+            RedactionUnavailable::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            } => WitnessError::TraceTooLargeForReview {
+                windows_needed,
+                windows_allowed,
+            },
+        }
+    }
+}
+
+/// Run a redaction pass, refusing on a panic as [`refuse_on_panic`] does,
+/// and keep only whether a failure was the classifier being unavailable.
+pub(crate) async fn redaction_outcome<T, F>(future: F) -> Result<T, RedactionUnavailable>
+where
+    F: std::future::Future<
+            Output = Result<T, trace_commons_protocol::trace_contribution::TraceContributionError>,
+        >,
+{
+    match refuse_on_panic(async { Ok::<_, ()>(future.await) }).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) if error.is_transient() => Err(RedactionUnavailable::ClassifierUnavailable),
+        Ok(Err(trace_commons_protocol::trace_contribution::TraceContributionError::UnclassifiableText {
+            ..
+        })) => Err(RedactionUnavailable::TextUnclassifiable),
+        Ok(Err(_)) | Err(SeamUnavailable) => Err(RedactionUnavailable::Failed),
+    }
+}
+
+/// See [`RefuseOnPanic`]. Any `Err` from the future is a refusal too.
+fn refuse_on_panic<T, E, F: std::future::Future<Output = Result<T, E>>>(
+    future: F,
+) -> RefuseOnPanic<F> {
+    RefuseOnPanic {
+        inner: Box::pin(future),
+    }
+}
+
 /// What a redaction pass produced.
 ///
 /// The report travels with the text because the verdict is derived from it.
@@ -342,7 +494,11 @@ impl DeterministicRedaction {
 #[async_trait]
 impl TranscriptRedactor for DeterministicRedaction {
     async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
-        let (redacted, report) = self.redactor.redact_text(raw);
+        // A panic is a refusal; see `RefuseOnPanic`.
+        let (redacted, report) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.redactor.redact_text(raw)
+        }))
+        .map_err(|_| SeamUnavailable)?;
         Ok(RedactedTranscript {
             redacted,
             report,
@@ -419,11 +575,7 @@ impl TranscriptRedactor for FullPipelineRedaction {
         // as `Err` from the protocol crate and becomes a refusal here. It is
         // never downgraded to the deterministic result, which would be a
         // certificate claiming coverage the pass did not have.
-        let result = self
-            .redactor
-            .redact_text_through_prose_filter(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+        let result = refuse_on_panic(self.redactor.redact_text_through_prose_filter(raw)).await?;
         Ok(RedactedTranscript {
             redacted: result.redacted,
             report: result.report,
@@ -784,7 +936,7 @@ pub trait ContributionRedactor: Send + Sync {
                 trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
             >,
         ),
-        SeamUnavailable,
+        RedactionUnavailable,
     > {
         Ok((self.redact(raw).await?, std::collections::BTreeMap::new()))
     }
@@ -793,7 +945,7 @@ pub trait ContributionRedactor: Send + Sync {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable>;
+    ) -> Result<RedactedContribution, RedactionUnavailable>;
 }
 
 /// The structured pipeline, over a [`DeterministicTraceRedactor`].
@@ -824,7 +976,7 @@ impl PipelineContributionRedaction {
     }
 
     /// Both stages: the deterministic pass, then the prose-PII classifier,
-    /// per event. A backend failure surfaces as [`SeamUnavailable`] and
+    /// per event. A backend failure surfaces as [`RedactionUnavailable`] and
     /// becomes a refusal; it is never downgraded to the deterministic result,
     /// which would be a certificate claiming coverage the pass did not have.
     pub fn with_privacy_filter(
@@ -853,13 +1005,10 @@ impl ContributionRedactor for PipelineContributionRedaction {
                 trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
             >,
         ),
-        SeamUnavailable,
+        RedactionUnavailable,
     > {
-        let (envelope, maps) = self
-            .redactor
-            .redact_trace_with_edits(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+        let (envelope, maps) =
+            redaction_outcome(self.redactor.redact_trace_with_edits(raw)).await?;
         Ok((
             RedactedContribution {
                 envelope,
@@ -871,12 +1020,8 @@ impl ContributionRedactor for PipelineContributionRedaction {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable> {
-        let envelope = self
-            .redactor
-            .redact_trace(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+    ) -> Result<RedactedContribution, RedactionUnavailable> {
+        let envelope = redaction_outcome(self.redactor.redact_trace(raw)).await?;
         Ok(RedactedContribution {
             envelope,
             policy_version: self.policy_version.clone(),
@@ -954,7 +1099,7 @@ pub(crate) async fn witness_contribution_with_issuance(
     } = redactor
         .redact(request.raw_contribution)
         .await
-        .map_err(|SeamUnavailable| WitnessError::RedactionFailed)?;
+        .map_err(WitnessError::from)?;
 
     // Inside the certified bytes. A client that had to stamp these after
     // certification would be making a byte change the certificate does not
@@ -1354,6 +1499,18 @@ mod tests {
                 redaction_pipeline_version(backend),
                 "alias must come from the protocol crate for {backend:?}"
             );
+            // The structural skip is on by default, so a full-pipeline
+            // witness reports the bumped alias (2026-11-05).
+            let bumped = match backend {
+                PrivacyFilterBackendTag::NearAi => "privacy-filter-near-ai-v2",
+                PrivacyFilterBackendTag::SelfHosted => "privacy-filter-self-hosted-v2",
+                _ => "privacy-filter-sidecar-v3",
+            };
+            assert!(
+                result.policy_version.ends_with(bumped),
+                "{backend:?}: {}",
+                result.policy_version
+            );
             assert_ne!(
                 result.policy_version, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
                 "a full-pipeline witness must not report the deterministic \
@@ -1390,6 +1547,56 @@ mod tests {
             .expect_err("a failed full pipeline must not issue a certificate");
             assert_eq!(error, WitnessError::RedactionFailed);
         }
+    }
+
+    /// A classifier backend that panics, standing in for any panic inside
+    /// the redaction pipeline (a detector slicing inside a character was
+    /// one).
+    struct PanickingFilter;
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for PanickingFilter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            panic!("classifier panicked");
+        }
+    }
+
+    /// A panic while redacting is a refusal for that request, never a
+    /// dropped connection the client reads as an outage and retries, and
+    /// never a certificate.
+    #[tokio::test]
+    async fn a_panicking_pipeline_refuses_rather_than_unwinding() {
+        let backend = PrivacyFilterBackendTag::SelfHosted;
+        let transcript = FullPipelineRedaction::new(Vec::new(), Arc::new(PanickingFilter), backend);
+        assert!(transcript.redact("deployed the build").await.is_err());
+        let error = witness(
+            request("Alice Brannigan deployed the build", false),
+            &transcript,
+            &TestSigner::new("panic-refusal"),
+            &TestEnclave,
+        )
+        .await
+        .expect_err("a panicking pipeline must not issue a certificate");
+        assert_eq!(error, WitnessError::RedactionFailed);
+
+        let structured = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            Arc::new(PanickingFilter),
+            backend,
+        );
+        assert!(structured.redact(raw_contribution(SURVIVOR)).await.is_err());
+        assert!(
+            structured
+                .redact_with_edits(raw_contribution(SURVIVOR))
+                .await
+                .is_err()
+        );
     }
 
     struct RefusingRedactor;
@@ -1995,6 +2202,66 @@ mod tests {
         assert_eq!(err, WitnessError::RedactionFailed);
     }
 
+    /// Only a classifier that stayed unavailable through its retries reads
+    /// as `ClassifierUnavailable`. Every other way the pass can stop -- a
+    /// permanent refusal, a panic -- is `Failed`, and each maps to its own
+    /// witness refusal.
+    #[tokio::test]
+    async fn only_a_transient_classifier_failure_is_classifier_unavailable() {
+        use trace_commons_protocol::trace_contribution::TraceContributionError;
+        let transient = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::TransientRedactionFailed {
+                reason: "classifier down".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(transient, Err(RedactionUnavailable::ClassifierUnavailable));
+        let permanent = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::RedactionFailed {
+                reason: "refused".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(permanent, Err(RedactionUnavailable::Failed));
+        let unclassifiable = redaction_outcome(async {
+            Err::<(), _>(TraceContributionError::UnclassifiableText {
+                reason: "no valid answer".to_string(),
+            })
+        })
+        .await;
+        assert_eq!(
+            unclassifiable,
+            Err(RedactionUnavailable::TextUnclassifiable)
+        );
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::TextUnclassifiable),
+            WitnessError::TextUnclassifiable
+        );
+        let panicked = redaction_outcome(async {
+            if std::hint::black_box(true) {
+                panic!("synthetic panic inside the pass");
+            }
+            Ok::<(), TraceContributionError>(())
+        })
+        .await;
+        assert_eq!(panicked, Err(RedactionUnavailable::Failed));
+        let done = redaction_outcome(async { Ok::<_, TraceContributionError>(7) }).await;
+        assert_eq!(done, Ok(7));
+
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::ClassifierUnavailable),
+            WitnessError::ClassifierUnavailable
+        );
+        assert_eq!(
+            WitnessError::from(RedactionUnavailable::Failed),
+            WitnessError::RedactionFailed
+        );
+        assert_eq!(
+            RedactionUnavailable::from(SeamUnavailable),
+            RedactionUnavailable::Failed
+        );
+    }
+
     #[tokio::test]
     async fn the_verdict_matches_what_the_envelope_carries() {
         let response = witness_contribution(
@@ -2411,6 +2678,9 @@ mod tests {
 
     #[tokio::test]
     async fn structured_witness_refuses_secret_echoed_by_classifier() {
+        // Prose, so the classifier is asked about it: a single structural
+        // token like SURVIVOR is skipped (structural skip, 2026-11-05).
+        const ECHO_TRIGGER: &str = "please echo this sentence";
         struct EchoSecret;
         #[async_trait]
         impl PrivacyFilterAdapter for EchoSecret {
@@ -2424,7 +2694,7 @@ mod tests {
                 Ok(Some(
                     trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction {
                         private_edits: None,
-                        redacted_text: if text == SURVIVOR {
+                        redacted_text: if text == ECHO_TRIGGER {
                             SECRET.into()
                         } else {
                             text.into()
@@ -2442,7 +2712,7 @@ mod tests {
         );
         assert!(
             witness_contribution(
-                contribution_request(SURVIVOR),
+                contribution_request(ECHO_TRIGGER),
                 &redactor,
                 &TestSigner::new("metadata-witness"),
                 &TestEnclave
@@ -2455,16 +2725,19 @@ mod tests {
     #[tokio::test]
     async fn structured_witness_refuses_colliding_redacted_metadata_keys() {
         let mut request = contribution_request(SURVIVOR);
+        // Keys never reach the classifier (structural skip, 2026-11-05), so
+        // the collision comes from the deterministic pass: an address key
+        // redacts to the placeholder the second key already spells.
         request
             .raw_contribution
             .ironclaw
             .feature_flags
-            .insert(CLASSIFIER_ONLY_PII.into(), "first".into());
+            .insert("a@b.co".into(), "first".into());
         request
             .raw_contribution
             .ironclaw
             .feature_flags
-            .insert("<PROSE_NAME>".into(), "second".into());
+            .insert("<PRIVATE_EMAIL_1>".into(), "second".into());
         let redactor = PipelineContributionRedaction::with_privacy_filter(
             Vec::new(),
             Arc::new(NameRemovingFilter),

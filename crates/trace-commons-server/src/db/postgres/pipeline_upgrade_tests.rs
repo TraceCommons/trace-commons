@@ -362,6 +362,17 @@ const ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[(
     &["tenant_id", "routing_state"],
 )];
 
+/// What earned trust's admission guard, `trace_account_admission_guard`,
+/// holds on the pipeline tables (V155): the three `pipeline_runs` columns its
+/// `SECURITY DEFINER` acceptance classifier reads to tell a pipeline
+/// acceptance from one with an unknown approver, and nothing else. The role
+/// cannot log in or bypass row-level security.
+const ACCOUNT_ADMISSION_GUARD_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[(
+    "pipeline_runs",
+    "SELECT",
+    &["tenant_id", "submission_id", "approved_revision_id"],
+)];
+
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and
 /// per column, as sorted `(grantee, table, column, privilege, is_grantable)`
 /// rows; the column is empty for a table-wide privilege. `is_grantable` is
@@ -651,6 +662,10 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             "trace_pipeline_routing_enumeration_guard",
             ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS,
         ),
+        (
+            "trace_account_admission_guard",
+            ACCOUNT_ADMISSION_GUARD_PIPELINE_GRANTS,
+        ),
     ]
     .into_iter()
     .flat_map(|(grantee, grants)| {
@@ -678,8 +693,8 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         expected,
         "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
          trace_gate_driver its two pipeline_runs columns, the V124 enumeration guard its two \
-         pipeline_tenant_routing columns, nothing to anyone else, and none of it WITH GRANT \
-         OPTION"
+         pipeline_tenant_routing columns, the V155 admission guard its three pipeline_runs \
+         columns, nothing to anyone else, and none of it WITH GRANT OPTION"
     );
 
     // Isolation as a role that cannot bypass RLS.

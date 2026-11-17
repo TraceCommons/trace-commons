@@ -160,7 +160,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// Whether herdr was found here, so "Group sessions in herdr" can
         /// be offered; absent from an older daemon, which reads as no.
         public let herdrAvailable: Bool?
-        /// Whether sessions open as tabs of herdr's "Near.ai" workspace;
+        /// Whether sessions open as tabs of herdr's "Near AI Gateway" workspace;
         /// absent from an older daemon.
         public let herdrGrouping: Bool?
         enum CodingKeys: String, CodingKey {

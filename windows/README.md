@@ -249,11 +249,9 @@ is a flat one-label-to-one-banner table with no ordering in it at all, and the
 view model stores whichever label arrived. The Linux shell's `render_health`
 records the same rule; the macOS `HealthCopy` is the same table again.
 
-Two copy rules from the shared design bind every sentence, and
-`QueueFrameCopyTests` holds them to both: **never name the mechanism**
-("privacy filter", "claim", "ingest", "canary" and "PII" are internal words),
-and **always state the data consequence** ("nothing has been lost", "your queue
-is safe", "rather than going out unscanned"). A label this build has never
+One copy rule from the shared design binds every sentence, and
+`QueueFrameCopyTests` holds them to it: **never name the mechanism**
+("privacy filter", "claim", "ingest", "canary" and "PII" are internal words). A label this build has never
 heard of gets the sentence that is true of every blocking label; it is never
 echoed back as the explanation, because a label is an internal name and
 printing it would breach the first rule by the most direct route available.

@@ -57,6 +57,7 @@ mod pilot_bootstrap_submitter;
 mod pilot_bootstrap_translators;
 mod routing_is_attribution_only;
 mod run_candidate_eval;
+mod store_trait_coverage;
 mod tail_floor_subcommand;
 mod trace_artifact_gcs;
 mod trace_artifact_gcs_integration;
@@ -65,7 +66,11 @@ mod trace_artifact_store_envelope;
 mod trace_corpus_storage_contract;
 mod trace_gate_service;
 mod trace_session_identity;
+mod unsafe_boundary;
 mod versioned_pipeline_remote_restore;
 mod witness_admission_chain;
 mod witness_certificate_cross_implementation;
+#[allow(dead_code)]
+#[path = "support/witness_jobs.rs"]
+mod witness_jobs_support;
 mod witness_manifest_matches_compose;

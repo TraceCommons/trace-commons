@@ -1,0 +1,253 @@
+[
+  {
+    "label": "learning_insights_empty",
+    "title": "Insights",
+    "body": "Local trace analysis has no readable week. Saved imports and daemon counter feed are separate.",
+    "controls": [
+      "Enable",
+      "Open file",
+      "Refresh",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_insights_busy",
+    "title": "Insights",
+    "body": "Copy, saved snapshots and week reads can finish independently.",
+    "controls": [
+      "Refresh",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_insights",
+    "title": "Insights",
+    "body": "The chosen feed owns all figures for the week.",
+    "controls": [
+      "Refresh",
+      "Open file",
+      "Select week",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_insights_error",
+    "title": "Insights",
+    "body": "A failed read clears the affected figures; saved-feed fallback can remain available.",
+    "controls": [
+      "Refresh",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_missions_empty",
+    "title": "Mission drafts",
+    "body": "No mission drafts have been read.",
+    "controls": [
+      "Choose file",
+      "Import",
+      "Refresh",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_missions",
+    "title": "Mission drafts",
+    "body": "Local imported drafts are separate from server mission publication.",
+    "controls": [
+      "Choose file",
+      "Import",
+      "Delete",
+      "Refresh",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_mission_busy",
+    "title": "Mission drafts",
+    "body": "An import or deletion is still executing; closing cannot cancel the native mutation.",
+    "controls": [
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_empty",
+    "title": "Learn from trace",
+    "body": "Resolve local install status before starting a new candidate.",
+    "controls": [
+      "Learn",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_busy",
+    "title": "Learning\u2026",
+    "body": "The selected workflow has an operation in flight.",
+    "controls": [
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_candidate",
+    "title": "Candidate skill",
+    "body": "Edit a candidate, then review its exact package.",
+    "controls": [
+      "Review skill",
+      "Edit skill",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_review",
+    "title": "Exact installable package",
+    "body": "Approve the disclosed evaluation requests for the reviewed package.",
+    "controls": [
+      "Approve & test",
+      "Edit skill",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_results",
+    "title": "Held-out plan results",
+    "body": "Passing evaluation allows reviewing installation; it does not itself install or publish.",
+    "controls": [
+      "Review install",
+      "Edit skill",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_plan",
+    "title": "Installation preview",
+    "body": "The plan names package and ownership-marker digests.",
+    "controls": [
+      "Install skill",
+      "Edit skill",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_installed",
+    "title": "Installed in Codex",
+    "body": "Actual filesystem installation and UI reconciliation remain distinct.",
+    "controls": [
+      "Roll back",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_rollback_confirm",
+    "title": "Roll back this skill?",
+    "body": "Rollback verifies the installed package and marker are unchanged.",
+    "controls": [
+      "Roll back",
+      "Keep",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_skill_error",
+    "title": "Learn from trace",
+    "body": "The failed operation retains phase-specific recovery state.",
+    "controls": [
+      "Retry install",
+      "Learn",
+      "Edit skill",
+      "Select trace",
+      "Insights",
+      "Mission drafts",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_publication",
+    "title": "Public run",
+    "body": "Publication is a separately approved account operation.",
+    "controls": [
+      "Publish",
+      "Unpublish",
+      "Insights",
+      "Mission drafts",
+      "Learn",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "learning_closed",
+    "title": "No learning window open",
+    "body": "A detached local mutation or filesystem install can finish after closure.",
+    "controls": [
+      "Open"
+    ],
+    "kind": "client"
+  }
+]

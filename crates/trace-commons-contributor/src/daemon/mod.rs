@@ -50,6 +50,8 @@ pub mod device_codes;
 pub mod diagnostics_log;
 pub mod model_training_consent;
 pub(crate) mod setup_completion;
+#[cfg(test)]
+mod witness_blocked_tests;
 /// Moved to the platform crate, which the Insights crate shares; re-exported
 /// here at its old path.
 pub(crate) mod credential_store {
@@ -57,6 +59,7 @@ pub(crate) mod credential_store {
 }
 pub mod eligibility;
 pub mod enroll;
+pub(crate) mod first_trace;
 pub mod grant_terms;
 pub mod harness;
 pub mod health;
@@ -71,6 +74,7 @@ pub mod insights_glance;
 pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;
 pub mod insights_sessions;
+pub(crate) mod insights_skills;
 pub mod insights_submitted;
 pub mod insights_week;
 mod insights_week_work;
@@ -99,6 +103,7 @@ pub(crate) mod test_credential_store;
 pub(crate) mod os_secret_store {
     pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
 }
+mod pass_supervisor;
 pub mod past_sessions;
 pub mod payout_link;
 pub mod policy;
@@ -106,6 +111,7 @@ pub mod preview;
 pub mod preview_scheduler;
 pub mod private_inference;
 pub mod profile;
+pub mod project_bulk;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
@@ -118,6 +124,7 @@ pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
 pub(crate) mod subscription_usage;
+pub mod terms_state;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
@@ -127,10 +134,13 @@ mod token_cleanup;
 pub mod unenroll;
 pub mod unsure_spans;
 pub mod uploader;
+pub mod usage_analytics;
 pub mod watcher;
 #[cfg(windows)]
 pub mod win_pipe;
 pub mod withdraw;
+mod witness_retry;
+pub(crate) mod witness_worker;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -196,7 +206,7 @@ impl std::error::Error for StartFailure {}
 /// same state directory fails loudly instead of two of them racing over the
 /// same queue.
 ///
-/// `run_supervisor` is awaited *inline* here (not spawned and then joined)
+/// The supervise loop is awaited *inline* here (not spawned and then joined)
 /// on purpose: if this async fn's own future is itself dropped before
 /// completion -- the ordinary way a caller races the daemon against, say, a
 /// ctrl-C future in a `tokio::select!` -- Rust's structured-concurrency
@@ -210,9 +220,16 @@ impl std::error::Error for StartFailure {}
 /// daemon -- exactly the corruption `daemon.lock` exists to prevent. See
 /// `EmbeddedDaemon`'s and `run_supervisor`'s docs for the embedding case
 /// that still needs the loop to run as a background task.
+///
+/// This process is the daemon's own, so it stops on SIGTERM / SIGINT, and
+/// that stop runs the same cleanup as any other: the loop's epilogue, then
+/// `EmbeddedDaemon::close`, which removes `daemon.sock` and the lock file.
+/// The handlers are installed first, before anything that a signal's default
+/// action would leave behind exists.
 pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
+    let signal = signal_stream();
     let embedded = start_embedded(store).await?;
-    let result = run_supervisor(Arc::clone(&embedded.shared), dry_run).await;
+    let result = supervise(Arc::clone(&embedded.shared), dry_run, signal).await;
     embedded.close();
     result
 }
@@ -239,8 +256,8 @@ impl Drop for PrivateInferenceShutdown {
 /// divergent, view of the on-disk state.
 ///
 /// Deliberately does **not** itself run the supervise loop (the periodic
-/// watch/upload/digest/history pass): `run` awaits `run_supervisor` inline
-/// for cancel-safety (see its doc). An embedder that needs the loop running
+/// watch/upload/digest/history pass): `run` awaits that loop inline for
+/// cancel-safety (see its doc). An embedder that needs the loop running
 /// in the background, independent of any one call's lifetime, spawns
 /// `run_supervisor` itself and keeps the resulting `JoinHandle` for its own
 /// explicit shutdown.
@@ -530,14 +547,19 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
 }
 
 /// Run the periodic watch/upload/digest/history pass to completion -- i.e.,
-/// until `shared`'s shutdown flag or signal fires. This is `supervise`,
-/// exposed under a stable name so a caller holding only an
-/// `Arc<DaemonShared>` (`supervise` itself is private) can run it -- either
-/// awaited inline, as `run` does for cancel-safety, or `tokio::spawn`ed as
+/// until `shared`'s shutdown flag fires. This is `supervise`, exposed under
+/// a stable name so a caller holding only an `Arc<DaemonShared>`
+/// (`supervise` itself is private) can run it, typically `tokio::spawn`ed as
 /// its own background task by an embedder that needs the loop running
 /// independent of any one call's lifetime (see `EmbeddedDaemon`'s doc).
+///
+/// It does not listen for SIGTERM or SIGINT. The process belongs to the
+/// application embedding it, and a handler installed here would stay
+/// installed for the life of the process: the app would no longer end on
+/// SIGTERM, and the signal would only stop this loop. `run`, which owns
+/// its process, is the one that listens.
 pub async fn run_supervisor(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
-    supervise(shared, dry_run).await
+    supervise(shared, dry_run, pass_supervisor::never()).await
 }
 
 /// Run `f` -- blocking, non-yielding work with no `.await` of its own
@@ -574,14 +596,38 @@ pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 /// The retained drain task continues while the daemon runtime lives; the budget
 /// includes waiting for any in-progress startup. Expiry does not claim Off.
 ///
-/// A panic or dropped run future skips this awaited path. Closing or dropping
+/// A panic in a pass restarts the passes (`pass_supervisor`) rather than
+/// skipping this path; a dropped run future still skips it. Closing or dropping
 /// EmbeddedDaemon requests terminal cleanup as a backstop. Runtime/process
 /// destruction can interrupt pending streams; neither path promises complete
 /// drainage after the host runtime has gone away.
-async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+///
+/// `signal` is the outside request to stop: the process's SIGTERM / SIGINT
+/// for `run`, never for an embedder (`run_supervisor`).
+async fn supervise(
+    shared: Arc<ipc::DaemonShared>,
+    dry_run: bool,
+    mut signal: pass_supervisor::StopSignal,
+) -> Result<()> {
     shared.reconcile_private_inference().await;
     repair_stale_status_line(&shared, dry_run);
-    let result = supervise_passes(&shared, dry_run).await;
+    // A panic in a pass restarts the loop after a backoff rather than ending
+    // it for the life of the process; see `pass_supervisor`. The catch is
+    // inline, so `run`'s cancel-safety (its doc) holds.
+    let passes_shared = Arc::clone(&shared);
+    let passes = pass_supervisor::run_restarting(
+        &shared,
+        &mut signal,
+        pass_supervisor::Backoff::daemon(),
+        move |signal| {
+            let shared = Arc::clone(&passes_shared);
+            Box::pin(async move { supervise_passes(&shared, dry_run, signal).await })
+        },
+    );
+    let result = tokio::select! {
+        result = passes => result,
+        _ = crate::feature_flags::run(&shared, dry_run) => Ok(()),
+    };
     // However the loop ended (a signal included, which sets nothing else),
     // so work running off the loop stops at its next check: the Insights
     // counter pass between files, the settlement scan between traces.
@@ -601,7 +647,11 @@ fn repair_stale_status_line(shared: &ipc::DaemonShared, dry_run: bool) {
 
 /// The periodic work: watch, expire, and decide about digests, until asked to
 /// stop.
-async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+async fn supervise_passes(
+    shared: &Arc<ipc::DaemonShared>,
+    dry_run: bool,
+    sigterm: &mut pass_supervisor::StopSignal,
+) -> Result<()> {
     // K2 (#1173): a dev dry run is a dry run: no upload, history or
     // community pass, and no account admission refresh.
     let dry_run = dry_run || shared.dev_dry_run;
@@ -618,20 +668,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // the lease plus one of these ticks.
     let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // At most one abandoned-collection pass at a time; a slow one is not
-    // started again until it finished.
-    let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
     let mut lease_pass = tokio::task::JoinSet::new();
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
-    // The published estimate table's fetch schedule (OWNER DECISION E11).
-    // A local of this loop, so nothing that answers a request can reach it.
-    let mut table_schedule =
-        crate::credit_estimate_table::EstimateTableSchedule::starting(Utc::now());
-    // The contribution-mission slot's fetch schedule: due on the first tick
-    // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
-    // too.
-    let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
-    let mut sigterm = signal_stream();
+    // What one tick carries to the next. A local of this loop, so nothing
+    // that answers a request can reach it.
+    let mut tick_state = TickState::starting(Utc::now());
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
     // A person's approval asks for an upload pass when its hold ends
     // (`DaemonShared::request_upload_at`), so a trace they just sent goes
@@ -640,6 +681,15 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     let upload_wake = tokio::time::sleep(std::time::Duration::ZERO);
     tokio::pin!(upload_wake);
     let mut upload_wake_armed = false;
+    // An upload asked for before a restart after a panic
+    // (`pass_supervisor`) is still due; arm it here, as the notification
+    // that asked for it went to the loop that ended.
+    if let Some(at) = shared.upload_due() {
+        upload_wake
+            .as_mut()
+            .reset(upload_wake_deadline(at, Utc::now()));
+        upload_wake_armed = true;
+    }
 
     loop {
         // Checked at the top as well as after the select, so a request that
@@ -677,15 +727,12 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             }
             Some(done) = lease_pass.join_next(), if !lease_pass.is_empty() => {
                 // Detached too: a collection is recorded when it finishes,
-                // and a long one holds back no later lease tick.
+                // and a long one holds back no later lease tick. At most one
+                // runs per daemon, across a restart of this loop as well; a
+                // slow one is not started again until it finished.
                 let plans = done.unwrap_or_default();
-                if !plans.is_empty()
-                    && collection_pass.as_ref().is_none_or(|pass| pass.is_finished())
-                {
-                    let shared = Arc::clone(shared);
-                    collection_pass = Some(tokio::spawn(async move {
-                        managed::collect_abandoned_rows(&shared, plans, Utc::now()).await;
-                    }));
+                if !plans.is_empty() {
+                    let _ = managed::spawn_abandoned_collection(shared, plans, Utc::now());
                 }
             }
             _ = shared.upload_due_changed.notified() => {
@@ -705,98 +752,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 }
             }
             _ = ticker.tick() => {
-                let tick_started = std::time::Instant::now();
-                let now = Utc::now();
-                // Ahead of `watcher::tick` so the sources it builds via
-                // `source_roots_with_routing` see this pass's snapshot
-                // rather than the previous one. A no-op when nothing was
-                // declared; otherwise bounded by the ledger's own short
-                // timeout, so this cannot stall the tick.
-                shared.refresh_routing().await;
-                // Applies a switch a client set over a transport that does
-                // not reach `handle_request_async` (the C ABI's pre-start
-                // settings override writes the file directly), and notices
-                // a proxy that ended on its own. Cheap when there is
-                // nothing to do, which is the ordinary case.
-                shared.reconcile_private_inference().await;
-                // Fixed labels, never `error = %e`. These errors are
-                // `anyhow::Error`s whose outermost context routinely embeds
-                // a filesystem path -- `write_atomic_0600`'s "creating temp
-                // file <dir>/...", `ConfigStore::open`'s state-directory
-                // context, `load_receipts`' "reading <path>". Under a
-                // service manager these land in the journal, where the path
-                // carries the OS username. The condition worth logging is
-                // *which pass* failed, and health carries the rest.
-                // Ahead of the watcher, so an armed project's re-offers are
-                // re-approved in this same pass, and outside the `!dry_run`
-                // block below: it sends nothing, so pause, quiesce and dry-run
-                // do not hold it back (see `settle_near_ai_notice`).
-                settle_near_ai_notice(shared, now);
-                // What ingest says about account admission, read before every
-                // full pass for the gate's R3. See `account_admission`.
-                // Skipped, and any earlier answer dropped, in a dry run and
-                // when nothing is armed.
-                account_admission::refresh(shared, now, dry_run).await;
-                // No usable session: renew an expired one off the pass, so
-                // R3 can lift at the next pass. Not awaited.
-                if shared.account_admission.take_session_missing() {
-                    let _ = account_session_renewal::renew_off_pass(shared);
-                }
-                if watcher::tick(shared, now).await.is_err() {
-                    tracing::warn!(pass = "watch", "daemon pass failed");
-                }
-                // The settlement estimate's scan, when one is due. Started
-                // off the workers and not awaited, so a large machine never
-                // holds up this tick; it reads and sends nothing but local
-                // files, so pause and dry-run do not hold it back.
-                let _ = settlement_estimate::tick(shared, now);
-                subscription_usage::tick(shared, now);
-                // NEAR AI credit arriving, and a balance sample for the
-                // 24-hour change: on its own schedule, a no-op without a
-                // NEAR AI sign-in. Reads only; sends nothing about traces.
-                nearai_credential::arrivals::poll(shared, now).await;
-                expire_and_digest(shared, now);
-                // Everything above is read-only bookkeeping; uploading is
-                // what dry-run withholds.
-                if !dry_run {
-                    if let Err(e) = drain_approved(shared, now, tick_started).await {
-                        // The one detail that is safe and load-bearing: a
-                        // fail-closed precondition is a fixed label by
-                        // construction (`SubmitPreconditionFailure`), and
-                        // it is what suspends queue expiry.
-                        tracing::warn!(
-                            pass = "upload",
-                            reason = uploader::precondition_health_label(&e),
-                            "daemon pass failed"
-                        );
-                    }
-                    if refresh_history(shared, now).await.is_err() {
-                        tracing::warn!(pass = "history", "daemon pass failed");
-                    }
-                    if refresh_community(shared, now).await.is_err() {
-                        tracing::warn!(pass = "community", "daemon pass failed");
-                    }
-                    // On its own fixed schedule, not this tick's: most
-                    // ticks find it not due and return at once.
-                    refresh_estimate_table(shared, now, &mut table_schedule).await;
-                    // Likewise on its own schedule, and likewise a public,
-                    // anonymous read that sends nothing about this Mac.
-                    activity_missions::refresh_mission_slot(
-                        shared,
-                        now,
-                        &mut mission_slot_schedule,
-                    )
-                    .await;
-                }
-                // A fetched table ageing out is the clock alone: announced
-                // here, outside the `!dry_run` block, with no fetch.
-                shared.publish_estimate_in_force_change(now, None);
-                // Last, after every pass that announces its own changes: what
-                // the clock alone moved in `status` this tick. Outside the
-                // `!dry_run` block, since the clock moves in a dry run too.
-                shared.publish_time_driven_status(now);
+                run_tick(shared, dry_run, &mut tick_state).await;
             }
-            _ = &mut sigterm => {
+            _ = sigterm.as_mut() => {
                 tracing::info!("daemon stopping on signal");
                 return Ok(());
             }
@@ -806,6 +764,266 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             return Ok(());
         }
     }
+}
+
+/// What one tick of the periodic passes carries over to the next.
+struct TickState {
+    /// Each pass's own panic guard and backoff (`pass_supervisor`).
+    guards: pass_supervisor::PassGuards,
+    /// The published estimate table's fetch schedule (OWNER DECISION E11).
+    table_schedule: crate::credit_estimate_table::EstimateTableSchedule,
+    /// The contribution-mission slot's fetch schedule: due on the first tick
+    /// with a config, then every `MISSION_SLOT_REFRESH`.
+    mission_slot_schedule: activity_missions::MissionSlotSchedule,
+    /// The signed witness accepted-measurements list's fetch schedule: due
+    /// at start, then about daily (`witness::accepted_list`).
+    witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule,
+    /// When the published Terms of Service are fetched again: at start,
+    /// then every six hours (`terms_state::TermsSchedule`).
+    terms_schedule: terms_state::TermsSchedule,
+    /// Whether this process has re-read the witness-risk holds under the
+    /// current rule (`release_witness_risk_holds_once`).
+    witness_risk_holds_rechecked: bool,
+    /// Whether this process has skipped queued sessions with no message from
+    /// the person and re-read the nothing-matched holds under the witness
+    /// rule (`recheck_second_look_holds_once`).
+    second_look_holds_rechecked: bool,
+}
+
+impl TickState {
+    fn starting(now: chrono::DateTime<Utc>) -> Self {
+        Self {
+            guards: pass_supervisor::PassGuards::daemon(),
+            table_schedule: crate::credit_estimate_table::EstimateTableSchedule::starting(now),
+            mission_slot_schedule: activity_missions::MissionSlotSchedule::default(),
+            witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule::starting(
+                now,
+            ),
+            terms_schedule: terms_state::TermsSchedule::starting(),
+            witness_risk_holds_rechecked: false,
+            second_look_holds_rechecked: false,
+        }
+    }
+}
+
+/// One tick of the periodic passes, in order.
+///
+/// Each pass runs under its own panic guard (`PassGuards::run`): a pass that
+/// panics is skipped for a backoff of its own and the rest of the tick goes
+/// on, so one pass that panics on every run (a watcher pass meeting the same
+/// file each time) cannot hold back upload, expiry or history. A panic that
+/// poisoned shared state still unwinds out of the tick, and the whole-loop
+/// rule in `pass_supervisor::run_restarting` stops the passes.
+///
+/// Fail closed: the upload pass runs only in a tick where the passes its
+/// gate reads from ran -- account admission (the gate's R3 answer) and
+/// expiry. A panic in either withholds that tick's upload rather than
+/// sending on a stale answer or an entry that should have aged out.
+async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut TickState) {
+    let guards = &mut state.guards;
+    let tick_started = std::time::Instant::now();
+    let now = Utc::now();
+    // Ahead of `watcher::tick` so the sources it builds via
+    // `source_roots_with_routing` see this pass's snapshot rather than the
+    // previous one. A no-op when nothing was declared; otherwise bounded by
+    // the ledger's own short timeout, so this cannot stall the tick.
+    guards
+        .run(shared, "routing", shared.refresh_routing())
+        .await;
+    // Applies a switch a client set over a transport that does not reach
+    // `handle_request_async` (the C ABI's pre-start settings override writes
+    // the file directly), and notices a proxy that ended on its own. Cheap
+    // when there is nothing to do, which is the ordinary case.
+    guards
+        .run(
+            shared,
+            "private-inference",
+            shared.reconcile_private_inference(),
+        )
+        .await;
+    // Fixed labels, never `error = %e`. These errors are `anyhow::Error`s
+    // whose outermost context routinely embeds a filesystem path --
+    // `write_atomic_0600`'s "creating temp file <dir>/...",
+    // `ConfigStore::open`'s state-directory context, `load_receipts`'
+    // "reading <path>". Under a service manager these land in the journal,
+    // where the path carries the OS username. The condition worth logging is
+    // *which pass* failed, and health carries the rest.
+    //
+    // Ahead of the watcher, so an armed project's re-offers are re-approved
+    // in this same pass, and outside the `!dry_run` block below: it sends
+    // nothing, so pause, quiesce and dry-run do not hold it back (see
+    // `settle_near_ai_notice`).
+    guards
+        .run(shared, "near-ai-notice", async {
+            settle_near_ai_notice(shared, now);
+        })
+        .await;
+    // Once per process, and ahead of the watcher for the same reason: a
+    // hold the current rule no longer makes goes back to waiting, and the
+    // watcher re-approves it in this same pass. Sends nothing.
+    let witness_risk_holds_rechecked = &mut state.witness_risk_holds_rechecked;
+    guards
+        .run(shared, "witness-risk-holds", async {
+            let _ = release_witness_risk_holds_once(shared, now, witness_risk_holds_rechecked);
+        })
+        .await;
+    // The same, for the Scrub check's nothing-matched holds on a witness
+    // device, after skipping what has nothing to contribute.
+    let second_look_holds_rechecked = &mut state.second_look_holds_rechecked;
+    guards
+        .run(shared, "second-look-holds", async {
+            let _ = recheck_second_look_holds_once(shared, now, second_look_holds_rechecked);
+        })
+        .await;
+    // What ingest says about account admission, read before every full pass
+    // for the gate's R3. See `account_admission`. Skipped, and any earlier
+    // answer dropped, in a dry run and when nothing is armed.
+    let admission = guards
+        .run(shared, "account-admission", async {
+            account_admission::refresh(shared, now, dry_run).await;
+            // No usable session: renew an expired one off the pass, so R3
+            // can lift at the next pass. Not awaited.
+            if shared.account_admission.take_session_missing() {
+                let _ = account_session_renewal::renew_off_pass(shared);
+            }
+        })
+        .await;
+    if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+        .run(shared, "watch", watcher::tick(shared, now))
+        .await
+    {
+        tracing::warn!(pass = "watch", "daemon pass failed");
+    }
+    // The settlement estimate's scan, when one is due. Started off the
+    // workers and not awaited, so a large machine never holds up this tick;
+    // it reads and sends nothing but local files, so pause and dry-run do not
+    // hold it back.
+    guards
+        .run(shared, "settlement-estimate", async {
+            let _ = settlement_estimate::tick(shared, now);
+        })
+        .await;
+    guards
+        .run(shared, "subscription-usage", async {
+            subscription_usage::tick(shared, now);
+        })
+        .await;
+    // NEAR AI credit arriving, and a balance sample for the 24-hour change:
+    // on its own schedule, a no-op without a NEAR AI sign-in. Reads only;
+    // sends nothing about traces.
+    guards
+        .run(
+            shared,
+            "near-ai-arrivals",
+            nearai_credential::arrivals::poll(shared, now),
+        )
+        .await;
+    // Terms of Service: re-check the published version when due (start,
+    // then every six hours), then post an acceptance owed to the configured org. Both
+    // reach the network, so a dry run and a developer dry run skip them; the
+    // hold persisted from an earlier check still applies. A failed fetch
+    // changes nothing (`terms_state::apply_fetch`).
+    let terms_schedule = &mut state.terms_schedule;
+    guards
+        .run(shared, "terms", async {
+            if !dry_run && !shared.dev_dry_run {
+                terms_state::tick(shared, now, terms_schedule).await;
+            }
+        })
+        .await;
+    let expiry = guards
+        .run(shared, "expire", async {
+            expire_and_digest(shared, now);
+        })
+        .await;
+    // Everything above is read-only bookkeeping; uploading is what dry-run
+    // withholds.
+    if !dry_run {
+        if admission.ran() && expiry.ran() {
+            if let pass_supervisor::PassRun::Ran(Err(e)) = guards
+                .run(shared, "upload", drain_approved(shared, now, tick_started))
+                .await
+            {
+                // The one detail that is safe and load-bearing: a fail-closed
+                // precondition is a fixed label by construction
+                // (`SubmitPreconditionFailure`), and it is what suspends
+                // queue expiry.
+                tracing::warn!(
+                    pass = "upload",
+                    reason = uploader::precondition_health_label(&e),
+                    "daemon pass failed"
+                );
+            }
+        }
+        if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+            .run(shared, "history", refresh_history(shared, now))
+            .await
+        {
+            tracing::warn!(pass = "history", "daemon pass failed");
+        }
+        if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+            .run(shared, "community", refresh_community(shared, now))
+            .await
+        {
+            tracing::warn!(pass = "community", "daemon pass failed");
+        }
+        // On its own fixed schedule, not this tick's: most ticks find it not
+        // due and return at once.
+        let table_schedule = &mut state.table_schedule;
+        guards
+            .run(
+                shared,
+                "estimate-table",
+                refresh_estimate_table(shared, now, table_schedule),
+            )
+            .await;
+        // The signed witness accepted-measurements list: at start, then
+        // about daily. A public, anonymous read; a build with no trusted
+        // list key never fetches.
+        let witness_list_schedule = &mut state.witness_list_schedule;
+        guards
+            .run(
+                shared,
+                "witness-accepted-list",
+                refresh_witness_accepted_list(shared, now, witness_list_schedule),
+            )
+            .await;
+        // Likewise on its own schedule, and likewise a public, anonymous read
+        // that sends nothing about this Mac.
+        let mission_slot_schedule = &mut state.mission_slot_schedule;
+        guards
+            .run(
+                shared,
+                "mission-slot",
+                activity_missions::refresh_mission_slot(shared, now, mission_slot_schedule),
+            )
+            .await;
+        // Anonymous usage counts, US only: asks the region every few days and
+        // sends finished weeks. Most ticks find nothing due and return
+        // without a request.
+        guards
+            .run(
+                shared,
+                "usage-analytics",
+                usage_analytics::tick(shared, now),
+            )
+            .await;
+    }
+    // A fetched table ageing out is the clock alone: announced here, outside
+    // the `!dry_run` block, with no fetch.
+    guards
+        .run(shared, "estimate-in-force", async {
+            shared.publish_estimate_in_force_change(now, None);
+        })
+        .await;
+    // Last, after every pass that announces its own changes: what the clock
+    // alone moved in `status` this tick. Outside the `!dry_run` block, since
+    // the clock moves in a dry run too.
+    guards
+        .run(shared, "time-driven-status", async {
+            shared.publish_time_driven_status(now);
+        })
+        .await;
 }
 
 /// When to wake for an upload pass asked for at `at`: just after it, by the
@@ -892,6 +1110,49 @@ fn cancel_account_admission_on_refusal(shared: &ipc::DaemonShared, reason_label:
     ) {
         shared.account_admission.refused();
     }
+}
+
+/// How long an entry refused for a spent account allowance waits when
+/// ingest named no reset (an allowance with no period) and nothing else says
+/// when it might lift.
+const ACCOUNT_LIMIT_DEFAULT_RETRY: chrono::Duration = chrono::Duration::hours(1);
+
+/// How long to wait after an `account_limit_reached` refusal: the wait ingest
+/// named, else [`ACCOUNT_LIMIT_DEFAULT_RETRY`], capped at the status read's
+/// own longest hold (`account_admission::MAX_HOLD`), with a small random
+/// extra so contributors whose allowances reset together do not all return
+/// in the same second.
+fn account_limit_retry_wait(hint_secs: Option<u32>, random: u64) -> chrono::Duration {
+    let cap = u32::try_from(account_admission::MAX_HOLD.num_seconds()).unwrap_or(u32::MAX);
+    let default = u32::try_from(ACCOUNT_LIMIT_DEFAULT_RETRY.num_seconds()).unwrap_or(cap);
+    let hint = hint_secs.unwrap_or(default).clamp(1, cap);
+    chrono::Duration::seconds(i64::from(crate::retry_jitter::hint_with_extra_secs(
+        hint, cap, random,
+    )))
+}
+
+/// Whether the account's allowance is known to be spent at `now`, so the
+/// upload pass sends nothing: an entry is waiting out an
+/// `account_limit_reached` refusal (persisted, so it survives a restart), or
+/// the last status read said the allowance is spent until a time still
+/// ahead (`account_admission`). Every send would be refused until then;
+/// sending them anyway would spend a request a pass finding that out again.
+fn account_allowance_held(
+    shared: &ipc::DaemonShared,
+    cfg: &crate::config::ContributorConfig,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    shared
+        .account_admission
+        .spent_until(cfg)
+        .is_some_and(|until| until > now)
+        || shared
+            .queue
+            .lock()
+            .expect("queue lock")
+            .all()
+            .iter()
+            .any(|e| e.waiting_on_account_allowance(now))
 }
 
 /// The diagnostics event an upload stopped in flight records, label-only.
@@ -992,6 +1253,11 @@ pub(crate) async fn race_upload<F: std::future::Future>(
 /// Upload everything that has been approved, whether by the contributor or by
 /// their standing opt-in for the project.
 ///
+/// An approved entry that still needs a witness review is not uploaded
+/// here: after every gate below it is handed to the witness worker
+/// (`witness_worker`), which pins the certified review, and a later pass
+/// uploads that. This pass never waits on the witness.
+///
 /// One `SubmitContext` covers the whole pass, so the claim is minted once and
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
@@ -1032,6 +1298,12 @@ async fn drain_approved(
     }
     // Held while `unenroll` waits for an upload in flight to settle.
     if shared.uploads_held.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    // Held until the published in-effect Terms of Service version is
+    // accepted (`terms_state`). Its own flag, never the pause: approved
+    // entries stay approved and go out once it lifts.
+    if shared.terms_held.load(Ordering::SeqCst) {
         return Ok(());
     }
     // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
@@ -1220,6 +1492,11 @@ async fn drain_approved(
     if crate::config::consent_hold(Some(&cfg)).is_some() {
         return Ok(());
     }
+    // The account's allowance is spent: every entry stays approved, as it
+    // is, and goes once the period has reset.
+    if account_allowance_held(shared, &cfg, now) {
+        return Ok(());
+    }
     let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
         s.near_ai.clone()
@@ -1261,9 +1538,10 @@ async fn drain_approved(
     let store =
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
-    // Nobody is waiting on this pass, so its witness requests say so, and a
-    // witness that keeps a slot for a person's review turns these away
-    // first (#1014).
+    // The pass makes no witness call of its own (the witness worker does,
+    // see `witness_worker`); declared background all the same, so any call
+    // reached through this context is turned away first by a witness that
+    // keeps a slot for a person's review (#1014).
     ctx.witness_as_background();
 
     let sources = crate::source::all_sources(&source_roots);
@@ -1279,35 +1557,28 @@ async fn drain_approved(
     // `?` threw all of that away, including the very label that suspends
     // expiry.
     let mut aborted: Option<anyhow::Error> = None;
-    // Set when the witness answers that it is at capacity: the instant,
-    // before jitter, it asked not to be asked again before, and the delay
-    // it gave. Every later entry in this pass that would need the witness
-    // is held until then instead of being sent, so a busy witness is asked
-    // once per pass rather than once per waiting session.
-    let mut witness_busy_until: Option<(chrono::DateTime<Utc>, u32)> = None;
     // Entries this pass has claimed for upload, against
     // `MAX_UPLOADS_PER_PASS`, and whether ingest's rate limit has refused
     // one. Either ends the pass; what is left stays approved for the next.
     let mut claimed_this_pass: usize = 0;
     let mut rate_limited = false;
+    // Whether ingest refused an entry because the account's allowance is
+    // spent. Ends the pass the same way.
+    let mut account_limited = false;
     // Whether ingest or the issuer was unavailable for an entry this pass
     // (#1358). Ends the pass the same way.
     let mut outage = false;
     // Listed on first use; see `PassSessions`.
     let mut pass_sessions: Option<PassSessions> = None;
+    // Whether this pass handed the witness worker anything new.
+    let mut enqueued_witness_jobs = false;
 
     for entry in approved {
         if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
             break;
         }
-        if let Some((until, retry_after_secs)) = witness_busy_until
-            && !entry.holds_witness_certificate()
-        {
-            let mut q = shared.queue.lock().expect("queue lock");
-            let held_until = until + witness_capacity_jitter(entry.entry_id, retry_after_secs);
-            if q.defer_for_witness_capacity(entry.entry_id, held_until) {
-                changed = true;
-            }
+        // Already with the witness worker: its result decides this entry.
+        if shared.witness_worker.is_in_flight(entry.entry_id) {
             continue;
         }
         // Subscribed before the claim, so an interrupt raised any time after
@@ -1331,7 +1602,9 @@ async fn drain_approved(
             // `unenroll` is settling uploads: nothing new goes in flight.
             // Checked under the queue lock `unenroll` checks `Uploading`
             // under, so the two cannot interleave.
-            if shared.uploads_held.load(Ordering::SeqCst) {
+            if shared.uploads_held.load(Ordering::SeqCst)
+                || shared.terms_held.load(Ordering::SeqCst)
+            {
                 break;
             }
             drop(policy);
@@ -1350,6 +1623,17 @@ async fn drain_approved(
             if current.approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice()) {
                 q.revoke_approval(entry.entry_id, queue::REASON_SCOPES_CHANGED);
                 changed = true;
+                continue;
+            }
+            // An entry that still needs the witness goes to the witness
+            // worker instead of being claimed, every gate above passed. The
+            // pass never waits on the witness (owner, 2026-11-05): the
+            // worker pins the certified bytes on the approved entry, and a
+            // later pass uploads them through the witness-pin path.
+            if witness_worker::needs_witness_job(&cfg, &current) {
+                if shared.witness_worker.enqueue(current, now) {
+                    enqueued_witness_jobs = true;
+                }
                 continue;
             }
             if !q.claim_for_upload(entry.entry_id, now) {
@@ -1442,35 +1726,11 @@ async fn drain_approved(
             }
         };
 
-        // Only a real upload counts toward the arming offer. The offer's
-        // whole claim is "you have contributed from here N times", so N
-        // counts sends, not settled entries. `AlreadySubmitted` means the
-        // content hash was already held and nothing went out.
-        //
-        // Defensive rather than a live fix, and worth saying so: this arm is
-        // not currently reachable through the watcher. A queue entry's id is
-        // `entry_id_for(&transcript.session_hash)` (`watcher.rs`), so two
-        // sessions with identical bytes collapse into one entry before
-        // anything is uploaded, and the duplicate that would have produced
-        // `AlreadySubmitted` never becomes a second entry. Verified by
-        // trying to provoke it end to end, both with the twin written after
-        // the first upload and with both present from the start: one entry,
-        // one send, either way.
-        //
-        // It is gated anyway because the reachability is a property of the
-        // watcher's id scheme, not of this decision, and nothing here would
-        // notice if that scheme changed. No test accompanies it for the same
-        // reason -- one would pass with or without the gate, which is a
-        // claim of coverage rather than coverage.
-        //
-        // The queue bookkeeping below still treats the two alike: either way
-        // the entry is settled server-side and should leave the queue.
-        let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
         // `submit_one` reports ingest's refusal of the upload itself as
         // `Failed`. `Refused` carries no rule-3 label today, but the two
         // arms are read alike below for admission refusals, so they are
         // here too: one call, which neither arm can lose.
-        if let uploader::UploadDecision::Refused { reason_label }
+        if let uploader::UploadDecision::Refused { reason_label, .. }
         | uploader::UploadDecision::Failed { reason_label } = &decision
         {
             cancel_account_admission_on_refusal(shared, reason_label);
@@ -1486,281 +1746,29 @@ async fn drain_approved(
         } else {
             session_ref
         };
-        let mut q = shared.queue.lock().expect("queue lock");
-        match decision {
-            uploader::UploadDecision::Uploaded {
-                submission_id,
-                receipt,
-                unattended_redaction,
-            } => {
-                settle_uploaded(
-                    shared,
-                    q,
-                    &entry,
-                    submission_id,
-                    receipt,
-                    unattended_redaction,
-                    newly_uploaded,
-                );
-                uploaded_this_pass = true;
-            }
-            uploader::UploadDecision::AlreadySubmitted { submission_id } => {
-                q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
-                q.set_submission_id(entry.entry_id, submission_id);
-                uploaded_this_pass = true;
-            }
-            uploader::UploadDecision::Superseded { new_hash } => {
-                // Use the adapter's grouped/database observation, not the virtual path's stat.
-                let size = session_ref.size_bytes;
-                let written = eligibility::last_write(
-                    session_ref.group_modified_at,
-                    std::fs::metadata(&entry.path)
-                        .ok()
-                        .and_then(|m| m.modified().ok()),
-                );
-                if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
-                    let max = shared
-                        .settings
-                        .lock()
-                        .expect("settings lock")
-                        .max_queue_entries;
-                    let _ = q.upsert(fresh, max);
-                }
-            }
-            uploader::UploadDecision::Refused { reason_label } => {
-                // Decision 1: a refusal for an admission reason is evidence
-                // about the entry, and the entry stops claiming otherwise.
-                // Every other refusal label says nothing about
-                // admissibility and rewrites nothing -- see
-                // `contribution_eligibility::writeback_for`.
-                if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
-                    q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
-                }
-                // The same retraction on the mark, which every contributor
-                // sees. A row still saying its session carries proof, after
-                // a send of that session was turned away for want of that
-                // proof, is the defect one layer up.
-                if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
-                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
-                }
-                q.set_state(
-                    entry.entry_id,
-                    queue::QueueState::Refused,
-                    Some(reason_label),
-                );
-            }
-            uploader::UploadDecision::ApprovalStale { reason_label } => {
-                // The same re-offer path the consent-scope guard above
-                // uses, and for the same reason: the approval covered
-                // terms that no longer hold, so it is revoked and the
-                // entry goes back in front of the contributor rather than
-                // being recorded as a refusal of the trace itself.
-                //
-                // Deliberately not `Queue::supersede`: that path is keyed
-                // on a *changed* session hash, and mints a replacement
-                // entry whose id is derived from it. Here the session hash
-                // is unchanged -- that is the whole point of the finding --
-                // so the replacement's id would collide with the entry
-                // just marked `Superseded`, `upsert` would treat it as
-                // already tracked, and the entry would never be re-offered
-                // at all.
-                q.revoke_approval(entry.entry_id, &reason_label);
-            }
-            uploader::UploadDecision::HeldForReview {
-                reason_label,
-                pin,
-                attested_inference,
-                would_send_bytes,
-            } => {
-                // Held with the witness's certified bytes pinned. Nothing
-                // re-approves it: the reason is one of
-                // `REASONS_NEEDING_A_PERSON`.
-                q.hold_with_witness_pin(
-                    entry.entry_id,
-                    &reason_label,
-                    &pin,
-                    attested_inference,
-                    would_send_bytes,
-                );
-            }
-            uploader::UploadDecision::HeldForSecondLook {
-                reason_label,
-                reasons,
-                pin,
-                would_send_bytes,
-            } => {
-                // The Scrub check (K4 of #1118). Under Automatic the reason
-                // is one of `REASONS_NEEDING_A_PERSON`, so nothing
-                // re-approves it. The envelope the hold was decided on is
-                // pinned with its counts beside the digest
-                // (`QueueEntry::scrub`), like a preview's. Labels only.
-                tracing::info!(
-                    reason = reason_label.as_str(),
-                    second_look = ?reasons,
-                    "held a session approved on the contributor's behalf for a person"
-                );
-                q.hold_with_scrub_pin_at(
-                    entry.entry_id,
-                    &reason_label,
-                    pin.as_ref()
-                        .map(|(digest, counts)| (digest.as_str(), *counts)),
-                    would_send_bytes,
-                    now,
-                );
-            }
-            uploader::UploadDecision::Failed { reason_label } => {
-                // Same rule on the failure side: `submit_one` can report an
-                // admission refusal either way round depending on where in
-                // the pipeline it surfaced, and a row that kept its claim
-                // on one of the two paths would be the same defect with a
-                // narrower reproduction.
-                if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
-                    q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
-                }
-                if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
-                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
-                }
-                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION
-                    && q.record_transient_redaction_failure(entry.entry_id)
-                        >= MAX_TRANSIENT_REDACTION_FAILURES
-                {
-                    // The budget is spent. Stop re-sending the session to
-                    // the classifier and put it in front of a person, held
-                    // so a standing opt-in does not simply re-approve it.
-                    q.record_attempt(entry.entry_id, None);
-                    q.revoke_approval(
-                        entry.entry_id,
-                        crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
-                    );
-                } else if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
-                    let attempt = q
-                        .get(entry.entry_id)
-                        .map(|e| e.attempts.saturating_add(1))
-                        .unwrap_or(1);
-                    // `now` was sampled at tick start. Classifier retries may
-                    // take longer than our backoff, so include monotonic time
-                    // spent in this pass before scheduling the next attempt.
-                    let observed_at = observed_at();
-                    q.record_attempt(
-                        entry.entry_id,
-                        Some(observed_at + transient_redaction_retry_delay(attempt)),
-                    );
-                    // Keep this approval live so its cancel, pin, consent,
-                    // project-policy, and source guards still apply at retry.
-                    q.set_state(
-                        entry.entry_id,
-                        queue::QueueState::Approved,
-                        Some(reason_label),
-                    );
-                } else if let Some(kind) = transient_upload_kind(&reason_label) {
-                    // Nothing was judged (#1358). The entry keeps its
-                    // approval, and with it every guard a retry re-runs,
-                    // until the budget is spent; then it ends `Failed`
-                    // under the same label, which reads as what it is.
-                    let observed_at = observed_at();
-                    let (failures, run_started) =
-                        q.record_transient_upload_failure(entry.entry_id, observed_at);
-                    if transient_upload_budget_spent(failures, run_started, observed_at) {
-                        q.record_attempt(entry.entry_id, None);
-                        q.set_state(
-                            entry.entry_id,
-                            queue::QueueState::Failed,
-                            Some(reason_label),
-                        );
-                    } else {
-                        q.record_attempt(
-                            entry.entry_id,
-                            Some(
-                                observed_at
-                                    + transient_upload_retry_wait(
-                                        failures,
-                                        ctx.last_unavailable_retry_after(),
-                                        crate::retry_jitter::random_u64(),
-                                    ),
-                            ),
-                        );
-                        q.set_state(
-                            entry.entry_id,
-                            queue::QueueState::Approved,
-                            Some(reason_label),
-                        );
-                    }
-                    if kind == TransientUpload::Outage {
-                        outage = true;
-                    }
-                } else {
-                    q.record_attempt(entry.entry_id, None);
-                    q.set_state(
-                        entry.entry_id,
-                        queue::QueueState::Failed,
-                        Some(reason_label),
-                    );
-                }
-            }
-            uploader::UploadDecision::WitnessSaturated { retry_after_secs } => {
-                // Nothing was judged, so nothing is refused: the entry keeps
-                // its approval and is not claimable again until the witness
-                // has had the time it asked for, doubling while it stays
-                // busy. Never a per-session attempt limit, for the reason
-                // the transient classifier retry has none.
-                let attempt = q
-                    .get(entry.entry_id)
-                    .map(|e| e.attempts.saturating_add(1))
-                    .unwrap_or(1);
-                let observed_at = observed_at();
-                let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
-                q.record_attempt(
-                    entry.entry_id,
-                    Some(until + witness_capacity_jitter(entry.entry_id, retry_after_secs)),
-                );
-                q.set_state(
-                    entry.entry_id,
-                    queue::QueueState::Approved,
-                    Some(crate::submit::REASON_WITNESS_SATURATED.to_string()),
-                );
-                witness_busy_until = Some((until, retry_after_secs));
-            }
-            decision @ (uploader::UploadDecision::RateLimited { retry_after_secs }
-            | uploader::UploadDecision::Paced { retry_after_secs }) => {
-                // Sending too fast is not a verdict on the session: it keeps
-                // its approval and is not claimable again until the wait has
-                // passed. No per-session attempt limit, for the reason the
-                // witness capacity retry has none. A server `429` records an
-                // attempt; this daemon's own burst guard (`Paced`) does not,
-                // since it sent nothing, and the witness and classifier
-                // backoffs grow with `attempts`.
-                let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
-                // A server `429` hint is a floor with a random extra on top,
-                // so contributors told the same wait do not return together.
-                // The daemon's own pacing is exact: it is not a herd.
-                let wait = if matches!(decision, uploader::UploadDecision::Paced { .. }) {
-                    hint
-                } else {
-                    crate::retry_jitter::hint_with_extra_secs(
-                        hint,
-                        crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
-                        crate::retry_jitter::random_u64(),
-                    )
-                };
-                let retry_at = observed_at() + chrono::Duration::seconds(i64::from(wait));
-                if matches!(decision, uploader::UploadDecision::Paced { .. }) {
-                    q.defer_without_attempt(entry.entry_id, retry_at);
-                } else {
-                    q.record_attempt(entry.entry_id, Some(retry_at));
-                }
-                q.set_state(
-                    entry.entry_id,
-                    queue::QueueState::Approved,
-                    Some(crate::submit::REASON_RATE_LIMITED.to_string()),
-                );
-                rate_limited = true;
-            }
-        }
+        let q = shared.queue.lock().expect("queue lock");
+        let applied = apply_upload_decision(
+            shared,
+            q,
+            &entry,
+            decision,
+            &session_ref,
+            now,
+            &observed_at,
+            ctx.last_unavailable_retry_after(),
+            ctx.last_account_limit_retry_after(),
+        );
+        note_witness_blocked(shared, &applied);
+        uploaded_this_pass |= applied.uploaded;
+        rate_limited |= applied.rate_limited;
+        account_limited |= applied.account_limited;
+        outage |= applied.outage;
         changed = true;
-        if rate_limited || outage {
-            // The limit is per device, not per session, and an outage is
-            // server-wide: every entry after this one would be turned away
-            // the same way. They stay approved, untouched, for the next pass.
+        if rate_limited || account_limited || outage {
+            // The limit is per device, not per session, the allowance is per
+            // account, and an outage is server-wide: every entry after this
+            // one would be turned away the same way. They stay approved,
+            // untouched, for the next pass.
             break;
         }
     }
@@ -1774,6 +1782,12 @@ async fn drain_approved(
         if q.release_in_flight() {
             changed = true;
         }
+    }
+
+    // Start whatever the witness worker can take now. Spawned, never
+    // awaited: the rest of this tick does not wait on the witness.
+    if enqueued_witness_jobs || shared.witness_worker.queued() > 0 {
+        witness_worker::pump(shared, observed_at());
     }
 
     if changed {
@@ -1804,6 +1818,389 @@ async fn drain_approved(
         return Err(e);
     }
     Ok(())
+}
+
+/// What applying one upload decision means for the rest of its pass.
+#[derive(Debug, Default, Clone, Copy)]
+struct AppliedDecision {
+    /// A trace went on the wire (or was already held by ingest).
+    uploaded: bool,
+    /// The witness asked not to be asked again before this instant, with
+    /// the delay it gave.
+    witness_busy_until: Option<(chrono::DateTime<Utc>, u32)>,
+    /// Ingest's rate limit refused this entry; the pass ends.
+    rate_limited: bool,
+    /// Ingest refused this entry because the account's allowance is spent;
+    /// the pass ends.
+    account_limited: bool,
+    /// Ingest or the issuer was unavailable; the pass ends.
+    outage: bool,
+    /// The witness kept this entry from being sent, and why
+    /// (`uploader::witness_blocked_label`). The caller counts it with
+    /// [`note_witness_blocked`] once the queue guard is released.
+    witness_blocked: Option<trace_commons_protocol::witness_blocked::WitnessBlockedLabel>,
+}
+
+/// Count one submission the witness kept from being sent, for the report
+/// the next history read carries (`refresh_history`). Labels only. The
+/// caller must not hold the queue guard; the caller saves the state.
+fn note_witness_blocked(shared: &ipc::DaemonShared, applied: &AppliedDecision) -> bool {
+    let Some(label) = applied.witness_blocked else {
+        return false;
+    };
+    shared
+        .state
+        .lock()
+        .expect("state lock")
+        .witness_blocked
+        .record(label);
+    true
+}
+
+/// Record one entry's upload decision on the queue. Shared by the upload
+/// pass and the witness worker (`witness_worker`), so a refusal, a retry or
+/// a hold reads the same whichever of the two reached it.
+///
+/// Takes the queue guard by value: an upload hands it on to
+/// `settle_uploaded`, which drops it before policy is locked.
+#[allow(clippy::too_many_arguments)]
+fn apply_upload_decision(
+    shared: &ipc::DaemonShared,
+    mut q: std::sync::MutexGuard<'_, queue::Queue>,
+    entry: &queue::QueueEntry,
+    decision: uploader::UploadDecision,
+    session_ref: &crate::source::SessionRef,
+    now: chrono::DateTime<Utc>,
+    observed_at: &dyn Fn() -> chrono::DateTime<Utc>,
+    unavailable_retry_after: Option<u32>,
+    account_limit_retry_after: Option<u32>,
+) -> AppliedDecision {
+    let mut applied = AppliedDecision {
+        witness_blocked: uploader::witness_blocked_label(&decision),
+        ..AppliedDecision::default()
+    };
+    // Only a real upload counts toward the arming offer. The offer's
+    // whole claim is "you have contributed from here N times", so N
+    // counts sends, not settled entries. `AlreadySubmitted` means the
+    // content hash was already held and nothing went out.
+    //
+    // Defensive rather than a live fix, and worth saying so: this arm is
+    // not currently reachable through the watcher. A queue entry's id is
+    // `entry_id_for(&transcript.session_hash)` (`watcher.rs`), so two
+    // sessions with identical bytes collapse into one entry before
+    // anything is uploaded, and the duplicate that would have produced
+    // `AlreadySubmitted` never becomes a second entry. Verified by
+    // trying to provoke it end to end, both with the twin written after
+    // the first upload and with both present from the start: one entry,
+    // one send, either way.
+    //
+    // It is gated anyway because the reachability is a property of the
+    // watcher's id scheme, not of this decision, and nothing here would
+    // notice if that scheme changed. No test accompanies it for the same
+    // reason -- one would pass with or without the gate, which is a
+    // claim of coverage rather than coverage.
+    //
+    // The queue bookkeeping below still treats the two alike: either way
+    // the entry is settled server-side and should leave the queue.
+    let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
+    match decision {
+        uploader::UploadDecision::Uploaded {
+            submission_id,
+            receipt,
+            unattended_redaction,
+        } => {
+            settle_uploaded(
+                shared,
+                q,
+                entry,
+                submission_id,
+                receipt,
+                unattended_redaction,
+                newly_uploaded,
+            );
+            applied.uploaded = true;
+        }
+        uploader::UploadDecision::AlreadySubmitted { submission_id } => {
+            q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
+            q.set_submission_id(entry.entry_id, submission_id);
+            applied.uploaded = true;
+        }
+        uploader::UploadDecision::Superseded { new_hash } => {
+            // Use the adapter's grouped/database observation, not the virtual path's stat.
+            let size = session_ref.size_bytes;
+            let written = eligibility::last_write(
+                session_ref.group_modified_at,
+                std::fs::metadata(&entry.path)
+                    .ok()
+                    .and_then(|m| m.modified().ok()),
+            );
+            if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
+                let max = shared
+                    .settings
+                    .lock()
+                    .expect("settings lock")
+                    .max_queue_entries;
+                let _ = q.upsert(fresh, max);
+            }
+        }
+        uploader::UploadDecision::Refused {
+            reason_label,
+            review_limits,
+        } => {
+            // Decision 1: a refusal for an admission reason is evidence
+            // about the entry, and the entry stops claiming otherwise.
+            // Every other refusal label says nothing about
+            // admissibility and rewrites nothing -- see
+            // `contribution_eligibility::writeback_for`.
+            if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
+                q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
+            }
+            // The same retraction on the mark, which every contributor
+            // sees. A row still saying its session carries proof, after
+            // a send of that session was turned away for want of that
+            // proof, is the defect one layer up.
+            if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
+                q.record_attestation(entry.entry_id, mark.state, mark.reason);
+            }
+            q.set_state(
+                entry.entry_id,
+                queue::QueueState::Refused,
+                Some(reason_label),
+            );
+            // Kept only for a session too large to review; cleared for
+            // every other refusal.
+            q.note_review_limits(entry.entry_id, review_limits);
+            // A no-op unless the refusal was a caught panic, which a
+            // newer build offers again.
+            q.note_refusal_version(entry.entry_id, env!("CARGO_PKG_VERSION"));
+        }
+        uploader::UploadDecision::ApprovalStale { reason_label } => {
+            // The same re-offer path the consent-scope guard above
+            // uses, and for the same reason: the approval covered
+            // terms that no longer hold, so it is revoked and the
+            // entry goes back in front of the contributor rather than
+            // being recorded as a refusal of the trace itself.
+            //
+            // Deliberately not `Queue::supersede`: that path is keyed
+            // on a *changed* session hash, and mints a replacement
+            // entry whose id is derived from it. Here the session hash
+            // is unchanged -- that is the whole point of the finding --
+            // so the replacement's id would collide with the entry
+            // just marked `Superseded`, `upsert` would treat it as
+            // already tracked, and the entry would never be re-offered
+            // at all.
+            q.revoke_approval(entry.entry_id, &reason_label);
+        }
+        uploader::UploadDecision::HeldForReview {
+            reason_label,
+            pin,
+            attested_inference,
+            would_send_bytes,
+        } => {
+            // Held with the witness's certified bytes pinned. Nothing
+            // re-approves it: the reason is one of
+            // `REASONS_NEEDING_A_PERSON`.
+            q.hold_with_witness_pin(
+                entry.entry_id,
+                &reason_label,
+                &pin,
+                attested_inference,
+                would_send_bytes,
+            );
+        }
+        uploader::UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+            would_send_bytes,
+        } => {
+            // The Scrub check (K4 of #1118). Under Automatic the reason
+            // is one of `REASONS_NEEDING_A_PERSON`, so nothing
+            // re-approves it. The envelope the hold was decided on is
+            // pinned with its counts beside the digest
+            // (`QueueEntry::scrub`), like a preview's. Labels only.
+            tracing::info!(
+                reason = reason_label.as_str(),
+                second_look = ?reasons,
+                "held a session approved on the contributor's behalf for a person"
+            );
+            q.hold_with_scrub_pin_at(
+                entry.entry_id,
+                &reason_label,
+                pin.as_ref()
+                    .map(|(digest, counts)| (digest.as_str(), *counts)),
+                would_send_bytes,
+                now,
+            );
+        }
+        uploader::UploadDecision::Failed { reason_label } => {
+            // Same rule on the failure side: `submit_one` can report an
+            // admission refusal either way round depending on where in
+            // the pipeline it surfaced, and a row that kept its claim
+            // on one of the two paths would be the same defect with a
+            // narrower reproduction.
+            if let Some(verdict) = contribution_eligibility::writeback_for(&reason_label) {
+                q.record_eligibility(entry.entry_id, verdict.state, verdict.reason);
+            }
+            if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
+                q.record_attestation(entry.entry_id, mark.state, mark.reason);
+            }
+            if reason_label == crate::submit::REASON_TRANSIENT_REDACTION
+                && q.record_transient_redaction_failure(entry.entry_id)
+                    >= MAX_TRANSIENT_REDACTION_FAILURES
+            {
+                // The budget is spent. Stop re-sending the session to
+                // the classifier and put it in front of a person, held
+                // so a standing opt-in does not simply re-approve it.
+                q.record_attempt(entry.entry_id, None);
+                q.revoke_approval(
+                    entry.entry_id,
+                    crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+                );
+            } else if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
+                let attempt = q
+                    .get(entry.entry_id)
+                    .map(|e| e.attempts.saturating_add(1))
+                    .unwrap_or(1);
+                // `now` was sampled at tick start. Classifier retries may
+                // take longer than our backoff, so include monotonic time
+                // spent in this pass before scheduling the next attempt.
+                let observed_at = observed_at();
+                q.record_attempt(
+                    entry.entry_id,
+                    Some(observed_at + transient_redaction_retry_delay(attempt)),
+                );
+                // Keep this approval live so its cancel, pin, consent,
+                // project-policy, and source guards still apply at retry.
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(reason_label),
+                );
+            } else if reason_label == queue::REASON_ACCOUNT_LIMIT_REACHED {
+                // The account's allowance for the period is spent. Not a
+                // verdict on the session: it keeps its approval, and every
+                // guard a send re-runs, and waits until the allowance has
+                // reset. No attempt limit, since the wait is ingest's own.
+                // While it waits nothing else is sent either
+                // (`account_allowance_held`).
+                let retry_at = observed_at()
+                    + account_limit_retry_wait(
+                        account_limit_retry_after,
+                        crate::retry_jitter::random_u64(),
+                    );
+                q.record_attempt(entry.entry_id, Some(retry_at));
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(reason_label),
+                );
+                applied.account_limited = true;
+            } else if let Some(kind) = transient_upload_kind(&reason_label) {
+                // Nothing was judged (#1358). The entry keeps its
+                // approval, and with it every guard a retry re-runs,
+                // until the budget is spent; then it ends `Failed`
+                // under the same label, which reads as what it is.
+                // A witness that cannot review has no budget (owner,
+                // 2026-11-12): it judged nothing, so nothing calls for a
+                // new decision, and the entry is retried at the capped
+                // wait, an hour, for as long as the outage lasts. Before
+                // this, six hours of a classifier outage handed every
+                // approval it touched back to the contributor.
+                let observed_at = observed_at();
+                let (failures, run_started) =
+                    q.record_transient_upload_failure(entry.entry_id, observed_at);
+                if kind != TransientUpload::Witness
+                    && transient_upload_budget_spent(failures, run_started, observed_at)
+                {
+                    q.record_attempt(entry.entry_id, None);
+                    q.set_state(
+                        entry.entry_id,
+                        queue::QueueState::Failed,
+                        Some(reason_label),
+                    );
+                } else {
+                    let random = crate::retry_jitter::random_u64();
+                    let wait = if kind == TransientUpload::Witness {
+                        witness_retry::retry_wait(failures, random)
+                    } else {
+                        transient_upload_retry_wait(failures, unavailable_retry_after, random)
+                    };
+                    q.record_attempt(entry.entry_id, Some(observed_at + wait));
+                    q.set_state(
+                        entry.entry_id,
+                        queue::QueueState::Approved,
+                        Some(reason_label),
+                    );
+                }
+                if kind == TransientUpload::Outage {
+                    applied.outage = true;
+                }
+            } else {
+                q.record_attempt(entry.entry_id, None);
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Failed,
+                    Some(reason_label),
+                );
+            }
+        }
+        uploader::UploadDecision::WitnessSaturated { retry_after_secs } => {
+            // Nothing was judged, so nothing is refused: the entry keeps
+            // its approval and is not claimable again until the witness
+            // has had the time it asked for. Prior failures of this trace
+            // must not multiply a server-wide capacity delay. There is no
+            // per-session attempt limit: saturation judged nothing.
+            let observed_at = observed_at();
+            let until = observed_at + witness_capacity_retry_delay(retry_after_secs);
+            q.record_attempt(
+                entry.entry_id,
+                Some(until + witness_capacity_jitter(entry.entry_id, retry_after_secs)),
+            );
+            q.set_state(
+                entry.entry_id,
+                queue::QueueState::Approved,
+                Some(crate::submit::REASON_WITNESS_SATURATED.to_string()),
+            );
+            applied.witness_busy_until = Some((until, retry_after_secs));
+        }
+        decision @ (uploader::UploadDecision::RateLimited { retry_after_secs }
+        | uploader::UploadDecision::Paced { retry_after_secs }) => {
+            // Sending too fast is not a verdict on the session: it keeps
+            // its approval and is not claimable again until the wait has
+            // passed. No per-session attempt limit, for the reason the
+            // witness capacity retry has none. A server `429` records an
+            // attempt; this daemon's own burst guard (`Paced`) does not,
+            // since it sent nothing, and classifier backoff grows with attempts.
+            let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+            // A server `429` hint is a floor with a random extra on top,
+            // so contributors told the same wait do not return together.
+            // The daemon's own pacing is exact: it is not a herd.
+            let wait = if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                hint
+            } else {
+                crate::retry_jitter::hint_with_extra_secs(
+                    hint,
+                    crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
+                    crate::retry_jitter::random_u64(),
+                )
+            };
+            let retry_at = observed_at() + chrono::Duration::seconds(i64::from(wait));
+            if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                q.defer_without_attempt(entry.entry_id, retry_at);
+            } else {
+                q.record_attempt(entry.entry_id, Some(retry_at));
+            }
+            q.set_state(
+                entry.entry_id,
+                queue::QueueState::Approved,
+                Some(crate::submit::REASON_RATE_LIMITED.to_string()),
+            );
+            applied.rate_limited = true;
+        }
+    }
+
+    applied
 }
 
 /// The bookkeeping for one `UploadDecision::Uploaded`: the queue entry is
@@ -1878,14 +2275,10 @@ fn sync_witness_capacity_health(shared: &ipc::DaemonShared, now: chrono::DateTim
     }
 }
 
-/// How long to leave a saturated witness alone after the `attempts`-th time
-/// it refused: its own `Retry-After`, doubling per consecutive refusal and
-/// capped at an hour. The witness's delay is the floor, never shortened.
-fn witness_capacity_retry_delay(retry_after_secs: u32, attempts: u32) -> chrono::Duration {
-    let base = i64::from(retry_after_secs.max(1));
-    let exponent = attempts.saturating_sub(1).min(7);
-    let cap = i64::from(crate::witness::transport::MAX_WITNESS_RETRY_AFTER_SECS).max(base);
-    chrono::Duration::seconds((base * (1_i64 << exponent)).min(cap))
+/// The witness's explicit capacity delay, independent of a trace's retry
+/// history. The transport already bounds this server-controlled hint.
+fn witness_capacity_retry_delay(retry_after_secs: u32) -> chrono::Duration {
+    chrono::Duration::seconds(i64::from(retry_after_secs.max(1)))
 }
 
 /// A per-session spread of up to half the witness's delay, so every
@@ -1953,6 +2346,13 @@ enum TransientUpload {
     /// `409 admission_in_progress`: another attempt at this one submission
     /// holds the lease. About this entry only, so the pass goes on.
     Lease,
+    /// The witness did not answer in time or could not be reached
+    /// (`submit::witness_failure_is_transient`). This entry backs off; the
+    /// worker detects correlated failures before pausing other traces.
+    /// It has no budget: the entry
+    /// keeps its approval and is retried at most an hour apart for as long
+    /// as the witness cannot review (owner, 2026-11-12).
+    Witness,
 }
 
 /// Whether a `Failed` label is one the daemon retries rather than ends
@@ -1969,6 +2369,9 @@ fn transient_upload_kind(reason_label: &str) -> Option<TransientUpload> {
         }
         other if AdmissionRefusal::from_label(other) == Some(AdmissionRefusal::InProgress) => {
             Some(TransientUpload::Lease)
+        }
+        other if crate::submit::witness_failure_is_transient(other) => {
+            Some(TransientUpload::Witness)
         }
         _ => None,
     }
@@ -2092,11 +2495,48 @@ fn note_uploads(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) -> 
 
 /// One upload pass, exposed so an integration test can drive the same code
 /// the supervisor runs rather than a reimplementation of it.
+///
+/// Under a witness the pass only hands sessions to the witness worker
+/// (`witness_worker`), so this also waits for the worker to settle and, if
+/// it did anything, runs the pass once more, which uploads what the worker
+/// pinned. A test of the pass on its own uses [`drain_approved_once_for_test`].
 pub async fn drain_approved_for_test(
     shared: &Arc<ipc::DaemonShared>,
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    drain_approved(shared, now, started).await?;
+    if settle_witness_worker_for_test(shared).await {
+        let later = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+        drain_approved(shared, later, std::time::Instant::now()).await?;
+    }
+    Ok(())
+}
+
+/// One upload pass and nothing else: whatever it handed the witness worker
+/// may still be running when this returns.
+pub async fn drain_approved_once_for_test(
+    shared: &Arc<ipc::DaemonShared>,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
     drain_approved(shared, now, std::time::Instant::now()).await
+}
+
+/// Wait until the witness worker has nothing running and nothing it could
+/// start. Returns whether it had anything to do. Panics after a minute.
+pub async fn settle_witness_worker_for_test(shared: &Arc<ipc::DaemonShared>) -> bool {
+    if shared.witness_worker.idle() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !shared.witness_worker.idle() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the witness worker did not settle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    true
 }
 
 /// Can this process reach the Cloud credential store?
@@ -2141,10 +2581,16 @@ pub fn credential_store_self_check() -> i32 {
 /// trace the contributor sent by hand waited behind all of it, at that many
 /// per poll. The contributor is waiting on theirs; the backlog is not.
 fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
+    approved.sort_by(compare_send_priority);
+    approved
+}
+
+/// Shared by the producer and worker so queued jobs cannot defeat fairness.
+fn compare_send_priority(
+    left: &queue::QueueEntry,
+    right: &queue::QueueEntry,
+) -> std::cmp::Ordering {
     let age = |entry: &queue::QueueEntry| {
-        // Match discovery's conversation start where available. The durable
-        // source-write time survives re-offers; the observation is a fallback
-        // for queue files written before that provenance was recorded.
         entry
             .shape
             .as_ref()
@@ -2152,24 +2598,31 @@ fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
             .or(entry.last_modified_at)
             .or(entry.observed_modified_at)
     };
-    approved.sort_by(|left, right| {
-        left.approved_unattended
-            .cmp(&right.approved_unattended)
-            .then_with(|| {
-                if !left.approved_unattended {
-                    // Stable sort preserves the person's existing queue order.
-                    return std::cmp::Ordering::Equal;
-                }
-                let left_age = age(left);
-                let right_age = age(right);
-                (left_age.is_none(), left_age, left.entry_id).cmp(&(
-                    right_age.is_none(),
-                    right_age,
-                    right.entry_id,
-                ))
-            })
-    });
-    approved
+    left.approved_unattended
+        .cmp(&right.approved_unattended)
+        .then_with(|| {
+            if !left.approved_unattended {
+                return std::cmp::Ordering::Equal;
+            }
+            // A retry is an attempted entry still waiting on its deadline.
+            // `attempts` alone never resets, so a reapproved or pinned trace
+            // would otherwise sort behind fresh work for good.
+            let retry = |e: &queue::QueueEntry| e.attempts > 0 && e.retry_after.is_some();
+            retry(left)
+                .cmp(&retry(right))
+                .then_with(|| {
+                    if retry(left) && retry(right) {
+                        left.retry_after.cmp(&right.retry_after)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    let l = age(left);
+                    let r = age(right);
+                    (l.is_none(), l, left.entry_id).cmp(&(r.is_none(), r, right.entry_id))
+                })
+        })
 }
 
 /// Every source's sessions, listed once per upload pass and looked up by
@@ -2285,6 +2738,247 @@ async fn refresh_estimate_table(
     settlement_estimate::apply_table_fetch(shared, settlement);
 }
 
+/// Fetch the signed witness accepted-measurements list when its schedule is
+/// due, or early (spaced 10 minutes) while a session is held for a measurement
+/// refusal; a failed fetch retries after the same spacing, not a day. Whatever the outcome, the stored list stays unless a newer verified
+/// one replaced it; `witness::accepted_list::refresh` logs one fixed label.
+///
+/// Then, on every tick and not only after a fetch, release the measurement
+/// holds a newly stored list may cure (`note_accepted_list_version`). The
+/// version is read back from the stored list rather than taken from the
+/// fetch's outcome, because a refusal inside a send also stores one
+/// (`accepted_list::refresh_on_refusal`); checking each tick means the other
+/// held sessions see it within a tick rather than at the next daily fetch.
+/// One small file read and a signature check.
+async fn refresh_witness_accepted_list(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
+) {
+    let holds = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .has_measurement_holds();
+    let mut configuration_state = None;
+    if let Ok(Some(cfg)) = shared.store.load_config() {
+        let _ = crate::witness::accepted_list::refresh_for_tick(
+            &cfg,
+            shared.store.dir(),
+            schedule,
+            now,
+            crate::credit_estimate_table::random_draw(),
+            holds,
+        )
+        .await;
+        configuration_state = cfg.witness.as_ref().and_then(|settings| {
+            crate::witness::configuration::active_state(settings, shared.store.dir(), now)
+        });
+    }
+    let dir = shared.store.dir();
+    let version = crate::witness::accepted_list::load_verified(
+        dir,
+        &crate::witness::accepted_list::trusted_keys(dir),
+    )
+    .map(|list| list.version);
+    let configuration_changed = schedule.configuration_changed(configuration_state);
+    note_accepted_list_version(shared, schedule, version, now, configuration_changed);
+}
+
+/// When the stored accepted list is one `schedule` has not seen, release the
+/// sessions held because their witness reported a measurement outside the
+/// accepted set (`Queue::release_measurement_holds`), so the new list is
+/// asked about them. Holds for a witness that did not verify stay.
+fn note_accepted_list_version(
+    shared: &ipc::DaemonShared,
+    schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
+    version: Option<u64>,
+    now: chrono::DateTime<Utc>,
+    configuration_changed: bool,
+) {
+    let list_changed = schedule.list_version_changed(version);
+    if !list_changed && !configuration_changed {
+        return;
+    }
+    let decisions_owed_before = shared.decisions_owed_value();
+    let released = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let released = q.release_measurement_holds(now);
+        if released > 0 && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after a new witness accepted list");
+        }
+        released
+    };
+    if released > 0 {
+        tracing::info!(
+            released,
+            "released sessions held for a measurement a new accepted list may accept"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+}
+
+/// Re-read, once per daemon process, the sessions an unattended approval
+/// parked under `submit::REASON_WITNESS_RISK_REVIEW_REQUIRED`, and release
+/// the ones the current rule lets go (`release_witness_risk_holds`).
+///
+/// Once per process is enough. The rule lives in the binary, so it changes
+/// only with a new daemon process, and every hold the current binary makes
+/// is one its own rule kept; re-reading them every tick would reach the same
+/// answer at the cost of a file read per held session. The flag is set
+/// before the pass runs, so a pass that fails or panics is not retried and
+/// its holds stay held.
+pub(crate) fn release_witness_risk_holds_once(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    done: &mut bool,
+) -> usize {
+    if std::mem::replace(done, true) {
+        return 0;
+    }
+    release_witness_risk_holds(shared, now)
+}
+
+/// Release every witness-risk hold whose own pinned certificate now lets an
+/// unattended session go (`submit::verdict_allows_unattended`), for holds
+/// parked under the older rule that held `medium` (owner decision,
+/// 2026-11-05). Returns how many moved.
+///
+/// Only an unattended approval is ever held under this label (the uploader
+/// arms the hold only for `approved_unattended` entries; a person's approve
+/// and the CLI never do), so the label is the marker. The verdict is read
+/// from the review the entry is pinned to, which is exactly what its upload
+/// would carry: the stored artifact must exist, parse, and hash to the pin.
+/// Anything else -- no pin (released after `PIN_MAX_AGE`), a missing or
+/// unreadable artifact, a digest that does not match, a `high` or
+/// unreadable verdict -- stays held for a person.
+///
+/// A released entry keeps its pin and goes back to waiting dated `now`. The
+/// standing opt-in re-approves it, and the upload pass sends the certified
+/// bytes after the same verdict check and the Scrub check, with no second
+/// witness run. In a folder no longer set to Automatic it waits for a
+/// person, as any offer there does.
+pub(crate) fn release_witness_risk_holds(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+) -> usize {
+    let held = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .witness_risk_holds();
+    // The artifacts are read with the queue lock released; the release below
+    // re-checks each entry's state and pin under the lock.
+    let allowed: Vec<(uuid::Uuid, String)> = held
+        .into_iter()
+        .filter(|(entry_id, pin)| pinned_verdict_allows_unattended(&shared.store, *entry_id, pin))
+        .collect();
+    if allowed.is_empty() {
+        return 0;
+    }
+    let decisions_owed_before = shared.decisions_owed_value();
+    let released = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let released = q.release_witness_risk_holds(&allowed, now);
+        if released > 0 && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after releasing witness-risk holds");
+        }
+        released
+    };
+    if released > 0 {
+        tracing::info!(
+            released,
+            "released witness-risk holds the current rule lets go unattended"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    released
+}
+
+/// What [`recheck_second_look_holds`] moved: sessions skipped for having no
+/// message from the person, and nothing-matched holds released.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SecondLookRecheck {
+    pub skipped: usize,
+    pub released: usize,
+}
+
+/// Once per daemon process, as [`release_witness_risk_holds_once`] and for
+/// the same reason: the rules live in the binary. The flag is set before the
+/// pass runs, so a pass that fails or panics is not retried.
+pub(crate) fn recheck_second_look_holds_once(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    done: &mut bool,
+) -> SecondLookRecheck {
+    if std::mem::replace(done, true) {
+        return SecondLookRecheck::default();
+    }
+    recheck_second_look_holds(shared, now)
+}
+
+/// Two rules from the owner's 2026-11-05 decision, applied to what was
+/// queued before them:
+///
+/// - A waiting or unattended-approved session with no message from the
+///   person is skipped (`Queue::skip_entries_without_user_messages`), so it
+///   never goes to the witness or upload and does not wait on anyone.
+/// - On a device with a redaction witness, a session held by the Scrub
+///   check only because nothing matched goes back to waiting
+///   (`Queue::release_nothing_matched_holds`); the standing opt-in
+///   re-approves it and it goes through the witness as any unattended
+///   session does, verdict hold included. Without a witness, or when the
+///   config cannot be read, nothing is released.
+pub(crate) fn recheck_second_look_holds(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+) -> SecondLookRecheck {
+    let witness = shared.redaction_witness();
+    let decisions_owed_before = shared.decisions_owed_value();
+    let moved = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let skipped = q.skip_entries_without_user_messages();
+        let released = if witness == second_look::RedactionWitness::Present {
+            q.release_nothing_matched_holds(now)
+        } else {
+            0
+        };
+        let moved = SecondLookRecheck { skipped, released };
+        if moved != SecondLookRecheck::default() && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after rechecking second-look holds");
+        }
+        moved
+    };
+    if moved != SecondLookRecheck::default() {
+        tracing::info!(
+            skipped = moved.skipped,
+            released = moved.released,
+            "rechecked second-look holds under the current rule"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    moved
+}
+
+/// Whether the review `entry_id` is pinned to (`pin`) is stored intact and
+/// certifies a verdict that lets an unattended session go. Fails closed.
+fn pinned_verdict_allows_unattended(
+    store: &crate::config::ConfigStore,
+    entry_id: uuid::Uuid,
+    pin: &str,
+) -> bool {
+    match approved_envelope::load_witnessed(store, entry_id) {
+        Ok(Some(artifact)) => {
+            artifact.digest().is_ok_and(|digest| digest == pin)
+                && crate::submit::verdict_allows_unattended(artifact.response())
+        }
+        _ => false,
+    }
+}
+
 /// How long after an upload the server is asked for verdicts.
 ///
 /// Not zero. The submission has only just landed and the server has not
@@ -2388,11 +3082,38 @@ async fn refresh_history(
     let Some(cfg) = shared.store.load_config()? else {
         return Ok(());
     };
-    let updates = match crate::submit::status(&shared.store, &cfg).await {
+    // The witness-blocked counts ride on this read. Taken out before the
+    // request so a count made while it is in flight is not cleared with
+    // them; put back if the read fails, so a report is retried rather than
+    // lost. A failed report never stops the read.
+    let report = std::mem::take(&mut shared.state.lock().expect("state lock").witness_blocked);
+    let read = crate::submit::status_reporting(&shared.store, &cfg, Some(&report)).await;
+    {
+        let mut state = shared.state.lock().expect("state lock");
+        if read.is_err() {
+            state.witness_blocked.merge(&report);
+        }
+        if !report.is_empty() {
+            // Best-effort: the counts are in memory either way, and the
+            // next save writes them.
+            let _ = state.save(&shared.store);
+        }
+    }
+    let updates = match read {
         Ok(u) => u,
         Err(_) => {
             // A failed poll serves the cache as-is; history is not worth a
-            // health failure of its own.
+            // health failure of its own. It is worth a line in the log,
+            // by fixed label only (the error's context can carry the
+            // ingest URL), and at most once per `HISTORY_POLL_WARN_EVERY`,
+            // since a failed poll is retried on every tick.
+            if history_poll_warning_due(shared.store.dir(), std::time::Instant::now()) {
+                tracing::warn!(
+                    pass = "history",
+                    reason = "status_read_failed",
+                    "history status read failed; serving the cache"
+                );
+            }
             return Ok(());
         }
     };
@@ -2423,6 +3144,32 @@ async fn refresh_history(
     let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     record_history_poll(shared, &records, now)
+}
+
+/// How often a failing history status read is logged, at most.
+const HISTORY_POLL_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Per state directory: when a failed history status read was last logged.
+static HISTORY_POLL_WARNED: std::sync::Mutex<
+    Option<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>,
+> = std::sync::Mutex::new(None);
+
+/// Whether a failed history status read for the state directory `dir`
+/// should be logged at `now`: the first time, then at most once per
+/// [`HISTORY_POLL_WARN_EVERY`]. Records `now` when it says yes.
+fn history_poll_warning_due(dir: &std::path::Path, now: std::time::Instant) -> bool {
+    let mut warned = HISTORY_POLL_WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let by_dir = warned.get_or_insert_with(std::collections::HashMap::new);
+    if by_dir
+        .get(dir)
+        .is_some_and(|at| now.saturating_duration_since(*at) < HISTORY_POLL_WARN_EVERY)
+    {
+        return false;
+    }
+    by_dir.insert(dir.to_path_buf(), now);
+    true
 }
 
 /// Stamp a successful history poll and advance the verdict news (nudge
@@ -2585,6 +3332,12 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // when it matters most. Ignored entirely under `Interval`, which the
     // generic `Tz` parameter never touches.
     let local_tz = chrono::Local;
+    // The terms hold is deliberately not a blocker here (spec section 5:
+    // expiry skips only entries waiting because of the hold). The hold
+    // keeps `Approved` entries waiting, and `expire` never touches those;
+    // a `Pending` entry waits for the contributor's review (an armed
+    // folder's are approved by the watcher whatever the hold), so its
+    // review timeout runs as usual.
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -2729,34 +3482,54 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
 }
 
 /// A future that resolves when the process is asked to terminate.
-fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending().await,
-            };
-            let mut interrupt = match signal(SignalKind::interrupt()) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending().await,
-            };
+///
+/// On unix the SIGTERM and SIGINT handlers are installed by this call, not
+/// on the future's first poll, so a signal that arrives while `run` is still
+/// starting is held for the loop rather than ending the process by its
+/// default action. Must be called inside a tokio runtime.
+fn signal_stream() -> pass_supervisor::StopSignal {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut interrupt)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return pass_supervisor::never();
+        };
+        Box::pin(async move {
             tokio::select! {
                 _ = term.recv() => {}
                 _ = interrupt.recv() => {}
             }
-        }
-        #[cfg(not(unix))]
-        {
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Box::pin(async {
             let _ = tokio::signal::ctrl_c().await;
-        }
-    })
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failing history status read is logged once, then not again until
+    /// `HISTORY_POLL_WARN_EVERY` has passed, per state directory.
+    #[test]
+    fn a_failed_history_poll_is_logged_at_most_once_an_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(history_poll_warning_due(dir.path(), t0));
+        let minute = t0 + std::time::Duration::from_secs(60);
+        assert!(!history_poll_warning_due(dir.path(), minute));
+        assert!(history_poll_warning_due(other.path(), t0));
+        let hour = t0 + HISTORY_POLL_WARN_EVERY;
+        assert!(history_poll_warning_due(dir.path(), hour));
+    }
 
     /// Nudge S4: `record_history_poll` and the verdict high-water mark.
     mod verdict_news {
@@ -2795,6 +3568,221 @@ mod tests {
                 approved_unattended: Some(false),
                 approved_verdict: None,
                 uploaded_bytes: None,
+                previous_account: false,
+            }
+        }
+
+        /// A changed accepted list releases measurement holds and leaves
+        /// `witness-not-trusted` holds alone; an unchanged one releases
+        /// nothing.
+        #[test]
+        fn a_changed_accepted_list_releases_measurement_holds_only() {
+            let (_dir, shared) = fixture();
+            let (measurement, untrusted) = {
+                let mut q = shared.queue.lock().unwrap();
+                let mut ids = Vec::new();
+                for (name, label) in [
+                    ("m", crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED),
+                    ("u", crate::submit::REASON_WITNESS_NOT_TRUSTED),
+                ] {
+                    let e = queue::QueueEntry {
+                        entry_id: queue::entry_id_for(name),
+                        session_hash: format!("sha256:{name}"),
+                        source: "claude-code".into(),
+                        project_key: format!("/Users/z/code/{name}"),
+                        project_label: name.into(),
+                        path: std::path::PathBuf::from(format!("/Users/z/{name}.jsonl")),
+                        size_bytes: 10,
+                        discovered_at: at(0),
+                        state: queue::QueueState::Pending,
+                        reason_label: Some(label.to_string()),
+                        ..Default::default()
+                    };
+                    ids.push(e.entry_id);
+                    q.upsert(e, 5000).unwrap();
+                }
+                (ids[0], ids[1])
+            };
+            let mut schedule = crate::witness::accepted_list::ListRefreshSchedule::starting(at(0));
+            let mut rx = shared.events.subscribe();
+
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1), false);
+            {
+                let q = shared.queue.lock().unwrap();
+                assert_eq!(q.get(measurement).unwrap().reason_label, None);
+                assert_eq!(
+                    q.get(untrusted).unwrap().reason_label.as_deref(),
+                    Some(crate::submit::REASON_WITNESS_NOT_TRUSTED)
+                );
+            }
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(event, _)| event == ipc::EVENT_QUEUE_CHANGED),
+                "the release is published"
+            );
+
+            // Held again under the same list: the same version releases nothing.
+            shared.queue.lock().unwrap().set_state(
+                measurement,
+                queue::QueueState::Pending,
+                Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()),
+            );
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2), false);
+            assert!(
+                shared
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .get(measurement)
+                    .unwrap()
+                    .held_for_review()
+            );
+            // Signed routing/activation is an independent change signal.
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(3), true);
+            let q = shared.queue.lock().unwrap();
+            assert_eq!(q.get(measurement).unwrap().reason_label, None);
+            assert_eq!(
+                q.get(untrusted).unwrap().reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_NOT_TRUSTED)
+            );
+        }
+
+        #[cfg(not(feature = "near-ai-staging"))]
+        #[tokio::test]
+        async fn same_version_repairs_release_measurement_holds_even_when_another_process_repairs()
+        {
+            use crate::witness::{accepted_list, configuration};
+            use ring::signature::{Ed25519KeyPair, KeyPair};
+            use trace_commons_protocol::witness_accepted_list::{
+                AcceptedEntry, ListSignature, key_id_for,
+            };
+            use trace_commons_protocol::witness_configuration::{
+                WITNESS_CONFIGURATION_SCHEMA, WitnessConfiguration, WitnessEndpoint,
+            };
+            for another_process in [false, true] {
+                let (_dir, shared) = fixture();
+                let dir = shared.store.dir();
+                let now = Utc::now();
+                let secret =
+                    Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+                let signer = Ed25519KeyPair::from_pkcs8(secret.as_ref()).unwrap();
+                let public: [u8; 32] = signer.public_key().as_ref().try_into().unwrap();
+                accepted_list::set_test_keys(dir, vec![public]);
+                let witness = crate::config::WitnessSettings {
+                    admission_evidence: false,
+                    url: configuration::COMMONS_ENROLLMENT_URLS[0].into(),
+                    signing_address: format!("0x{}", "11".repeat(20)),
+                    expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+                };
+                let config = WitnessConfiguration {
+                    schema: WITNESS_CONFIGURATION_SCHEMA.into(),
+                    version: 8,
+                    issued_at: now,
+                    enrollment_urls: vec![witness.url.clone()],
+                    endpoints: vec![WitnessEndpoint {
+                        url: witness.url.clone(),
+                        entries: vec![AcceptedEntry {
+                            signing_address: witness.signing_address.clone(),
+                            measurements: witness.expected_measurements[0].clone(),
+                            not_before: now - chrono::Duration::hours(1),
+                            not_after: now + chrono::Duration::hours(1),
+                            commit: None,
+                        }],
+                    }],
+                };
+                let payload = trace_commons_protocol::canonical_json::to_canonical_string(
+                    &serde_json::to_value(config).unwrap(),
+                )
+                .unwrap();
+                let signature = ListSignature {
+                    key_id: key_id_for(&public),
+                    signature: hex::encode(signer.sign(payload.as_bytes()).as_ref()),
+                };
+                let bytes = serde_json::to_vec(
+                    &serde_json::json!({"payload":payload,"signatures":[signature]}),
+                )
+                .unwrap();
+                configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                let mut cfg = crate::commands::unenrolled_preview_config();
+                cfg.witness = Some(witness.clone());
+                cfg.ingest_url = "https://ingest.invalid".into();
+                cfg.allowed_hosts = Some("deny-all-named-hosts.invalid".into());
+                shared.store.save_config(&cfg).unwrap();
+                let mut schedule = accepted_list::ListRefreshSchedule::starting(now);
+                // The supervisor has already seen V8 with no holds outstanding.
+                refresh_witness_accepted_list(&shared, now, &mut schedule).await;
+                let entry_id = queue::entry_id_for("repair-measurement");
+                shared
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .upsert(
+                        queue::QueueEntry {
+                            entry_id,
+                            session_hash: "sha256:repair-measurement".into(),
+                            source: "claude-code".into(),
+                            project_key: "/tmp/repair-measurement".into(),
+                            project_label: "repair-measurement".into(),
+                            path: "/tmp/repair-measurement.jsonl".into(),
+                            size_bytes: 10,
+                            discovered_at: now,
+                            state: queue::QueueState::Pending,
+                            reason_label: Some(
+                                crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.into(),
+                            ),
+                            ..Default::default()
+                        },
+                        5000,
+                    )
+                    .unwrap();
+                // Damage and repair both happen before the next supervisor read.
+                std::fs::write(dir.join(configuration::CONFIGURATION_FILE), b"damaged").unwrap();
+                if another_process {
+                    std::fs::write(dir.join("repair-document.test-input"), &bytes).unwrap();
+                    std::fs::write(dir.join("repair-public-key.test-input"), public).unwrap();
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "witness::configuration::tests::repair_cache_in_subprocess",
+                            "--nocapture",
+                        ])
+                        .env("TRACE_COMMONS_WITNESS_REPAIR_TEST_DIR", dir)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "repair subprocess failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                } else {
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                }
+                assert_eq!(
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap(),
+                    accepted_list::InstallOutcome::NotNewer
+                );
+                refresh_witness_accepted_list(
+                    &shared,
+                    now + chrono::Duration::minutes(1),
+                    &mut schedule,
+                )
+                .await;
+                assert_eq!(
+                    shared
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .get(entry_id)
+                        .unwrap()
+                        .reason_label,
+                    None,
+                    "actual repair must release the hold even after a NotNewer observation"
+                );
+                assert_eq!(
+                    shared.store.load_config().unwrap().unwrap().witness,
+                    Some(witness)
+                );
             }
         }
 
@@ -3076,19 +4064,30 @@ mod tests {
         /// `Some(retry_after)` makes `/v1/witness` answer the pacing
         /// contract's `503 witness_saturated`; `None` certifies.
         witness_saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+        /// Set, `/v1/witness` answers `503 witness_signing_unavailable`: a
+        /// witness that is up but cannot do its job right now.
+        witness_unavailable: Arc<std::sync::atomic::AtomicBool>,
         /// The workload header of every `/v1/witness` request, in order.
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// Non-zero makes the claim issuer answer with that status.
         issuer_status: Arc<AtomicU16>,
         /// Set, ingest takes an upload and never answers it.
         ingest_hang: Arc<std::sync::atomic::AtomicBool>,
+        /// How long `/v1/witness` takes to answer, in milliseconds.
+        witness_delay_ms: Arc<AtomicU64>,
+        /// `/v1/witness` requests being answered now, and the most at once.
+        witness_live: Arc<(AtomicUsize, AtomicUsize)>,
     }
 
     impl TransientRetryHarness {
         async fn spawn(router: Router) -> String {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            tokio::spawn(async move {
+                axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(router))
+                    .await
+                    .unwrap()
+            });
             format!("http://{addr}")
         }
 
@@ -3193,11 +4192,17 @@ mod tests {
             ))
             .await;
             let witness_saturated = Arc::new(std::sync::Mutex::new(None::<&'static str>));
+            let witness_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let witness_calls = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
             let quote_guards = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let witness_delay_ms = Arc::new(AtomicU64::new(0));
+            let witness_live = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
             let witness_routes = Self::witness_routes(
                 witness_saturated.clone(),
+                witness_unavailable.clone(),
                 witness_calls.clone(),
+                witness_delay_ms.clone(),
+                witness_live.clone(),
                 quote_guards,
             );
             let ingest = Self::spawn(witness_routes.route(
@@ -3326,9 +4331,12 @@ mod tests {
                 uploads,
                 ingest_reply,
                 witness_saturated,
+                witness_unavailable,
                 witness_calls,
                 issuer_status,
                 ingest_hang,
+                witness_delay_ms,
+                witness_live,
             }
         }
 
@@ -3338,7 +4346,10 @@ mod tests {
         /// and certifies what it was sent.
         fn witness_routes(
             saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+            unavailable: Arc<std::sync::atomic::AtomicBool>,
             calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+            delay_ms: Arc<AtomicU64>,
+            live: Arc<(AtomicUsize, AtomicUsize)>,
             guards: Arc<std::sync::Mutex<Vec<crate::witness::verify::QuoteFixture>>>,
         ) -> Router {
             use axum::extract::Query;
@@ -3389,6 +4400,7 @@ mod tests {
                     post(
                         move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
                             let saturated = *saturated.lock().unwrap();
+                            let unavailable = unavailable.load(Ordering::SeqCst);
                             calls.lock().unwrap().push(
                                 headers
                                     .get(
@@ -3396,12 +4408,27 @@ mod tests {
                                     )
                                     .map(|v| v.to_str().unwrap().to_string()),
                             );
+                            let delay = delay_ms.load(Ordering::SeqCst);
+                            let live = live.clone();
                             async move {
+                                let now_live = live.0.fetch_add(1, Ordering::SeqCst) + 1;
+                                live.1.fetch_max(now_live, Ordering::SeqCst);
+                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                                live.0.fetch_sub(1, Ordering::SeqCst);
                                 if let Some(retry_after) = saturated {
                                     return (
                                         StatusCode::SERVICE_UNAVAILABLE,
                                         [(axum::http::header::RETRY_AFTER, retry_after)],
                                         Json(serde_json::json!({"error": "witness_saturated"})),
+                                    )
+                                        .into_response();
+                                }
+                                if unavailable {
+                                    return (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        Json(serde_json::json!({
+                                            "error": trace_commons_protocol::witness_refusal::WITNESS_SIGNING_UNAVAILABLE
+                                        })),
                                     )
                                         .into_response();
                                 }
@@ -4411,6 +5438,10 @@ mod tests {
         // answered either way.
         assert!(h.uploads.load(Ordering::SeqCst) <= 1);
         assert!(entry.retry_after.unwrap() >= now + UPLOAD_HUNG_RETRY);
+        // The deadline paces the entry even though a hang records no retry
+        // label: a fresh trace that hung must not be claimed again at once.
+        assert!(!entry.ready_for_upload(now + chrono::Duration::seconds(1)));
+        assert!(entry.ready_for_upload(entry.retry_after.unwrap()));
         assert_eq!(
             entry.attempts, 0,
             "a hang is not counted against the session"
@@ -4635,6 +5666,337 @@ mod tests {
         );
     }
 
+    /// Wait until `cond` holds, polling. Panics after `within`.
+    async fn wait_until(within: std::time::Duration, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + within;
+        while !cond() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "condition not reached"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The owner's rule (2026-11-05): the witness never synchronously blocks
+    /// anything. A pass under a slow witness hands the session to the
+    /// witness worker and returns at once; the status says a trace is in
+    /// the privacy check; the worker pins the certified bytes without
+    /// uploading them; and a later pass uploads exactly those, without a
+    /// second witness call.
+    #[tokio::test]
+    async fn a_slow_witness_does_not_hold_up_the_pass_and_its_result_uploads_later() {
+        let h = TransientRetryHarness::with_witness().await;
+        // Long enough that nothing below can be waiting on it: the witness
+        // is still answering when every assertion before the settle runs.
+        h.witness_delay_ms.store(3_000, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        let id = h.entry().entry_id;
+
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        // The pass returned with the session handed over and nothing
+        // answered: it did not wait.
+        assert!(
+            h.shared.witness_worker.is_in_flight(id) || h.shared.witness_worker.queued() == 1,
+            "the pass did not hand the session to the worker"
+        );
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_live.0.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        // Other passes run meanwhile: a watch pass completes while the
+        // witness is still answering.
+        watcher::tick(&h.shared, now).await.unwrap();
+        assert_eq!(
+            h.witness_live.0.load(Ordering::SeqCst),
+            1,
+            "the watch pass waited on the witness"
+        );
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved);
+        assert!(!entry.holds_witness_certificate());
+        let status = h.shared.status_value();
+        assert_eq!(status["witness_capacity"]["privacy_check_sessions"], 1);
+        assert_eq!(status["witness_capacity"]["checking_sessions"], 1);
+        // Nothing waits on capacity: the witness is working, not busy.
+        assert_eq!(status["witness_capacity"]["waiting_sessions"], 0);
+
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        let pinned = h.entry();
+        assert_eq!(pinned.state, queue::QueueState::Approved, "{pinned:?}");
+        assert!(pinned.holds_witness_certificate(), "{pinned:?}");
+        assert_eq!(
+            h.uploads.load(Ordering::SeqCst),
+            0,
+            "the worker never uploads"
+        );
+        assert_eq!(
+            *h.witness_calls.lock().unwrap(),
+            vec![Some("background".to_string())]
+        );
+        // An upload was asked for, so the pinned bytes go out promptly.
+        assert!(h.shared.upload_due().is_some());
+
+        drain_approved_once_for_test(&h.shared, now + chrono::Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 1, "witnessed once");
+        let status = h.shared.status_value();
+        assert_eq!(status["witness_capacity"]["privacy_check_sessions"], 0);
+        assert_eq!(status["witness_capacity"]["checking_sessions"], 0);
+    }
+
+    /// One background witness call at a time, however many sessions wait.
+    #[tokio::test]
+    async fn the_witness_worker_keeps_to_its_concurrency_bound() {
+        let h = TransientRetryHarness::with_witness().await;
+        for (id, text) in [
+            (
+                "9a9a9a9a-9a9a-9a9a-9a9a-9a9a9a9a9a9a",
+                "second session, mail bob.jones@example.org",
+            ),
+            (
+                "9b9b9b9b-9b9b-9b9b-9b9b-9b9b9b9b9b9b",
+                "third session, mail carol.white@example.org",
+            ),
+        ] {
+            h.add_session(id, text).await;
+        }
+        assert_eq!(h.entries().len(), 3);
+        h.witness_delay_ms.store(200, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        // One probe first: the second slot opens once a review is certified.
+        assert_eq!(h.shared.witness_worker.queued(), 2);
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            h.witness_live.1.load(Ordering::SeqCst),
+            witness_worker::BACKGROUND_SLOTS,
+            "more witness calls at once than the bound"
+        );
+        assert!(h.entries().iter().all(|e| e.holds_witness_certificate()));
+        // A pass while they wait enqueues nothing twice.
+        drain_approved_once_for_test(&h.shared, now + chrono::Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 3);
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 3);
+    }
+
+    /// Restart semantics. A result that was received is pinned on disk, so a
+    /// restart uploads it without sending the raw session again. A call
+    /// whose result never arrived (stopped mid-call) leaves the entry
+    /// approved with no pin, and the next pass sends it again.
+    #[tokio::test]
+    async fn a_restart_resends_only_a_session_whose_result_never_arrived() {
+        let h = TransientRetryHarness::with_witness().await;
+        let now = TransientRetryHarness::now();
+
+        // Stopped mid-call: the result never arrives.
+        h.witness_delay_ms.store(5_000, Ordering::SeqCst);
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_live.0.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        h.shared.upload_interrupt.send_modify(|n| *n += 1);
+        wait_until(std::time::Duration::from_secs(2), || {
+            h.shared.witness_worker.idle()
+        })
+        .await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved);
+        assert!(!entry.holds_witness_certificate());
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 1);
+
+        // A restart: a fresh daemon on the same state directory. The entry
+        // is still approved with no pin, so it is witnessed again.
+        h.witness_delay_ms.store(0, Ordering::SeqCst);
+        let restart = |from: &ipc::DaemonShared| {
+            let shared = Arc::new(ipc::DaemonShared::load(from.store.clone()).unwrap());
+            // The harness keeps its settings and policy in memory.
+            *shared.settings.lock().unwrap() = from.settings.lock().unwrap().clone();
+            *shared.policy.lock().unwrap() = from.policy.lock().unwrap().clone();
+            shared
+        };
+        let restarted = restart(&h.shared);
+        drain_approved_once_for_test(&restarted, now).await.unwrap();
+        assert!(settle_witness_worker_for_test(&restarted).await);
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 2);
+        assert!(restarted.queue.lock().unwrap().all()[0].holds_witness_certificate());
+
+        // A second restart after the result was pinned: no witness call,
+        // the pinned bytes upload.
+        let again = restart(&restarted);
+        drain_approved_for_test(&again, now + chrono::Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            h.witness_calls.lock().unwrap().len(),
+            2,
+            "re-sent after its result arrived"
+        );
+        assert_eq!(
+            again.queue.lock().unwrap().all()[0].state,
+            queue::QueueState::Uploaded
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// Pause, quiesce and the unenroll hold stop a queued job before it
+    /// sends anything, and leave the entry approved for later.
+    #[tokio::test]
+    async fn a_held_daemon_starts_no_witness_job() {
+        type Hold = fn(&ipc::DaemonShared, bool);
+        let holds: [(&str, Hold); 3] = [
+            ("paused", |s, on| {
+                s.paused.store(on, Ordering::Relaxed);
+                s.state.lock().unwrap().paused = on;
+            }),
+            ("quiesced", |s, on| s.quiesced.store(on, Ordering::Relaxed)),
+            ("uploads_held", |s, on| {
+                s.uploads_held.store(on, Ordering::SeqCst)
+            }),
+        ];
+        for (name, hold) in holds {
+            let h = TransientRetryHarness::with_witness().await;
+            let now = TransientRetryHarness::now();
+            hold(&h.shared, true);
+            assert!(h.shared.witness_worker.enqueue(h.entry(), now));
+            witness_worker::pump(&h.shared, now);
+            settle_witness_worker_for_test(&h.shared).await;
+            assert_eq!(h.witness_calls.lock().unwrap().len(), 0, "{name}");
+            let entry = h.entry();
+            assert_eq!(entry.state, queue::QueueState::Approved, "{name}");
+            assert!(!entry.holds_witness_certificate(), "{name}");
+            hold(&h.shared, false);
+            drain_approved_for_test(&h.shared, now).await.unwrap();
+            assert_eq!(h.entry().state, queue::QueueState::Uploaded, "{name}");
+        }
+    }
+
+    /// A result that arrives after the approval it ran under has gone (a
+    /// cancel, say) pins nothing.
+    #[tokio::test]
+    async fn a_result_for_a_cancelled_approval_is_dropped() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.witness_delay_ms.store(500, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_live.0.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        let id = h.entry().entry_id;
+        assert!(h.shared.queue.lock().unwrap().return_to_waiting(id, now));
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Pending);
+        assert!(entry.previewed_envelope_digest.is_none(), "{entry:?}");
+    }
+
+    /// A panic in one job refuses that entry under the panic label and the
+    /// worker carries on: after its backoff the next session is witnessed.
+    #[tokio::test]
+    async fn a_panicking_witness_job_refuses_one_entry_and_the_worker_survives() {
+        let h = TransientRetryHarness::with_witness().await;
+        let first = h.entry().entry_id;
+        witness_worker::set_test_hook(h.shared.store.dir(), |entry| {
+            if entry.session_hash.len() > 1 && WITNESS_JOB_PANIC.load(Ordering::SeqCst) {
+                panic!("injected witness job panic");
+            }
+        });
+        WITNESS_JOB_PANIC.store(true, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        settle_witness_worker_for_test(&h.shared).await;
+        let refused = h.entry();
+        assert_eq!(refused.state, queue::QueueState::Refused);
+        assert_eq!(
+            refused.reason_label.as_deref(),
+            Some(crate::envelope::REASON_REDACTION_PANICKED)
+        );
+        WITNESS_JOB_PANIC.store(false, Ordering::SeqCst);
+
+        h.add_session(
+            "9c9c9c9c-9c9c-9c9c-9c9c-9c9c9c9c9c9c",
+            "after the panic, mail dave.green@example.org",
+        )
+        .await;
+        // Past the backoff.
+        drain_approved_for_test(&h.shared, now + chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        let next = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id != first)
+            .unwrap();
+        assert_eq!(next.state, queue::QueueState::Uploaded, "{next:?}");
+    }
+
+    /// A person's review, asked for in the background, answers at once
+    /// with `in_progress` and finishes with one `witness_review_ready`
+    /// event; the entry is pinned and still waiting for their decision.
+    #[tokio::test]
+    async fn a_background_witness_review_answers_at_once_and_finishes_by_event() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.shared.adopt_runtime();
+        h.shared.adopt_self();
+        let now = TransientRetryHarness::now();
+        let id = h.entry().entry_id;
+        assert!(h.shared.queue.lock().unwrap().return_to_waiting(id, now));
+        h.witness_delay_ms.store(1_000, Ordering::SeqCst);
+        let mut events = h.shared.events.subscribe();
+        let request = ipc::Request {
+            id: 7,
+            method: "witness_preview_request".to_string(),
+            params: serde_json::json!({
+                "entry_id": id.to_string(),
+                "raw_session_confirmed": true,
+                "background": true,
+            }),
+        };
+        let started = std::time::Instant::now();
+        let response = ipc::handle_request_async(&h.shared, &request).await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(800));
+        let result = response.result.expect("an answer");
+        assert_eq!(result["status"], "in_progress");
+        assert_eq!(result["entry_id"], id.to_string());
+        // Asked again while it runs: the same answer, not a second review.
+        let again = ipc::handle_request_async(&h.shared, &request).await;
+        assert_eq!(again.result.expect("an answer")["status"], "in_progress");
+
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.event == ipc::EVENT_WITNESS_REVIEW_READY {
+                    return event.data;
+                }
+            }
+        })
+        .await
+        .expect("the review finished");
+        assert_eq!(ready["entry_id"], id.to_string());
+        assert_eq!(ready["status"], "ready", "{ready}");
+        assert!(ready["summary"].is_object());
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Pending);
+        assert!(entry.holds_witness_certificate());
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            h.shared.witness_worker.in_flight(),
+            0,
+            "the lane is given back"
+        );
+    }
+
+    static WITNESS_JOB_PANIC: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     /// A server without the labelled refusal answers a bare
     /// `{"error":"rate limited"}` with no hint. Same handling, with the
     /// server's whole window as the wait.
@@ -4762,6 +6124,288 @@ mod tests {
         );
     }
 
+    /// Ingest's `429 account_limit_reached` with this body.
+    fn account_limit_reply(body: serde_json::Value) -> Option<(StatusCode, serde_json::Value)> {
+        Some((StatusCode::TOO_MANY_REQUESTS, body))
+    }
+
+    /// The jitter `retry_jitter::hint_with_extra_secs` may add on top of a
+    /// wait, at most.
+    fn account_limit_extra() -> chrono::Duration {
+        chrono::Duration::seconds(i64::from(crate::retry_jitter::HINT_EXTRA_MAX_SECS))
+    }
+
+    /// A spent account allowance is not a verdict on the session: the entry
+    /// keeps its approval (and so is not asked about again) and waits for
+    /// the period ingest named, instead of ending `Failed`.
+    #[tokio::test]
+    async fn an_account_limit_refusal_keeps_the_approval_and_waits() {
+        let h = TransientRetryHarness::new().await;
+        let before = h.entry();
+        assert!(before.approved_unattended);
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 1800}),
+        );
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.reason_label.as_deref(), Some("account_limit_reached"));
+        assert!(held.approved_unattended, "{held:?}");
+        assert_eq!(held.approved_scopes, before.approved_scopes);
+        assert!(held.approved_scopes.is_some());
+        let due = held.retry_after.expect("a retry time");
+        let wait = chrono::Duration::seconds(1800);
+        assert!(
+            due >= now + wait && due <= now + pass_took + wait + account_limit_extra(),
+            "{due}"
+        );
+        assert!(!held.ready_for_upload(now + chrono::Duration::seconds(60)));
+    }
+
+    /// With no wait in the refusal and no hold from the status read, the
+    /// entry waits the bounded default.
+    #[tokio::test]
+    async fn an_account_limit_refusal_without_a_hint_waits_the_default() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() =
+            account_limit_reply(serde_json::json!({"error": "account_limit_reached"}));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        let due = held.retry_after.expect("a retry time");
+        let wait = ACCOUNT_LIMIT_DEFAULT_RETRY;
+        assert!(
+            due >= now + wait && due <= now + pass_took + wait + account_limit_extra(),
+            "{due}"
+        );
+    }
+
+    /// A status read that says the allowance is spent, with a reset time,
+    /// holds every upload until that time; then they go.
+    #[tokio::test]
+    async fn a_spent_allowance_from_the_status_read_holds_uploads_until_its_reset() {
+        let h = TransientRetryHarness::new().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        let now = TransientRetryHarness::now();
+        h.shared
+            .account_admission
+            .record_spent_for_test(&cfg, 7200, now);
+        h.pass(now).await;
+        h.pass(now + chrono::Duration::seconds(3600)).await;
+        assert_eq!(
+            h.uploads.load(Ordering::SeqCst),
+            0,
+            "held by the status read"
+        );
+        let waiting = h.entry();
+        assert_eq!(waiting.state, queue::QueueState::Approved, "{waiting:?}");
+        assert_eq!(waiting.attempts, 0, "nothing was tried");
+
+        h.pass(now + chrono::Duration::seconds(7200)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// A wait past a day is capped at a day, as the status read's hold is.
+    #[tokio::test]
+    async fn an_account_limit_wait_is_capped_at_a_day() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 30 * 86_400}),
+        );
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+        let due = h.entry().retry_after.expect("a retry time");
+        assert!(
+            due <= now + pass_took + account_admission::MAX_HOLD,
+            "{due}"
+        );
+        assert!(
+            due >= now + account_admission::MAX_HOLD - account_limit_extra(),
+            "{due}"
+        );
+    }
+
+    /// Once the wait has passed, the next pass sends the session again.
+    #[tokio::test]
+    async fn a_session_waiting_on_the_account_limit_is_sent_after_the_wait() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 600}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        let due = h.entry().retry_after.expect("a retry time");
+
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(due - chrono::Duration::seconds(1)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "not before the wait");
+        h.pass(due).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// While the allowance is known to be spent nothing else is sent: one
+    /// refusal holds the whole queue, so a backlog does not spend one
+    /// request a pass finding out again.
+    #[tokio::test]
+    async fn a_spent_account_allowance_holds_every_other_upload() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "0badc0de-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "second session, then mail alice.smith@example.org",
+        )
+        .await;
+        assert_eq!(
+            h.entries()
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            2
+        );
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 1800}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "the pass stops");
+        h.pass(now + chrono::Duration::seconds(60)).await;
+        h.pass(now + chrono::Duration::seconds(600)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "held until the wait");
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved),
+            "{:?}",
+            h.entries()
+        );
+    }
+
+    /// On a witness device the certified bytes the refused upload carried
+    /// are kept with the waiting entry and sent after the wait, without
+    /// asking the witness again.
+    #[tokio::test]
+    async fn a_witnessed_session_waiting_on_the_account_limit_is_sent_under_its_pin() {
+        let h = TransientRetryHarness::with_witness().await;
+        *h.ingest_reply.lock().unwrap() = account_limit_reply(
+            serde_json::json!({"error": "account_limit_reached", "retry_after_seconds": 600}),
+        );
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.reason_label.as_deref(), Some("account_limit_reached"));
+        let pin = held.previewed_envelope_digest.clone().expect("a pin");
+        let witness_calls = h.witness_calls.lock().unwrap().len();
+
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(held.retry_after.unwrap()).await;
+        let sent = h.entry();
+        assert_eq!(sent.state, queue::QueueState::Uploaded, "{sent:?}");
+        assert_eq!(
+            sent.previewed_envelope_digest.as_deref(),
+            Some(pin.as_str())
+        );
+        assert_eq!(h.witness_calls.lock().unwrap().len(), witness_calls);
+    }
+
+    /// Make the harness's entry what an older build left after a spent
+    /// allowance: `Failed` under the label, its approval kept, and its
+    /// stored envelope swept, since a `Failed` entry pins nothing.
+    fn fail_as_an_older_build_did(h: &TransientRetryHarness) {
+        let mut q = h.shared.queue.lock().unwrap();
+        let id = q.all()[0].entry_id;
+        q.record_attempt(id, None);
+        q.set_state(
+            id,
+            queue::QueueState::Failed,
+            Some("account_limit_reached".into()),
+        );
+        q.save(&h.shared.store).unwrap();
+        approved_envelope::sweep(&h.shared.store, &q.pinned_entry_ids()).unwrap();
+    }
+
+    /// After the update, a session an older build failed for a spent
+    /// allowance is approved again on load and sent by the next pass.
+    #[tokio::test]
+    async fn an_account_limit_failure_from_an_older_build_is_sent_after_the_update() {
+        let h = TransientRetryHarness::new().await;
+        fail_as_an_older_build_did(&h);
+        let reloaded = ipc::DaemonShared::load(h.shared.store.clone()).unwrap();
+        let migrated = reloaded.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(migrated.state, queue::QueueState::Approved, "{migrated:?}");
+        assert!(migrated.approved_unattended);
+
+        let now = TransientRetryHarness::now();
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .retry_account_limit_failures(now);
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// The same on a witness device, where the older build had pinned the
+    /// certified bytes and the sweep has since removed them: an unattended
+    /// session is witnessed again and sent, not handed to a person.
+    #[tokio::test]
+    async fn a_witnessed_account_limit_failure_from_an_older_build_is_witnessed_again() {
+        let h = TransientRetryHarness::with_witness().await;
+        *h.ingest_reply.lock().unwrap() =
+            account_limit_reply(serde_json::json!({"error": "account_limit_reached"}));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert!(h.entry().previewed_envelope_digest.is_some());
+        fail_as_an_older_build_did(&h);
+        *h.ingest_reply.lock().unwrap() = None;
+
+        let later = now + chrono::Duration::days(2);
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .retry_account_limit_failures(later);
+        h.pass(later).await;
+        let sent = h.entry();
+        assert_eq!(sent.state, queue::QueueState::Uploaded, "{sent:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+    }
+
+    /// Every other admission refusal still ends the entry: a refusal of the
+    /// account, and the per-session evidence budget.
+    #[tokio::test]
+    async fn other_admission_refusals_still_end_failed() {
+        for (status, label) in [
+            (StatusCode::FORBIDDEN, "admission_refused"),
+            (StatusCode::TOO_MANY_REQUESTS, "admission_limit_reached"),
+        ] {
+            let h = TransientRetryHarness::new().await;
+            *h.ingest_reply.lock().unwrap() = Some((
+                status,
+                serde_json::json!({"error": label, "retry_after_seconds": 60}),
+            ));
+            h.pass(TransientRetryHarness::now()).await;
+            let ended = h.entry();
+            assert_eq!(ended.state, queue::QueueState::Failed, "{label}: {ended:?}");
+            assert_eq!(ended.reason_label.as_deref(), Some(label));
+        }
+    }
+
     /// A hint past the cap is clamped rather than parking the session.
     #[tokio::test]
     async fn a_rate_limit_hint_is_capped() {
@@ -4884,11 +6528,13 @@ mod tests {
         {
             let mut q = h.shared.queue.lock().unwrap();
             for (index, entry) in entries.iter().enumerate() {
+                // Only the start moves; the recorded prompts stay, so the
+                // sessions still have something to contribute.
                 q.entry_mut_for_test(entry.entry_id).unwrap().shape = Some(queue::SessionShape {
                     started_at: Some(
                         at("2026-08-08T10:00:00Z") - chrono::Duration::days(index as i64),
                     ),
-                    ..Default::default()
+                    ..entry.shape.clone().expect("the watcher records a shape")
                 });
             }
         }
@@ -5103,6 +6749,314 @@ mod tests {
         );
     }
 
+    /// A witness that cannot be reached judged nothing. The session keeps
+    /// its approval and is tried again on the transient-upload backoff,
+    /// never refused. Two distinct failures are not enough evidence to
+    /// stop other traces; the shared circuit requires three.
+    #[tokio::test]
+    async fn isolated_witness_failures_back_off_each_trace_without_stopping_the_pass() {
+        let h = TransientRetryHarness::build_with(true, true).await;
+        h.add_session(
+            "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
+        h.pass(TransientRetryHarness::now()).await;
+        let entries = h.entries();
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved),
+            "{entries:?}"
+        );
+        let tried: Vec<_> = entries
+            .iter()
+            .filter(|e| e.reason_label.as_deref() == Some("witness_unreachable"))
+            .collect();
+        assert_eq!(
+            tried.len(),
+            2,
+            "each trace gets an independent attempt: {entries:?}"
+        );
+        assert!(tried[0].retry_after.is_some());
+        assert_eq!(tried[0].transient_upload_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn one_failed_witness_trace_does_not_starve_a_healthy_trace() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.add_session(
+            "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
+            "a different approved trace, mail alice.smith@example.org",
+        )
+        .await;
+        h.witness_unavailable.store(true, Ordering::SeqCst);
+        h.witness_delay_ms.store(100, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_calls.lock().unwrap().len() == 1
+        })
+        .await;
+        // The first request captured the error. Every later trace succeeds.
+        h.witness_unavailable.store(false, Ordering::SeqCst);
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        let entries = h.entries();
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.holds_witness_certificate())
+                .count(),
+            1
+        );
+        let failed = entries
+            .iter()
+            .find(|e| !e.holds_witness_certificate())
+            .unwrap();
+        assert_eq!(failed.state, queue::QueueState::Approved);
+        assert_eq!(failed.transient_upload_failures, 1);
+        assert!(failed.retry_after.unwrap() > now);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        // Only the independently certified trace uploads on the next pass.
+        drain_approved_once_for_test(&h.shared, now + chrono::Duration::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.entries()
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_automatic_traces_precede_retries_but_manual_approvals_come_first() {
+        let now = Utc::now();
+        let entry = |n, attempts, manual: bool, wait| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: !manual,
+            retry_after: Some(now + chrono::Duration::seconds(wait)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 17, false, -10),
+            entry(2, 0, false, 0),
+            entry(3, 17, true, 0),
+            entry(4, 2, false, -100),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![3, 2, 4, 1]
+        );
+    }
+
+    /// The transient witness labels are mapped by name in five places, and
+    /// the sets differ on purpose. This table is the one statement of what
+    /// each place does with each label; a label added to
+    /// `submit::WITNESS_TRANSIENT_LABELS` fails here until it has a row.
+    #[test]
+    fn every_transient_witness_label_has_an_answer_at_every_site() {
+        use trace_commons_protocol::witness_blocked::WitnessBlockedLabel as B;
+        // (label, witness-blocked report, stops a CLI batch, monitor line)
+        let table: [(&str, Option<B>, bool, bool); 6] = [
+            ("witness_timeout", Some(B::TimedOut), true, true),
+            ("witness_unreachable", Some(B::Unreachable), true, true),
+            (
+                "witness_classifier_unavailable",
+                Some(B::Unreachable),
+                true,
+                true,
+            ),
+            ("witness_redaction_failed", Some(B::Unreachable), true, true),
+            // The quote fetch is the first request to the witness.
+            (
+                "witness_attestation_unavailable",
+                Some(B::Unreachable),
+                false,
+                false,
+            ),
+            // The collateral is Intel's, fetched by ingest: not the witness.
+            ("witness_collateral_unavailable", None, false, false),
+        ];
+        let mut labels: Vec<&str> = table.iter().map(|row| row.0).collect();
+        labels.sort_unstable();
+        let mut expected = crate::submit::WITNESS_TRANSIENT_LABELS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(labels, expected, "one row per transient witness label");
+
+        let unreachable = crate::witness_copy::witness_copy()
+            .review
+            .failed_unreachable;
+        for (label, blocked, stops, monitor) in table {
+            let failed = uploader::UploadDecision::Failed {
+                reason_label: label.to_string(),
+            };
+            assert_eq!(uploader::witness_blocked_label(&failed), blocked, "{label}");
+            assert_eq!(
+                crate::submit::WITNESS_BATCH_STOP_LABELS.contains(&label),
+                stops,
+                "{label}"
+            );
+            assert_eq!(
+                crate::preview_copy::monitor_failure_line(label).is_some(),
+                monitor,
+                "{label}"
+            );
+            assert_eq!(
+                crate::witness_copy::witness_refusal_line(Some(label)),
+                unreachable,
+                "{label}"
+            );
+            assert!(
+                queue::REASONS_NEEDING_A_PERSON.contains(&label),
+                "{label} must hold for a person once its budget is spent"
+            );
+        }
+    }
+
+    /// `attempts` never resets, so it cannot say whether an entry is waiting
+    /// on a retry now. An automatic trace whose earlier attempts were cleared
+    /// by a fresh approval or a pinned review (no `retry_after`) is fresh work
+    /// again, and must not sort behind every newer automatic trace for good.
+    #[test]
+    fn an_attempted_trace_with_no_pending_retry_sorts_as_fresh_work() {
+        let now = Utc::now();
+        let entry = |n, attempts, retry_after: Option<i64>, age: i64| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: true,
+            retry_after: retry_after.map(|wait| now + chrono::Duration::seconds(wait)),
+            last_modified_at: Some(now - chrono::Duration::seconds(age)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 0, None, 10),
+            // Reapproved after a 429: attempts kept, retry cleared, oldest.
+            entry(2, 3, None, 100),
+            entry(3, 2, Some(-50), 1000),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3]
+        );
+    }
+
+    /// A witness that is up but cannot do its job right now (`503
+    /// witness_signing_unavailable`) judged nothing. Before the witness's
+    /// refusals were read by status and label it was a malformed answer and
+    /// the session was refused for good. Now it keeps its approval, is tried
+    /// again on the transient-upload backoff, and goes out once the witness
+    /// recovers.
+    #[tokio::test]
+    async fn a_witness_that_cannot_serve_is_retried_and_the_session_goes_out_later() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.witness_unavailable.store(true, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+        assert_eq!(entry.reason_label.as_deref(), Some("witness_unreachable"));
+        assert_eq!(entry.transient_upload_failures, 1);
+        let due = entry.retry_after.expect("a retry time");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.witness_unavailable.store(false, Ordering::SeqCst);
+        h.pass(due).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Uploaded, "{entry:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// An approved session an older build refused `witness_response_malformed`
+    /// (a witness that was only down) is approved again by a newer build's
+    /// load-time pass, keeping the approval it was refused under, and goes
+    /// out through the witness on the next pass.
+    #[tokio::test]
+    async fn a_malformed_witness_refusal_from_an_older_build_goes_out_after_the_upgrade() {
+        let h = TransientRetryHarness::with_witness().await;
+        let id = h.entry().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            q.set_state(
+                id,
+                queue::QueueState::Refused,
+                Some("witness_response_malformed".to_string()),
+            );
+            assert!(q.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")));
+            assert!(!q.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")));
+        }
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+        h.pass(TransientRetryHarness::now()).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Uploaded, "{entry:?}");
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A witness that cannot review a trace never hands it back (owner,
+    /// 2026-11-12). Nothing was judged, so nothing calls for a new
+    /// decision: well past the old six-hour budget the session keeps its
+    /// approval and its label, and is retried at most an hour apart. Before
+    /// this a day-long classifier outage revoked every approval it touched.
+    #[tokio::test]
+    async fn a_witness_that_never_answers_keeps_the_approval_and_retries_hourly() {
+        let h = TransientRetryHarness::build_with(true, true).await;
+        let mut now = TransientRetryHarness::now();
+        for _ in 0..(MAX_TRANSIENT_UPLOAD_FAILURES * 3) {
+            h.pass(now).await;
+            let entry = h.entry();
+            assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+            assert_eq!(entry.reason_label.as_deref(), Some("witness_unreachable"));
+            assert!(!entry.held_for_review(), "{entry:?}");
+            let next = entry.retry_after.expect("a retry time");
+            assert!(
+                next > now && next - now <= chrono::Duration::hours(1),
+                "{entry:?}"
+            );
+            now = next;
+        }
+        let entry = h.entry();
+        assert!(entry.transient_upload_failures >= MAX_TRANSIENT_UPLOAD_FAILURES * 3);
+        assert!(
+            now - TransientRetryHarness::now() > transient_upload_give_up_horizon(),
+            "the run outlasted the old budget"
+        );
+    }
+
+    #[test]
+    fn only_a_witness_whose_evidence_could_not_be_fetched_is_a_transient_upload() {
+        for fetch in [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ] {
+            assert_eq!(
+                transient_upload_kind(fetch),
+                Some(TransientUpload::Witness),
+                "{fetch}"
+            );
+        }
+        for not_retried in [
+            "witness_quote_unverified",
+            "witness_signer_unexpected",
+            "witness_certificate_unverified",
+        ] {
+            assert_eq!(transient_upload_kind(not_retried), None, "{not_retried}");
+        }
+    }
+
     /// The control for the 409s that are not a pause. A re-send of bytes
     /// ingest already holds is answered with the stored receipt, never a
     /// 409; a 409 says the id is bound to something else, or the session
@@ -5162,6 +7116,22 @@ mod tests {
             .find(|row| row.entry_id == Some(entry_id))
             .unwrap_or_else(|| panic!("the session is still listed: {rows:?}"));
         assert_eq!(row.state, past_sessions::PastSessionState::Approved);
+    }
+
+    #[tokio::test]
+    async fn saturation_respects_the_server_delay_independently_of_prior_trace_failures() {
+        let h = TransientRetryHarness::with_witness().await;
+        let id = h.entry().entry_id;
+        for _ in 0..17 {
+            h.shared.queue.lock().unwrap().record_attempt(id, None);
+        }
+        *h.witness_saturated.lock().unwrap() = Some("45");
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved);
+        assert!(entry.retry_after.unwrap() >= now + chrono::Duration::seconds(45));
+        assert!(entry.retry_after.unwrap() < now + chrono::Duration::seconds(70));
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage
@@ -5947,6 +7917,200 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing is fetched");
     }
 
+    /// Set in the child process a SIGTERM test starts, to the directory it
+    /// runs against. Its value's prefix names which half to run.
+    #[cfg(unix)]
+    const SIGTERM_CHILD_DIR: &str = "TC_TEST_SIGTERM_CHILD_DIR";
+
+    /// Distinct exits for the child halves, so a failure says which step it
+    /// reached.
+    #[cfg(unix)]
+    mod sigterm_exit {
+        /// The signal did not end the process.
+        pub const SURVIVED: i32 = 0;
+        /// The supervisor ended before the signal was sent.
+        pub const SUPERVISOR_ENDED: i32 = 10;
+        /// The supervisor never finished a tick.
+        pub const NOT_READY: i32 = 11;
+        /// `run` never created its socket.
+        pub const RUN_NOT_STARTED: i32 = 20;
+        /// `run` did not end on SIGTERM.
+        pub const RUN_IGNORED_SIGTERM: i32 = 21;
+        /// `run` ended with an error.
+        pub const RUN_FAILED: i32 = 22;
+        /// `run` left `daemon.sock` or `daemon.lock` behind.
+        pub const RUN_LEFT_FILES: i32 = 23;
+    }
+
+    /// Re-run this test binary for one named test with the child variable
+    /// set, its home and config locations all inside `dir`, and return how
+    /// it ended.
+    #[cfg(unix)]
+    fn run_sigterm_child(test: &str, dir: &std::path::Path) -> std::process::ExitStatus {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(SIGTERM_CHILD_DIR, dir)
+            // Nothing in the child reads the real home, config or IronWire
+            // home: each is a process-wide input (see the K2 sample recorder
+            // note in Cargo.toml).
+            .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+            .env("IRONWIRE_HOME", dir.join("ironwire"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn sigterm_self() {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status();
+    }
+
+    #[cfg(unix)]
+    fn sigterm_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Poll `done` every 20 ms for up to `limit`.
+    #[cfg(unix)]
+    async fn sigterm_wait(limit: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+        let until = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < until {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        done()
+    }
+
+    /// An application that embeds the daemon (the macOS and Windows apps
+    /// through the C ABI, the GTK shell directly) owns its process's signals.
+    /// `run_supervisor` used to install SIGTERM and SIGINT handlers, which
+    /// stay installed for the life of the process, so a SIGTERM sent to the
+    /// app only stopped the daemon's loop and the app kept running.
+    ///
+    /// Runs in a child process, since the property is about what a signal
+    /// does to the whole process: the child starts the supervisor, waits for
+    /// it to finish a tick (by then the old handler was installed), checks
+    /// it is still running, sends itself SIGTERM, and must die of it.
+    #[cfg(unix)]
+    #[test]
+    fn an_embedded_supervisor_leaves_sigterm_to_the_host() {
+        use std::os::unix::process::ExitStatusExt;
+        if let Ok(dir) = std::env::var(SIGTERM_CHILD_DIR) {
+            embedded_sigterm_child(std::path::Path::new(&dir));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = run_sigterm_child(
+            "daemon::tests::an_embedded_supervisor_leaves_sigterm_to_the_host",
+            dir.path(),
+        );
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "SIGTERM ends the host process; the child exited with {status:?}"
+        );
+    }
+
+    /// The child's half: a paused supervisor with nothing configured, so no
+    /// pass reads a session root or sends anything. Missions are hidden (the
+    /// default), so its first tick empties the slot filled here: that is the
+    /// readiness signal. Exits only if the signal did not end the process.
+    #[cfg(unix)]
+    fn embedded_sigterm_child(dir: &std::path::Path) -> ! {
+        let code = sigterm_runtime().block_on(async {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+            shared.paused.store(true, Ordering::Relaxed);
+            mission_matching::receive_catalogue(
+                &shared.mission_catalogue,
+                &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+                Utc::now(),
+            )
+            .unwrap();
+            let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+            let ticked = sigterm_wait(std::time::Duration::from_secs(60), || {
+                shared.mission_catalogue.lock().unwrap().is_none()
+            })
+            .await;
+            if !ticked {
+                return sigterm_exit::NOT_READY;
+            }
+            if supervisor.is_finished() {
+                return sigterm_exit::SUPERVISOR_ENDED;
+            }
+            sigterm_self();
+            // The signal ends the process well inside this; returning means
+            // it did not.
+            sigterm_wait(std::time::Duration::from_secs(5), || false).await;
+            sigterm_exit::SURVIVED
+        });
+        std::process::exit(code)
+    }
+
+    /// The CLI's `daemon run` owns its process, so it still stops on SIGTERM
+    /// (what systemd and launchd send), and stops cleanly: exit 0, with
+    /// `daemon.sock` and `daemon.lock` removed. Without this, passing an
+    /// embedder's never-firing signal here would make the CLI daemon ignore
+    /// SIGTERM and every other test would still pass.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_run_stops_cleanly_on_sigterm() {
+        if let Ok(dir) = std::env::var(SIGTERM_CHILD_DIR) {
+            run_sigterm_child_half(std::path::Path::new(&dir));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = run_sigterm_child(
+            "daemon::tests::daemon_run_stops_cleanly_on_sigterm",
+            dir.path(),
+        );
+        assert_eq!(
+            status.code(),
+            Some(sigterm_exit::SURVIVED),
+            "daemon run stops cleanly on SIGTERM; the child exited with {status:?}"
+        );
+    }
+
+    /// The child's half: `run` in a dry run, SIGTERM once its socket exists
+    /// (its handlers are installed before that), then check what it left.
+    #[cfg(unix)]
+    fn run_sigterm_child_half(dir: &std::path::Path) -> ! {
+        let code = sigterm_runtime().block_on(async {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            let sock = store.daemon_path(DAEMON_SOCK_FILE);
+            let lock = store.daemon_path(DAEMON_LOCK_FILE);
+            let daemon = tokio::spawn(run(store, true));
+            let started = sigterm_wait(std::time::Duration::from_secs(30), || {
+                sock.exists() || daemon.is_finished()
+            })
+            .await;
+            if !started || daemon.is_finished() {
+                return sigterm_exit::RUN_NOT_STARTED;
+            }
+            sigterm_self();
+            let Ok(joined) = tokio::time::timeout(std::time::Duration::from_secs(30), daemon).await
+            else {
+                return sigterm_exit::RUN_IGNORED_SIGTERM;
+            };
+            if !matches!(joined, Ok(Ok(()))) {
+                return sigterm_exit::RUN_FAILED;
+            }
+            if sock.exists() || lock.exists() {
+                return sigterm_exit::RUN_LEFT_FILES;
+            }
+            sigterm_exit::SURVIVED
+        });
+        std::process::exit(code)
+    }
+
     /// Without a config there is no origin to ask: nothing is sent and the
     /// built-in table stays.
     #[tokio::test]
@@ -5962,6 +8126,249 @@ mod tests {
             ipc::EstimateTableSlot::built_in()
         );
         assert!(!schedule.due(start));
+    }
+
+    /// The Terms of Service hold: the re-check, what it stops, and what it
+    /// keeps from ageing out (`terms_state`).
+    mod terms_hold {
+        use super::*;
+        use crate::terms::FetchedTerms;
+        use trace_commons_protocol::terms::{TermsBlock, TermsDocument};
+
+        fn fetched(version: &str, in_effect: bool) -> FetchedTerms {
+            FetchedTerms {
+                document: TermsDocument {
+                    schema_version: trace_commons_protocol::terms::TERMS_SCHEMA_VERSION.into(),
+                    version: version.into(),
+                    effective: "2026-12-01".into(),
+                    in_effect,
+                    title: "Terms".into(),
+                    blocks: vec![TermsBlock::Paragraph {
+                        text: "Terms text.".into(),
+                    }],
+                },
+                content_sha256: std::iter::repeat_n('c', 64).collect(),
+            }
+        }
+
+        fn load(dir: &std::path::Path) -> Arc<ipc::DaemonShared> {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            Arc::new(ipc::DaemonShared::load(store).unwrap())
+        }
+
+        fn accept(shared: &ipc::DaemonShared, version: &str) {
+            let reply = ipc::handle_request(
+                shared,
+                &ipc::Request {
+                    id: 1,
+                    method: "terms_accept".into(),
+                    params: serde_json::json!({
+                        "version": version,
+                        "content_sha256": std::iter::repeat_n('c', 64).collect::<String>(),
+                        "accepted_at": Utc::now(),
+                    }),
+                },
+            );
+            assert!(reply.error.is_none(), "{:?}", reply.error);
+        }
+
+        #[tokio::test]
+        async fn a_new_in_effect_version_starts_the_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            accept(&shared, "v1");
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v2", true)));
+            let mut events = shared.events.subscribe();
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_version_owed"], "v2");
+            let mut names = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                names.push(event.event);
+            }
+            assert!(names.iter().any(|e| e == ipc::EVENT_STATUS_CHANGED));
+            // The same version again moves nothing.
+            terms_state::apply_fetch(&shared, at("2026-11-09T18:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_never_starts_a_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            // No override: the fetch is unavailable.
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+            assert!(shared.terms.lock().unwrap().published.is_none());
+            // Nor does a refused document, and neither lifts a hold.
+            terms_state::apply_fetch(&shared, at("2026-11-09T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            terms_state::apply_fetch(
+                &shared,
+                at("2026-11-09T18:00:00Z"),
+                Err("terms-schema-unknown"),
+            );
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "a failure keeps the hold"
+            );
+            assert_eq!(
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .unwrap()
+                    .version,
+                "v2"
+            );
+        }
+
+        #[tokio::test]
+        async fn held_uploads_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let id = seed_contributor_approval(&shared);
+            terms_state::apply_fetch(&shared, at("2026-08-08T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+
+            let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(held, before, "held exactly as it was, not sent");
+            assert_eq!(held.unwrap().state, queue::QueueState::Approved);
+
+            accept(&shared, "v2");
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+            let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(
+                released.map(|e| (e.state, e.reason_label)),
+                Some((
+                    queue::QueueState::Failed,
+                    Some("session-file-vanished".to_string())
+                )),
+                "released: the pass reached the send"
+            );
+        }
+
+        /// Spec section 5: expiry does not run against entries waiting only
+        /// because of the hold. The hold delays `Approved` entries, which
+        /// never age out; a `Pending` entry waits for the contributor's own
+        /// review (an armed folder's entries are approved by the watcher
+        /// whatever the hold), so review expiry runs as it does without one.
+        #[tokio::test]
+        async fn held_entries_do_not_expire() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let now = at("2026-11-09T12:00:00Z");
+            let ttl_days = shared.settings.lock().unwrap().queue_ttl_days;
+            let old = now - chrono::Duration::days(ttl_days + 1);
+            let (approved, pending) = {
+                let mut q = shared.queue.lock().expect("queue lock");
+                let a = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-approved".to_string(),
+                    project_key: "/w/approved".to_string(),
+                    discovered_at: old,
+                    ..Default::default()
+                };
+                let p = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-pending".to_string(),
+                    project_key: "/w/pending".to_string(),
+                    discovered_at: old,
+                    ..Default::default()
+                };
+                let (a_id, p_id) = (a.entry_id, p.entry_id);
+                q.upsert(a, 100).unwrap();
+                q.upsert(p, 100).unwrap();
+                assert!(q.approve(a_id, &[], None, None, None, None));
+                (a_id, p_id)
+            };
+            terms_state::apply_fetch(&shared, now, Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+
+            expire_and_digest(&shared, now);
+            let q = shared.queue.lock().unwrap();
+            assert_eq!(
+                q.get(approved).unwrap().state,
+                queue::QueueState::Approved,
+                "an entry the hold keeps waiting does not age out"
+            );
+            assert_eq!(
+                q.get(pending).unwrap().state,
+                queue::QueueState::Expired,
+                "review expiry is not suspended by the hold"
+            );
+        }
+
+        #[tokio::test]
+        async fn hold_survives_restart_without_network() {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let shared = load(dir.path());
+                accept(&shared, "v1");
+                terms_state::apply_fetch(
+                    &shared,
+                    at("2026-11-09T12:00:00Z"),
+                    Ok(fetched("v2", true)),
+                );
+                assert!(shared.terms_held.load(Ordering::SeqCst));
+            }
+            // A new process, offline: the persisted published version holds.
+            let shared = load(dir.path());
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_hold"], true);
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T13:00:00Z"), &mut schedule).await;
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "an offline start keeps it"
+            );
+        }
+
+        #[tokio::test]
+        async fn recheck_runs_at_start_then_every_six_hours() {
+            let start = at("2026-11-09T12:00:00Z");
+            let mut schedule = terms_state::TermsSchedule::starting();
+            assert!(schedule.due(start));
+            schedule.attempted(start);
+            assert!(!schedule.due(start));
+            assert!(!schedule.due(start + chrono::Duration::seconds(6 * 60 * 60 - 1)));
+            assert!(schedule.due(start + chrono::Duration::hours(6)));
+
+            // Through the pass: the check time moves only when due.
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v1", false)));
+            let checked = |shared: &ipc::DaemonShared| {
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .map(|p| p.checked_at)
+            };
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, start, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start));
+            terms_state::tick(&shared, start + chrono::Duration::hours(1), &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start), "not due an hour later");
+            let later = start + chrono::Duration::hours(6);
+            terms_state::tick(&shared, later, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(later));
+            // A draft never holds.
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+        }
     }
 }
 

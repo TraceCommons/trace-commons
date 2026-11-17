@@ -184,7 +184,7 @@ public sealed partial class SettingsView : UserControl
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.InferenceEvidenceDisclosure,
+                    Text = ContributorSettingsViewModel.JoinParagraphs(Settings.PrivacyConfirmDescription, Settings.InferenceEvidenceDisclosure,
                         Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },
@@ -246,7 +246,7 @@ public sealed partial class SettingsView : UserControl
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.TokenContributionDisclosure,
+                    Text = ContributorSettingsViewModel.JoinParagraphs(Settings.PrivacyConfirmDescription, Settings.TokenContributionDisclosure,
                         Settings.TokenContributionCaptureNote, Settings.TokenContributionScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },

@@ -4,7 +4,7 @@ Copy the prompt below into a terminal-capable AI agent and replace the bracketed
 
 ---
 
-Configure my Trace Commons / Near.ai app through its CLI.
+Configure my Trace Commons / Near AI Gateway app through its CLI.
 
 Target app/channel: [production or staging, and installation location if nonstandard].
 Requested settings: [for example, disable notifications and enable trace-value estimates].

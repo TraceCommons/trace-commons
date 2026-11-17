@@ -208,8 +208,9 @@ public sealed class PublicProfileCopyTests
             PublicProfileCopy.Footnote);
 
         Assert.Equal(
-            "I understand my handle and aggregate counts become public. Leaving the roster "
-            + "removes me from future snapshots.",
+            // Owner changed this 2026-11-04 (Settings copy pass 2, P160).
+            "I understand my handle and counts become public. Leaving removes me from "
+            + "future snapshots only.",
             PublicProfileCopy.GoPublicAcknowledgement);
 
         Assert.Equal(

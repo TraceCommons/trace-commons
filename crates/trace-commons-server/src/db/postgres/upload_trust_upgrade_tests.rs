@@ -100,7 +100,10 @@ async fn v137_invalidates_already_enabled_pre_migration_applied_generations_once
     );
     backend.run_migrations().await.unwrap();
     let state=client.query_one("SELECT f.generation,e.input_generation,(f.generation=e.input_generation) FROM trace_account_trust_frontiers f JOIN trace_account_trust_evaluations e USING(tenant_id,account_id) WHERE f.tenant_id=$1 AND f.account_id=$2", &[&tenant,&account]).await.unwrap();
-    assert_eq!(state.get::<_, i64>(0), old_generation + 1);
+    // Two bumps across the whole upgrade: V137 invalidates the pre-migration
+    // applied row once, and V156 bumps every frontier once more because it
+    // changes how pipeline gate facts are derived. Neither runs twice.
+    assert_eq!(state.get::<_, i64>(0), old_generation + 2);
     assert_eq!(
         state.get::<_, i64>(1),
         old_generation,
@@ -133,6 +136,6 @@ async fn v137_invalidates_already_enabled_pre_migration_applied_generations_once
         0
     );
     backend.run_migrations().await.unwrap();
-    assert_eq!(client.query_one("SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap().get::<_,i64>(0),old_generation+1,
+    assert_eq!(client.query_one("SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap().get::<_,i64>(0),old_generation+2,
         "the migration runner never applies the metadata invalidation twice");
 }

@@ -123,6 +123,9 @@ pub fn call<T: DeserializeOwned>(
 /// The error for a daemon refusal labelled `code`: its label, except for a
 /// refusal whose sentence tells the person what to change.
 fn refusal(code: &str) -> anyhow::Error {
+    if code == super::DAEMON_UPDATE_REQUIRED_LABEL {
+        return ManagedError::DaemonUpdateRequired.into();
+    }
     if code == super::PROJECT_CHOOSES_MODEL_LABEL {
         return ManagedError::ProjectChoosesModel.into();
     }
@@ -523,6 +526,17 @@ mod tests {
         assert_eq!(
             refusal("managed-model-unavailable").to_string(),
             "managed-model-unavailable"
+        );
+    }
+
+    #[test]
+    fn an_old_daemon_refusal_names_the_app_update_action() {
+        assert_eq!(
+            refusal("managed-daemon-update-required").to_string(),
+            format!(
+                "Update and reopen {} before launching Codex.",
+                crate::brand::APP_NAME
+            )
         );
     }
 

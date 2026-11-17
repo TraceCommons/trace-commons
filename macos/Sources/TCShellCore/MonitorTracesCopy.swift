@@ -35,6 +35,12 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     public let undoKeep: String
     public let coreUnreachable: String
     public let requestFailed: String
+    /// A trace that has to go through the privacy check before it can be
+    /// sent (`witness-review-required`). DRAFT.
+    public let needsPrivacyCheck: String
+    /// The privacy check did not answer in time or could not be reached
+    /// (`witness_timeout`, `witness_unreachable`, `preview-timed-out`). DRAFT.
+    public let privacyCheckNoAnswer: String
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Not `dismiss` ("Not this one").
     public let dismissAction: String
@@ -62,6 +68,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         case undoKeep = "undo_keep"
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
+        case needsPrivacyCheck = "needs_privacy_check"
+        case privacyCheckNoAnswer = "privacy_check_no_answer"
         case dismissAction = "dismiss_action"
         case dismissAll = "dismiss_all"
         case optionalAutomation = "optional_automation"
@@ -77,6 +85,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
         "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
         "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
+        "needs_privacy_check", "privacy_check_no_answer",
         "dismiss_action", "dismiss_all", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
         "look_inside", "undo",
     ]
@@ -105,6 +114,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
             copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
+            copy.needsPrivacyCheck, copy.privacyCheckNoAnswer,
             copy.dismissAction, copy.dismissAll, copy.optionalAutomation,
         ]
         let tables: [Bool] = [
@@ -117,9 +127,34 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// What the tab says for a failed request: the core's line for a core
     /// that does not answer, or for one that refused. Never the error's own
     /// fixed label, which is for logs.
+    ///
+    /// A failure whose label has a line of its own says that line instead
+    /// (`failureLine(for:)`), so a trace waiting on the privacy check, or a
+    /// check that did not answer, is not reported as a generic failure.
     public func line(for error: DaemonDataError) -> String {
         if case .unreachable = error { return coreUnreachable }
-        return requestFailed
+        return failureLine(for: error) ?? requestFailed
+    }
+
+    /// The line for a preview or Submit failure whose label has one, or nil.
+    /// Reads the daemon's fixed label: an IPC error's message, or a skipped
+    /// approve's reason.
+    public func failureLine(for error: DaemonDataError) -> String? {
+        switch error {
+        case .daemon(_, let message): return failureLine(forLabel: message)
+        case .notApproved(let reason): return reason.flatMap(failureLine(forLabel:))
+        default: return nil
+        }
+    }
+
+    /// The same mapping as the core's `preview_copy::monitor_failure_line`.
+    public func failureLine(forLabel label: String) -> String? {
+        switch label {
+        case "witness-review-required": return needsPrivacyCheck
+        case "preview-timed-out", "witness_timeout", "witness_unreachable",
+             "witness_classifier_unavailable", "witness_redaction_failed": return privacyCheckNoAnswer
+        default: return nil
+        }
     }
 }
 
@@ -134,15 +169,25 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
 public protocol MonitorWordTable: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name.
     static var consumedFields: [String] { get }
+    /// The words the owner cut, by property name: each arrives "" and is
+    /// drawn as nothing, so it does not make the table unwhole.
+    static var ownerCut: Set<String> { get }
 }
 
 extension MonitorWordTable {
+    public static var ownerCut: Set<String> { [] }
+
     /// Every word in the table, so a decode can refuse an empty one.
     var words: [String] { Mirror(reflecting: self).children.compactMap { $0.value as? String } }
 
     /// Whether every word is there: an empty one is a table this shell
-    /// cannot render, never a blank label.
-    var isWhole: Bool { !words.contains(where: \.isEmpty) }
+    /// cannot render, never a blank label. An `ownerCut` word may be empty.
+    var isWhole: Bool {
+        !Mirror(reflecting: self).children.contains { child in
+            guard let text = child.value as? String, text.isEmpty else { return false }
+            return !Self.ownerCut.contains(child.label ?? "")
+        }
+    }
 }
 
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
@@ -473,7 +518,13 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public let unavailable: String
     public let within: String
     public let mayHaveStarted: String
+    public let heldForReviewOne: String
+    public let heldForReview: String
     public let undoing: String
+    /// "Data redaction has begun.": said once per app run, under the first
+    /// Submit a person makes that goes to the privacy witness. See
+    /// `RedactionBegunNotice`.
+    public let redactionBegun: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case approvalSaved = "approval_saved"
@@ -481,7 +532,10 @@ public struct MonitorUndoCopy: MonitorWordTable {
         case unavailable
         case within
         case mayHaveStarted = "may_have_started"
+        case heldForReviewOne = "held_for_review_one"
+        case heldForReview = "held_for_review"
         case undoing
+        case redactionBegun = "redaction_begun"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
@@ -612,15 +666,12 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let settingsRefresh: String
     /// Each Settings card's re-read button's accessible name and tooltip.
     public let settingsRefreshDesktop: String
-    public let settingsRefreshDiscovery: String
     public let settingsRefreshUses: String
     /// Startup's updates card.
     public let updatesEyebrow: String
     public let consentEyebrow: String
     public let desktopEyebrow: String
     public let desktopTitle: String
-    public let discoveryEyebrow: String
-    public let discoveryTitle: String
     public let watcherEyebrow: String
     public let watcherTitle: String
     public let watcherWatching: String
@@ -675,14 +726,11 @@ public struct MonitorShellCopy: MonitorWordTable {
         case mapViewsLabel = "map_views_label"
         case settingsRefresh = "settings_refresh"
         case settingsRefreshDesktop = "settings_refresh_desktop"
-        case settingsRefreshDiscovery = "settings_refresh_discovery"
         case settingsRefreshUses = "settings_refresh_uses"
         case updatesEyebrow = "updates_eyebrow"
         case consentEyebrow = "consent_eyebrow"
         case desktopEyebrow = "desktop_eyebrow"
         case desktopTitle = "desktop_title"
-        case discoveryEyebrow = "discovery_eyebrow"
-        case discoveryTitle = "discovery_title"
         case watcherEyebrow = "watcher_eyebrow"
         case watcherTitle = "watcher_title"
         case watcherWatching = "watcher_watching"
@@ -694,6 +742,10 @@ public struct MonitorShellCopy: MonitorWordTable {
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// Settings' consent and watcher eyebrows, cut by the owner
+    /// 2026-11-04 (Settings copy pass 2, P140, P79): each arrives "".
+    public static var ownerCut: Set<String> { ["consentEyebrow", "watcherEyebrow"] }
 
     /// Watching N tools: the singular is its own line.
     public func watching(tools: Int) -> String {
@@ -756,6 +808,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
+    /// Under the hero while Train coding models is off (owner, 2026-11-05).
+    public let noCreditBody: String
+    public let noCreditOpenSettings: String
     /// Home's Credit earned tile: the account's whole total, `{amount}`
     /// (product owner, 2026-10-29).
     public let creditAccountTotal: String
@@ -820,6 +875,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
+        case noCreditBody = "no_credit_body"
+        case noCreditOpenSettings = "no_credit_open_settings"
         case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

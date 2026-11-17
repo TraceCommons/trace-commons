@@ -56,7 +56,8 @@ const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "public_attribution",
         "List my handle publicly as a contributor",
-        "Lists your handle publicly as a contributor. Does not change how any trace is used.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P146).
+        "Doesn't change how any trace is used.",
         false,
     ),
 ];

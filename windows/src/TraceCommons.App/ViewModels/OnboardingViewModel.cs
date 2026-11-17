@@ -39,6 +39,9 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// facts about the build, not about a running daemon.
     private static readonly PrivateInferenceCopy? SharedPrivateInferenceCopy =
         PrivateInferenceSurface.Copy();
+    public AgentConfigurationCopy? AgentConfiguration { get; } = AgentConfigurationCopy.Load();
+    public bool HasAgentConfiguration => AgentConfiguration is not null;
+    public string AgentConfigurationAction => AgentConfiguration?.Action ?? string.Empty;
     public string WelcomeBody => SharedOnboardingCopy?.WelcomeBody ?? "";
     public string DoneBody => SharedOnboardingCopy?.DoneBody ?? "";
     /// <summary>

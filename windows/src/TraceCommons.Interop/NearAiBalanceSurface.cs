@@ -184,8 +184,18 @@ public static class NearAiBalanceSurface
     /// What the WHOLE ACCOUNT has spent, or the empty string. A zero is not
     /// that: an account that has spent nothing has spent $0.00.
     /// </summary>
-    public static string SpentLine(long? nanos, byte? scale) =>
-        Line(NativeMethods.tc_near_ai_balance_spent_line, nanos, scale);
+    /// <remarks>
+    /// <c>remaining</c> is the same reading's remaining figure. Beside one,
+    /// Spent rounds up to the cent so Limit, Spent and what is left add up;
+    /// without one it is floored like every other amount. The core decides.
+    /// </remarks>
+    public static string SpentLine(long? nanos, long? remaining, byte? scale) =>
+        scale is not { } units
+            ? string.Empty
+            : NativeMethods.TakeOwnedString(
+                NativeMethods.tc_near_ai_balance_spent_line(
+                    Present(nanos), nanos ?? 0, units, Present(remaining)))
+                ?? string.Empty;
 
     /// <summary>
     /// How long ago THIS COMPUTER asked, or the empty string.

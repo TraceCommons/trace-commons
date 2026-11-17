@@ -107,7 +107,7 @@ public class NearAiBalanceTests
         Assert.Equal(string.Empty, NearAiBalanceSurface.RemainingLine(8_500_000_000, null));
         Assert.Equal(string.Empty, NearAiBalanceSurface.RemainingLine(null, null));
         Assert.Equal(string.Empty, NearAiBalanceSurface.LimitLine(0, null));
-        Assert.Equal(string.Empty, NearAiBalanceSurface.SpentLine(0, null));
+        Assert.Equal(string.Empty, NearAiBalanceSurface.SpentLine(0, 0, null));
     }
 
     /// <summary>
@@ -144,9 +144,25 @@ public class NearAiBalanceTests
     public void TheLimitAndSpentLinesAreEmptyWhenAbsentAndZeroWhenZero()
     {
         Assert.Equal(string.Empty, NearAiBalanceSurface.LimitLine(null, Scale));
-        Assert.Equal(string.Empty, NearAiBalanceSurface.SpentLine(null, Scale));
+        Assert.Equal(string.Empty, NearAiBalanceSurface.SpentLine(null, null, Scale));
         Assert.Contains("$0.00", NearAiBalanceSurface.LimitLine(0, Scale), StringComparison.Ordinal);
-        Assert.Contains("$0.00", NearAiBalanceSurface.SpentLine(0, Scale), StringComparison.Ordinal);
+        Assert.Contains("$0.00", NearAiBalanceSurface.SpentLine(0, null, Scale), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Beside a remaining figure the row adds up: limit $130.00, spent
+    /// $18.185 and $111.815 left read $130.00, $18.19 and $111.81. With no
+    /// remaining figure Spent is floored, and a sub-cent spend is the phrase,
+    /// never a cent nobody spent.
+    /// </summary>
+    [Fact]
+    public void SpentBesideARemainingFigureAddsUpAndWithoutOneIsFloored()
+    {
+        Assert.Equal("Limit: $130.00", NearAiBalanceSurface.LimitLine(130_000_000_000, Scale));
+        Assert.Equal("Spent: $18.19", NearAiBalanceSurface.SpentLine(18_185_000_000, 111_815_000_000, Scale));
+        Assert.Equal("$111.81 left", NearAiBalanceSurface.RemainingLine(111_815_000_000, Scale));
+        Assert.Equal("Spent: $18.18", NearAiBalanceSurface.SpentLine(18_185_000_000, null, Scale));
+        Assert.Equal("Spent: less than $0.01", NearAiBalanceSurface.SpentLine(1, 111_815_000_000, Scale));
     }
 
     /// <summary>

@@ -1,0 +1,31 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 104 and seed 4152616182690475057 with 1 worker on 16 cores with 27300MB heap and 64MB offheap memory [pid: 20475] (Mac OS X 27.0.1 aarch64, Homebrew 21.0.13.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /private/tmp/tc-skills-extended-dump/FLOW.tla
+Parsing file /private/var/folders/d8/q4n9h8vx5l14s40vhldysw2c0000gn/T/Integers.tla
+Parsing file /private/var/folders/d8/q4n9h8vx5l14s40vhldysw2c0000gn/T/Sequences.tla
+Parsing file /private/var/folders/d8/q4n9h8vx5l14s40vhldysw2c0000gn/T/FiniteSets.tla
+Parsing file /private/var/folders/d8/q4n9h8vx5l14s40vhldysw2c0000gn/T/TLC.tla
+Parsing file /private/tmp/tc-skills-extended-dump/Apalache.tla
+Parsing file /private/tmp/tc-skills-extended-dump/Variants.tla
+Parsing file /private/var/folders/d8/q4n9h8vx5l14s40vhldysw2c0000gn/T/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Apalache
+Semantic processing of module Variants
+Semantic processing of module FLOW
+Starting... (2026-11-11 08:12:45)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-11 08:12:46.
+Progress(13) at 2026-11-11 08:12:49: 527,004 states generated (527,004 s/min), 39,622 distinct states found (39,622 ds/min), 12,932 states left on queue.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 6.1E-9
+  based on the actual fingerprints:  val = 7.1E-10
+1578879 states generated, 74288 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 18.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 14 and the 95th percentile is 4).
+Finished in 08s at (2026-11-11 08:12:54)

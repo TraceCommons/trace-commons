@@ -272,6 +272,7 @@ struct LegacyMigrationMoveControls: View {
             if model.legacyMigrationInviteNeeded {
                 GlassTextField(offer.invitePrompt, text: $invite)
                     .accessibilityLabel(offer.invitePrompt)
+                    .help(offer.inviteLinkTooltip)
             }
             // The action first, the dismiss after it as a link (Ron,
             // 2026-10-09).

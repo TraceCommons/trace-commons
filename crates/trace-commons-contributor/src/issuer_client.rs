@@ -61,10 +61,22 @@ pub struct IssuerClient {
 impl IssuerClient {
     /// Construct a client with a 30-second request timeout.
     pub fn new(allowlist: HostAllowlist) -> Result<Self> {
+        Self::with_timeout(allowlist, std::time::Duration::from_secs(30))
+    }
+
+    /// [`Self::new`] with a caller-chosen whole-request timeout. The
+    /// timeout covers the connection, the request and the body read, so an
+    /// issuer that accepts a connection and never answers costs at most
+    /// `timeout`.
+    pub(crate) fn with_timeout(
+        allowlist: HostAllowlist,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
             // Service endpoints never delegate credentials or trust through redirects.
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(timeout.min(std::time::Duration::from_secs(15)))
+            .timeout(timeout)
             .build()
             .context("building issuer HTTP client")?;
         Ok(Self { http, allowlist })
@@ -369,6 +381,39 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    /// An issuer that accepts the connection and never answers costs the
+    /// timeout, then an error -- never an indefinite wait before a witness
+    /// review or an upload.
+    #[tokio::test]
+    async fn a_silent_issuer_is_bounded_by_the_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = IssuerClient::with_timeout(
+            trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+            std::time::Duration::from_millis(300),
+        )
+        .unwrap();
+        let signed = crate::identity::SignedClaimRequest {
+            body: r#"{"k":"v"}"#.into(),
+            device_key_id: "sha256:ab".into(),
+            signature_b64: "c2ln".into(),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.mint_claim(&base, &signed),
+        )
+        .await
+        .expect("the claim mint returned instead of hanging");
+        assert!(result.is_err());
+        task.abort();
     }
 
     #[tokio::test]

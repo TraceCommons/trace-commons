@@ -17,6 +17,8 @@ mod test_worker;
 pub mod artifact;
 mod controller;
 mod live;
+#[cfg(unix)]
+mod owner_watch;
 pub mod policy;
 mod process;
 mod resource;

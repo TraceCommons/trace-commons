@@ -219,7 +219,7 @@ fn launch_without_daemon_refuses_instead_of_starting_an_untracked_tool() {
         value["error"]
             .as_str()
             .unwrap()
-            .contains("open the Near.ai app before launching")
+            .contains("open the Near AI Gateway app before launching")
     );
 }
 
@@ -392,7 +392,7 @@ fn redeem_launch_takes_its_ticket_from_the_environment() {
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
     let with = run(Some("0123abcd9876fedc"));
-    assert!(with.contains("open the Near.ai app"), "{with}");
+    assert!(with.contains("open the Near AI Gateway app"), "{with}");
     assert!(
         !with.contains("0123abcd9876fedc"),
         "the ticket is never printed: {with}"

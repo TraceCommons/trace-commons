@@ -18,7 +18,7 @@ final class NudgeSettingsSectionTests: XCTestCase {
             .notify("near_ai_credit"),
         ])
         XCTAssertTrue(store.rows.allSatisfy(\.isOn))
-        XCTAssertEqual(store.rows.first?.label, "Show suggestions in Traces, History and the menu bar")
+        XCTAssertEqual(store.rows.first?.label, "Show suggestions")
         XCTAssertEqual(store.offers, [])
     }
 
@@ -121,14 +121,14 @@ final class NudgeSettingsSectionTests: XCTestCase {
 
     func testSettingsShowTheEstimateSwitch() throws {
         let copy = NudgeCopy(table: [
-            "SETTING_SETTLEMENT_ESTIMATE": "Estimate what traces on this Mac are worth",
+            "SETTING_SETTLEMENT_ESTIMATE": "Estimate what traces are worth",
             "SETTING_SETTLEMENT_ESTIMATE_HELP": "Worked out on this Mac.",
         ])
         let settings = try JSONDecoder().decode(
             DaemonData.Settings.self, from: Data(#"{"settlement_estimate_enabled":true}"#.utf8))
         let rows = NudgeSettings.rows(settings, copy: copy, digestHelp: nil)
         XCTAssertEqual(rows.map(\.id), [.settlementEstimate])
-        XCTAssertEqual(rows.first?.label, "Estimate what traces on this Mac are worth")
+        XCTAssertEqual(rows.first?.label, "Estimate what traces are worth")
         XCTAssertEqual(rows.first?.isOn, true)
         // Unknown is no switch, never off.
         let unread = try JSONDecoder().decode(DaemonData.Settings.self, from: Data("{}".utf8))

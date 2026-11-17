@@ -43,6 +43,9 @@ scripts/operator/*.csv
 # microsoft/winget-pkgs, not carried here -- the InstallerSha256 is only valid
 # for one specific published artifact.
 manifests/
+# Reviewed feature configuration examples are source, not generated manifests.
+!crates/trace-commons-contributor/feature-flags/manifests/
+!crates/trace-commons-contributor/feature-flags/manifests/*.json
 
 # CPython bytecode, written beside any script under scripts/ the moment it is
 # run or imported. One of these reached main because it was sitting untracked

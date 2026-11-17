@@ -145,7 +145,7 @@ public class NearAiCredentialTests
         PrivateInferenceCopy copy = Copy();
         string[] credential =
         {
-            copy.CredentialTitle, copy.CredentialWhat, copy.CredentialCost,
+            copy.CredentialTitle, copy.CredentialCost, copy.SignInTooltip,
             copy.CredentialObtain, copy.CredentialCancel, copy.CredentialForget,
             copy.CredentialForgetExplains, copy.CredentialAbsent, copy.CredentialObtaining,
             copy.CredentialFailed, copy.CredentialCancelled, copy.CredentialPresent,
@@ -155,6 +155,9 @@ public class NearAiCredentialTests
             copy.CredentialWalletNotice,
         };
 
+        // CredentialWhat is not here: the owner cut it 2026-11-04 (Settings
+        // copy pass 2, P10) and the core sends "". SignInTooltip joined (P3).
+        Assert.Equal(string.Empty, copy.CredentialWhat);
         Assert.Equal(19, credential.Length);
         foreach (string sentence in credential)
         {
@@ -393,11 +396,19 @@ public class NearAiCredentialTests
         {
             // A browser opens, somebody signs in with a company that is not
             // this app, and a key is minted and kept here.
-            "browser", "creates an API key", "system credential store",
-            "keeps you signed in", "can read your account and create more keys",
+            "browser", "makes a NEAR AI key", "keeps you signed in",
         })
         {
             Assert.Contains(consequence, copy.CredentialCost, StringComparison.Ordinal);
+        }
+
+        // Owner dropped "creates an API key", "system credential store" and
+        // "can read your account and create more keys" from the cost line
+        // 2026-11-04 (Settings copy pass 2, P3); the key's revocability and
+        // the saved sign-in's reach moved to the Sign in button's tooltip.
+        foreach (string fragment in new[] { "revoke the key in NEAR AI", "read your account and make more keys" })
+        {
+            Assert.Contains(fragment, copy.SignInTooltip, StringComparison.Ordinal);
         }
 
         // And forgetting says what it does: removed here, revoked at NEAR AI;

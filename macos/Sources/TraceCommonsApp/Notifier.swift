@@ -321,7 +321,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 contributedProjects: contributedProjects, creditPending: creditPending)
         else { return }
         let content = UNMutableNotificationContent()
-        content.title = Self.nudgeCopy?[.digestTitle] ?? "Near.ai"
+        content.title = Self.nudgeCopy?[.digestTitle] ?? "Near AI Gateway"
         content.body = body
         content.categoryIdentifier = Self.categoryIdentifier
         content.interruptionLevel = .passive

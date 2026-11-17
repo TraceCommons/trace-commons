@@ -149,6 +149,9 @@ public struct GlassNoticeMark: View {
             Image(systemName: systemImage)
                 .glassGlyph(12, weight: .semibold)
                 .foregroundStyle(tint)
+                // A mark that changes its symbol (the arming offer's bolt
+                // to a check) replaces it rather than cutting.
+                .contentTransition(.symbolEffect(.replace))
         }
         .frame(width: Self.side, height: Self.side)
         .accessibilityHidden(true)

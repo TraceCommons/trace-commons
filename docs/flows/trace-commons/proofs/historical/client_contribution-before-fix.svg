@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 851 393" width="851" height="393" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state"><style>
+.pele {
+  --pele-bg: #ffffff;
+  --pele-fg: #1c1c1c;
+  --pele-muted: #656565;
+  --pele-line: #808080;
+  --pele-surface: #fcfcfc;
+  --pele-surface-alt: #f1f1f1;
+  --pele-border: #c9c9c9;
+}
+.pele .blue rect { fill: #c3e0ff; }
+.pele .orange rect { fill: #f0d3bf; }
+.pele .purple rect { fill: #e3d5ff; }
+.pele .yellow rect { fill: #f0dcbf; }
+.pele .teal rect { fill: #bfe3df; }
+.pele .tan rect { fill: #e5d9ce; }
+.pele .pink rect { fill: #ffcbe6; }
+.pele .breaks rect {
+  fill: #ffecee !important;
+  stroke: #e72e3b !important;
+  stroke-width: 2.5px !important;
+}
+.pele .breaks text {
+  fill: #cd2834 !important;
+}
+.pele .mayBreak rect {
+  fill: #fff3e6 !important;
+  stroke: #e8730c !important;
+  stroke-width: 2.5px !important;
+}
+.pele .mayBreak text {
+  fill: #b85a06 !important;
+}
+.pele .bugPath rect {
+  stroke: #1680f3 !important;
+  stroke-width: 2.5px !important;
+}
+.pele .repeats rect {
+  stroke: #9b35d6 !important;
+  stroke-width: 2.5px !important;
+  stroke-dasharray: 6 3;
+}
+@media (prefers-color-scheme: dark) {
+  .pele {
+    --pele-bg: #1f1f1f;
+    --pele-fg: #f5f5f5;
+    --pele-muted: #acacac;
+    --pele-line: #939393;
+    --pele-surface: #121212;
+    --pele-surface-alt: #2c2c2c;
+    --pele-border: #4e4e4e;
+  }
+  .pele .blue rect { fill: #1b3857; }
+  .pele .orange rect { fill: #573117; }
+  .pele .purple rect { fill: #3c2e57; }
+  .pele .yellow rect { fill: #573d17; }
+  .pele .teal rect { fill: #174641; }
+  .pele .tan rect { fill: #3d3127; }
+  .pele .pink rect { fill: #57233e; }
+  .pele .breaks rect {
+    fill: #2e2021 !important;
+    stroke: #cf2b35 !important;
+  }
+  .pele .breaks text {
+    fill: #ff6463 !important;
+  }
+  .pele .mayBreak rect {
+    fill: #2e2619 !important;
+    stroke: #d0700f !important;
+  }
+  .pele .mayBreak text {
+    fill: #ffa257 !important;
+  }
+  .pele .bugPath rect {
+    stroke: #116dd2 !important;
+  }
+  .pele .repeats rect {
+    stroke: #9a3fcf !important;
+  }
+}
+</style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="425.5" y="25.6">Discovery, consent, upload and receipts</tspan></text><g transform="translate(0,36)"><g class="pele-clusters"><g class="pele-cluster pele-state-composite" data-id="legend"><rect x="376.01" y="8" width="466.85" height="112" rx="10" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)"/><path d="M376.01,44H842.86" fill="none" stroke="var(--_b)"/><text class="pele-cluster-label" x="609.44" y="31.6" text-anchor="middle">Legend</text></g></g><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M329.01,120L329.01,157"/><path class="pele-marker" d="M329.01,164L325.65,156L332.37,156Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M329.01,208L329.01,284"/><path class="pele-marker" d="M329.01,291L325.65,283L332.37,283Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M414.37,305C440.37,297 440.37,329 421.06,323.06"/><path class="pele-marker" d="M414.37,321L423.01,320.14L421.03,326.56Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="edge1"><rect x="272.48" y="228.5" width="113.06" height="21" rx="3" fill="var(--_bg)"/><text x="329.01" y="243.9" text-anchor="middle">You open history</text></g><g class="pele-edge-label" data-id="edge2"><rect x="446.37" y="277" width="205.65" height="72" rx="3" fill="var(--_bg)"/><text text-anchor="middle" xml:space="preserve"><tspan x="549.2" y="290.9">You refresh history or The</tspan><tspan x="549.2" y="308.9">current account changes or The</tspan><tspan x="549.2" y="326.9">history read publishes an empty</tspan><tspan x="549.2" y="344.9">snapshot</tspan></text></g></g><g class="pele-nodes"><g class="pele-node pele-state bugPath" data-id="s0" transform="translate(329.01,186)"><rect x="-83.58" y="-22" width="167.17" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">contribution_empty</text></g><g class="pele-node pele-state mayBreak bugPath" data-id="s1" transform="translate(329.01,313)"><rect x="-85.36" y="-22" width="170.72" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)" style="fill:#fff3e6;stroke:#e8730c;stroke-width:2.5px;"/><text class="pele-label" style="fill:#b85a06;" x="0" y="5.6" text-anchor="middle">contribution_history</text></g><g class="pele-node pele-state-start" data-id="root_start" transform="translate(329.01,113)"><circle r="7" fill="var(--_l)"/></g><g class="pele-node pele-state mayBreak" data-id="lg0" transform="translate(502.72,82)"><rect x="-110.7" y="-22" width="221.41" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)" style="fill:#fff3e6;stroke:#e8730c;stroke-width:2.5px;"/><text class="pele-label" style="fill:#b85a06;" x="0" y="5.6" text-anchor="middle">Breaks P12 in some cases</text></g><g class="pele-node pele-state bugPath" data-id="lg1" transform="translate(740.14,82)"><rect x="-86.72" y="-22" width="173.44" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">Path to the P12 bug</text></g></g></g></svg>

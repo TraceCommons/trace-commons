@@ -157,8 +157,9 @@ a Finder launch cannot set and which this runbook forbids.
 
 Clean therefore means a clean **user account**. This is the largest
 operational cost in this procedure, and it is stated here rather than
-discovered halfway through. Precedent: the `windows named-pipe ACL` CI job
-(`.github/workflows/ci.yml:225`) already creates a second non-administrator
+discovered halfway through. Precedent: the named-pipe ACL step of the `windows contributor crates (tests,
+named-pipe ACL, update conformance)` CI job (`.github/workflows/clients.yml`)
+already creates a second non-administrator
 local account, because the property it tests is not observable any other way.
 
 Per campaign: one invite minted and revoked, up to 25 uses, one throwaway

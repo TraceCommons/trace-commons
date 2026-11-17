@@ -5,10 +5,14 @@ use std::path::PathBuf;
 
 #[path = "cli/config.rs"]
 mod config_cli;
+#[path = "cli/feature_flags.rs"]
+mod feature_flags_cli;
 #[path = "cli/insights.rs"]
 mod insights_cli;
 #[path = "cli/mission_draft.rs"]
 mod mission_draft_cli;
+#[path = "cli/skills_catalog.rs"]
+mod skills_catalog_cli;
 
 /// The `--version` line: the build identity, then the channel
 /// (`channel::VERSION_CHANNEL_SUFFIX`), last, where the macOS bundle scripts
@@ -46,6 +50,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect feature flags and change per-machine overrides.
+    FeatureFlags(feature_flags_cli::FlagArgs),
+    /// Sign and verify the server's Skills catalog document (operator use).
+    SkillsCatalog(skills_catalog_cli::CatalogArgs),
     /// Discover, inspect, preview, and apply running-app settings as JSON
     Config(config_cli::ConfigArgs),
     /// Launch a coding tool in this terminal with an isolated saved account.
@@ -641,6 +649,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&preview)?);
         return Ok(());
     }
+    if let Command::FeatureFlags(args) = &cli.command {
+        return feature_flags_cli::run(args, cli.json, cli.config_dir.clone());
+    }
+    if let Command::SkillsCatalog(args) = &cli.command {
+        return skills_catalog_cli::run(args);
+    }
     if let Command::Config(args) = &cli.command {
         let store = ConfigStore::resolve_existing(cli.config_dir.clone())
             .map_err(|_| anyhow::anyhow!("config-state-dir-unavailable: check --config-dir"))?;
@@ -767,6 +781,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             commands::submit(&store, &sel).await
         }
         Command::ImportPreview { .. }
+        | Command::FeatureFlags(_)
+        | Command::SkillsCatalog(_)
         | Command::Config(_)
         | Command::Insights(_)
         | Command::MissionDraft { .. }

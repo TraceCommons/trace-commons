@@ -100,6 +100,19 @@ public class PrivateInferenceTests
         PrivateInferenceCopy copy = Copy();
         Assert.Contains("{connected}", copy.InspectorToolsConnected, StringComparison.Ordinal);
         Assert.Contains("{total}", copy.InspectorToolsConnected, StringComparison.Ordinal);
+        // The owner cut these lines 2026-11-04 (Settings copy pass 2, P8, P10,
+        // P177, P209). The core still sends them, as "", and a shell draws no
+        // line; they are the only sentences allowed to be empty.
+        foreach (string cut in copy.CutByOwner)
+        {
+            Assert.Equal(string.Empty, cut);
+        }
+
+        Assert.Equal(string.Empty, copy.AccountContributionPendingCredit);
+        Assert.Equal(string.Empty, copy.CredentialWhat);
+        Assert.Equal(string.Empty, copy.HarnessesWhat);
+        Assert.Equal(string.Empty, copy.HarnessNotConnected);
+
         foreach (string sentence in copy.Sentences)
         {
             Assert.False(string.IsNullOrWhiteSpace(sentence));
@@ -148,10 +161,13 @@ public class PrivateInferenceTests
         }
 
         Assert.NotEmpty(decoded);
-        Assert.Equal(decoded.Count, copy.Sentences.Length);
+        // Sentences plus the four lines the owner cut (CutByOwner, empty by
+        // design) are every decoded string, and no fewer.
+        Assert.Equal(decoded.Count, copy.Sentences.Length + copy.CutByOwner.Length);
+        var checkedOrCut = copy.Sentences.Concat(copy.CutByOwner).ToList();
         foreach (string sentence in decoded)
         {
-            Assert.Contains(sentence, copy.Sentences);
+            Assert.Contains(sentence, checkedOrCut);
         }
     }
 
@@ -235,7 +251,8 @@ public class PrivateInferenceTests
             Assert.Contains("off and on", sentence, StringComparison.Ordinal);
         }
 
-        Assert.Contains("won't retry on its own", copy.StateCrashed, StringComparison.Ordinal);
+        // Owner dropped "won't retry on its own" 2026-11-04 (Settings copy pass 2, P198).
+        Assert.Contains("May have stopped", copy.StateCrashed, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -351,19 +368,18 @@ public class PrivateInferenceTests
     }
 
     /// <summary>
-    /// The quit sentence is added only while the switch is on, and it is the
-    /// payload's words rather than this shell's.
+    /// Quitting asks about Private AI only when the core says quitting would
+    /// stop it: while the switch is on, or while it is still stopping, and
+    /// never for a listener another app runs.
     /// </summary>
     [Fact]
-    public void TheQuitSentenceIsOnlyAddedWhenTheSwitchIsOn()
+    public void QuitStopsPrivateAIOnlyWhenTheCoreSaysSo()
     {
-        PrivateInferenceCopy copy = Copy();
-        Assert.Null(PrivateInferenceSurface.QuitDetail(on: false, State(string.Empty), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(on: true, State(string.Empty), null));
-        Assert.Equal(copy.QuitAlsoStops, PrivateInferenceSurface.QuitDetail(on: true, State(string.Empty), copy));
-        Assert.Equal(copy.QuitAlsoStops, PrivateInferenceSurface.QuitDetail(false, State("stopping"), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(true, State("running_elsewhere"), copy));
-        Assert.Null(PrivateInferenceSurface.QuitDetail(true, State("off"), copy));
+        Assert.False(PrivateInferenceSurface.QuitStops(on: false, State(string.Empty)));
+        Assert.True(PrivateInferenceSurface.QuitStops(on: true, State(string.Empty)));
+        Assert.True(PrivateInferenceSurface.QuitStops(false, State("stopping")));
+        Assert.False(PrivateInferenceSurface.QuitStops(true, State("running_elsewhere")));
+        Assert.False(PrivateInferenceSurface.QuitStops(true, State("off")));
     }
 
     /// <summary>

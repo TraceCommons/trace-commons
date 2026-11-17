@@ -13,7 +13,6 @@ public struct ComputeCopy: Decodable, Equatable, Sendable {
     public let resume: String
     public let pause: String
     public let disable: String
-    public let quitDetail: String?
     public let quitRefused: String?
 
     public static func decode(_ json: String) -> Self? {

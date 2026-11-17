@@ -96,9 +96,11 @@ public enum TCNearAiBalance {
     ///
     /// An absent figure is the empty string, drawn as no line. A zero is not
     /// that: an account that has spent nothing renders `$0.00`, which is
-    /// true.
-    public static func spentLine(present: Int32, nanos: Int64, scale: UInt8) -> String? {
-        owned(tc_near_ai_balance_spent_line(present, nanos, scale))
+    /// true. `remainingPresent` is whether the same reading's remaining
+    /// figure is present: beside one Spent rounds up to the cent so Limit,
+    /// Spent and what is left add up; without one it is floored.
+    public static func spentLine(present: Int32, nanos: Int64, scale: UInt8, remainingPresent: Int32) -> String? {
+        owned(tc_near_ai_balance_spent_line(present, nanos, scale, remainingPresent))
     }
 
     /// How long ago this computer asked.

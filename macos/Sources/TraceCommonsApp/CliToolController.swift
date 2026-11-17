@@ -56,8 +56,11 @@ final class CliToolController: ObservableObject {
         }
     }
 
+    /// Assigns only a change: the app menu observes this controller, and a
+    /// publish rebuilds the whole menu.
     func refresh() {
-        status = probe()
+        let next = probe()
+        if next != status { status = next }
     }
 
     /// Run `action`'s script, if the core offers it. One at a time.

@@ -95,7 +95,14 @@ final class InsightsBreakdownInspectorTests: XCTestCase {
         let tab = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(tab.contains("pick: { inspector.pick(day: $0) })"))
         let insights = try InsightsGlassConventionsTests.text("Views/InsightsView.swift")
-        XCTAssertTrue(insights.contains(".onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }"))
+        XCTAssertTrue(insights.contains(".onChange(of: visibleTab, initial: true) { _, shown in showBreakdownDetail(shown) }"))
+        XCTAssertTrue(insights.contains("tab == .skills && !isSkillsEnabled ? .overview : tab"),
+                      "the inspector must follow the visible fallback immediately when Skills is disabled")
+        XCTAssertTrue(insights.contains(".onChange(of: isSkillsEnabled, initial: true)"))
+        XCTAssertTrue(insights.contains("if !enabled, tab == .skills { tab = .overview }"),
+                      "reenabling Skills must preserve the Overview fallback until the person selects another tab")
+        XCTAssertTrue(insights.contains("showBreakdownDetail(visibleTab)"),
+                      "sample updates must also use the visible tab for inspector ownership")
         XCTAssertTrue(insights.contains("guard shown == .patterns else { inspector.clear(); return }"))
         let window = try InsightsGlassConventionsTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("} else if shownTab == .insights, let detail = insightsInspector.detail {"))

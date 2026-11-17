@@ -1,8 +1,22 @@
 # `TRACE_COMMONS_*` Environment Variable Reference
 
 Every env var the `trace-commons-ingest` binary reads, grouped by surface. The
-master list is `grep '^const TRACE_COMMONS_' crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`.
-If you change a default in code, update this table.
+master list is every `"TRACE_COMMONS_..."` string literal in the ingest
+crate's production source:
+
+```sh
+find crates/trace-commons-ingest/src -name '*.rs' \
+  | grep -vE '(/tests/|tests?\.rs$|_tests?\.rs$|fixture)' \
+  | xargs grep -hoE '"TRACE_COMMONS_[A-Z0-9_]+"' | sort -u
+```
+
+Two results are prefixes completed at run time (`TRACE_COMMONS_ADMISSION`,
+`TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE`; see
+[Account contribution admission](#account-contribution-admission-default-off))
+and two are `TRACE_COMMONS_PIPELINE_TEST_*` names used only by test builds.
+If you change a default in code, update this table. Variables whose full
+description lives in another runbook are listed in
+[section 17](#17-variables-described-in-other-runbooks) with a pointer.
 
 The binary parses constants at boot; values that fail to parse refuse the
 binary's startup rather than degrading. **Defaults are conservative — when
@@ -449,12 +463,16 @@ instead.
 
 The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
 pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
-appended to envelope records is `+privacy-filter-near-ai-v1`; this value is
-audit-relevant and is included in gate version hash derivation.
+appended to envelope records is `+privacy-filter-near-ai-v2` with the
+structural skip on (the default since 2026-11-05) and `+privacy-filter-near-ai-v1`
+with it off (`TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0`); this value is
+audit-relevant and is included in gate version hash derivation. Through a
+witness redeploy, list both in `TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS`.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| `self-hosted` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL` | optional | on | Whether the prose classifier skips identifier-shaped keys and structural tokens (1-40 chars of ASCII letters, digits, `_ . - / :`, with no capitalized word, no 7+ digit run, no dotted name without a slash, not IPv6-shaped; never a value under an identity key such as `author` or `email`). Unset, `1`, `true` or `on` skip; any other value classifies everything. The deterministic detectors run regardless. Client and witness must agree, or the witness-at-submission subset check sees different edits. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md` section 2.5. |
 | `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
@@ -465,8 +483,12 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
 | `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports the `https://privacy-filter.completions.near.ai/v1` faster path. Must include the scheme and must be `https`, or `http` against loopback (local sidecars, tests) -- the API key rides on every request as a bearer token, so a plaintext non-loopback endpoint is refused at construction. |
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
-| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `15000` | The fixed part of each classify request's timeout; the whole is this plus `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS` per KiB of request body (53.4 s for a full 64 KiB window at the defaults). Was a flat timeout before 2026-11-05. Each request is attempted up to three times on transport errors, timeouts, 429/408 and 5xx; a caller with a deadline (the witness) starts no retry that could not finish before it. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS` | optional | `600` | The part of each classify request's timeout that grows with the body. Owner decision 2026-11-05, from that day's dense-text measurement (~3 s + 0.4 s/KiB: 32 KiB 19.4 s, 128 KiB 64.0 s). |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` | optional | `1` (off) | Most texts sent in one `privacy/classify` request as an input array, when a caller hands the adapter several (the witness does). Each answer is mapped back by index; a request that fails, or whose entry count differs from its input count, fails every text it carried. Measured 2026-11-05: answers are correct but not faster (~1.4-1.6 s per input against ~2.0 s alone), so leave it at 1. Zero is refused. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE` | optional | unset (unpaced) | Most `privacy/classify` requests this process sends a minute, retries included, spaced evenly with no burst. A 429 holds every caller for its `Retry-After` (or one interval when it names none), capped at 60 s. A request that cannot start before its caller's deadline is not sent and fails as transient. The witness requires it as a sealed deploy-time value in `allowed_envs` (`30`, the limit NEAR AI set for its key on 2026-11-12), so it can change without a new measurement. Zero or a non-number is refused at startup. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` | optional | `65536` (64 KiB) | Largest serialized `privacy/classify` request body. 64 KiB rather than the ~240 KiB the body limit allows (owner decision 2026-11-05): dense text takes ~29 s at 64 KiB and 64 s at 128 KiB, and a full window and its retries must fit the request budget. Windows are cut so each body fits; a body over it or a 413 halves the window (at most four times) before the field is refused. Must be above zero and under the 262144-byte limit measured 2026-09-03. Replaces the retired `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS`, which is now refused at startup if set. |
 
 ---
 
@@ -611,6 +633,24 @@ Startup refuses a scheduler with neither. Its liveness name is
 
 See [legacy invite migration](./legacy-invite-migration.md).
 
+## Usage region check (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_USAGE_REGION_MMDB` | optional | (unset) | Path to a MaxMind-format country database (`.mmdb`, for example GeoLite2 Country) that `GET /v1/public/usage-region` reads to tell a client whether it may send anonymous usage counts (United States only). Unset, or a file that does not open, answers `{"analytics_allowed": false}` to everyone and logs `control=usage_region_mmdb` once; it never fails startup. The address is looked up and dropped: nothing about it is stored or logged. Refresh the file monthly. `POST /v1/usage-events` (the weekly totals, each with an anonymous random install id) needs no variable: it stores into V152's `trace_usage_event_weeks` through the guard-owned `trace_usage_events_record()`, and answers 503 without a database. |
+
+See the [usage analytics design](../superpowers/specs/2026-11-04-us-only-usage-analytics.md).
+
+## Witness accepted-measurements list (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH` | optional | (unset) | Path to the signed witness accepted-measurements list that `GET /v1/public/witness-accepted-list` serves, unauthenticated and byte for byte. The server does not sign; the operator installs a file signed with the commons' Cloud KMS list-signing key. Read on every request, so a new list needs no restart. Unset or blank: 404 `witness_accepted_list_not_published`. Set, but the file is missing, unreadable, over 64 KiB, or not a well-formed signed list: 503 `witness_accepted_list_unavailable`, logged as that label only; an unsigned list is never served. Never fails startup. Changes nothing ingest itself verifies (`TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` still governs certificates). |
+| `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_DIRECTORY` | optional | (unset) | Directory of signed V1 witness accepted lists for `GET /v1/public/witness-accepted-list?witness_url=<URL-encoded configured URL>`. Each filename is the lowercase hex SHA-256 of the exact configured URL after removing trailing `/`, followed by `.json`. URLs must be HTTPS, at most 2048 bytes, with no credentials, query, or fragment. Files are read per request, bounded to 64 KiB, checked for signed shape, and served byte for byte only when the signed payload names the requested URL (ignoring trailing slashes). A missing dedicated file falls back to `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH` only if its payload names that URL. Unknown URL: fixed 404 `witness_accepted_list_not_published`; malformed, unreadable, oversized, or mismatched dedicated file: fixed 503 `witness_accepted_list_unavailable`; malformed query: fixed 400 `witness_accepted_list_query_invalid`. No remote URL is fetched; URLs and paths are never logged. Unqualified requests continue to serve only the legacy path, including its existing 404/503 behavior. Never fails startup. |
+| `TRACE_COMMONS_WITNESS_CONFIGURATION_PATH` | optional | (unset) | Path to the signed witness endpoint-and-measurement configuration served unauthenticated and byte for byte at `GET /v1/public/witness-configuration`. The operator signs the document; the server checks signed shape and never signs or fetches a witness URL. Read on every request, so replacement needs no restart. Unset or blank: 404 `witness_configuration_not_published`. Configured but missing, unreadable, over 64 KiB, unsigned, or malformed: 503 `witness_configuration_unavailable`, logged as that fixed label only. Paths and endpoint URLs are never logged. Clients verify the signature against compiled-in keys, retain their enrollment URL as the trust anchor, and automatically use a listed endpoint only after its endpoint-specific attestation and signing-entry checks pass. Never fails startup. Leaves both V1 accepted-list routes and ingest certificate verification unchanged. |
+
+See [the accepted-list runbook](./witness-accepted-list.md).
+
 ## Payout rails (default off)
 
 | Var | R? | Default | Description |
@@ -685,6 +725,121 @@ safe to delete from env files once the deployment is past V144.
 | `TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS` | ignored since V144 | Reaper age limit for closed accounts. |
 | `TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
 | `TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
+
+## 17. Variables described in other runbooks
+
+These are read by ingest and fully described elsewhere. Each row gives the
+default and the document that owns the variable; follow the link before
+changing one.
+
+### Process, storage and tokens
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_BIND` | `127.0.0.1:3907` | Listen address. Ignored in prequalify mode. | [`local-ingest-verification.md`](local-ingest-verification.md) |
+| `TRACE_COMMONS_DATA_DIR` | `~/.ironclaw/trace_commons_ingest` | Root of the file-backed store. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_OBJECT_STORE` | unset (file) | Object store mode: `file`/`none`, `local_encrypted`, `local_service`, `remote_service` and their aliases. Any other value refuses startup. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_ARTIFACT_KEY_HEX` | (none) | Key for the local encrypted artifact store. Setting it turns encrypted artifacts on. | [`backup-restore.md`](backup-restore.md) |
+| `TRACE_COMMONS_ENCRYPTED_ARTIFACTS` | `false` | Turns the local encrypted artifact store on without a key variable. | [`../trace-commons.md`](../trace-commons.md) |
+| `TRACE_COMMONS_ARTIFACT_DIR` | `<data dir>/encrypted_artifacts` | Directory of the local encrypted artifact store; fallback for the service-local store. | [`backup-restore.md`](backup-restore.md) |
+| `TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR` | `<data dir>/service_object_store` | Directory of the service-local object store. | [`../trace-commons.md`](../trace-commons.md) |
+| `TRACE_COMMONS_INGEST_TOKEN` | (none) | Single bearer token, optional expiry suffix. | [`pilot-account-admission-cutover-2026-10.md`](pilot-account-admission-cutover-2026-10.md) |
+| `TRACE_COMMONS_TENANT_TOKENS` | (none) | Tenant bearer-token table. | [`operator-binaries.md`](operator-binaries.md) |
+| `TRACE_COMMONS_TENANT_POLICIES` | (none) | Per-tenant submission policies. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` | `false` | Refuse submissions from a tenant with no policy. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS` | `false` | Dataset exports must name a purpose and select accepted, low-risk submissions. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_BUNDLE_SERVER_ID` | (none) | Server id stamped on token distribution bundles; unset refuses the bundle routes. | [`token-distribution-bundles.md`](token-distribution-bundles.md) |
+| `TRACE_COMMONS_TOKEN_RESEARCH_EXPORTS` | `false` | Turns the token research export routes on; off, they return 503. | `docs/superpowers/plans/2026-09-10-token-logprobs-progress.md` |
+
+### Database storage mode
+
+Every switch here is `true`/`false`, default `false`. The pilot template
+sets all of them on.
+
+| Var | Description | Described in |
+|---|---|---|
+| `TRACE_COMMONS_DB_DUAL_WRITE` | Mirror every file-backed write into PostgreSQL. Required by every other switch in this table. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` | Turn a failed mirror write into a refusal. Needs dual-write. | [`../trace-commons-storage.md`](../trace-commons-storage.md), [`audit-trail-forensics.md`](audit-trail-forensics.md) |
+| `TRACE_COMMONS_DB_AUDIT_READS` | Read audit rows from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_CONTRIBUTOR_READS` | Read contributor-facing records from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REVIEWER_READS` | Read reviewer records from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS` | Reviewer reads require object refs. Needs reviewer reads. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REPLAY_EXPORT_READS` | Replay exports read from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS` | Replay exports require object refs. Needs replay-export reads. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DB_TENANT_POLICY_READS` | Read tenant policy from the database. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+| `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS` | Derived exports require object refs. | [`../trace-commons-storage.md`](../trace-commons-storage.md) |
+
+### Pipeline runtime
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_PIPELINE_RUNTIME` | unset | Unset: no pipeline runtime. `production`: the production assembly (`near-ai-scorer` builds). | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` | `false` | Refuse startup when no production-qualified runtime was injected. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` | `false` | Test and local development only. Production must never set it. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` | (none) | Tenants whose receipts route to the pipeline. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` | (none) | Tenants whose follow-up work the worker still drains after rollback. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` | `1` | Units of pipeline work run at once, 1 to 16, per process. | [`pipeline-activation.md`](pipeline-activation.md#worker-concurrency) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` | built-in | Review-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` | built-in | Score-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` | built-in | Settle-phase claim lease, whole seconds. | [`pipeline-activation.md`](pipeline-activation.md#per-phase-claim-lease) |
+| `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` | `900` | Privacy-pass classifier ceiling, 60 to 7200. The Review lease still bounds it. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` | (none) | Trusted keys for signed pipeline packages. | [`pipeline-activation.md`](pipeline-activation.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH` | (none) | Trusted keys for qualification check results. | [`pipeline-qualification.md`](pipeline-qualification.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR` | (none) | Directory of qualification check results. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_RUN_ID` | (none) | Run id of the check results to read. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH` | (none) | Code revision the check results must match. | [`pipeline-smoke-tests.md`](pipeline-smoke-tests.md) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING` | off | `all` arms default routing. | [`pipeline-activation.md`](pipeline-activation.md#default-routing) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` | (none) | Directory holding the signed package default routing activates. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_INTERVAL_SECONDS` | `60` | Pass interval, 5 to 3600. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` | `50` | Tenants per pass, 1 to 1000. | [`pipeline-activation.md`](pipeline-activation.md#settings) |
+
+### Gate chunking (large traces)
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS` | `2048` | Target chunk size. Must be > 0 and <= the max. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS` | `3072` | Hard chunk bound. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_CAP` | `16` | Most chunks scored per trace, at least 1. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS` | `64` | Smallest chunk scored. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` | `50000` | Novelty a chunk needs before its embedding is inserted. | [`large-trace-chunked-scoring.md`](large-trace-chunked-scoring.md) |
+| `TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS` | unset | Per-chunk qualifying floor, non-negative integer micros. | `scripts/operator/pipeline_tooling/envfile.py` |
+
+### NEAR provisioning and settlement
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED` | `false` | Exactly `true` turns NEAR-native provisioning on. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL` | (none) | Published issuer URL, `https` only. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE` | (none) | Published audience; needs the issuer URL. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN` | (none) | Public origin of the provisioning ceremony. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT` | (none) | Published receipt endpoint. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON` | (none) | Published witness material. | [`near-native-provisioning.md`](near-native-provisioning.md) |
+| `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` | (none) | Key that wraps stored NEAR account names. | `deploy/staging-gcp/README.md` |
+| `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | `disabled` | `dry_run` or `http`; anything else is `disabled`. | [`pipeline-activation.md`](pipeline-activation.md), [`pilot-gcp-deployment.md`](pilot-gcp-deployment.md) |
+| `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL` | (none) | Base URL the attestation drill fetches from. | [`near-attestation-drill.md`](near-attestation-drill.md) |
+| `TRACE_COMMONS_NEAR_AI_STARTER_MODE` | `disabled` | `disabled` or `dry_run`; `live` refuses startup. | `docs/superpowers/specs/2026-10-21-nearai-starter-advance-design.md` |
+| `TRACE_COMMONS_INFERENCE_CONNECTION_CATALOG_JSON` | (none) | Inference connection catalog. | [`inference-connection.md`](inference-connection.md) |
+
+### Credit estimates and first-run copy
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_CREDIT_ESTIMATE_TABLE_PATH` | (none) | Estimate table file. | `docs/superpowers/plans/2026-10-15-settlement-estimate.md` |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH` | (none) | Settlement table file. | `docs/superpowers/specs/2026-10-15-settlement-estimate-design.md` |
+| `TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN` | (none) | Low end of the first-run USD estimate, parsed fail-closed. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX` | (none) | High end of the same estimate. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_MICROS_PER_TRACE` | (none) | Per-trace amount shown in first-run copy. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_ACCOUNT_CEILING_MICROS` | (none) | Account ceiling shown in first-run copy. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_LINE` | (none) | First-run copy line. | `deploy/pilot-gcp/ingest.env.template` |
+| `TRACE_COMMONS_FIRST_RUN_COPY_USD_COULD_LINE` | (none) | First-run "could earn" copy line. | `deploy/pilot-gcp/ingest.env.template` |
+
+### Other
+
+| Var | Default | Description | Described in |
+|---|---|---|---|
+| `TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTES` | (none) | Floor on the final request body in bytes for admission evidence. | [`native-admission-session.md`](native-admission-session.md) |
+| `TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR` | `25` | Fewest contributors a published register stat may describe. | [`register-stats-role.md`](register-stats-role.md) |
+| `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` | (none) | Activity missions policy. | `docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md` |
 
 ## Build-time features (Cargo)
 

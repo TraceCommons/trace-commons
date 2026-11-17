@@ -129,44 +129,38 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: joined), [.ask, .autoUpload, .ignore])
 
         var state = FirstRunState(step: .tools)
-        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
-        XCTAssertTrue(state.rules.isEmpty, "nothing is written before the confirmation")
         XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(state, project: project))
-        XCTAssertTrue(RulesScreenLayout.confirmArming(&state, project: project))
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .applied)
         XCTAssertEqual(state.rules["p1"], .autoUpload)
         XCTAssertTrue(RulesScreenLayout.armsAfterSignIn(state, project: project))
 
         var signedIn = joined
-        XCTAssertTrue(RulesScreenLayout.confirmArming(&signedIn, project: project))
+        XCTAssertEqual(RulesScreenLayout.pick(&signedIn, project: project, wanted: .autoUpload), .applied)
         XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(signedIn, project: project), "armed at Start, no note")
 
         let bucket = ProjectRow(projectId: "p9", projectLabel: "unresolved", mode: .ask, isUnresolvedBucket: true)
         XCTAssertFalse(RulesScreenLayout.offeredModes(bucket, state: joined).contains(.autoUpload))
         var other = FirstRunState(step: .tools)
         XCTAssertEqual(RulesScreenLayout.pick(&other, project: bucket, wanted: .autoUpload), .refused)
-        XCTAssertFalse(RulesScreenLayout.confirmArming(&other, project: bucket))
+        XCTAssertTrue(other.rules.isEmpty)
     }
 
-    /// Arming is a grant, so it is never silent: picking Automatic asks
-    /// first, and only the confirmation writes the rule the plan sends.
-    func test_automaticWaitsForTheArmingConfirmation() {
+    /// Picking Automatic sets it at once, with no confirmation box (owner,
+    /// 2026-11-11). `pick` is its only writer: `setRule` never writes it.
+    @MainActor
+    func test_automaticIsSetWithoutAConfirmation() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         var state = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
 
-        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
-        XCTAssertTrue(state.rules.isEmpty)
-        XCTAssertFalse(
-            FirstRunPlan.calls(for: state, at: .start).contains {
-                if case .setProjectMode = $0 { return true }
-                return false
-            })
-
-        // `setRule` is not a way around the confirmation.
         RulesScreenLayout.setRule(&state, projectID: "p1", mode: .autoUpload)
         XCTAssertTrue(state.rules.isEmpty)
 
-        XCTAssertTrue(RulesScreenLayout.confirmArming(&state, project: project))
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .applied)
         XCTAssertEqual(state.rules["p1"], .autoUpload)
+
+        let source = try? TracesParityTests.text("Views/FirstRun/ToolsScreen.swift")
+        XCTAssertNotNil(source)
+        XCTAssertFalse(source?.contains("armingCandidate") ?? true, "no arming confirmation on the first run")
     }
 
     /// Picking Never or Automatic when the daemon already has it is not a

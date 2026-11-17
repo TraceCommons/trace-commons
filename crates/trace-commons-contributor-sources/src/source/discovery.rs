@@ -198,7 +198,7 @@ where
 /// This describes candidates only; it does not declare or enable a source.
 pub fn probe_this_machine() -> Vec<SourceCandidate> {
     let home = super::home_dir();
-    probe(&home, |key| std::env::var(key).ok())
+    probe(&home, super::machine_env)
 }
 
 /// Describe a native OpenCode store or a folder of explicit JSON exports.

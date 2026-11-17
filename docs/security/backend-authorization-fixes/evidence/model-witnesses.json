@@ -1,0 +1,189 @@
+{
+  "complete": true,
+  "models": [
+    {
+      "model": "authorization.qnt",
+      "sha256": "cbaa76d156c5b3d73b610820c143ebf5c467aca99293c205d279c44570d37cdd",
+      "runs": [
+        "LegacyReadDeniedTest",
+        "LegacyDeleteDeniedTest",
+        "LegacyEditDeniedTest",
+        "ForeignTenantDeniedTest",
+        "ForgedRoleDeniedTest",
+        "ForeignExportDeniedTest",
+        "LinkedDeviceDownloadTest",
+        "UnlinkedCallerCannotExpandStatusTest",
+        "UnlinkedCallerKeepsExactOwnStatusTest",
+        "PeerDownloadDeniedTest"
+      ],
+      "ok": true,
+      "checks": [
+        {
+          "command": [
+            "quint",
+            "typecheck",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/authorization.qnt"
+          ],
+          "exitCode": 0,
+          "output": ""
+        },
+        {
+          "command": [
+            "quint",
+            "test",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/authorization.qnt",
+            "--max-samples",
+            "1",
+            "--match",
+            "^(LegacyReadDeniedTest|LegacyDeleteDeniedTest|LegacyEditDeniedTest|ForeignTenantDeniedTest|ForgedRoleDeniedTest|ForeignExportDeniedTest|LinkedDeviceDownloadTest|UnlinkedCallerCannotExpandStatusTest|UnlinkedCallerKeepsExactOwnStatusTest|PeerDownloadDeniedTest)$"
+          ],
+          "exitCode": 0,
+          "output": "\n  authorization\n    ok LegacyReadDeniedTest passed 1 test(s)\n    ok LegacyDeleteDeniedTest passed 1 test(s)\n    ok LegacyEditDeniedTest passed 1 test(s)\n    ok ForeignTenantDeniedTest passed 1 test(s)\n    ok ForgedRoleDeniedTest passed 1 test(s)\n    ok ForeignExportDeniedTest passed 1 test(s)\n    ok LinkedDeviceDownloadTest passed 1 test(s)\n    ok UnlinkedCallerCannotExpandStatusTest passed 1 test(s)\n    ok UnlinkedCallerKeepsExactOwnStatusTest passed 1 test(s)\n    ok PeerDownloadDeniedTest passed 1 test(s)\n\n  10 passing (163ms)\n"
+        }
+      ]
+    },
+    {
+      "model": "export-eligibility.qnt",
+      "sha256": "d879595c3d9aa05e7e14c8146a33c01d77eba24a42b22c320a63ec34cac7391b",
+      "runs": [
+        "fileExpiryCannotHideBehindMirrorTest",
+        "fileRevocationCannotHideBehindMirrorTest",
+        "replayUsesFileAuthorityTest",
+        "databaseAuthorityRemainsDatabaseTest",
+        "missingDatabaseAuthorityRefusesTest",
+        "deliveredBeforeExpiryRemainsHistoricalTest",
+        "historicalWrongAuthorityCounterexampleTest",
+        "historicalMissingDeadlineCounterexampleTest"
+      ],
+      "ok": true,
+      "checks": [
+        {
+          "command": [
+            "quint",
+            "typecheck",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/export-eligibility.qnt"
+          ],
+          "exitCode": 0,
+          "output": ""
+        },
+        {
+          "command": [
+            "quint",
+            "test",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/export-eligibility.qnt",
+            "--max-samples",
+            "1",
+            "--match",
+            "^(fileExpiryCannotHideBehindMirrorTest|fileRevocationCannotHideBehindMirrorTest|replayUsesFileAuthorityTest|databaseAuthorityRemainsDatabaseTest|missingDatabaseAuthorityRefusesTest|deliveredBeforeExpiryRemainsHistoricalTest|historicalWrongAuthorityCounterexampleTest|historicalMissingDeadlineCounterexampleTest)$"
+          ],
+          "exitCode": 0,
+          "output": "\n  export_eligibility\n    ok fileExpiryCannotHideBehindMirrorTest passed 1 test(s)\n    ok fileRevocationCannotHideBehindMirrorTest passed 1 test(s)\n    ok replayUsesFileAuthorityTest passed 1 test(s)\n    ok databaseAuthorityRemainsDatabaseTest passed 1 test(s)\n    ok missingDatabaseAuthorityRefusesTest passed 1 test(s)\n    ok deliveredBeforeExpiryRemainsHistoricalTest passed 1 test(s)\n    ok historicalWrongAuthorityCounterexampleTest passed 1 test(s)\n    ok historicalMissingDeadlineCounterexampleTest passed 1 test(s)\n\n  8 passing (47ms)\n"
+        }
+      ]
+    },
+    {
+      "model": "identity-bootstrap.qnt",
+      "sha256": "5591bee27d3c4d5f7b3da7092eb2b408fc5b45054185a1e16b7b0a09923a635d",
+      "runs": [
+        "concurrentWeakSecondDeniedTest",
+        "legitimateStrongSecondAllowedTest",
+        "provisioningWriterObservedTest"
+      ],
+      "ok": true,
+      "checks": [
+        {
+          "command": [
+            "quint",
+            "typecheck",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/identity-bootstrap.qnt"
+          ],
+          "exitCode": 0,
+          "output": ""
+        },
+        {
+          "command": [
+            "quint",
+            "test",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/identity-bootstrap.qnt",
+            "--max-samples",
+            "1",
+            "--match",
+            "^(concurrentWeakSecondDeniedTest|legitimateStrongSecondAllowedTest|provisioningWriterObservedTest)$"
+          ],
+          "exitCode": 0,
+          "output": "\n  identity_bootstrap\n    ok concurrentWeakSecondDeniedTest passed 1 test(s)\n    ok legitimateStrongSecondAllowedTest passed 1 test(s)\n    ok provisioningWriterObservedTest passed 1 test(s)\n\n  3 passing (22ms)\n"
+        }
+      ]
+    },
+    {
+      "model": "rls-composition.qnt",
+      "sha256": "534432a9ff4bc711151b734e4b12a0b8ce69efc293dd137a31b8b5f192b61281",
+      "runs": [
+        "SetLocalOverridesAndRestores",
+        "ExplicitResolverIsNarrow",
+        "InheritedResolverRefusesStartup",
+        "ExtraPolicyRefusesStartup"
+      ],
+      "ok": true,
+      "checks": [
+        {
+          "command": [
+            "quint",
+            "typecheck",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/rls-composition.qnt"
+          ],
+          "exitCode": 0,
+          "output": ""
+        },
+        {
+          "command": [
+            "quint",
+            "test",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/rls-composition.qnt",
+            "--max-samples",
+            "1",
+            "--match",
+            "^(SetLocalOverridesAndRestores|ExplicitResolverIsNarrow|InheritedResolverRefusesStartup|ExtraPolicyRefusesStartup)$"
+          ],
+          "exitCode": 0,
+          "output": "\n  rls_composition\n    ok SetLocalOverridesAndRestores passed 1 test(s)\n    ok ExplicitResolverIsNarrow passed 1 test(s)\n    ok InheritedResolverRefusesStartup passed 1 test(s)\n    ok ExtraPolicyRefusesStartup passed 1 test(s)\n\n  4 passing (26ms)\n"
+        }
+      ]
+    },
+    {
+      "model": "scope-escalation.qnt",
+      "sha256": "75f2b180700539a35ff4e72494220df6ef38db3c283b42dde0e0f59ddab2efad",
+      "runs": [
+        "policyWideningRejectedTest",
+        "grantWideningRejectedTest",
+        "permittedPolicyRemainsBoundedTest",
+        "permittedGrantRemainsBoundedTest"
+      ],
+      "ok": true,
+      "checks": [
+        {
+          "command": [
+            "quint",
+            "typecheck",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/scope-escalation.qnt"
+          ],
+          "exitCode": 0,
+          "output": ""
+        },
+        {
+          "command": [
+            "quint",
+            "test",
+            "/private/tmp/tc-backend-authorization-fixes/docs/security/backend-authorization-fixes/scope-escalation.qnt",
+            "--max-samples",
+            "1",
+            "--match",
+            "^(policyWideningRejectedTest|grantWideningRejectedTest|permittedPolicyRemainsBoundedTest|permittedGrantRemainsBoundedTest)$"
+          ],
+          "exitCode": 0,
+          "output": "\n  scope_escalation\n    ok policyWideningRejectedTest passed 1 test(s)\n    ok grantWideningRejectedTest passed 1 test(s)\n    ok permittedPolicyRemainsBoundedTest passed 1 test(s)\n    ok permittedGrantRemainsBoundedTest passed 1 test(s)\n\n  4 passing (22ms)\n"
+        }
+      ]
+    }
+  ]
+}

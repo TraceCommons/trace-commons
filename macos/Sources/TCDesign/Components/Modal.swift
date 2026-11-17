@@ -26,6 +26,9 @@ public struct GlassModalAction: Identifiable {
     /// The button's accessibility name when it must say more than its
     /// title (the core's `*_accessibility_name`); nil reads the title.
     public let accessibilityName: String?
+    /// The button's hover tip, when the caller has one; nil or empty draws
+    /// none.
+    public let help: String?
     public let action: () -> Void
 
     /// `isDefault` makes this the action Return takes, drawn as the primary
@@ -35,7 +38,7 @@ public struct GlassModalAction: Identifiable {
     public init(
         _ title: String, role: Role = .standard, isDefault: Bool = false, isEnabled: Bool = true,
         isProminent: Bool = false, id: String? = nil, accessibilityName: String? = nil,
-        action: @escaping () -> Void
+        help: String? = nil, action: @escaping () -> Void
     ) {
         self.id = id ?? title
         self.title = title
@@ -44,6 +47,7 @@ public struct GlassModalAction: Identifiable {
         self.isEnabled = isEnabled
         self.isProminent = isProminent
         self.accessibilityName = accessibilityName
+        self.help = help
         self.action = action
     }
 
@@ -53,8 +57,10 @@ public struct GlassModalAction: Identifiable {
     }
 
     /// A destructive action.
-    public static func destructive(_ title: String, isEnabled: Bool = true, action: @escaping () -> Void) -> GlassModalAction {
-        GlassModalAction(title, role: .destructive, isEnabled: isEnabled, action: action)
+    public static func destructive(
+        _ title: String, isEnabled: Bool = true, help: String? = nil, action: @escaping () -> Void
+    ) -> GlassModalAction {
+        GlassModalAction(title, role: .destructive, isEnabled: isEnabled, help: help, action: action)
     }
 
     /// The footer's order, left to right: cancel, then the others as given,
@@ -203,6 +209,7 @@ public struct GlassModal<Content: View>: View {
                             .disabled(!action.isEnabled || (action.role == .cancel && !cancellable))
                             .keyboardShortcut(Self.shortcut(for: action, isDefault: isDefault, isTopmost: isTopmost))
                             .accessibilityLabel(action.accessibilityName ?? action.title)
+                            .helpIfAny(action.help ?? "")
                     }
                 }
                 .padding(.top, 10)

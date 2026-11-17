@@ -1,9 +1,11 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-review` — reviewer-audience operator CLI.
 //!
-//! Eight subcommands matching the reviewer-bearer endpoints on
+//! Twelve subcommands matching the reviewer-bearer endpoints on
 //! trace-commons-server. All requests are issued through the foundation
 //! `trace_commons_operator_client::Client`, which enforces the host
 //! allowlist and never logs bearer tokens or query strings.
@@ -73,6 +75,14 @@ pub(crate) enum ReviewSubcommand {
     ReviewLeaseRelease(LeaseReleaseArgs),
     /// Append a delayed credit event for a submission.
     AppendCreditEvent(AppendCreditEventArgs),
+    /// List pipeline runs waiting for review.
+    PipelineQuarantine(PipelineQuarantineArgs),
+    /// Claim a pipeline run for review.
+    PipelineClaim(PipelineClaimArgs),
+    /// Save a freshly rechecked version of a held pipeline run.
+    PipelineRecheck(PipelineRecheckArgs),
+    /// Record an assessment of a pipeline run or exact rechecked version.
+    PipelineAssessment(PipelineAssessmentArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -155,6 +165,78 @@ pub(crate) struct AppendCreditEventArgs {
     pub external_ref: Option<String>,
 }
 
+#[derive(Debug, clap::Args)]
+pub(crate) struct PipelineQuarantineArgs {
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct PipelineClaimArgs {
+    #[arg(long)]
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct PipelineRecheckArgs {
+    #[arg(long)]
+    pub run_id: Uuid,
+    #[arg(long)]
+    pub lease_token: Uuid,
+    /// Stable request ID to reuse when retrying this recheck.
+    #[arg(long)]
+    pub recheck_id: Uuid,
+    /// Hash of the current stored pass or latest rechecked version.
+    #[arg(long, value_parser = parse_pipeline_hash)]
+    pub expected_source_hash: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct PipelineAssessmentArgs {
+    #[arg(long)]
+    pub run_id: Uuid,
+    #[arg(long)]
+    pub lease_token: Uuid,
+    #[arg(long, value_enum)]
+    pub decision: ReviewDecision,
+    #[arg(long, value_parser = parse_pipeline_reason)]
+    pub reason: String,
+    /// Repeat for each hold resolved by an approval.
+    #[arg(long = "resolved-quarantine-reason", value_parser = parse_pipeline_reason)]
+    pub resolved_quarantine_reasons: Vec<String>,
+    /// Exact version being assessed; required once a rechecked version exists.
+    #[arg(long, requires = "candidate_content_hash")]
+    pub candidate_id: Option<Uuid>,
+    #[arg(long, requires = "candidate_id", value_parser = parse_pipeline_hash)]
+    pub candidate_content_hash: Option<String>,
+}
+
+fn parse_pipeline_hash(value: &str) -> std::result::Result<String, String> {
+    match value.strip_prefix("sha256:") {
+        Some(hex)
+            if hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+        {
+            Ok(value.to_owned())
+        }
+        _ => Err("expected sha256: followed by 64 lowercase hexadecimal characters".into()),
+    }
+}
+
+fn parse_pipeline_reason(value: &str) -> std::result::Result<String, String> {
+    if (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("reason must contain 1 to 64 lowercase letters, digits or underscores".into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ReviewLeaseFilter {
     All,
@@ -217,12 +299,29 @@ impl CreditEventType {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = build_client(
-        &cli.endpoint,
-        &cli.bearer_token_env,
-        cli.allowed_hosts.as_deref(),
-    )?;
+    let client = build_review_client(&cli)?;
     dispatch(&client, &cli.endpoint, cli.command, cli.json).await
+}
+
+// A recheck can classify many fields. Keep the normal client timeout for
+// every other operation, but let a recheck finish within its 30-minute
+// review claim plus a minute for the server to return its committed result.
+fn build_review_client(cli: &Cli) -> Result<Client> {
+    if !matches!(&cli.command, ReviewSubcommand::PipelineRecheck(_)) {
+        return build_client(
+            &cli.endpoint,
+            &cli.bearer_token_env,
+            cli.allowed_hosts.as_deref(),
+        );
+    }
+    let mut builder = Client::builder(&cli.endpoint, &cli.bearer_token_env)
+        .timeout(std::time::Duration::from_secs(31 * 60));
+    if let Some(csv) = cli.allowed_hosts.as_deref() {
+        builder = builder.host_allowlist(
+            trace_commons_operator_client::host_allowlist::HostAllowlist::from_csv(csv),
+        );
+    }
+    Ok(builder.build()?)
 }
 
 async fn dispatch(
@@ -254,7 +353,159 @@ async fn dispatch(
         ReviewSubcommand::AppendCreditEvent(args) => {
             append_credit_event(client, endpoint, args, json).await
         }
+        ReviewSubcommand::PipelineQuarantine(args) => {
+            pipeline_quarantine(client, endpoint, args, json).await
+        }
+        ReviewSubcommand::PipelineClaim(args) => pipeline_claim(client, endpoint, args, json).await,
+        ReviewSubcommand::PipelineRecheck(args) => {
+            pipeline_recheck(client, endpoint, args, json).await
+        }
+        ReviewSubcommand::PipelineAssessment(args) => {
+            pipeline_assessment(client, endpoint, args, json).await
+        }
     }
+}
+
+async fn pipeline_quarantine(
+    client: &Client,
+    endpoint: &str,
+    args: PipelineQuarantineArgs,
+    json: bool,
+) -> Result<()> {
+    let path = "/v1/review/pipeline/quarantine";
+    let owned = args
+        .limit
+        .map(|limit| vec![("limit", limit.to_string())])
+        .unwrap_or_default();
+    let query = borrow_query(&owned);
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
+    if json {
+        emit_json(endpoint, "GET", path, &value)?;
+    } else {
+        render_items(
+            &mut stdout(),
+            "Pipeline review queue",
+            &value,
+            &[
+                "run_id",
+                "submission_id",
+                "phase",
+                "hold_reason",
+                "assessment_superseded",
+                "review_source_hash",
+                "review_candidate",
+                "created_at",
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+async fn pipeline_claim(
+    client: &Client,
+    endpoint: &str,
+    args: PipelineClaimArgs,
+    json: bool,
+) -> Result<()> {
+    let path = format!("/v1/review/pipeline/runs/{}/claim", args.run_id);
+    let value: Value = client
+        .call_json::<(), Value>(Method::POST, &path, &[], None)
+        .await?;
+    if json {
+        emit_json(endpoint, "POST", &path, &value)?;
+    } else {
+        let mut out = stdout();
+        writeln!(out, "Claimed pipeline review for {}", args.run_id)?;
+        render_kv_fields(
+            &mut out,
+            &value,
+            &[
+                ("  lease token", "lease_token"),
+                ("  expires at", "lease_expires_at"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+async fn pipeline_recheck(
+    client: &Client,
+    endpoint: &str,
+    args: PipelineRecheckArgs,
+    json: bool,
+) -> Result<()> {
+    parse_pipeline_hash(&args.expected_source_hash).map_err(anyhow::Error::msg)?;
+    let path = format!("/v1/review/pipeline/runs/{}/recheck", args.run_id);
+    let body = serde_json::json!({
+        "lease_token":args.lease_token,"recheck_id":args.recheck_id,
+        "expected_source_hash":args.expected_source_hash,
+    });
+    let value: Value = client
+        .call_json::<Value, Value>(Method::POST, &path, &[], Some(&body))
+        .await?;
+    if json {
+        emit_json(endpoint, "POST", &path, &value)?;
+    } else {
+        let mut out = stdout();
+        writeln!(out, "Saved rechecked version for {}", args.run_id)?;
+        render_kv_fields(
+            &mut out,
+            &value,
+            &[
+                ("  candidate id", "candidate_id"),
+                ("  content hash", "content_hash"),
+                ("  source hash", "source_hash"),
+                ("  risk", "residual_pii_risk"),
+                ("  coverage complete", "coverage_complete"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn pipeline_assessment_body(args: &PipelineAssessmentArgs) -> Result<Value> {
+    if args.candidate_id.is_some() != args.candidate_content_hash.is_some() {
+        anyhow::bail!("candidate id and content hash must be supplied together");
+    }
+    parse_pipeline_reason(&args.reason).map_err(anyhow::Error::msg)?;
+    for reason in &args.resolved_quarantine_reasons {
+        parse_pipeline_reason(reason).map_err(anyhow::Error::msg)?;
+    }
+    let mut body = serde_json::json!({
+        "lease_token":args.lease_token,"recommendation":args.decision.as_str(),
+        "reason":args.reason,"resolved_quarantine_reasons":args.resolved_quarantine_reasons,
+    });
+    if let (Some(candidate_id), Some(content_hash)) =
+        (args.candidate_id, args.candidate_content_hash.as_ref())
+    {
+        parse_pipeline_hash(content_hash).map_err(anyhow::Error::msg)?;
+        body["candidate_id"] = serde_json::json!(candidate_id);
+        body["candidate_content_hash"] = serde_json::json!(content_hash);
+    }
+    Ok(body)
+}
+
+async fn pipeline_assessment(
+    client: &Client,
+    endpoint: &str,
+    args: PipelineAssessmentArgs,
+    json: bool,
+) -> Result<()> {
+    let body = pipeline_assessment_body(&args)?;
+    let path = format!("/v1/review/pipeline/runs/{}/assessment", args.run_id);
+    let value: Value = client
+        .call_json::<Value, Value>(Method::POST, &path, &[], Some(&body))
+        .await?;
+    if json {
+        emit_json(endpoint, "POST", &path, &value)?;
+    } else {
+        let mut out = stdout();
+        writeln!(out, "Recorded pipeline assessment for {}", args.run_id)?;
+        render_kv_fields(&mut out, &value, &[("  assessment id", "assessment_id")])?;
+    }
+    Ok(())
 }
 
 async fn quarantine_list(
@@ -607,19 +858,30 @@ mod tests {
         format!("TC_REVIEW_TEST_BEARER_{n}")
     }
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     struct EnvGuard {
         name: String,
     }
 
     impl EnvGuard {
+        #[allow(unsafe_code)]
         fn set(name: String, value: &str) -> Self {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock` and uses a unique variable name per test.
             unsafe { std::env::set_var(&name, value) };
             EnvGuard { name }
         }
     }
 
     impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock`; see `EnvGuard::set`.
             unsafe { std::env::remove_var(&self.name) };
         }
     }
@@ -878,5 +1140,309 @@ mod tests {
         )
         .await
         .expect("decision posted");
+    }
+    fn pipeline_cli(command: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec!["trace-commons-review", "--endpoint", "https://api.example"];
+        args.extend_from_slice(command);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn cli_parses_pipeline_commands_and_exact_candidate_binding() {
+        let run = Uuid::new_v4().to_string();
+        let lease = Uuid::new_v4().to_string();
+        let recheck = Uuid::new_v4().to_string();
+        let candidate = Uuid::new_v4().to_string();
+        let source_hash = format!("sha256:{}", "a".repeat(64));
+        let candidate_hash = format!("sha256:{}", "b".repeat(64));
+        assert!(matches!(
+            pipeline_cli(&["pipeline-quarantine", "--limit", "25"])
+                .unwrap()
+                .command,
+            ReviewSubcommand::PipelineQuarantine(PipelineQuarantineArgs { limit: Some(25) })
+        ));
+        assert!(matches!(
+            pipeline_cli(&["pipeline-claim", "--run-id", &run])
+                .unwrap()
+                .command,
+            ReviewSubcommand::PipelineClaim(_)
+        ));
+        match pipeline_cli(&[
+            "pipeline-recheck",
+            "--run-id",
+            &run,
+            "--lease-token",
+            &lease,
+            "--recheck-id",
+            &recheck,
+            "--expected-source-hash",
+            &source_hash,
+        ])
+        .unwrap()
+        .command
+        {
+            ReviewSubcommand::PipelineRecheck(args) => {
+                assert_eq!(args.run_id.to_string(), run);
+                assert_eq!(args.recheck_id.to_string(), recheck);
+                assert_eq!(args.expected_source_hash, source_hash);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        match pipeline_cli(&[
+            "pipeline-assessment",
+            "--run-id",
+            &run,
+            "--lease-token",
+            &lease,
+            "--decision",
+            "approve",
+            "--reason",
+            "privacy_rechecked",
+            "--resolved-quarantine-reason",
+            "privacy_risk_high_review_required",
+            "--candidate-id",
+            &candidate,
+            "--candidate-content-hash",
+            &candidate_hash,
+        ])
+        .unwrap()
+        .command
+        {
+            ReviewSubcommand::PipelineAssessment(args) => {
+                assert_eq!(args.decision, ReviewDecision::Approve);
+                assert_eq!(args.candidate_id.unwrap().to_string(), candidate);
+                assert_eq!(
+                    args.candidate_content_hash.as_deref(),
+                    Some(candidate_hash.as_str())
+                );
+                assert_eq!(
+                    args.resolved_quarantine_reasons,
+                    ["privacy_risk_high_review_required"]
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_assessment_requires_both_candidate_fields() {
+        let run = Uuid::new_v4().to_string();
+        let lease = Uuid::new_v4().to_string();
+        let candidate = Uuid::new_v4().to_string();
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let mut base = vec![
+            "pipeline-assessment",
+            "--run-id",
+            &run,
+            "--lease-token",
+            &lease,
+            "--decision",
+            "reject",
+            "--reason",
+            "privacy_unresolved",
+        ];
+        assert!(pipeline_cli(&base).is_ok());
+        base.extend(["--candidate-id", &candidate]);
+        assert!(pipeline_cli(&base).is_err());
+        base.truncate(base.len() - 2);
+        base.extend(["--candidate-content-hash", &hash]);
+        assert!(pipeline_cli(&base).is_err());
+    }
+
+    #[test]
+    fn pipeline_arguments_reject_invalid_hashes_and_free_text_reasons() {
+        let run = Uuid::new_v4().to_string();
+        let lease = Uuid::new_v4().to_string();
+        let recheck = Uuid::new_v4().to_string();
+        assert!(
+            pipeline_cli(&[
+                "pipeline-recheck",
+                "--run-id",
+                &run,
+                "--lease-token",
+                &lease,
+                "--recheck-id",
+                &recheck,
+                "--expected-source-hash",
+                "not_a_hash"
+            ])
+            .is_err()
+        );
+        assert!(
+            pipeline_cli(&[
+                "pipeline-assessment",
+                "--run-id",
+                &run,
+                "--lease-token",
+                &lease,
+                "--decision",
+                "approve",
+                "--reason",
+                "looks fine"
+            ])
+            .is_err()
+        );
+        assert!(
+            pipeline_cli(&[
+                "pipeline-assessment",
+                "--run-id",
+                &run,
+                "--lease-token",
+                &lease,
+                "--decision",
+                "approve",
+                "--reason",
+                "privacy_rechecked",
+                "--resolved-quarantine-reason",
+                "free text"
+            ])
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_quarantine_uses_pipeline_route_and_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/review/pipeline/quarantine"))
+            .and(query_param("limit", "25"))
+            .and(header("authorization", "Bearer reviewer-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = unique_bearer_env();
+        let _guard = EnvGuard::set(env.clone(), "reviewer-secret");
+        let client = Client::builder(server.uri(), env).build().unwrap();
+        pipeline_quarantine(
+            &client,
+            &server.uri(),
+            PipelineQuarantineArgs { limit: Some(25) },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipeline_claim_posts_to_run_claim_route() {
+        let run_id = Uuid::new_v4();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/review/pipeline/runs/{run_id}/claim")))
+            .and(header("authorization", "Bearer reviewer-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "lease_token": Uuid::new_v4(), "lease_expires_at": "2026-11-15T12:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = unique_bearer_env();
+        let _guard = EnvGuard::set(env.clone(), "reviewer-secret");
+        let client = Client::builder(server.uri(), env).build().unwrap();
+        pipeline_claim(&client, &server.uri(), PipelineClaimArgs { run_id }, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipeline_recheck_posts_idempotency_source_and_lease_in_body() {
+        let run_id = Uuid::new_v4();
+        let lease_token = Uuid::new_v4();
+        let recheck_id = Uuid::new_v4();
+        let expected_source_hash = format!("sha256:{}", "a".repeat(64));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/review/pipeline/runs/{run_id}/recheck")))
+            .and(header("authorization", "Bearer reviewer-secret"))
+            .and(body_json(serde_json::json!({
+                "lease_token":lease_token,"recheck_id":recheck_id,
+                "expected_source_hash":expected_source_hash,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidate_id":recheck_id,"content_hash":format!("sha256:{}", "b".repeat(64)),
+                "coverage_complete":true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = unique_bearer_env();
+        let _guard = EnvGuard::set(env.clone(), "reviewer-secret");
+        let client = Client::builder(server.uri(), env).build().unwrap();
+        pipeline_recheck(
+            &client,
+            &server.uri(),
+            PipelineRecheckArgs {
+                run_id,
+                lease_token,
+                recheck_id,
+                expected_source_hash,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipeline_assessment_posts_exact_candidate_and_review_reasons() {
+        let run_id = Uuid::new_v4();
+        let lease_token = Uuid::new_v4();
+        let candidate_id = Uuid::new_v4();
+        let candidate_content_hash = format!("sha256:{}", "b".repeat(64));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1/review/pipeline/runs/{run_id}/assessment"
+            )))
+            .and(body_json(serde_json::json!({
+                "lease_token":lease_token,"recommendation":"approve","reason":"privacy_rechecked",
+                "resolved_quarantine_reasons":["privacy_risk_high_review_required"],
+                "candidate_id":candidate_id,"candidate_content_hash":candidate_content_hash,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "assessment_id":Uuid::new_v4(),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = unique_bearer_env();
+        let _guard = EnvGuard::set(env.clone(), "reviewer-secret");
+        let client = Client::builder(server.uri(), env).build().unwrap();
+        pipeline_assessment(
+            &client,
+            &server.uri(),
+            PipelineAssessmentArgs {
+                run_id,
+                lease_token,
+                decision: ReviewDecision::Approve,
+                reason: "privacy_rechecked".into(),
+                resolved_quarantine_reasons: vec!["privacy_risk_high_review_required".into()],
+                candidate_id: Some(candidate_id),
+                candidate_content_hash: Some(candidate_content_hash),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn legacy_pipeline_assessment_omits_candidate_fields_and_rejects_partial_pair() {
+        let mut args = PipelineAssessmentArgs {
+            run_id: Uuid::new_v4(),
+            lease_token: Uuid::new_v4(),
+            decision: ReviewDecision::Reject,
+            reason: "privacy_unresolved".into(),
+            resolved_quarantine_reasons: Vec::new(),
+            candidate_id: None,
+            candidate_content_hash: None,
+        };
+        let body = pipeline_assessment_body(&args).unwrap();
+        assert_eq!(body["recommendation"], "reject");
+        assert!(body.get("candidate_id").is_none());
+        assert!(body.get("candidate_content_hash").is_none());
+        args.candidate_id = Some(Uuid::new_v4());
+        assert!(pipeline_assessment_body(&args).is_err());
     }
 }

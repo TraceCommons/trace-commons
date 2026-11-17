@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "registry_version": 3,
+  "environment": "production",
+  "capabilities": [
+    "insights_skills_v1",
+    "skills_server_catalog_v1"
+  ],
+  "remote_enable": [
+    "insights_skills",
+    "skills_server_catalog"
+  ],
+  "signing_keys": [
+    "49ce745bfec653ca8187c1c0bb68d18c7afc9dfc6998bc7bc9424bd4081845a5"
+  ]
+}

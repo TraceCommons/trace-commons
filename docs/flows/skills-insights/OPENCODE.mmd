@@ -1,0 +1,57 @@
+stateDiagram-v2
+  direction TB
+  state "Usage unavailable — analysis off" as s0
+  state "Skills disabled" as s1
+  state "Folder excluded" as s2
+  state "No accepted OpenCode event" as s3
+  state "Call incomplete — not counted" as s4
+  state "Call failed — not counted" as s5
+  state "One accepted invocation" as s6
+  state "One accepted load" as s7
+  [*] --> s0
+  s0 --> s1 : the skills flag turns off
+  s0 --> s2 : you exclude the folder
+  s0 --> s3 : you enable local analysis
+  s1 --> s0 : the skills flag turns on
+  s2 --> s1 : the skills flag turns off
+  s2 --> s0 : you permit the folder
+  s3 --> s1 : the skills flag turns off
+  s3 --> s2 : you exclude the folder
+  s3 --> s0 : you disable local analysis
+  s1 --> s2 : the skills flag turns on
+  s1 --> s3 : the skills flag turns on
+  s2 --> s3 : you permit the folder
+  s3 --> s4 : the open code call is running
+  s3 --> s5 : the open code call fails
+  s3 --> s6 : the database reports successful invocation / the export reports successful invocation
+  s3 --> s7 : the database reports successful load / the export reports successful load
+  s4 --> s5 : the open code call fails
+  s4 --> s6 : the database reports successful invocation / the export reports successful invocation
+  s4 --> s7 : the database reports successful load / the export reports successful load
+  s4 --> s1 : the skills flag turns off
+  s4 --> s2 : you exclude the folder
+  s4 --> s0 : you disable local analysis
+  s4 --> s3 : you clear local analysis
+  s5 --> s4 : the open code call is running
+  s5 --> s1 : the skills flag turns off
+  s5 --> s2 : you exclude the folder
+  s5 --> s0 : you disable local analysis
+  s5 --> s3 : you clear local analysis
+  s6 --> s6 : the database reports successful invocation / the export reports successful invocation
+  s6 --> s1 : the skills flag turns off
+  s6 --> s2 : you exclude the folder
+  s6 --> s0 : you disable local analysis
+  s6 --> s3 : you clear local analysis
+  s7 --> s7 : the database reports successful load / the export reports successful load
+  s7 --> s1 : the skills flag turns off
+  s7 --> s2 : you exclude the folder
+  s7 --> s0 : you disable local analysis
+  s7 --> s3 : you clear local analysis
+  class s0 teal
+  class s1 tan
+  class s2 tan
+  class s3 teal
+  class s4 teal
+  class s5 teal
+  class s6 teal
+  class s7 teal

@@ -345,7 +345,9 @@ downgrade is the failure this whole design is aimed at.
 |---|---|---|
 | Witness URL set, no measurements configured | `witness_expected_measurement` | Refuse. Send nothing. |
 | Witness URL set, no signing address configured | `witness_signing_address` | Refuse. Send nothing. |
-| Attestation route unreachable or malformed | `witness_attestation_unavailable` | Refuse. Send nothing. |
+| Attestation route answered with an error or a malformed body | `witness_attestation_unavailable` | Refuse. Send nothing. |
+| Witness did not answer within the client's deadline (30 s for the quote, 330 s for the review), or answered `504 witness_request_timed_out` | `witness_timeout` | Refuse. Nothing is certified. A CLI batch stops contacting the witness. |
+| Witness could not be connected to | `witness_unreachable` | Refuse. Send nothing. A CLI batch stops contacting the witness. |
 | Collateral unobtainable | `witness_collateral_unavailable` | Refuse. Send nothing. |
 | Quote fails DCAP verification | `witness_quote_unverified` | Refuse. Send nothing. |
 | Report data does not carry this client's nonce | `witness_quote_replayed` | Refuse. Send nothing. |

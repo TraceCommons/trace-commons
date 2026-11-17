@@ -344,27 +344,27 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("Task.detached"))
     }
 
-    /// The list under the ring: each found tool's tile, name and trace
-    /// count (the canvas's rows) and its marker check, the added folders
+    /// The list under the ring: each found tool's tile and name (the canvas's
+    /// rows, no trace count) and its marker check, the added folders
     /// with "Added by you", and the add row under the card, one tile and one
     /// list defined once. Continue waits on an open question.
     func test_theListShowsEachToolWithItsCheckAndTheAddRow() throws {
         let tools = try Self.source("ToolsScreen.swift")
         XCTAssertEqual(tools.components(separatedBy: "struct AddToolTile: View").count - 1, 1)
         XCTAssertEqual(tools.components(separatedBy: "struct ToolChecks: View").count - 1, 1)
-        XCTAssertTrue(tools.contains("copy.frame.sessionCount"))
+        XCTAssertFalse(tools.contains("copy.frame.sessionCount"), "no trace counts (Ron, 2026-11-05)")
         XCTAssertTrue(tools.contains("ToolAnswerRowLayout.fill(copy.folders.watchQuestion, tool: row.source)"))
         XCTAssertTrue(tools.contains("AddToolTile(copy: copy, runner: runner, adding: adding)"))
         XCTAssertTrue(tools.contains("@StateObject private var adding = AddToolModel()"))
         XCTAssertTrue(tools.contains("pending: adding.pending != nil"))
         XCTAssertTrue(tools.contains("meta: copy.tools.addedByYou"))
 
-        // The add row sits under the scrolling card, not in it.
+        // The add row sits under the card, not in it.
         let checks = try XCTUnwrap(tools.range(of: "struct ToolChecks: View {"))
         let body = String(tools[checks.upperBound...])
-        let scroll = try XCTUnwrap(body.range(of: "ScrollView { list }"))
+        let card = try XCTUnwrap(body.range(of: "            list\n"))
         let add = try XCTUnwrap(body.range(of: "AddToolTile(copy: copy, runner: runner, adding: adding)"))
-        XCTAssertLessThan(scroll.lowerBound, add.lowerBound)
+        XCTAssertLessThan(card.lowerBound, add.lowerBound)
 
         // The caption is "Added by you" for a folder the person gave
         // through a missing tool's row, nothing otherwise.

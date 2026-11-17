@@ -2,12 +2,17 @@
 
 pub const WELCOME_BODY: &str = "This app finds finished coding-agent traces on this machine according to your source settings. Review those settings to see which folders are read.";
 pub const DONE_BODY: &str = "Review waiting traces in the queue. Notifications summarize traces to review and recent contributions.";
-pub const NOTIFICATION_PURPOSE: &str = "Notifications tell you about traces waiting for review and recent contributions. They never submit a trace for you.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P249).
+pub const NOTIFICATION_PURPOSE: &str =
+    "About traces waiting for review and recent contributions. They never submit a trace for you.";
 pub const NOTIFICATION_HEADING: &str = "Notifications";
 pub const NOTIFICATION_OFFER: &str = concat!("Let ", crate::app_name!(), " notify you?");
-pub const NOTIFICATION_ALLOWED: &str = "Notifications allowed";
-pub const NOTIFICATION_DENIED: &str = "Notifications turned off in System Settings";
-pub const NOTIFICATION_UNKNOWN: &str = "Notification permission could not be determined";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P255).
+pub const NOTIFICATION_ALLOWED: &str = "Allowed";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P254).
+pub const NOTIFICATION_DENIED: &str = "Off in System Settings";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P246).
+pub const NOTIFICATION_UNKNOWN: &str = "Permission unknown";
 pub const NOTIFICATION_NOT_ASKED: &str = "Not asked yet";
 /// #1146 `platform-panel.tsx` (owner ruling, 2026-10-06).
 pub const NOTIFICATION_ALLOW: &str = "Allow";

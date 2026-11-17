@@ -128,8 +128,9 @@ pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), and the NEAR AI notice marker.
-pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
     CONFIG_FILE,
+    crate::daemon::first_trace::FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     DAEMON_PAYOUT_LINK_FILE,
@@ -545,6 +546,7 @@ impl WitnessSettings {
         Ok(WitnessTrust {
             signing_address: self.signing_address.clone(),
             measurements,
+            accepted: Vec::new(),
         })
     }
 
@@ -1658,6 +1660,7 @@ impl ConfigStore {
             LEGACY_INVITE_REFUSAL_FILE,
             RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
+            crate::daemon::terms_state::TERMS_STATE_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1688,6 +1691,7 @@ impl ConfigStore {
             LEGACY_INVITE_REFUSAL_FILE,
             RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
+            crate::daemon::terms_state::TERMS_STATE_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -2741,6 +2745,7 @@ mod tests {
     // serialize the mutating tests so they do not race each other.
     static ATTESTATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[allow(unsafe_code)]
     fn set_attestation_env(value: Option<&str>) {
         // SAFETY: serialized through ATTESTATION_ENV_LOCK.
         unsafe {

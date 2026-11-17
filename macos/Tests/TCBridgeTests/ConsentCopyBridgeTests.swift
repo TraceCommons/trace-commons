@@ -108,7 +108,7 @@ final class ConsentCopyBridgeTests: XCTestCase {
             return
         }
         XCTAssertEqual(object.keys.sorted(), AccountChangeCopy.consumedFields.sorted())
-        XCTAssertEqual(copy.mismatchChange, "Use a different account")
+        XCTAssertEqual(copy.mismatchChange, "Switch account")
         XCTAssertEqual(copy.title, "Use a different NEAR AI account")
         XCTAssertEqual(copy.render(copy.confirmAccessibilityName, new: "google"), "Switch to Google")
     }

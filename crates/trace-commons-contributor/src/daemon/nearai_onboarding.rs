@@ -45,9 +45,10 @@
 //!
 //! Two clients on two different bases of trust, and they do not mix. The
 //! commons calls go through [`super::account_onboarding::client`] under the
-//! derived signup allowlist. The token exchange goes to `cloud-api.near.ai`,
-//! a compiled-in constant with no configuration that can move it — see
-//! [`super::nearai_credential::api`]. It is deliberately **not** added to the
+//! derived signup allowlist. The token exchange goes to NEAR AI's platform
+//! API (`crate::channel::NEAR_AI_API_ORIGIN`), a compiled-in constant with no
+//! configuration that can move it — see [`super::nearai_credential::api`].
+//! It is deliberately **not** added to the
 //! signup allowlist: that list constrains configurable destinations, and
 //! putting a fixed endpoint on it would imply the host is subject to
 //! configuration.

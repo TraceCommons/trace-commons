@@ -416,6 +416,43 @@ public sealed class ApprovalHoldTests
     private static DaemonResponse Response(string result) =>
         DaemonResponse.Parse($$"""{"id":1,"result":{{result}}}""");
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("{\"approved\":\"invalid\"}")]
+    [InlineData("{\"approved\":1,\"redactions\":null}")]
+    [InlineData("{\"approved\":1,\"skipped\":null}")]
+    public void MalformedApprovalCannotBecomeASuccessfulPreviewDecision(string json)
+    {
+        var decision = TraceCommons.App.ViewModels.PreviewDecision.Approved(ApprovalHold.Parse(Response(json)));
+        Assert.Equal(TraceCommons.App.ViewModels.PreviewOutcome.Failed, decision.Outcome);
+        Assert.Equal("Approval could not be confirmed. Check the trace status.", decision.Message);
+    }
+
+    [Fact]
+    public void ZeroApprovalPreservesTheActualRefusalAndOffersNoUndoEvenWithADeadline()
+    {
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(Response(
+            """{"approved":0,"skipped":[{"entry_id":"one","reason_label":"not-pending"}],"hold_until":"2026-08-18T12:00:05Z"}""")));
+        var decision = TraceCommons.App.ViewModels.PreviewDecision.Approved(hold);
+
+        Assert.Equal(TraceCommons.App.ViewModels.PreviewOutcome.Failed, decision.Outcome);
+        Assert.Equal("Nothing approved. Scrubbing matched nothing. 1 not approved: already decided.", decision.Message);
+        Assert.False(hold.IsLive(DateTimeOffset.Parse("2026-08-18T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    [Fact]
+    public void APositiveApprovalWithoutAHoldKeepsItsCounts()
+    {
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(Response(
+            """{"approved":1,"redactions":{"secret":2},"flagged":1,"hold_until":null}""")));
+        var decision = TraceCommons.App.ViewModels.PreviewDecision.Approved(hold);
+
+        Assert.Equal(TraceCommons.App.ViewModels.PreviewOutcome.Approved, decision.Outcome);
+        Assert.Equal("Approved. 2 redactions applied. 1 flagged.", decision.Hold!.Toast.Line);
+        Assert.False(hold.IsLive(DateTimeOffset.UtcNow));
+    }
+
     [Fact]
     public void TheDaemonsDeadlineDrivesTheCountdown()
     {

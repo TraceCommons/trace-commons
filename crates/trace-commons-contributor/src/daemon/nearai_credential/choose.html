@@ -23,7 +23,8 @@ p { font-size: 16px; line-height: 1.6; color: #c4c6d1; margin: 0; }
 @media (max-width: 400px) { .card { padding: 32px 24px; } h1 { font-size: 24px; } }
 .card h1 { margin-bottom: 32px; }
 form { display: grid; gap: 12px; text-align: left; }
-button { display: block; width: 100%; min-height: 48px; padding: 12px 20px; border: 1px solid #ffffff1f; border-radius: 12px; background: #262938; color: inherit; font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+button { position: relative; display: block; width: 100%; min-height: 48px; padding: 12px 52px; border: 1px solid #ffffff1f; border-radius: 12px; background: #262938; color: inherit; font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+.provider-logo { position: absolute; left: 20px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; pointer-events: none; }
 button:hover { background: #2e3244; }
 button:focus-visible { outline: 2px solid #56b6ff; outline-offset: 3px; }
 .note { margin: -4px 4px 4px; font-size: 14px; line-height: 1.5; color: #a5a8b8; }

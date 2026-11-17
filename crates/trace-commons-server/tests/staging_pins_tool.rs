@@ -66,7 +66,8 @@ const MODEL: &str = "Qwen/Qwen3.6-35B-A3B-FP8";
 const FIXTURE_CAPTURED_AT: u64 = 1_788_264_000;
 
 /// The staging gateway host the app compares a payload's `gateway_host`
-/// with: the host of the server's compiled-in staging NEAR AI API base.
+/// with: the host of the server's compiled-in staging NEAR AI inference
+/// base.
 const STAGING_GATEWAY_HOST: &str = "cloud-stg-api.near.ai";
 
 // ---------------------------------------------------------------------------

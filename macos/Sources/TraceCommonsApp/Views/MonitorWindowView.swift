@@ -266,7 +266,7 @@ struct MonitorWindowView: View {
                 inferenceDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
                 inferenceDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
-                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
+                tracesDescription: traces.phase == .loading ? nil : Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
                 showsGraph: $showsGraph,
                 breadcrumb: Self.breadcrumb(
@@ -331,6 +331,12 @@ struct MonitorWindowView: View {
                             tracesPage = .history
                         },
                         openInsights: { tab = .insights },
+                        // Records the section, then opens the Settings window,
+                        // as the gear and the Private AI tab's link do.
+                        openSettings: {
+                            navigation.requestSettings(at: .consent)
+                            openWindow(id: WindowID.settings)
+                        },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
@@ -341,7 +347,10 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
-                                 })
+                                 }, openSkillsSettings: {
+                                     navigation.requestSettings(at: .insights)
+                                     openWindow(id: WindowID.settings)
+                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -442,6 +451,9 @@ struct MonitorWindowView: View {
         // The change of login's sheet (F10), raised from Settings'
         // Connection and Private AI sections, once for the window.
         .modifier(AccountLoginChangePresenter())
+        // The new-terms sheet, raised by Home's terms notice or the menu
+        // bar's row.
+        .modifier(TermsHoldPresenter())
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.
@@ -535,7 +547,9 @@ struct MonitorWindowView: View {
     /// The Traces badge (R7): decisions owed, a dash when the core did not
     /// say, nothing at zero. Never queue depth.
     private var tracesBadge: GlassBadgeValue? {
-        traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
+        // Before the first answer the count is loading, not unknown.
+        if traces.phase == .loading { return .loading }
+        return traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
     }
 
     /// The Traces badge's text equivalent, from the core: "unavailable" for

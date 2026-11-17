@@ -36,7 +36,7 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
         } else {
             projectId = nil
         }
-        let data = try JSONEncoder().encode(value)
+        let data = try JSONEncoder.sortedKeys.encode(value)
         json = String(decoding: data, as: UTF8.self)
     }
 }
@@ -46,6 +46,18 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
 extension GrantVoidWire: Encodable {
     public func encode(to encoder: Encoder) throws {
         try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)).encode(to: encoder)
+    }
+}
+
+extension JSONEncoder {
+    /// An encoder that writes object keys in sorted order. A decoded
+    /// dictionary's key order changes from one decode to the next, so a value
+    /// that keeps an object re-encoded and compares by that string needs a
+    /// fixed order to compare equal for equal content.
+    static var sortedKeys: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
     }
 }
 

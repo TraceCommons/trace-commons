@@ -179,6 +179,9 @@ pub(super) fn action_explains(action: CredentialAction) -> &'static str {
 /// process doing anything -- the ceremony finishes in a browser -- and a
 /// latched answer would keep claiming the old one.
 pub fn refresh(app: &Rc<App>) {
+    // Balance is independently readable even if credential status fails.
+    // Reuse this same read after a sign-in/forget ceremony and on refresh.
+    super::balance::refresh(app);
     // The attempt is named only when this shell started one. A caller that
     // names no attempt still gets `state`, which is the part this section
     // renders; `attempt_status` is the daemon's answer about the ceremony and
@@ -197,12 +200,6 @@ pub fn refresh(app: &Rc<App>) {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         render(app, state);
-        // The balance is the same fact read the other way round: it is the
-        // account this key spends from, and a sign-in that has just landed
-        // or just been forgotten changes both. Re-read here rather than
-        // waiting for the next screen refresh, so the ceremony a
-        // contributor finishes in a browser lands on both rows at once.
-        super::balance::refresh(app);
     });
 }
 
@@ -280,6 +277,22 @@ pub fn render(app: &Rc<App>, state: &str) {
     if action == CredentialAction::Cancel {
         ensure_poll(app);
     }
+    app.home
+        .balance
+        .set_action_sensitive(!obtain_in_progress(app));
+}
+
+pub(super) fn obtain_in_progress(app: &Rc<App>) -> bool {
+    let view = &app.private_inference.credential;
+    obtain_busy(
+        view.pending.get(),
+        view.polling.get(),
+        view.attempt.borrow().is_some(),
+    )
+}
+
+fn obtain_busy(pending: bool, polling: bool, has_attempt: bool) -> bool {
+    pending || polling || has_attempt
 }
 
 pub(super) fn pending(app: &Rc<App>) -> bool {
@@ -299,6 +312,45 @@ pub(super) fn pending(app: &Rc<App>) -> bool {
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
+    act_guarded(app, action, Rc::new(|| true), None);
+}
+
+/// A transient Join surface may leave before a start reply arrives. Keep the
+/// existing account actions, but never open a browser for a stale appearance.
+#[derive(Default)]
+pub(super) struct OwnedAttempt(RefCell<Option<String>>);
+impl OwnedAttempt {
+    fn record(&self, id: &str) {
+        if !id.is_empty() {
+            self.0.replace(Some(id.to_owned()));
+        }
+    }
+    fn take(&self) -> Option<String> {
+        self.0.borrow_mut().take()
+    }
+}
+
+/// Leave only the ceremony this transient surface started. An absent id must
+/// never become an unqualified cancellation of another account surface.
+pub(super) fn cancel_owned(app: &Rc<App>, attempt: &OwnedAttempt) {
+    if let Some(id) = attempt.take() {
+        app.call(
+            "near_ai_credential_cancel",
+            serde_json::json!({"attempt_id":id}),
+            |app, _| refresh(app),
+        );
+    }
+}
+
+pub(super) fn act_guarded(
+    app: &Rc<App>,
+    action: CredentialAction,
+    current: Rc<dyn Fn() -> bool>,
+    owned: Option<Rc<OwnedAttempt>>,
+) {
+    if !current() || (action == CredentialAction::Obtain && obtain_in_progress(app)) {
+        return;
+    }
     let view = &app.private_inference.credential;
     if view.pending.replace(true) {
         return;
@@ -311,7 +363,7 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         }
         CredentialAction::Obtain => {
             crate::ui::funding::credential_pending(app);
-            start(app);
+            start(app, current, owned);
         }
         CredentialAction::Cancel => {
             crate::ui::funding::credential_pending(app);
@@ -327,6 +379,9 @@ pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
         }
     }
     view.action.set_sensitive(!view.pending.get());
+    app.home
+        .balance
+        .set_action_sensitive(!obtain_in_progress(app));
 }
 
 /// Open the sign-in page, and say whether anything took it.
@@ -361,16 +416,43 @@ pub(super) fn open_browser(url: &str) -> bool {
 /// happened, which a call whose answer was lost cannot know, and the re-read
 /// beside it draws whatever the daemon actually holds. Before this, the
 /// screen did not change at all and a press read as unheard (#728).
-fn start(app: &Rc<App>) {
+fn start(app: &Rc<App>, current: Rc<dyn Fn() -> bool>, owned: Option<Rc<OwnedAttempt>>) {
     app.call(
         "near_ai_credential_start",
         serde_json::json!({}),
-        |app, result| {
+        move |app, result| {
+            if !current() {
+                // Cancel only this returned ceremony. Never use an empty id,
+                // which would cancel another surface's current attempt.
+                if let Some(id) = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.get("attempt_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    app.call(
+                        "near_ai_credential_cancel",
+                        serde_json::json!({"attempt_id":id}),
+                        |app, _| {
+                            app.private_inference.credential.pending.set(false);
+                            refresh(app);
+                        },
+                    );
+                } else {
+                    app.private_inference.credential.pending.set(false);
+                    refresh(app);
+                }
+                return;
+            }
             let view = &app.private_inference.credential;
             let opened = match result {
                 Ok(value) => {
                     if let Some(id) = value.get("attempt_id").and_then(serde_json::Value::as_str) {
                         view.attempt.replace(Some(id.to_string()));
+                        if let Some(owned) = &owned {
+                            owned.record(id);
+                        }
                     }
                     value
                         .get("browser_url")
@@ -381,6 +463,9 @@ fn start(app: &Rc<App>) {
                 Err(_) => false,
             };
             if !opened && view.attempt.borrow().is_some() {
+                if let Some(owned) = &owned {
+                    owned.take();
+                }
                 // `pending` stays set on purpose: the cancel that follows is
                 // the same press still being answered, and clears it itself.
                 cancel(app);
@@ -497,6 +582,19 @@ fn ensure_poll(app: &Rc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn leaving_a_surface_consumes_only_its_owned_attempt_once() {
+        let join = super::OwnedAttempt::default();
+        let other = super::OwnedAttempt::default();
+        join.record("");
+        assert!(join.take().is_none());
+        join.record("join-attempt");
+        other.record("settings-attempt");
+        assert_eq!(join.take().as_deref(), Some("join-attempt"));
+        assert!(join.take().is_none());
+        assert_eq!(other.take().as_deref(), Some("settings-attempt"));
+    }
+
     use super::*;
     use trace_commons_contributor::private_inference_copy::{
         LABEL_CREDENTIAL_ABSENT, LABEL_CREDENTIAL_CANCELLED, LABEL_CREDENTIAL_FAILED,
@@ -504,6 +602,23 @@ mod tests {
     };
 
     const SOURCE: &str = include_str!("credential.rs");
+
+    #[test]
+    fn obtain_cannot_replace_an_active_browser_ceremony() {
+        let source = include_str!("credential.rs");
+        let act = source.split("pub(super) fn act(").nth(1).unwrap();
+        let guard = act
+            .find("action == CredentialAction::Obtain && obtain_in_progress(app)")
+            .unwrap();
+        let write = act.find("view.pending.replace(true)").unwrap();
+        assert!(guard < write);
+        // Start replied and stored an attempt, but its first status poll
+        // has not replied yet: neither pending nor polling protects this gap.
+        assert!(obtain_busy(false, false, true));
+        assert!(obtain_busy(true, false, false));
+        assert!(obtain_busy(false, true, false));
+        assert!(!obtain_busy(false, false, false));
+    }
 
     /// The failed-revoke sentence is for `removed: true, revoked: false`
     /// only: not a revoke that happened, nothing stored (`null`), or an

@@ -1,5 +1,7 @@
 //! The Windows transport: a per-user named pipe carrying the same
 //! `trace_commons.daemon.v1_1` protocol as the unix-socket transport.
+
+#![allow(unsafe_code)]
 //!
 //! # Why this file is security-critical
 //!
@@ -33,7 +35,8 @@
 //! property of the Windows security model and cannot be observed from a
 //! cross-compile on another operating system.
 //!
-//! The observation is automated. CI's `windows-pipe-acl` job runs
+//! The observation is automated. The named-pipe ACL step of CI's `windows
+//! contributor crates` job (`clients.yml`) runs
 //! `scripts/windows/verify-pipe-acl.ps1` on `windows-latest`, which creates a
 //! second, non-administrator local account, has it attempt to open this pipe,
 //! and requires ERROR_ACCESS_DENIED -- plus a control confirming the owning

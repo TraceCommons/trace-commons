@@ -110,6 +110,5 @@ The shared checklist, plus: ~~no Dock icon appears~~ (reversed 2026-08-19 --
 a Dock icon appears, and carries the mark rather than the generic
 application icon); the app shows in Login Items
 after opting in; `daemon status` in a terminal answers while the app runs;
-quitting the app with "Quit and stop watching" releases the lock so a
-subsequent `daemon run` succeeds; notification actions are exactly Review and
+quitting the app releases the lock so a subsequent `daemon run` succeeds; notification actions are exactly Review and
 Not now.

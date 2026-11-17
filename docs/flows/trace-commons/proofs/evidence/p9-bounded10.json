@@ -1,0 +1,21 @@
+{
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/server_settlement.qnt",
+    "--invariant",
+    "P9",
+    "--verbosity",
+    "2",
+    "--server-endpoint",
+    "localhost:8838",
+    "--max-steps",
+    "10"
+  ],
+  "cwd": "/private/tmp/tc-quint-proof-checks",
+  "modelSha256": "8f8350008deab8b9077bf556b99461503f2733c9a922941962f51f4a025606bc",
+  "log": "/private/tmp/tc-quint-proof-checks/server_settlement-P9-bounded10-8838.log",
+  "logSha256": "d6894cecb6d240ffa7b3a9ca276cdcf412ae94923173ee372854e6c32ffe8019",
+  "exit": "timeout90",
+  "seconds": 90.03
+}

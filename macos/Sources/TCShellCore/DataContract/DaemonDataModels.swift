@@ -328,8 +328,11 @@ extension DaemonData {
         public var heldByManualScrubCheck: Bool { reasonLabel == ReasonLabel.scrubCheckManual }
         /// waiting for a person even in an armed folder, and left out of a
         /// folder approve: the daemon's `held_for_review`. Manual Scrub check
-        /// is not one of these.
-        public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
+        /// is not one of these. Only a pending entry, as in the daemon: an
+        /// approved one retrying under `witness_timeout` is not held.
+        public var heldForReview: Bool {
+            state == "pending" && (reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false)
+        }
     }
 
     /// `status.settlement_estimate`: what the traces on this Mac would settle
@@ -412,6 +415,14 @@ extension DaemonData {
         public static let tokenDistributionReviewRequired = "token-distribution-review-required"
         public static let witnessRiskReviewRequired = "witness-risk-review-required"
         public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
+        public static let witnessTimeout = "witness_timeout"
+        public static let witnessUnreachable = "witness_unreachable"
+        public static let witnessClassifierUnavailable = "witness_classifier_unavailable"
+        public static let witnessRedactionFailed = "witness_redaction_failed"
+        public static let witnessAttestationUnavailable = "witness_attestation_unavailable"
+        public static let witnessCollateralUnavailable = "witness_collateral_unavailable"
+        public static let witnessNotTrusted = "witness-not-trusted"
+        public static let witnessMeasurementNotAccepted = "witness-measurement-not-accepted"
 
         /// `queue.rs` `REASONS_NEEDING_A_PERSON`, in its order.
         public static let needingAPerson: Set<String> = [
@@ -419,6 +430,14 @@ extension DaemonData {
             witnessRiskReviewRequired,
             privacyFilterTransientExhausted,
             secondLookReviewRequired,
+            witnessTimeout,
+            witnessUnreachable,
+            witnessClassifierUnavailable,
+            witnessRedactionFailed,
+            witnessAttestationUnavailable,
+            witnessCollateralUnavailable,
+            witnessNotTrusted,
+            witnessMeasurementNotAccepted,
         ]
     }
 
@@ -446,6 +465,9 @@ extension DaemonData {
         /// Explicit CLI setup completion for the current enrollment. Absent
         /// on older daemons, which retain shell-local completion behavior.
         public let setupComplete: Bool?
+        /// Oldest trace observed under this enrollment, owned durably by the
+        /// daemon. Missing/null cannot establish graph age on older daemons.
+        public let firstTraceAt: Date?
         /// Opaque account binding; present whenever the daemon can derive a
         /// scope from its store, signed in or not. Not proof of sign-in: read
         /// `loggedIn` for that.
@@ -456,6 +478,13 @@ extension DaemonData {
         /// chosen; `nil` otherwise, and from a daemon predating it. A label,
         /// never shown as text.
         public let consentHold: String?
+        /// `true` while an in-effect Terms of Service version is published
+        /// that this person has not accepted: the daemon uploads nothing.
+        /// Separate from `paused`. `nil` from a daemon predating it.
+        public let termsHold: Bool?
+        /// The version owed while `termsHold`; `nil` otherwise. A version
+        /// id, never shown as text.
+        public let termsVersionOwed: String?
         public let paused: Bool?
         /// Authoritative admission capacity, including eligible Approved entries.
         /// Missing on older daemons; unknown must never establish recovery.
@@ -536,9 +565,12 @@ extension DaemonData {
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
             case setupComplete = "setup_complete"
+            case firstTraceAt = "first_trace_at"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
+            case termsHold = "terms_hold"
+            case termsVersionOwed = "terms_version_owed"
             case paused
             case queueAtCapacity = "queue_at_capacity"
             case queueCapacityUsed = "queue_capacity_used"
@@ -753,10 +785,17 @@ extension DaemonData {
     public struct WitnessCapacity: Codable, Equatable, Sendable {
         public let waitingSessions: Int?
         public let nextRetryAt: Date?
+        /// Approved traces still waiting on, or in, the privacy check (the
+        /// daemon's witness worker). Absent from an older daemon.
+        public let privacyCheckSessions: Int?
+        /// Witness calls running now. Absent from an older daemon.
+        public let checkingSessions: Int?
 
         public enum CodingKeys: String, CodingKey {
             case waitingSessions = "waiting_sessions"
             case nextRetryAt = "next_retry_at"
+            case privacyCheckSessions = "privacy_check_sessions"
+            case checkingSessions = "checking_sessions"
         }
     }
 
@@ -1001,6 +1040,9 @@ extension DaemonData {
         /// hidden for now, off by default). `nil` from a daemon that
         /// predates it, which reads as off; only an exact `true` shows them.
         public let missionsEnabled: Bool?
+        /// Decode-only (Settings draws no switch for it yet): whether usage
+        /// data is shared; on by default. `nil` from a daemon that predates it.
+        public let shareUsageData: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case managedCLIOptions = "managed_cli_options"
@@ -1040,6 +1082,7 @@ extension DaemonData {
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
             case settlementEstimateEnabled = "settlement_estimate_enabled"
             case missionsEnabled = "missions_enabled"
+            case shareUsageData = "share_usage_data"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
@@ -1319,8 +1362,17 @@ extension DaemonData {
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
         public let approvedVerdict: String?
+        /// The submission belongs to an account this Mac was enrolled under
+        /// before the current one: the row keeps what the server last said,
+        /// the current account cannot withdraw it, and its credit is not in
+        /// the rollup's totals. `nil` from a daemon that predates the field
+        /// reads as `false`.
+        public let previousAccount: Bool?
 
         public var id: String { submissionId }
+
+        /// Whether this row is a previous account's.
+        public var isPreviousAccount: Bool { previousAccount == true }
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case submissionId = "submission_id"
@@ -1338,6 +1390,7 @@ extension DaemonData {
             case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
+            case previousAccount = "previous_account"
         }
 
         /// Render `.notRecorded` as "not recorded", never as "you approved".
@@ -1387,6 +1440,10 @@ extension DaemonData {
         public let quarantined: Int?
         public let withdrawn: Int?
         public let other: Int?
+        /// The core's Contributed figure: accepted plus waiting to be
+        /// scored, never held (held is its own figure). Read, never re-added
+        /// from the buckets; nil from an older daemon, drawn as a dash.
+        public let contributed: Int?
     }
 
     public struct Community: Codable, Equatable, Sendable {

@@ -726,7 +726,7 @@ export async function getCertificateDetail(
   );
 }
 
-export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {
+export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy | null> {
   return parseQuitConfirmationCopy(await invokeTauri("quit_confirmation_copy"));
 }
 

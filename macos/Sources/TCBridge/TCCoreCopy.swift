@@ -246,10 +246,10 @@ public enum TCCoreCopy {
         take(tc_decisions_owed_text(decisionsOwed.map(Int64.init) ?? -1))
     }
 
-    /// `tc_quit_prompt_json` with no handle: the prompt for a process with no
-    /// watcher to stop. `TCDaemon.quitPromptJSON()` is the one to use while
-    /// a daemon handle exists.
-    public static func quitPromptWithoutWatcherJSON() -> String? {
-        take(tc_quit_prompt_json(nil))
+    /// `tc_quit_reason_prompt_json`: the quit prompt naming what quitting
+    /// stops. Nil when neither is true (no prompt), or on a caught panic.
+    /// Decoded by `TCShellCore.QuitPrompt`.
+    public static func quitReasonPromptJSON(stopsCompute: Bool, stopsPrivateAI: Bool) -> String? {
+        take(tc_quit_reason_prompt_json(stopsCompute ? 1 : 0, stopsPrivateAI ? 1 : 0))
     }
 }

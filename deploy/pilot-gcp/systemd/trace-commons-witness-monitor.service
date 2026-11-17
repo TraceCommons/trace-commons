@@ -1,0 +1,25 @@
+[Unit]
+Description=Poll the redaction witness diagnostics (TraceCommons pilot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Exit 1 means an alert was raised, so the unit shows as failed
+# (`systemctl --failed`) and an OnFailure= drop-in can deliver it. Exit 2 means
+# the configuration was refused.
+Type=oneshot
+User=tracecommons
+Group=tracecommons
+EnvironmentFile=/etc/tracecommons/witness-monitor.env
+ExecStart=/usr/bin/python3 /opt/tracecommons/bin/witness_monitor.py poll
+TimeoutStartSec=30
+StateDirectory=tracecommons/witness-monitor
+Environment=TRACE_COMMONS_WITNESS_MONITOR_STATE_DIR=/var/lib/tracecommons/witness-monitor
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6

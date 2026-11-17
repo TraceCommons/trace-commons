@@ -241,7 +241,11 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(try Self.text("AppModel.swift").contains("credentialPollInterval"))
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
-        for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
+        // The state is the card's subtitle, in words alone (Ron, 2026-11-05).
+        XCTAssertFalse(balance.contains("GlassStatusLabel("))
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceAccount.swift").contains(
+            "subtitle: BalanceSurface.stateLine(model.balanceStatus, copy: copy, calls: model.balanceCalls)"))
+        for needle in ["BalanceSurface.stateLine(status, copy: copy, calls: model.balanceCalls) == nil",
                        "BalanceSurface.showsFigures(status, calls: model.balanceCalls)"] {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }

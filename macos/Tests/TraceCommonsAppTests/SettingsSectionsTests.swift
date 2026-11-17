@@ -1,4 +1,5 @@
 import XCTest
+import TCShellCore
 
 @testable import TraceCommonsApp
 
@@ -15,7 +16,7 @@ final class SettingsSectionsTests: XCTestCase {
             .account, .payouts, .referrals,
             .watching, .watchedFolders, .tools, .insights,
             .projects, .consent, .publicProfile, .changes,
-            .privateAI,
+            .privateAI, .savedAccounts,
             .general, .startup, .notifications, .updates,
             .witness, .compute,
         ])
@@ -26,19 +27,19 @@ final class SettingsSectionsTests: XCTestCase {
         }, groups, "a group is split")
     }
 
-    /// The list names sixteen rows in the core's words, with a hairline
+    /// The list names seventeen rows in the core's words, with a hairline
     /// before the first row of every group but the first (D17: no group
     /// headings). Watched folders sits under Watching (D12) and Notifications
     /// under "Startup & notifications"; Updates has its own row (D19).
     func test_theListIsGroupedInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
             .account, .payouts, .referrals, .watching, .tools, .insights, .projects, .consent, .publicProfile,
-            .changes, .privateAI, .general, .startup, .updates, .witness, .compute,
+            .changes, .privateAI, .savedAccounts, .general, .startup, .updates, .witness, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
             "Account", "Payouts", "Referrals", "Watching", "Tools", "Insights", "Projects", "Data uses",
-            "Public profile", "Change log", "Private AI", "General", "Startup & notifications", "Updates",
+            "Public profile", "Change log", "Private AI", "Saved accounts", "General", "Startup & notifications", "Updates",
             "Redaction witness", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
@@ -98,6 +99,22 @@ final class SettingsSectionsTests: XCTestCase {
             }
         }
         XCTAssertEqual(drawn.count, Set(drawn).count, "a view is drawn by two sections: \(drawn)")
+    }
+
+    /// Saved accounts (owner, 2026-11-11) draws the saved-account card that
+    /// left the Private AI tab in #1490, with every dialog it opened: Add,
+    /// Launch, Rename and Remove. Without this section nothing in the app
+    /// opens any of them.
+    func test_savedAccountsOpensEveryAccountDialog() throws {
+        let section = try SettingsParityTests.text("Views/Settings/SavedAccountsSection.swift")
+        for sheet in ["ManagedAccountSheet(", "ManagedLaunchSheet(", "ManagedRenameSheet(", "ManagedRemoveSheet("] {
+            XCTAssertTrue(section.contains(sheet), "Saved accounts does not open \(sheet)")
+        }
+        for method in ["managed_select", "managed_account_reconnect", "managed_account_verify"] {
+            XCTAssertTrue(section.contains("\"\(method)\""), "Saved accounts' menu lacks \(method)")
+        }
+        XCTAssertEqual(SettingsSection.savedAccounts.group, .privateAI)
+        XCTAssertFalse(SettingsSection.savedAccounts.availableBeforeOnboarding)
     }
 
     /// Account (was Connection, D1) carries the account contribution card in
@@ -179,7 +196,7 @@ final class SettingsSectionsTests: XCTestCase {
             // daemon's choice), as the payout card's Sign in again runs it.
             "if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {",
             "Button(signIn) { Task { await model.signInToAccount() } }",
-            ".disabled(model.accountSigningIn)",
+            ".disabled(model.accountSigningIn && !model.canRetryAccountSignIn)",
             // One Sign in in the section: the NEAR AI login card and the
             // devices card, whose own Sign in again would be a second, wait
             // for the account to be signed in.
@@ -260,7 +277,7 @@ final class SettingsSectionsTests: XCTestCase {
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
             .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
             .watching: ("WatchingSection",
-                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {"),
+                        "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle, accessory: {"),
             .consent: ("ConsentSection",
                        "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
@@ -269,9 +286,12 @@ final class SettingsSectionsTests: XCTestCase {
             // The section's own panels, headed by the standard-settings rule
             // (owner, 2026-10-10); the modal's rule names it by the list's word.
             .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
+            // The card's title is the managed table's "accounts_title", the
+            // same key the list row reads (`SettingsWords.savedAccounts`).
+            .savedAccounts: ("SavedAccountsSection", "systemImage: Self.symbol, title: model.managedText(\"accounts_title\")"),
             .referrals: ("ReferralsSection", "GlassEyebrowCard(surface.copy.title)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
-            .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
+            .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects, accessory: {"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),
         ]
         for section in SettingsSection.allCases where section != .compute {
@@ -307,18 +327,53 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertFalse(WatchingSection.controlsArmed(read: .answered, lastReadFailed: false, startup: .refused("x")))
         XCTAssertFalse(WatchingSection.controlsArmed(read: .failed, lastReadFailed: true, startup: .running))
         let shell = try XCTUnwrap(MonitorWords.table?.shell)
-        for word in [shell.watcherEyebrow, shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
-                     shell.watcherCaption, shell.settingsRefresh, shell.consentEyebrow, shell.desktopEyebrow,
-                     shell.desktopTitle, shell.discoveryEyebrow, shell.discoveryTitle] {
+        for word in [shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
+                     shell.watcherCaption, shell.settingsRefresh, shell.desktopEyebrow,
+                     shell.desktopTitle] {
             XCTAssertFalse(word.isEmpty)
+        }
+        // Owner dropped the watcher and consent eyebrows 2026-11-04
+        // (Settings copy pass 2, P79, P140): each arrives "".
+        for word in [shell.watcherEyebrow, shell.consentEyebrow] {
+            XCTAssertEqual(word, "")
         }
         XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
         // Every card that re-reads has the refresh icon button, named in
         // the core's word (owner, 2026-10-20: it was a "Refresh" link).
-        for file in ["WatchingSection", "ConsentSection", "StartupSection"] {
+        for file in ["ConsentSection", "StartupSection"] {
             let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
             XCTAssertTrue(text.contains("GlassRefreshButton(SettingsLegacyWords.refresh"), "\(file) has no refresh")
         }
+    }
+
+    /// Owner, 2026-11-04: the Trace discovery card and its Refresh button
+    /// are gone. The queue-limit line is the watcher card's second caption
+    /// (same style as the first), drawn once settings are read, with the
+    /// settings read's retry notice in its place until then; with no status
+    /// answer there is no watcher card, so the same two cases get a plain
+    /// card and neither is lost.
+    func test_queueLimitLiveInTheWatcherCardAndNoDiscoveryCardRemains() throws {
+        let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
+        XCTAssertEqual(source.components(separatedBy: "GlassEyebrowCard(").count - 1, 1, "only the watcher card remains")
+        XCTAssertFalse(source.contains("GlassRefreshButton"), "Watching has no Refresh button")
+        XCTAssertFalse(source.contains("discovery"), "no Trace discovery card")
+        // The line follows the caption inside the watcher card, in its style.
+        let watcher = try XCTUnwrap(source.range(of: "private func watcher("))
+        let card = String(source[watcher.lowerBound...])
+        let caption = try XCTUnwrap(card.range(of: "Text(SettingsLegacyWords.watcherCaption)"))
+        let line = try XCTUnwrap(card.range(of: "queueLimit\n"))
+        let buttons = try XCTUnwrap(card.range(of: "Button(SettingsLegacyWords.pauseWatcher)"))
+        XCTAssertTrue(caption.upperBound < line.lowerBound && line.upperBound < buttons.lowerBound)
+        // Gated on the settings read, with the retry notice otherwise.
+        for needle in ["if model.daemonSettings == nil {\n            SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)",
+                       "Text(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))\n                .glassType(GlassTokens.TypeScale.caption)\n                .foregroundStyle(GlassColor.textTertiary)"] {
+            XCTAssertTrue(source.contains(needle), "WatchingSection.swift lacks \(needle)")
+        }
+        // Status unread: the same line or notice in a plain card.
+        XCTAssertTrue(source.contains("} else {\n            // Status not read"))
+        XCTAssertTrue(source.contains("GlassCard { queueLimit }"))
+        // Shells decode no discovery words.
+        XCTAssertFalse(MonitorShellCopy.consumedFields.contains { $0.lowercased().contains("discovery") })
     }
 
     /// The digest interval line at one hour, the shortest interval the
@@ -326,12 +381,17 @@ final class SettingsSectionsTests: XCTestCase {
     /// (poldsam's #1298 review, finding 2). Other intervals keep the plural.
     func test_theDigestIntervalLineAtOneHourIsTheCoresSingular() throws {
         let words = try XCTUnwrap(ShellWords.table?.settings)
-        XCTAssertFalse(words.atMostOneNotificationOne.isEmpty)
+        // Owner dropped both interval lines 2026-11-04 (Settings copy pass 2,
+        // P235, P236): the digest switch's help says the interval, so each
+        // arrives "" and Settings draws no line, never "every 1 hours".
+        XCTAssertEqual(words.atMostOneNotificationOne, "")
+        XCTAssertEqual(words.atMostOneNotification, "")
         XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(1), words.atMostOneNotificationOne)
         XCTAssertFalse(SettingsLegacyWords.atMostOneNotification(1).contains("1 hours"))
         XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(4),
                        ShellWords.fill(words.atMostOneNotification, ["hours": "4"]))
-        XCTAssertTrue(SettingsLegacyWords.atMostOneNotification(4).contains("4 hours"))
+        let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
+        XCTAssertTrue(startup.contains("if !interval.isEmpty {"), "an empty interval line is still drawn")
     }
 
     /// The view a section's `case` arm draws in `GlassSettingsContent`.

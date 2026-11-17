@@ -1,5 +1,7 @@
 //! Verifies that the daemon's Windows named pipe actually excludes other
 //! users. This is a test tool, not a contributor-facing command.
+
+#![allow(unsafe_code)]
 //!
 //! # Why this binary exists
 //!
@@ -13,7 +15,8 @@
 //! connection and be refused.
 //!
 //! So this binary does exactly that, and CI runs it on `windows-latest`
-//! (see the `windows-pipe-acl` job). Without it the control ships on the
+//! (see the named-pipe ACL step of the `windows contributor crates` job in
+//! `clients.yml`). Without it the control ships on the
 //! strength of an argument rather than an observation, which for the one
 //! thing standing between a local process and a contributor's transcripts
 //! is not good enough.

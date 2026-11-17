@@ -29,7 +29,7 @@ final class ReengageDeclaration<Token> {
         self.redeclare = redeclare
     }
 
-    var isDeclared: Bool { !accepts.isEmpty }
+    var isDeclared: Bool { accepts.contains("reengage_due") }
 
     /// Declares `accepts`, or withdraws with none. The same answer again
     /// changes nothing, so it can be asked as often as the app comes

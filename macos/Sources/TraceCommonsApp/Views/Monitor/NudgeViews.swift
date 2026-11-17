@@ -207,12 +207,7 @@ struct NudgeRowTags: View {
                         .accessibilityHint(explainer)
                         .help(explainer)
                         .popover(isPresented: $explaining, arrowEdge: .bottom) {
-                            Text(explainer)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(width: 260, alignment: .leading)
-                                .padding(GlassTokens.Space.s5)
+                            Text(explainer).glassPopoverText()
                         }
                     }
                 }

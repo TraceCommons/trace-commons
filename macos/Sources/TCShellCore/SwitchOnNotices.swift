@@ -33,7 +33,7 @@ public struct ArmingRewordingWire: Decodable, Equatable, Sendable {
         } else {
             projectId = nil
         }
-        json = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+        json = String(decoding: try JSONEncoder.sortedKeys.encode(value), as: UTF8.self)
     }
 }
 
@@ -121,12 +121,12 @@ public struct GateHeld: Decodable, Equatable, Sendable {
                     debugDescription: "automatic_contribution_held.held_sessions"))
         }
         heldSessions = Int(n)
-        json = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+        json = String(decoding: try JSONEncoder.sortedKeys.encode(value), as: UTF8.self)
     }
 
     private init() {
         heldSessions = 0
-        json = #"{"held_sessions":0,"reasons":[],"projects":[]}"#
+        json = #"{"held_sessions":0,"projects":[],"reasons":[]}"#
     }
 
     public static let none = GateHeld()

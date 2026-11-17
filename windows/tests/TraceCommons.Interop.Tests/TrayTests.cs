@@ -371,7 +371,9 @@ public class TrayMenuModelTests
         var status = new DaemonStatus { Paused = true, QueueDepth = 1 };
         var rollup = new HistoryRollup
         {
-            Week = new HistoryCounts { Submitted = 4, Quarantined = 2 },
+            // Contributed is the core's figure; Submitted alone is only the
+            // waiting part of it and is not what the line shows.
+            Week = new HistoryCounts { Submitted = 1, Contributed = 4, Quarantined = 2 },
         };
         var projects = new[]
         {

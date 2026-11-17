@@ -227,18 +227,16 @@ private struct CardClose: View {
 /// it is offered only in the core's words (`tc_arming_offer_copy_json`) and
 /// nothing is drawn without them. Evidence first, question second; the
 /// confirm first as a glass button and the decline after it as a link, the
-/// order the owner ruled for every card (Ron, 2026-10-09). Ron's shape (#1146 `ArmingOffer`): the eyebrow over the card, and the
-/// card's confirm opens a confirmation with the core's body before anything
-/// is armed.
+/// order the owner ruled for every card (Ron, 2026-10-09). Ron's shape (#1146 `ArmingOffer`): the eyebrow over the card. The
+/// card's confirm arms at once, with no confirmation box (owner, 2026-11-11).
 struct ArmingOfferGlassCard: View {
     let offer: ArmingOffer
     /// The core's "OPTIONAL AUTOMATION"; nil draws no eyebrow.
     let eyebrow: String?
+    /// Where Enable is (`ArmingOfferMotion`); nil before it is pressed.
+    var step: ArmingOfferStep? = nil
     let onArm: () -> Void
     let onDecline: () -> Void
-
-    /// The confirmation is open: nothing arms until it is answered.
-    @State private var confirming = false
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -265,36 +263,21 @@ struct ArmingOfferGlassCard: View {
                         .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     // #1146 `arming-offer.tsx`: what arming does, on the
-                    // card itself, before either button (and again in the
-                    // confirmation).
+                    // card itself, before either button.
                     Text(copy.body)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: GlassTokens.Space.s4) {
-                        Button(copy.confirm) { confirming = true }
+                        Button(copy.confirm, action: onArm)
                             .buttonStyle(GlassButtonStyle(.glass))
+                            .disabled(ArmingOfferMotion.enableLocked(step))
                         Button(copy.decline, action: onDecline)
                             .buttonStyle(GlassButtonStyle(.link))
                     }
                 }
             }
             .accessibilityElement(children: .contain)
-            // A whole-window confirmation. Declining here closes the
-            // confirmation only; the offer stays until it is answered on
-            // the card.
-            .glassModal(isPresented: $confirming) {
-                GlassConfirmation(
-                    title: copy.question, message: copy.body,
-                    actions: [
-                        .cancel(copy.decline) { confirming = false },
-                        GlassModalAction(copy.confirm, isDefault: true) {
-                            confirming = false
-                            onArm()
-                        },
-                    ],
-                    onCancel: { confirming = false })
-            }
         }
     }
 }

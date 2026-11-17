@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -13,8 +14,9 @@ import TCShellCore
 /// menu bar it is assigned a frame that never draws, and there was no other
 /// door.
 ///
-/// The launch is quiet (R-44): an onboarded install puts no window on
-/// screen. SwiftUI opens the first `Window` scene, the Monitor, on a normal
+/// A quiet launch (R-44: at login, `open -g`) puts no window on screen for
+/// an onboarded install; a launch the person started opens the Monitor in
+/// front (`LaunchRouting.LaunchKind`). SwiftUI opens the first `Window` scene, the Monitor, on a normal
 /// launch; from macOS 15 that scene's launch is suppressed, and the launch
 /// opens what it needs itself (`Launcher.openAtLaunch`). A scene modifier
 /// cannot be applied under `if #available` without dropping the scene on
@@ -52,7 +54,15 @@ enum MonitorLaunchSuppressed: MonitorLaunchPolicy {
 
 struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
     private let insightsStoreSelection: InsightsStoreSelection
-    @StateObject private var model = AppModel()
+    /// Held, not observed. The views that read it observe it themselves
+    /// (`environmentObject`, `Launcher`). Observed here, every change to any
+    /// of its published values re-ran this body, so SwiftUI rebuilt every
+    /// scene and the whole main menu on each daemon status update: the main
+    /// thread stayed busy rebuilding menus, about one core while idle.
+    @State private var model: AppModel
+    /// The one thing the app menu shows from the model: the Private AI
+    /// switch, republished only when its label or state changes.
+    @State private var privateInferenceMenu: PrivateInferenceMenuItem
     @State private var compute = ComputeModel()
     @State private var navigation = MainWindowNavigation()
     @State private var missionDrafts = MissionDraftsModel()
@@ -66,6 +76,9 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
 
     init() {
         insightsStoreSelection = .parse(arguments: CommandLine.arguments)
+        let model = AppModel()
+        _model = State(initialValue: model)
+        _privateInferenceMenu = State(initialValue: PrivateInferenceMenuItem(model: model))
         // Earlier builds wrote the preview sheet's recent-search list to
         // UserDefaults. That list is the contributor's own record of what
         // they were checking for -- client names, employers, unreleased
@@ -98,7 +111,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // `OpenMonitor` opens it, or first run while onboarding is required.
         MonitorLaunch.launch(MonitorScene(
             model: model, compute: compute, navigation: navigation,
-            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts))
+            insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
+            privateInferenceMenu: privateInferenceMenu))
 
         #if DEBUG
         // The menu-bar item and popover in a window (R13 of #1173), for
@@ -122,6 +136,9 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         Window("First run", id: WindowID.firstRun) {
             FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
+                // First run is dark whatever the app's appearance (Ron,
+                // 2026-11-05); the other windows keep following it.
+                .preferredColorScheme(.dark)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
@@ -150,6 +167,15 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
+
+        // About, from the app menu: the standard panel's lines, and a Copy
+        // button for the version, which the standard panel cannot hold.
+        Window(MonitorWords.table?.aboutApp ?? "", id: WindowID.about) {
+            AboutWindowView()
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
     }
 }
 
@@ -189,6 +215,8 @@ struct MonitorScene: Scene {
     let navigation: MainWindowNavigation
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// The app menu's Private AI switch (`MonitorCommands`).
+    let privateInferenceMenu: PrivateInferenceMenuItem
 
     var body: some Scene {
         Window("Monitor", id: WindowID.monitor) {
@@ -229,7 +257,7 @@ struct MonitorScene: Scene {
         // worth reaching without the window. Menu items, so they are in-app
         // only; see `MonitorCommands`.
         .commands {
-            MonitorCommands(model: model, navigation: navigation)
+            MonitorCommands(privateInference: privateInferenceMenu, navigation: navigation)
         }
     }
 }
@@ -248,7 +276,13 @@ struct MonitorScene: Scene {
 /// Traces open first run, and Inference opens the Monitor on its own tab,
 /// where Private AI sign-in is (R-38).
 struct MonitorCommands: Commands {
-    @ObservedObject var model: AppModel
+    /// The switch's item, not the whole `AppModel`: SwiftUI rebuilds the
+    /// entire main menu whenever a `Commands` value's observed object
+    /// changes, and the model changes on every daemon status update.
+    @ObservedObject var privateInference: PrivateInferenceMenuItem
+    /// The command-line tool's item, observed here so a change of status
+    /// rebuilds the menu item; it publishes only on a change.
+    @ObservedObject var cliTool: CliToolController = .shared
     let navigation: MainWindowNavigation
     /// The person's tab order, so Cmd-N follows the strip as dragged.
     @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
@@ -287,6 +321,11 @@ struct MonitorCommands: Commands {
             Divider()
             toggle
         }
+        // The app menu's About opens the app's own About window, which can
+        // hold a Copy button for the version (owner, 2026-11-09).
+        CommandGroup(replacing: .appInfo) {
+            OpenAboutButton()
+        }
         // Cmd-comma: the Settings window (owner, 2026-10-08).
         CommandGroup(replacing: .appSettings) {
             OpenSettingsButton(navigation: navigation)
@@ -294,7 +333,7 @@ struct MonitorCommands: Commands {
         // Install, update or remove the command-line tool (owner,
         // 2026-10-29), like VS Code's "Install 'code' command in PATH".
         CommandGroup(after: .appSettings) {
-            CliToolMenuItem()
+            CliToolMenuItem(controller: cliTool)
         }
     }
 
@@ -311,20 +350,76 @@ struct MonitorCommands: Commands {
     /// against a stale switch position is an enable.
     @ViewBuilder
     private var toggle: some View {
-        if let copy = model.privateInferenceCopy {
-            let on = model.daemonSettings?.privateInferenceOn ?? false
-            Button(PrivateInferenceTray.label(on: on, copy: copy)) {
+        if let item = privateInference.state {
+            Button(item.label) {
                 PrivateInferenceTray.perform(
-                    on: on,
-                    turnOff: { model.applyPrivateInference(false) },
+                    on: item.on,
+                    turnOff: { privateInference.turnOff() },
                     open: { OpenMonitor.request(.inference) })
             }
             .keyboardShortcut(KeyEquivalent(Self.toggleKey), modifiers: Self.toggleModifiers)
             // Only the writing direction can be unavailable. Navigation stays
             // reachable whatever the daemon is doing.
-            .disabled(
-                on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+            .disabled(item.disabled)
         }
+    }
+}
+
+/// The app menu's Private AI switch, derived from `AppModel` and republished
+/// only when what the item shows changes.
+///
+/// `MonitorCommands` observes this instead of the model. The model publishes
+/// on every daemon status update, and each publish to an object a `Commands`
+/// value observes makes SwiftUI rebuild the whole main menu.
+@MainActor
+final class PrivateInferenceMenuItem: ObservableObject {
+    /// What the item shows, or nil if the core's Private AI words did not
+    /// load (they are decoded once, in `AppModel`'s initializer).
+    struct Item: Equatable {
+        let label: String
+        let on: Bool
+        let disabled: Bool
+    }
+
+    @Published private(set) var state: Item?
+    private let model: AppModel
+    private var watch: AnyCancellable?
+
+    init(model: AppModel) {
+        self.model = model
+        let copy = model.privateInferenceCopy
+        state = Self.item(copy: copy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+        // Only these two values change what the item shows. A @Published
+        // value sends its new value, so the item follows in the same turn.
+        watch = model.$daemonSettings
+            .combineLatest(model.$privateInferenceBusy)
+            .map { Self.item(copy: copy, settings: $0, busy: $1) }
+            .removeDuplicates()
+            .sink { [weak self] item in self?.state = item }
+    }
+
+    /// The off direction, the one write the item may make
+    /// (`PrivateInferenceTray.perform`).
+    func turnOff() {
+        model.applyPrivateInference(false)
+    }
+
+    static func state(of model: AppModel) -> Item? {
+        item(copy: model.privateInferenceCopy, settings: model.daemonSettings, busy: model.privateInferenceBusy)
+    }
+
+    private static func item(copy: PrivateInferenceCopy?, settings: DaemonSettingsView?, busy: Bool) -> Item? {
+        guard let copy else { return nil }
+        let on = settings?.privateInferenceOn ?? false
+        return Item(label: PrivateInferenceTray.label(on: on, copy: copy), on: on, disabled: on && busy)
+    }
+}
+
+private struct OpenAboutButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(MonitorWords.table?.aboutApp ?? "") { openWindow(id: WindowID.about) }
     }
 }
 
@@ -477,7 +572,8 @@ private struct Launcher: View {
     }
 
     /// The launch's window (`LaunchRouting.launchOpening`), once, when the
-    /// core has said enough. An onboarded install opens nothing (R-44).
+    /// core has said enough. An onboarded install opens nothing on a quiet
+    /// launch (R-44), and the Monitor, in front, on one the person started.
     /// First run opens activated, alone: the Monitor SwiftUI may have
     /// opened at launch (macOS 14), or that an opener opened before the
     /// core answered (a cold-start invite link or notification), is
@@ -495,6 +591,15 @@ private struct Launcher: View {
             OpenMonitor.request()
         case .monitor:
             OpenMonitor.request(activate: false)
+        case .focusedMonitor:
+            // The person launched the app and is looking at it. The first
+            // activation's request (`AppDelegate`) can be lost at a cold
+            // launch, so the Monitor is asked for again here, once the
+            // core has answered, unless a titled window (the Monitor,
+            // first run, Settings) is already up. The status item and the
+            // edge rail are borderless, so they do not count.
+            guard !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else { return }
+            OpenMonitor.request()
         case .nothing, .wait:
             break
         }
@@ -535,4 +640,6 @@ enum WindowID {
     /// The menu-bar item and popover in a window (R13), for review where
     /// the menu bar has no room for the item. Debug builds only.
     static let menuPreview = "trace-commons-menu-preview"
+    /// About, in place of the standard panel, so the version can be copied.
+    static let about = "trace-commons-about"
 }

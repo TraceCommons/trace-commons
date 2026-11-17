@@ -226,6 +226,51 @@ async fn revoke_at_server(
             .is_ok(),
     )
 }
+/// The browser sign-in each configuration directory is waiting on, by
+/// generation, with the sender that ends it.
+type WaitingSignIns =
+    std::collections::HashMap<std::path::PathBuf, (u64, tokio::sync::oneshot::Sender<()>)>;
+
+fn waiting_sign_ins() -> &'static std::sync::Mutex<(u64, WaitingSignIns)> {
+    static WAITING: std::sync::OnceLock<std::sync::Mutex<(u64, WaitingSignIns)>> =
+        std::sync::OnceLock::new();
+    WAITING.get_or_init(Default::default)
+}
+
+/// Register a browser sign-in for `dir`, ending the one already waiting
+/// there. Sign in, close the tab, Sign in again: nothing tells the first
+/// call the tab is gone, so it would hold its loopback listener and the
+/// shell's "waiting" state for the whole `LOOPBACK_WAIT`. The newer request
+/// is the person's, so the older one ends now (`account-sign-in-replaced`)
+/// and releases its port. The receiver resolves when a later sign-in
+/// replaces this one.
+fn sign_in_begin(dir: &std::path::Path) -> (u64, tokio::sync::oneshot::Receiver<()>) {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let mut waiting = waiting_sign_ins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    waiting.0 = waiting.0.wrapping_add(1);
+    let generation = waiting.0;
+    if let Some((_, earlier)) = waiting.1.insert(dir.to_path_buf(), (generation, send)) {
+        let _ = earlier.send(());
+    }
+    (generation, receive)
+}
+
+/// Forget `dir`'s waiting sign-in, if it is still `generation`'s.
+fn sign_in_end(dir: &std::path::Path, generation: u64) {
+    let mut waiting = waiting_sign_ins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if waiting
+        .1
+        .get(dir)
+        .is_some_and(|(current, _)| *current == generation)
+    {
+        waiting.1.remove(dir);
+    }
+}
+
 async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
     match req.method.as_str() {
         "account_session_status" => Ok(status(shared).await),
@@ -236,8 +281,15 @@ async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
                 .load_config()?
                 .ok_or_else(|| anyhow!("account-enrollment-required"))?;
             resolve_origin(&shared.store, &req.params)?;
-            let result = account_auth::sign_in(&shared.store, &cfg, true, |_| {})
-                .await
+            let dir = shared.store.dir().to_path_buf();
+            let (generation, superseded) = sign_in_begin(&dir);
+            let outcome = tokio::select! {
+                result = account_auth::sign_in(&shared.store, &cfg, true, |_| {}) => Some(result),
+                _ = superseded => None,
+            };
+            sign_in_end(&dir, generation);
+            let result = outcome
+                .ok_or_else(|| anyhow!("account-sign-in-replaced"))?
                 .map_err(|_| anyhow!("account-sign-in-refused"))?;
             Ok(json!({"signed_in":true,"expires_at":result.expires_at}))
         }
@@ -259,6 +311,7 @@ fn ipc_label(error: &str) -> &'static str {
         "account-origin-refused" => "account-origin-refused",
         "account-enrollment-required" => "account-enrollment-required",
         "account-sign-in-refused" => "account-sign-in-refused",
+        "account-sign-in-replaced" => "account-sign-in-replaced",
         _ => "account-unavailable",
     }
 }

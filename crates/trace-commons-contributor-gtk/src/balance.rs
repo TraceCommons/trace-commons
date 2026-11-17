@@ -101,7 +101,9 @@ struct BalanceTable {
     action: fn(&str) -> copy::CredentialAction,
     remaining_line: fn(Option<i64>, u8) -> String,
     limit_line: fn(Option<i64>, u8) -> String,
-    spent_line: fn(Option<i64>, u8) -> String,
+    /// Takes the reading's remaining figure too: beside one, Spent rounds
+    /// up so the row adds up (the core's one exception to its rule).
+    spent_line: fn(Option<i64>, Option<i64>, u8) -> String,
     observed_line: fn(Option<u64>) -> String,
 }
 
@@ -148,7 +150,7 @@ fn view_through(balance: &NearAiBalance, table: &BalanceTable) -> BalanceView {
             (table.limit_line)(balance.spend_limit_nanos, scale)
         }),
         spent_line: scale.map_or_else(String::new, |scale| {
-            (table.spent_line)(balance.total_spent_nanos, scale)
+            (table.spent_line)(balance.total_spent_nanos, balance.remaining_nanos, scale)
         }),
         observed_line: if figures {
             (table.observed_line)(seconds_since(balance.observed_at.as_deref()))
@@ -266,6 +268,24 @@ mod tests {
         let zero = view(&known(r#","spend_limit_nanos":0,"total_spent_nanos":0"#));
         assert!(zero.limit_line.contains("$0.00"), "{}", zero.limit_line);
         assert!(zero.spent_line.contains("$0.00"), "{}", zero.spent_line);
+    }
+
+    /// The row adds up beside a remaining figure: limit $130.00, spent
+    /// $18.185 and the reply's $111.815 left read $130.00, $18.19 and
+    /// $111.81. With no remaining figure Spent is floored.
+    #[test]
+    fn spent_beside_a_remaining_figure_adds_up_and_without_one_is_floored() {
+        let capped = view(&known(
+            r#","remaining_nanos":111815000000,"spend_limit_nanos":130000000000,"total_spent_nanos":18185000000"#,
+        ));
+        assert_eq!(capped.limit_line, "Limit: $130.00");
+        assert_eq!(capped.spent_line, "Spent: $18.19");
+        assert_eq!(capped.remaining_line, "$111.81 left");
+
+        let uncapped = view(&known(
+            r#","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":18185000000"#,
+        ));
+        assert_eq!(uncapped.spent_line, "Spent: $18.18");
     }
 
     /// The wire's `scale` decides the figure, and nothing in this shell
@@ -475,6 +495,9 @@ mod tests {
         fn amount(nanos: Option<i64>, _: u8) -> String {
             nanos.map_or_else(|| "absent".to_string(), |n| n.to_string())
         }
+        fn spent(nanos: Option<i64>, _: Option<i64>, scale: u8) -> String {
+            amount(nanos, scale)
+        }
         fn age(_: Option<u64>) -> String {
             "age".to_string()
         }
@@ -484,7 +507,7 @@ mod tests {
             action: inverted_action,
             remaining_line: amount,
             limit_line: amount,
-            spent_line: amount,
+            spent_line: spent,
             observed_line: age,
         };
         // `known` now has a sentence, so its row is NOT figures.

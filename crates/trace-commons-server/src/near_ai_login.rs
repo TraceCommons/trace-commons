@@ -361,20 +361,23 @@ mod tests {
     /// `cloud-api` defines the route as `/me` and nests the router under
     /// `/users`, so reading the route definition gives `/v1/me` and the served
     /// path is `/v1/users/me`. That gap is why this assertion names the whole
-    /// URL and not a suffix.
+    /// URL and not a suffix. The account routes, this one with them, now
+    /// live on NEAR AI's platform API, `cloud-platform`.
     #[test]
-    fn the_introspection_url_is_the_one_cloud_api_serves() {
+    fn the_introspection_url_is_the_one_the_platform_api_serves() {
         // The production base, spelled here so a change to either side has to
         // meet this assertion.
-        let base = "https://cloud-api.near.ai/v1";
+        let base = "https://cloud-platform.near.ai/v1";
+        #[cfg(not(feature = "near-ai-staging"))]
+        assert_eq!(base, crate::near_ai_api::NEAR_AI_API_BASE_URL);
         assert_eq!(
             introspection_url(base),
-            "https://cloud-api.near.ai/v1/users/me"
+            "https://cloud-platform.near.ai/v1/users/me"
         );
         // A trailing slash on the base must not double the separator.
         assert_eq!(
-            introspection_url("https://cloud-api.near.ai/v1/"),
-            "https://cloud-api.near.ai/v1/users/me"
+            introspection_url("https://cloud-platform.near.ai/v1/"),
+            "https://cloud-platform.near.ai/v1/users/me"
         );
         // And the path we shipped is not the path we serve, kept as an
         // assertion so a regression to it fails here rather than at runtime.

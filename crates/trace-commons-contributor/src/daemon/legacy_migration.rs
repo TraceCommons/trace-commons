@@ -601,7 +601,10 @@ fn commit(
     session: &[u8],
     context: SwitchContext,
 ) -> Result<Rebaselined> {
-    let _pass = shared.pass_lock.lock().expect("pass lock");
+    let _pass = shared
+        .pass_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     commons_credentials::switch_identity(
         &shared.store,
         legacy_snapshot,

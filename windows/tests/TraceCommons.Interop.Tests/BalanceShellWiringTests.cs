@@ -43,7 +43,7 @@ public class BalanceShellWiringTests
             "NearAiBalanceSurface.Amount(_balance.RemainingNanos, _balance.Scale)",
             "NearAiBalanceSurface.RemainingLine(_balance.RemainingNanos, _balance.Scale)",
             "NearAiBalanceSurface.LimitLine(_balance.SpendLimitNanos, _balance.Scale)",
-            "NearAiBalanceSurface.SpentLine(_balance.TotalSpentNanos, _balance.Scale)",
+            "NearAiBalanceSurface.SpentLine(_balance.TotalSpentNanos, _balance.RemainingNanos, _balance.Scale)",
             "NearAiBalanceSurface.ObservedLine(_balance.ObservedAt",
             "NearAiBalanceSurface.Parse(",
         })

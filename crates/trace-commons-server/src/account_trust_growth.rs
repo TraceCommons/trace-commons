@@ -23,7 +23,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::account_trust::TrustAccount;
-use crate::account_trust_rule::{Evaluation, GrowthPolicy, evaluate};
+use crate::account_trust_rule::{
+    Evaluation, GrowthPolicy, RejectionCounts, evaluate, rejection_counts,
+};
 use crate::db::Database;
 use crate::error::DatabaseError;
 
@@ -51,6 +53,11 @@ pub struct RecordFactsSummary {
     pub failed: u64,
     /// The limit stopped the run before every account was visited.
     pub limit_reached: bool,
+    /// Accounts holding at least one carried age (V157) after the run.
+    pub carried_age_accounts: u64,
+    /// Accounts whose carried-age refresh failed; their previous carry, if
+    /// any, stands until the next run (a revocation still removes it).
+    pub carried_age_failed: u64,
 }
 
 /// Walks every open account in an anchored tenant and records its missing
@@ -84,6 +91,19 @@ pub async fn record_account_trust_facts(
                 break 'pages;
             }
             summary.accounts_scanned += 1;
+            if !dry_run {
+                match db.refresh_account_trust_carried_age(account).await {
+                    Ok(0) => {}
+                    Ok(_) => summary.carried_age_accounts += 1,
+                    Err(error) => {
+                        summary.carried_age_failed += 1;
+                        tracing::warn!(
+                            error_label = %database_error_label(&error),
+                            "earned-trust carried-age refresh skipped one account"
+                        );
+                    }
+                }
+            }
             let candidates = db
                 .list_account_trust_fact_candidates(account, remaining)
                 .await?;
@@ -184,6 +204,11 @@ pub struct EvaluateSummary {
     pub units_capped: u64,
     pub failed: u64,
     pub limit_reached: bool,
+    /// Why facts did not earn units, summed over the accounts evaluated:
+    /// labels and counts only. Shadow runs only; an applied run evaluates
+    /// inside the database and reports `null` here rather than zeros it did
+    /// not measure.
+    pub rejections: Option<RejectionCounts>,
 }
 
 /// Evaluates every open account in an anchored tenant that has facts and
@@ -206,6 +231,7 @@ pub async fn evaluate_account_trust(
     let mut summary = EvaluateSummary {
         mode: mode.as_str(),
         growth_policy_version: policy.version().to_string(),
+        rejections: (mode == EvaluationMode::Shadow).then(RejectionCounts::default),
         ..EvaluateSummary::default()
     };
     let mut after: Option<TrustAccount> = None;
@@ -237,6 +263,9 @@ pub async fn evaluate_account_trust(
                         let changed = db
                             .record_account_trust_evaluation(account, SHADOW_MODE, &evaluation)
                             .await?;
+                        if let Some(total) = summary.rejections.as_mut() {
+                            total.add(&rejection_counts(policy, &facts, as_of));
+                        }
                         Ok::<_, DatabaseError>(Some((evaluation, changed)))
                     }
                     .await

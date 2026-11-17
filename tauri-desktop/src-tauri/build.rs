@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 #[cfg(target_os = "macos")]
 use std::{env, path::PathBuf, process::Command};
 

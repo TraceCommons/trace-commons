@@ -35,6 +35,16 @@ final class HomeStore {
     private(set) var glance: DaemonData.InsightsGlance?
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
+    /// The methods whose first reply (a value, a failure, or "not served")
+    /// has come from the current client. Until then a figure is loading,
+    /// which is neither zero nor unknown.
+    private(set) var answered: Set<String> = []
+
+    /// Whether `methods` still wait on a first reply. A failed read has
+    /// answered: that is "unknown", not loading.
+    func isLoading(_ methods: String...) -> Bool {
+        methods.contains { !answered.contains($0) }
+    }
 
     /// History rows read at once: the page, not the whole record.
     nonisolated static let historyLimit = 100
@@ -100,6 +110,7 @@ final class HomeStore {
         credit = nil
         missions = nil
         failures = [:]
+        answered = []
         nudgeBusy = false
         nudgeError = nil
     }
@@ -184,6 +195,7 @@ final class HomeStore {
     ) async {
         guard let client else {
             failures[method] = .unreachable
+            answered.insert(method)
             apply(nil)
             return
         }
@@ -195,6 +207,7 @@ final class HomeStore {
             result = .failure(error as? DaemonDataError ?? .undecodable(method: method))
         }
         guard mine == generation else { return }
+        answered.insert(method)
         switch result {
         case .success(let value):
             failures[method] = nil

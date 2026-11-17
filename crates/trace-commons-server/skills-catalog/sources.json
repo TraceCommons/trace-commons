@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    {
+      "repository": "cursor/plugins",
+      "publisher_id": "poteto",
+      "publisher_name": "Poteto",
+      "skills_root": "pstack/skills",
+      "instructions_url": "https://github.com/cursor/plugins/blob/main/pstack/README.md"
+    },
+    {
+      "repository": "obra/superpowers",
+      "publisher_id": "obra",
+      "publisher_name": "Obra",
+      "skills_root": "skills",
+      "instructions_url": "https://github.com/obra/superpowers#installation"
+    },
+    {
+      "repository": "slackapi/slack-skills-plugin",
+      "publisher_id": "slack",
+      "publisher_name": "Slack",
+      "skills_root": "skills",
+      "instructions_url": "https://github.com/slackapi/slack-skills-plugin#installation"
+    },
+    {
+      "repository": "anthropics/skills",
+      "skills_root": "skills"
+    }
+  ],
+  "marketplaces": [
+    {
+      "repository": "anthropics/claude-plugins-official"
+    }
+  ],
+  "lists": []
+}

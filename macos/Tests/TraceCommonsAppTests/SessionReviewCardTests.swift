@@ -174,6 +174,40 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertEqual(store.lastContributed?.entryId, "e1")
     }
 
+    /// A row's Submit refused because the trace needs the privacy check
+    /// first is said under that row, in the core's line for it, never as
+    /// silence and never as the toast's least specific reason.
+    func test_aSubmitThatNeedsThePrivacyCheckIsSaidUnderItsRow() async throws {
+        let transport = RecordingTransport(approveReply: SampleDaemonData.approveSkipped(
+            entryId: "e1", reason: "witness-review-required"))
+        let store = TracesStore(client: LiveDaemonClient(transport: transport))
+        await store.perform(.contribute, on: "e1")
+        XCTAssertEqual(transport.approves.count, 1)
+        XCTAssertNil(store.lastContributed, "a refused Submit is never drawn as a contribution")
+        let words = try XCTUnwrap(store.words)
+        XCTAssertEqual(store.actionError?.entryId, "e1")
+        XCTAssertEqual(TracesStore.rowRefusal(store, entryId: "e1"), words.needsPrivacyCheck)
+        XCTAssertNil(TracesStore.rowRefusal(store, entryId: "e2"), "another row says nothing")
+        XCTAssertFalse(store.acting.contains("e1"), "the row is not left turning")
+
+        // The row draws it, and only for a row whose review card is not
+        // already saying it.
+        let views = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(views.contains("refusal: selected ? nil : TracesStore.rowRefusal(store, entryId: entry.entryId)"))
+        XCTAssertTrue(views.contains("if let refusal {"))
+    }
+
+    /// A refused Dismiss is not said under the row: it is said in the
+    /// Dismiss confirmation, where it was pressed.
+    func test_onlyARefusedSubmitIsSaidUnderTheRow() async throws {
+        // This transport refuses everything but `approve`.
+        let store = TracesStore(client: LiveDaemonClient(transport: RecordingTransport(
+            approveReply: SampleDaemonData.approved)))
+        await store.perform(.dismiss, on: "e1")
+        XCTAssertEqual(store.actionError?.entryId, "e1")
+        XCTAssertNil(TracesStore.rowRefusal(store, entryId: "e1"))
+    }
+
     /// A card left up over a core that stopped answering (its banner says
     /// so) is not armed: Contribute is drawn disabled and a press sends
     /// nothing, whichever tab the card is on.

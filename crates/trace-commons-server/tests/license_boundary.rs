@@ -241,6 +241,10 @@ fn both_sides_of_the_boundary_are_populated() {
             "trace-commons-gate-api",
             "trace-commons-gate-enclave",
             "trace-commons-ingest",
+            // Unpublished and tests only: the ingest tests that use the
+            // contributor's client code, moved out of the ingest crate with
+            // their licence (owner decision, 2026-11-10).
+            "trace-commons-ingest-contributor-tests",
             "trace-commons-server",
         ],
         "the set of AGPL crates changed; update LICENSE and this test together"

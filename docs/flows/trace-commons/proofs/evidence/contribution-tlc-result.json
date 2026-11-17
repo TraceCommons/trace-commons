@@ -1,0 +1,39 @@
+{
+  "model": "client_contribution",
+  "command": [
+    "python3",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+    "client_contribution",
+    "--skill-root",
+    "/private/tmp/tc-flow-promises-tools/plugins",
+    "--out",
+    "/private/tmp/tc-quint-proof-checks/tlc-client-scopes-refresh-2/client_contribution/check"
+  ],
+  "exitCode": 1,
+  "timedOut": false,
+  "elapsedSeconds": 24.45,
+  "budgetSeconds": 120,
+  "budgetKind": "wall-clock process budget; no model constraint",
+  "modelSha256": "8aa6f3a4bcddfffcb3c1333b6e9d42c0f8ab88ff1af974dde448cf5716c04a00",
+  "configSha256": "7e929c310625e84f4456fe733a55af5d42601cf5e73004304f1274e4fd462d3c",
+  "viewSha256": "5e36604c509dae123ec9c885cacc5eeab53c694ea15853733ccdbdff96a66673",
+  "artifactsChangedDuringRun": false,
+  "results": [
+    {
+      "definition": "P2",
+      "status": "not checked"
+    },
+    {
+      "definition": "P3",
+      "status": "not checked"
+    },
+    {
+      "definition": "P4",
+      "status": "not checked"
+    },
+    {
+      "definition": "P12",
+      "status": "breaks"
+    }
+  ]
+}

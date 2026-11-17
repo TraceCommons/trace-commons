@@ -145,8 +145,7 @@ impl PgBackend {
                  FOR UPDATE",
                 &[&write.tenant_id, &write.account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .is_some();
         if !account_is_open {
             return Err(DatabaseError::Constraint(
@@ -160,8 +159,7 @@ impl PgBackend {
                  FOR UPDATE",
                 &[&write.tenant_id, &write.submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .map(|row| row.get::<_, String>("status"));
         if source_status.as_deref() != Some("accepted") {
             return Err(DatabaseError::Constraint(
@@ -174,8 +172,7 @@ impl PgBackend {
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&write.tenant_id, &write.submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .map_or(write.publication_id, |row| row.get("publication_id"));
         if let Some(source_publication_id) = write.source_publication_id {
             tx.execute(
@@ -185,15 +182,13 @@ impl PgBackend {
                     &PUBLIC_RUN_PROVENANCE_LOCK_OBJID,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
             let would_cycle: bool = tx
                 .query_one(
                     "SELECT trace_public_run_would_cycle($1, $2) AS would_cycle",
                     &[&effective_publication_id, &source_publication_id],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .get("would_cycle");
             if would_cycle {
                 return Err(DatabaseError::Constraint(
@@ -254,8 +249,7 @@ impl PgBackend {
                     &write.expected_publication_version,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
         else {
             return Err(DatabaseError::Constraint(
                 crate::db::PUBLIC_RUN_VERSION_CONFLICT.to_string(),
@@ -276,20 +270,18 @@ impl PgBackend {
              VALUES ($1, 'public_run_publish', $2, 'success', $3)",
             &[&write.tenant_id, &actor_ref, &safe_metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         let page_row = tx
             .query_opt(
                 "SELECT * FROM trace_public_run_page($1, $2)",
                 &[&stored.slug, &12_i32],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .ok_or_else(|| {
                 DatabaseError::Serialization("public run projection is unavailable".into())
             })?;
         let page = public_run_page_from_row(&page_row)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(PublicRunMutation { row: stored, page })
     }
 
@@ -308,8 +300,7 @@ impl PgBackend {
         );
         let row = tx
             .query_opt(&sql, &[&tenant_id, &account_id, &submission_id])
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .map(public_run_from_row)
             .transpose()?;
         let retained_source_slug = if row
@@ -321,8 +312,7 @@ impl PgBackend {
                  FROM trace_public_run_retained_source($1, $2, $3)",
                 &[&tenant_id, &account_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .map(|source| source.get("retained_source_slug"))
         } else {
             None
@@ -333,13 +323,12 @@ impl PgBackend {
                     "SELECT * FROM trace_public_run_page($1, $2)",
                     &[&row.slug, &12_i32],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .map(|page| public_run_page_from_row(&page))
                 .transpose()?,
             None => None,
         };
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(PublicRunOwnerData {
             row,
             page,
@@ -364,8 +353,7 @@ impl PgBackend {
                  RETURNING version",
                 &[&tenant_id, &account_id, &submission_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let unpublished = changed_version.is_some();
         if unpublished {
             let actor_ref = crate::account_session::account_actor_ref(
@@ -377,8 +365,7 @@ impl PgBackend {
                  VALUES ($1, 'public_run_unpublish', $2, 'success', '{}'::jsonb)",
                 &[&tenant_id, &actor_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
         let version = match changed_version {
             Some(row) => row.get::<_, i32>("version"),
@@ -388,14 +375,13 @@ impl PgBackend {
                      WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
                     &[&tenant_id, &account_id, &submission_id],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .map_or(0, |row| row.get::<_, i32>("version")),
         };
         let expected_publication_version = u32::try_from(version).map_err(|_| {
             DatabaseError::Serialization("public run version is invalid".to_string())
         })?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(PublicRunUnpublishMutation {
             unpublished,
             expected_publication_version,
@@ -414,8 +400,7 @@ impl PgBackend {
                 "SELECT * FROM trace_public_run_page($1, $2)",
                 &[&slug, &variation_limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -432,8 +417,7 @@ impl PgBackend {
                 "SELECT * FROM trace_resolve_public_run_source($1)",
                 &[&slug],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(row.map(|row| PublicRunSourceRow {
             publication_id: row.get("publication_id"),
             slug: row.get("slug"),

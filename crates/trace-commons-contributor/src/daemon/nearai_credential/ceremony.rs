@@ -1102,6 +1102,17 @@ async fn begin_with(store: &ConfigStore, named: Option<&'static str>) -> Result<
     #[cfg(test)]
     record_browser_url_served(&dir);
 
+    // A new Sign in replaces a sign-in still waiting on the browser. The
+    // person asked again, most often because they closed the tab the first
+    // one opened; that attempt cannot finish without the tab and would hold
+    // the directory until `BROWSER_TIMEOUT`, refusing every retry in the
+    // meantime. It is cancelled as an unnamed cancel would cancel it (task
+    // aborted, its port released, status `cancelled`), under the same commit
+    // lock, so a persist already running finishes or is refused first. Only
+    // after `prepare` succeeded: a start that could not begin leaves the
+    // earlier attempt alone.
+    let _replaced = cancel(&dir, None);
+
     {
         let mut map = attempts().lock().expect("ceremony state lock");
         if map
@@ -1782,7 +1793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_ceremony_at_a_time_per_directory_and_a_cancel_frees_it() {
+    async fn a_ceremony_binds_its_callback_before_handing_out_the_url() {
         let (dir, store) = temp_store();
         let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
@@ -1795,7 +1806,7 @@ mod tests {
             reqwest::Url::parse(crate::daemon::nearai_credential::api::CLOUD_API_ORIGIN).unwrap();
         assert_eq!(url.host_str(), pinned.host_str());
         #[cfg(not(feature = "near-ai-staging"))]
-        assert_eq!(url.host_str(), Some("cloud-api.near.ai"));
+        assert_eq!(url.host_str(), Some("cloud-platform.near.ai"));
         let callback = url
             .query_pairs()
             .find(|(k, _)| k == "frontend_callback")
@@ -1815,13 +1826,6 @@ mod tests {
         );
         assert!(callback.ends_with(CALLBACK_PATH), "{callback}");
 
-        // A second attempt in the same directory is refused rather than
-        // evicting the first, whose listener is still holding a port.
-        assert_eq!(
-            begin(&store, "google").await.unwrap_err().to_string(),
-            "near_ai_credential_busy"
-        );
-
         assert_eq!(
             status(dir.path(), Some(&attempt_id)).unwrap().status,
             "waiting_for_browser"
@@ -1835,8 +1839,76 @@ mod tests {
             cancel(dir.path(), Some(&attempt_id)).unwrap().status,
             "cancelled"
         );
-        // And now, and only now, another may begin.
+        // And now another may begin.
         assert!(begin(&store, "google").await.is_ok());
+    }
+
+    /// Sign in, close the tab, Sign in again: the second start replaces
+    /// the first instead of being refused as busy until the first times
+    /// out. The first is cancelled, not evicted, so its listener lets go of
+    /// its port, and only one attempt is ever in flight.
+    #[tokio::test]
+    async fn a_second_sign_in_replaces_one_left_waiting_on_the_browser() {
+        let (dir, store) = temp_store();
+        let first = begin(&store, "google").await.unwrap();
+        let first_id = first["attempt_id"].as_str().unwrap().to_string();
+        let first_port = callback_port(&first);
+
+        let second = begin(&store, "google").await.unwrap();
+        let second_id = second["attempt_id"].as_str().unwrap().to_string();
+        assert_ne!(first_id, second_id);
+        assert_eq!(second["status"], "waiting_for_browser");
+        assert_eq!(
+            status(dir.path(), Some(&second_id)).unwrap().status,
+            "waiting_for_browser"
+        );
+        assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
+        // The first no longer reads as the directory's attempt.
+        assert!(status(dir.path(), Some(&first_id)).is_none());
+
+        // The abandoned attempt's listener is released, not leaked.
+        let mut released = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", first_port))
+                .await
+                .is_err()
+            {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(released, "the replaced attempt still holds its port");
+
+        cancel(dir.path(), Some(&second_id));
+    }
+
+    /// A start that could not begin leaves the attempt in flight alone.
+    #[tokio::test]
+    async fn a_refused_start_does_not_cancel_the_attempt_in_flight() {
+        let (dir, store) = temp_store();
+        let first = begin(&store, "google").await.unwrap();
+        let first_id = first["attempt_id"].as_str().unwrap().to_string();
+        assert!(begin(&store, "unsupported-provider").await.is_err());
+        assert_eq!(
+            status(dir.path(), Some(&first_id)).unwrap().status,
+            "waiting_for_browser"
+        );
+        cancel(dir.path(), Some(&first_id));
+    }
+
+    fn callback_port(started: &serde_json::Value) -> u16 {
+        let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
+        let callback = url
+            .query_pairs()
+            .find(|(k, _)| k == "frontend_callback")
+            .unwrap()
+            .1
+            .into_owned();
+        reqwest::Url::parse(&callback)
+            .unwrap()
+            .port()
+            .expect("an ephemeral port this process holds")
     }
 
     /// The wallet branch has its own transport; unsupported OAuth names still
@@ -1920,7 +1992,6 @@ mod tests {
         assert_eq!(url.fragment().unwrap().len(), 43);
         let address = ("127.0.0.1", url.port().unwrap());
         assert!(tokio::net::TcpListener::bind(address).await.is_err());
-        assert!(begin(&store, "google").await.is_err());
         assert!(store.load_config().unwrap().is_none());
         assert_eq!(cancel(dir.path(), Some(id)).unwrap().status, "cancelled");
         tokio::time::timeout(Duration::from_secs(5), async {

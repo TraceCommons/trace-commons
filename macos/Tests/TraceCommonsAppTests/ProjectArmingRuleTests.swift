@@ -3,8 +3,8 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// An Auto override is a grant: arming goes only through the core's
-/// confirmation. Never asks first only when it would clear waiting
+/// Choosing Auto sets it at once, with no confirmation box (owner,
+/// 2026-11-11). Never asks first only when it would clear waiting
 /// sessions (#1146 `ProjectModeField`, as the Traces tree does).
 final class ProjectArmingRuleTests: XCTestCase {
     private static let source: String = {
@@ -16,19 +16,11 @@ final class ProjectArmingRuleTests: XCTestCase {
 
     private var lines: [String] { Self.source.components(separatedBy: "\n") }
 
-    func test_chosenAutoOnlyStagesTheConfirmation() throws {
+    func test_chosenAutoIsSetDirectly() throws {
         XCTAssertFalse(Self.source.isEmpty)
-        XCTAssertTrue(Self.source.contains("if wanted == .autoUpload { return .arm }"))
-        XCTAssertTrue(Self.source.contains("case .arm: armingCandidate = project"), "arming must stage the dialog")
         XCTAssertTrue(Self.source.contains("case .apply: model.setProjectMode(project, mode: wanted)"))
-    }
-
-    func test_theOnlyDirectArmingCallIsTheConfirmButton() throws {
-        let hits = lines.indices.filter { lines[$0].contains("mode: .autoUpload") }
-        XCTAssertEqual(hits.count, 1)
-        let at = try XCTUnwrap(hits.first)
-        XCTAssertTrue(lines[at - 1].contains("GlassModalAction(copy.settingsConfirm, isDefault: true) {"),
-                      "arming outside the confirm closure")
+        XCTAssertFalse(Self.source.contains("armingCandidate"), "no arming confirmation in Settings")
+        XCTAssertFalse(Self.source.contains("settingsConfirm"))
     }
 
     /// Never with sessions waiting asks in the core's words; with none
@@ -44,7 +36,7 @@ final class ProjectArmingRuleTests: XCTestCase {
         let unread = ProjectRow(projectId: "p", projectLabel: "api", projectPath: "/x", mode: .ask)
         XCTAssertEqual(ProjectsSection.change(unread, to: .ignore), .apply)
         XCTAssertEqual(ProjectsSection.change(waiting, to: .ask), .noop)
-        XCTAssertEqual(ProjectsSection.change(waiting, to: .autoUpload), .arm)
+        XCTAssertEqual(ProjectsSection.change(waiting, to: .autoUpload), .apply)
         let armed = ProjectRow(projectId: "p", projectLabel: "api", projectPath: "/x", mode: .autoUpload, pendingCount: 2)
         XCTAssertEqual(ProjectsSection.change(armed, to: .ask), .apply)
         XCTAssertTrue(Self.source.contains("model.setProjectMode(project, mode: .ignore)"),

@@ -273,6 +273,19 @@ pub struct DaemonState {
     /// first drawable one. Cleared by `unenroll` (`clear_nudges`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_notified: Option<SettlementNotified>,
+    /// Submissions the witness kept from being sent since the last report,
+    /// per label (`busy`, `timed_out`, `unreachable`), each held to
+    /// `WITNESS_BLOCKED_REPORT_MAX`. Counts only: no entry, session or time.
+    /// Reported to ingest on the next history read and cleared then
+    /// (`refresh_history`); a read that fails puts them back.
+    ///
+    /// Not written while empty, so an install the witness never blocked
+    /// keeps writing the bytes it always did.
+    #[serde(
+        default,
+        skip_serializing_if = "trace_commons_protocol::witness_blocked::WitnessBlockedCounts::is_empty"
+    )]
+    pub witness_blocked: trace_commons_protocol::witness_blocked::WitnessBlockedCounts,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -314,6 +327,7 @@ impl DaemonState {
             last_notified_at: None,
             notify_kinds_known: true,
             settlement_notified: None,
+            witness_blocked: Default::default(),
             last_written: LastWritten::default(),
             recent_upload_attempts: VecDeque::new(),
         }
@@ -493,6 +507,26 @@ mod tests {
         s.save(&store).unwrap();
         let loaded = DaemonState::load(&store).unwrap();
         assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn witness_blocked_counts_round_trip_and_are_not_written_while_empty() {
+        use trace_commons_protocol::witness_blocked::WitnessBlockedLabel;
+        let empty = serde_json::to_value(DaemonState::new()).unwrap();
+        assert!(empty.get("witness_blocked").is_none(), "{empty}");
+        // A file written before the field existed parses with no counts.
+        let parsed: DaemonState = serde_json::from_value(empty).unwrap();
+        assert!(parsed.witness_blocked.is_empty());
+
+        let (_d, store) = temp_store();
+        let mut s = DaemonState::new();
+        s.witness_blocked.record(WitnessBlockedLabel::Busy);
+        s.witness_blocked.record(WitnessBlockedLabel::Unreachable);
+        s.save(&store).unwrap();
+        let loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded.witness_blocked.busy, 1);
+        assert_eq!(loaded.witness_blocked.timed_out, 0);
+        assert_eq!(loaded.witness_blocked.unreachable, 1);
     }
 
     #[test]

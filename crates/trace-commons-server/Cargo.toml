@@ -179,6 +179,21 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 name = "trace-commons-witness"
 path = "src/bin/trace-commons-witness.rs"
 
+# Build, sign (through Google Cloud KMS) and verify the signed witness
+# accepted-measurements list that ingest serves at
+# /v1/public/witness-accepted-list. Runbook:
+# docs/operator/witness-accepted-list.md.
+[[bin]]
+name = "trace-commons-witness-list"
+path = "src/bin/trace-commons-witness-list.rs"
+
+# Crawl public skill sources into PostgreSQL (V160) and export the unsigned
+# Skills catalog payload the owner signs and publishes. Runbook:
+# docs/operator/skills-catalog.md.
+[[bin]]
+name = "trace-commons-skills-catalog"
+path = "src/bin/trace-commons-skills-catalog.rs"
+
 # The staging NEAR AI pin re-sign tool: observes NEAR AI staging's enclave
 # measurements and signs the pin set a staging app trusts. Operators run it;
 # nothing ships it. `observe` also needs `near-attestation-collateral` to
@@ -285,6 +300,9 @@ path = "tests/mission_rewards_pg.rs"
 name = "model_training_consent_pg"
 path = "tests/model_training_consent_pg.rs"
 [[test]]
+name = "terms_acceptance_pg"
+path = "tests/terms_acceptance_pg.rs"
+[[test]]
 name = "onboarding_retention_pg"
 path = "tests/onboarding_retention_pg.rs"
 [[test]]
@@ -296,6 +314,9 @@ path = "tests/payout_rails_pg.rs"
 [[test]]
 name = "first_run_stats_pg"
 path = "tests/first_run_stats_pg.rs"
+[[test]]
+name = "witness_blocked_pg"
+path = "tests/witness_blocked_pg.rs"
 [[test]]
 name = "referral_bonus_pg"
 path = "tests/referral_bonus_pg.rs"
@@ -333,6 +354,13 @@ path = "tests/trace_invite_registry_pg.rs"
 name = "trace_session_withdrawal_pg"
 path = "tests/trace_session_withdrawal_pg.rs"
 [[test]]
+name = "usage_events_pg"
+path = "tests/usage_events_pg.rs"
+
+[[test]]
+name = "skills_catalog_pg"
+path = "tests/skills_catalog_pg.rs"
+[[test]]
 name = "upload_principal_ownership_pg"
 path = "tests/upload_principal_ownership_pg.rs"
 [[test]]
@@ -350,3 +378,10 @@ path = "tests/witness_evidence_pg.rs"
 [[test]]
 name = "r1_pipeline_measurement"
 path = "tests/r1_pipeline_measurement.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -19,6 +19,8 @@
 TC_CHANNEL_KEYS=(
   TC_BUNDLE_ID
   TC_BUNDLE_NAME
+  TC_DISPLAY_NAME
+  TC_DMG_VOLUME_NAME
   TC_URL_SCHEME
   TC_URL_TYPE_NAME
   TC_SPARKLE_FEED_URL
@@ -92,6 +94,17 @@ load_channel() {
     echo "refusing: $TC_CHANNEL channel file's TC_BUNDLE_NAME must be letters, digits, dots and spaces" >&2
     return 1
   fi
+  # The display name is written into a .strings file and a plist: nothing
+  # that needs quoting or escaping in either.
+  if [[ ! "$TC_DISPLAY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.\ ]*$ ]]; then
+    echo "refusing: $TC_CHANNEL channel file's TC_DISPLAY_NAME must be letters, digits, dots and spaces" >&2
+    return 1
+  fi
+  # The release DMG's volume name, passed to hdiutil -volname.
+  if [[ ! "$TC_DMG_VOLUME_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.\ ]*$ ]]; then
+    echo "refusing: $TC_CHANNEL channel file's TC_DMG_VOLUME_NAME must be letters, digits, dots and spaces" >&2
+    return 1
+  fi
   # Variable names, used with ${!name}: refuse anything that is not one.
   for key in TC_SPARKLE_KEY_VAR TC_PROFILE_VAR; do
     if [[ ! "${!key}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
@@ -99,6 +112,15 @@ load_channel() {
       return 1
     fi
   done
+  TC_FEATURE_PROFILE="${TC_FEATURE_PROFILE:-$TC_CHANNEL}"
+  local feature_identity
+  feature_identity="$(python3 "$channels_dir/../../scripts/feature-flags/profile.py" --channel "$TC_CHANNEL" --profile "$TC_FEATURE_PROFILE")" || return 1
+  TC_FEATURE_PROFILE_DIGEST="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["profile_digest"])' <<< "$feature_identity")" || return 1
+  # Testing shares staging identity, but never moves the staging update feed.
+  if [[ "$TC_FEATURE_PROFILE" == testing ]]; then
+    TC_SPARKLE_FEED_URL="${TC_SPARKLE_FEED_URL%/appcast.xml}/testing/appcast.xml"
+  fi
+  export TC_FEATURE_PROFILE
 }
 
 # The channel a bundled `near-ai --version` reports: the word after
@@ -183,5 +205,7 @@ with open(sys.argv[1], "rb") as f:
     echo "FATAL: URL scheme mismatch: $TC_CHANNEL channel file $TC_URL_SCHEME, FFI library $lib_scheme" >&2
     return 1
   fi
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../../scripts/feature-flags/profile.py" \
+    --channel "$TC_CHANNEL" --profile "$TC_FEATURE_PROFILE" --app "$app" || return 1
   echo "verified channel $TC_CHANNEL: Info.plist, near-ai and the FFI library agree"
 }

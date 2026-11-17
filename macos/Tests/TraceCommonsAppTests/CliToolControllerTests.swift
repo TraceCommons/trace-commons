@@ -1,3 +1,4 @@
+import Combine
 import TCShellCore
 import XCTest
 
@@ -32,6 +33,21 @@ final class CliToolControllerTests: XCTestCase {
                 recorder.scripts.append(script)
                 return outcome
             })
+    }
+
+    /// Reading the link again when nothing changed publishes nothing. The app
+    /// menu observes this controller, so each publish rebuilds the menu, and
+    /// the link is read every time the app comes forward.
+    func testRereadingAnUnchangedLinkPublishesNothing() {
+        let model = controller(states: ["installed", "installed", "not_installed"], outcome: .done, recorder: Recorder())
+        var published = 0
+        let watch = model.objectWillChange.sink { published += 1 }
+        defer { watch.cancel() }
+        model.refresh()
+        XCTAssertEqual(published, 0, "an unchanged link was published")
+        model.refresh()
+        XCTAssertEqual(published, 1, "a changed link was not published")
+        XCTAssertEqual(model.status?.state, .notInstalled)
     }
 
     func testInstallRunsTheInstallScriptAndRereads() async {

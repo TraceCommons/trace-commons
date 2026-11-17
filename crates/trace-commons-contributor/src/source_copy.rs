@@ -163,17 +163,19 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     if tool == SourceTool::OpenCode {
         return match source_mode {
             "watch" => "OpenCode sessions are watched in the selected folder",
-            "off" => "OpenCode collection turned off. Previously queued traces are not removed",
-            "unset" => "No OpenCode folder selected; only sessions you collect through managed launches can be read",
-            _ => "OpenCode source settings could not be confirmed",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P71).
+            "off" => "OpenCode collection turned off",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P74).
+            "unset" => "No OpenCode folder selected; only managed launches are read",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P87).
+            _ => "OpenCode settings could not be confirmed",
         }
         .into();
     }
     match source_mode {
         "watch" => format!("{name} traces folder set"),
-        "off" => format!(
-            "{name} marked not used, so nothing is opened for it. Previously queued traces are not removed"
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P72).
+        "off" => format!("{name} marked not used, so nothing is opened for it"),
         _ if undeclared_scans_conventional(tool.adapter_name()) => {
             format!("{name} traces read from the usual place")
         }
@@ -181,10 +183,15 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     }
 }
 
-/// Native/export format refusal, shared by all native health surfaces.
-pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode session version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str =
-    "Supported: OpenCode 1.19.0 databases and sessions from 1.18.29 or 1.19.0.";
+/// Refusal for traces saved by an OpenCode version the reader does not
+/// accept, shared by all native health surfaces. The versions match the
+/// readers' `READABLE_RANGES` in `trace-commons-contributor-sources`.
+/// Approved by the owner 2026-11-10; "this app" per the 2026-11-02 rule that
+/// the commons' name never appears in user-visible copy.
+pub const OPENCODE_VERSION_TITLE: &str =
+    "Some OpenCode traces are from a version this app can't read yet.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This app reads traces saved by OpenCode 1.14.28 to \
+     1.14.29, 1.18.0 to 1.18.35 and 1.19.0 to 1.19.5. Traces from other versions are left out.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -192,8 +199,8 @@ pub struct SourceSettingsCopy {
     pub heading: &'static str,
     pub explanation: &'static str,
     pub save_failed: &'static str,
-    /// Names Refresh, the control Uses shows (it said "retry", which
-    /// Uses has no control for). DRAFT, NEEDS APPROVAL (2026-11-04).
+    /// A permission change that could not be confirmed; Uses' Refresh sits
+    /// beside it. Approved by the owner 2026-11-04 (Settings copy pass 2, P139).
     pub consent_save_failed: &'static str,
     pub unavailable: &'static str,
     pub selected_folder: &'static str,
@@ -304,7 +311,8 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
                 },
                 explanation: (tool == SourceTool::OpenCode)
                     .then_some("Watch local OpenCode sessions or a folder of exports."),
-                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose a folder…"),
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P88).
+                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose folder…"),
                 unset_scans_conventional: undeclared_scans_conventional(tool.adapter_name()),
             },
         )
@@ -314,23 +322,31 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         opencode_version_title: OPENCODE_VERSION_TITLE,
         opencode_version_detail: OPENCODE_VERSION_DETAIL,
         heading: "Watched folders",
-        explanation: "Source settings control future discovery. Turning a source off does not remove traces already queued.",
-        save_failed: "Couldn't confirm that folder change. The last available settings are shown; retry to check the current state.",
-        consent_save_failed: "Couldn't confirm that permission change. The last available permissions are shown; choose Refresh to check the current state.",
-        unavailable: "Current folder settings aren't available.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P75).
+        explanation: "Turning a tool off does not remove traces already queued.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P76).
+        save_failed: "Couldn't confirm that change; the folders shown may be out of date.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P139).
+        consent_save_failed: "Couldn't confirm that change. The ticks may be out of date.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P89).
+        unavailable: "Folder settings aren't available.",
         selected_folder: "Selected folder",
-        no_candidate: "No standard location found — choose a folder, or decline",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P77).
+        no_candidate: "No standard location found.",
         watch_candidate: "Watch",
-        choose_folder: "Choose a different folder…",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P80).
+        choose_folder: "Choose folder…",
         tool_action_accessibility_name: "{tool}: {action}",
         retry: "Retry",
         evidence: SourceEvidenceCopy {
             missing: "Not found on this machine",
-            empty: "Found, but holding no traces yet",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P81).
+            empty: "Found, no traces yet",
             count_one: "1 trace",
             count: "{count} traces",
             most_recent: "{traces}, most recent {age}",
-            relocated: "{evidence} (moved here by an environment variable)",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P90).
+            relocated: "{evidence} (set by an environment variable)",
             age_just_now: "just now",
             age_minutes: "{n} minutes ago",
             age_hour: "1 hour ago",
@@ -341,7 +357,8 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         tools,
         trajectory: TrajectorySettingsCopy {
             title: "Exported traces",
-            explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P73).
+            explanation: "Exports here always wait for you; none is sent automatically.",
             watching: "A folder of exported traces is read.",
             off: "No folder of exported traces is read.",
             decline: "Stop reading",
@@ -376,13 +393,33 @@ mod tests {
         assert_ne!(row["watching"], row["off"]);
     }
 
+    /// The banner's version list is the readers' ranges, in order, each
+    /// written "1.m.first to 1.m.last".
+    fn assert_opencode_detail_names_every_readable_version() {
+        let ranges: Vec<String> = crate::source::opencode::READABLE_RANGES
+            .iter()
+            .map(|(m, first, last)| format!("1.{m}.{first} to 1.{m}.{last}"))
+            .collect();
+        let (last, rest) = ranges.split_last().unwrap();
+        let expected = format!("OpenCode {} and {last}.", rest.join(", "));
+        assert!(
+            OPENCODE_VERSION_DETAIL.contains(&expected),
+            "{OPENCODE_VERSION_DETAIL} lacks {expected}"
+        );
+    }
+
     #[test]
     fn export_refusal_payload_preserves_supported_version_and_scope() {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert_opencode_detail_names_every_readable_version();
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
     }
 
     #[test]
@@ -395,9 +432,17 @@ mod tests {
                 undeclared_scans_conventional(adapter)
             );
             let source = SourceTool::from_key(tool.key).expect("known source");
+            // Owner dropped "Previously queued traces are not removed" from
+            // each off line 2026-11-04 (Settings copy pass 2, P71, P72); the
+            // section explanation (P75) says it once.
             assert!(
-                source_check_line(source, "off")
-                    .contains("Previously queued traces are not removed")
+                source_check_line(source, "off").ends_with("turned off")
+                    || source_check_line(source, "off")
+                        .ends_with("marked not used, so nothing is opened for it")
+            );
+            assert!(
+                copy.explanation
+                    .contains("does not remove traces already queued")
             );
             if source == SourceTool::OpenCode {
                 assert_eq!(tool.decline, "Don't read");
@@ -428,13 +473,15 @@ mod tests {
             assert!(line.contains("could not be confirmed"));
             assert_ne!(line, source_check_line(SourceTool::OpenCode, "off"));
         }
-        assert!(
-            source_check_line(SourceTool::OpenCode, "unset")
-                .contains("only sessions you collect through managed launches")
-        );
+        assert!(source_check_line(SourceTool::OpenCode, "unset").contains("only managed launches"));
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
+        assert_opencode_detail_names_every_readable_version();
+        // One refusal, one cause: the saving version. Not the database
+        // format, and "trace", never "session".
+        for text in [OPENCODE_VERSION_TITLE, OPENCODE_VERSION_DETAIL] {
+            assert!(!text.contains("database"), "{text}");
+            assert!(!text.to_lowercase().contains("session"), "{text}");
+        }
         assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));
     }
 
@@ -452,11 +499,11 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Claude, "off"),
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Claude Code marked not used, so nothing is opened for it"
         );
         assert_eq!(
             source_check_line(SourceTool::Codex, "off"),
-            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Codex marked not used, so nothing is opened for it"
         );
         // Gemini CLI and Cline construct no adapter when undeclared, so the
         // scan sentence would be false for them in the fail-open direction.
@@ -474,7 +521,7 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "off"),
-            "Cline marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Cline marked not used, so nothing is opened for it"
         );
     }
 

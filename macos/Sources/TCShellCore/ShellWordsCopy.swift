@@ -8,7 +8,8 @@ import Foundation
 /// Decoding is here so it is testable without the dylib; `TCBridgeTests`
 /// checks it against the real export. A table with any empty string is
 /// refused whole: a blank sentence on a withdrawal or a public-profile
-/// screen is worse than none.
+/// screen is worse than none. The only exceptions are the lines the owner
+/// cut (`ownerCut`), which arrive "" and are drawn as nothing.
 public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public struct Withdrawal: Decodable, Equatable, Sendable {
         public let withdraw: String
@@ -135,10 +136,17 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let alwaysIncluded: String
         public let optionalDataUse: String
         public let rewardOpportunities: String?
+        /// The hover tip beside `rewardOpportunities`: what credit depends
+        /// on. Optional so an older core still decodes.
+        /// Approved by the owner 2026-11-04 (Settings copy pass 2, P137).
+        public let rewardOpportunitiesTooltip: String?
         public let credit: String
         public let required: String
         public let nothingPreselected: String
         public let nothingChanged: String
+        /// A refused folder mode change. Optional so an older core still
+        /// decodes. Approved by the owner 2026-11-04 (Settings copy pass 2, P136).
+        public let projectModeFailed: String?
         public let auditActions: [String: String]
         public let auditChanged: String
     }
@@ -150,6 +158,42 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public let scrubbing: Scrubbing
     public let settings: Settings
     public let pausedNotice: PausedNotice
+    /// Settings > Projects' summary and Manage sheet (#1952). Required: the
+    /// core is bundled with the app, so it never lacks them, and an
+    /// optional table let a missing one remove every mode control from
+    /// Settings > Projects.
+    public let projectsManager: ProjectsManager
+
+    /// `shell_words_copy::ProjectsManagerWords`.
+    public struct ProjectsManager: Decodable, Equatable, Sendable {
+        public let manage: String
+        public let search: String
+        public let all: String
+        /// `{title} {count}`: one mode's name and how many projects are in it.
+        public let modeCount: String
+        /// `{count} selected`.
+        public let selected: String
+        public let setTo: String
+        /// `{count} projects`: several projects as one name.
+        public let projectsCount: String
+        public let noMatches: String
+        /// `{title}, {count} projects`: a group header's accessible name.
+        public let groupAccessibility: String
+        /// `Select {title}`: a project's checkbox's accessible name.
+        public let selectAccessibility: String
+        /// The search field's prompt, apart from its label (`search`).
+        public let searchPrompt: String
+        /// The checkbox above the list that selects every project shown.
+        public let selectAll: String
+        /// `Select {title} projects`: a group header's checkbox.
+        public let selectGroupAccessibility: String
+        /// `Set {title} projects`: a group header's mode menu.
+        public let groupMenuAccessibility: String
+        /// `Set {count} selected projects`: the bulk menu.
+        public let bulkMenuAccessibility: String
+        /// `{count} of {total} changed.`: a bulk change stopped part way.
+        public let changedSome: String
+    }
 
     /// The Traces tab's resume notice (approved 2026-11-04): Settings'
     /// paused sentence, Resume and Not now. When it shows is
@@ -167,12 +211,23 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         }
     }
 
-    /// Decode the table, or nil if it will not parse or any string in it is
-    /// empty.
+    /// The lines the owner cut 2026-11-04 (Settings copy pass 2, P142,
+    /// P144, P235, P236, P244), by wire path: each arrives "", the only
+    /// strings in the table allowed to, and a view draws them as nothing.
+    public static let ownerCut: Set<String> = [
+        "public_profile.footnote",
+        "public_profile.go_public_footnote",
+        "settings.at_most_one_notification",
+        "settings.at_most_one_notification_one",
+        "settings.notifications_rendered_here",
+    ]
+
+    /// Decode the table, or nil if it will not parse or any string in it
+    /// other than an `ownerCut` line is empty.
     public static func decode(fromJSON json: String?) -> ShellWordsCopy? {
         guard let data = json?.data(using: .utf8),
             let tree = try? JSONSerialization.jsonObject(with: data),
-            !hasEmptyString(tree)
+            !hasEmptyString(tree, path: "")
         else {
             return nil
         }
@@ -181,11 +236,14 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         return try? decoder.decode(ShellWordsCopy.self, from: data)
     }
 
-    private static func hasEmptyString(_ node: Any) -> Bool {
+    private static func hasEmptyString(_ node: Any, path: String) -> Bool {
         switch node {
-        case let text as String: return text.isEmpty
-        case let list as [Any]: return list.contains(where: hasEmptyString)
-        case let map as [String: Any]: return map.values.contains(where: hasEmptyString)
+        case let text as String: return text.isEmpty && !ownerCut.contains(path)
+        case let list as [Any]: return list.contains { hasEmptyString($0, path: path + "[]") }
+        case let map as [String: Any]:
+            return map.contains { key, value in
+                hasEmptyString(value, path: path.isEmpty ? key : path + "." + key)
+            }
         default: return false
         }
     }

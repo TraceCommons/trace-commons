@@ -112,14 +112,20 @@ pub struct FrameCopy {
     /// `private_ai.title_bold`, and free to diverge: one names a step, the
     /// other ends a title. DRAFT, NEEDS APPROVAL.
     pub step_private_ai: &'static str,
-    /// Approved 2026-10-08 (button rule). On Tools it opens the per-repo
-    /// rules in place (Ron, 2026-10-21).
+    /// The animated first run's Terms step, near the end, before Join
+    /// (owner, 2026-11-09). DRAFT, NEEDS APPROVAL.
+    pub step_terms: &'static str,
+    /// Approved 2026-10-08 (button rule). On Uses it opens the per-repo
+    /// rules in place (Ron, 2026-11-05).
     pub custom_setup_instead: &'static str,
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
     pub answer_every_tool: &'static str,
     /// `{count}`: sessions found for a tool (Tools) or a repo (Rules).
     pub session_count: &'static str,
+    /// The same for exactly one session. Same wording as the Settings
+    /// source row's `count_one`. DRAFT: pending the owner's approval.
+    pub session_count_one: &'static str,
     /// Takes back a choice not yet acted on (near.ai on Join).
     /// Approved 2026-10-06.
     pub undo: &'static str,
@@ -179,8 +185,9 @@ pub struct JoinCopy {
     /// Unread by the macOS shell since sign-in became required (owner,
     /// 2026-10-12): Join has no Skip. Kept so the wire table is unchanged.
     pub skip_note: &'static str,
-    /// Approved 2026-10-08 (button rule). Unread since 2026-10-12, as
-    /// `skip_note`.
+    /// Approved 2026-10-08 (button rule). Join has not read it since
+    /// 2026-10-12; Uses' primary action reads it until the person chooses
+    /// something (Ron, 2026-11-05).
     pub skip: &'static str,
 }
 
@@ -195,6 +202,52 @@ pub struct WelcomeCopy {
     /// only path, where nothing is shared so "Start sharing" would be
     /// false: DRAFT, NEEDS APPROVAL (2026-11-04) for that reuse.
     pub start: &'static str,
+    /// First-run UI placeholder, requested 2026-11-07. It is not a legal
+    /// acceptance receipt or a trace-sharing consent grant.
+    pub legal: WelcomeLegalCopy,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WelcomeLegalCopy {
+    /// The Terms step's title, before `terms` in bold. DRAFT, NEEDS
+    /// APPROVAL.
+    pub title_light: &'static str,
+    pub accept: &'static str,
+    pub terms: &'static str,
+    pub privacy: &'static str,
+    pub terms_url: &'static str,
+    pub privacy_url: &'static str,
+    /// The disabled checkbox's hint until the terms have been scrolled to
+    /// the end. DRAFT, NEEDS APPROVAL.
+    pub scroll_hint: &'static str,
+    /// While the terms document loads. DRAFT, NEEDS APPROVAL.
+    pub loading: &'static str,
+    /// When the terms document could not be loaded. DRAFT, NEEDS APPROVAL.
+    pub failed: &'static str,
+    /// Re-runs the load after `failed`. DRAFT, NEEDS APPROVAL.
+    pub retry: &'static str,
+    /// Under the terms while the published version has `in_effect: false`
+    /// (the current documents are not valid, owner 2026-11-09). DRAFT,
+    /// NEEDS APPROVAL.
+    pub not_in_effect: &'static str,
+    /// The terms sheet's accept button, after new terms are published.
+    /// DRAFT, NEEDS APPROVAL.
+    pub accept_button: &'static str,
+}
+
+/// New Terms of Service after onboarding: the Home notice and the menu bar
+/// row the owner asked for (2026-11-09). Their wording is DRAFT, NEEDS
+/// APPROVAL (copy guide rule 9).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TermsHoldCopy {
+    /// DRAFT, NEEDS APPROVAL.
+    pub notice_title: &'static str,
+    /// DRAFT, NEEDS APPROVAL.
+    pub notice_body: &'static str,
+    /// The notice's one button; opens the terms sheet. DRAFT, NEEDS APPROVAL.
+    pub review: &'static str,
+    /// The menu bar dropdown's row. DRAFT, NEEDS APPROVAL.
+    pub menu_row: &'static str,
 }
 
 /// Traces: what the watched tools' traces could earn. The titles and
@@ -225,6 +278,9 @@ pub struct TracesCopy {
     /// back: only the link does, since it opens a step the footer's Back
     /// would not name. Owner, 2026-10-27; approved in these words in
     /// Zaki's review of #1690 (2026-10-28).
+    /// `no_credit` and `back_to_uses` are unread by the macOS shell since
+    /// Traces moved before Uses (Ron, 2026-11-05). Kept so the wire table is
+    /// unchanged.
     pub no_credit: &'static str,
     pub back_to_uses: &'static str,
 }
@@ -297,10 +353,6 @@ pub struct ToolsCopy {
     /// one of them to say "I don't use it"; this says so beside the added
     /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
-    /// The secondary action beside Continue: finish setup for Private AI
-    /// alone, watching no tool and sharing nothing (tester report,
-    /// owner-approved path 2026-11-04). DRAFT, NEEDS APPROVAL (2026-11-04).
-    pub private_ai_only: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -368,7 +420,7 @@ pub struct UsesCopy {
     /// Settings > Projects' sharing choice, the setup choice made
     /// changeable (owner, 2026-10-30; #1753 A2): the line under it, and the
     /// question Automatic asks when folders are set to Ask, with `{count}`
-    /// those folders. DRAFT, NEEDS APPROVAL.
+    /// those folders.
     pub settings_sharing_note: &'static str,
     pub keep_asks_title: &'static str,
     pub keep_asks_body: &'static str,
@@ -392,7 +444,7 @@ pub struct UsesCopy {
     pub sharing_save_failed: &'static str,
     /// Settings > Projects' own lines for the same two failures: setup's
     /// name setup and its Start sharing button, which Settings does not
-    /// show (copy-guide rule 7). DRAFT, NEEDS APPROVAL (2026-11-04).
+    /// show (copy-guide rule 7).
     pub settings_sharing_refused: &'static str,
     pub settings_sharing_save_failed: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
@@ -414,13 +466,6 @@ pub struct UsesCopy {
     /// Under Automatic before sign-in: sign-in is the last step, and the
     /// grant needs the enrollment it makes. DRAFT, NEEDS APPROVAL.
     pub automatic_after_sign_in: &'static str,
-    /// Two buttons of equal weight above the optional data uses, which
-    /// start unticked (R7): `allow_all` ticks every optional use, the
-    /// public handle excepted; `only_required` unticks them, leaving the
-    /// required use. Owner, 2026-10-27; approved as written in Zaki's
-    /// review of #1690 (2026-10-28).
-    pub allow_all: &'static str,
-    pub only_required: &'static str,
     /// The collapsed section under the optional uses that holds the
     /// required use; `{title}` is that use's title. Owner, 2026-10-28.
     pub always_on: &'static str,
@@ -438,12 +483,12 @@ pub struct PrivateAiCopy {
     /// While the offer's words cannot be read. The step has had no switch
     /// since #1685, so it says nothing about enabling.
     pub unavailable: &'static str,
-    /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
+    /// The first two sentences of `private_inference_copy::OFFER_WHAT_FIRST_RUN`,
     /// the only words the Uses card shows before "Learn more" (owner,
-    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
+    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT_FIRST_RUN`
     /// exactly, so nothing of the disclosure is reworded or lost.
     pub offer_lead: &'static str,
-    /// The rest of `OFFER_WHAT`, shown with the exposure and no-repoint
+    /// The rest of `OFFER_WHAT_FIRST_RUN`, shown with the exposure and no-repoint
     /// sentences once "Learn more" is pressed.
     pub offer_more: &'static str,
     /// Discloses the rest of the Private AI offer in place. Approved
@@ -459,9 +504,24 @@ pub struct PrivateAiCopy {
     pub can_connect_one: &'static str,
 }
 
+/// Agent configuration guidance introduced during first run.
+/// The prompt is bundled from the documented example to prevent drift.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentConfigurationCopy {
+    pub action: &'static str,
+    pub title: &'static str,
+    pub body: &'static str,
+    pub prerequisite: &'static str,
+    pub prompt: &'static str,
+    pub copy: &'static str,
+    pub copied: &'static str,
+    pub close: &'static str,
+}
+
 /// Every first-run string, grouped by screen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FirstRunCopy {
+    pub agent_configuration: AgentConfigurationCopy,
     pub frame: FrameCopy,
     pub welcome: WelcomeCopy,
     pub join: JoinCopy,
@@ -471,11 +531,22 @@ pub struct FirstRunCopy {
     pub uses: UsesCopy,
     pub traces: TracesCopy,
     pub private_ai: PrivateAiCopy,
+    pub terms_hold: TermsHoldCopy,
 }
 
 #[must_use]
 pub fn first_run_copy() -> FirstRunCopy {
     FirstRunCopy {
+        agent_configuration: AgentConfigurationCopy {
+            action: "Set up with an agent",
+            title: "Set up with your AI agent",
+            body: "Copy this prompt into a terminal-capable AI agent, then replace the bracketed details with your preferences.",
+            prerequisite: "Keep the app open. If the agent reports that the app is not ready, continue setup in the app, then try again.",
+            prompt: include_str!("../../../docs/examples/agent-configuration-prompt.md"),
+            copy: "Copy prompt",
+            copied: "Copied",
+            close: "Close",
+        },
         frame: FrameCopy {
             quick_setup: "Quick setup",
             custom_setup: "Custom setup",
@@ -486,10 +557,12 @@ pub fn first_run_copy() -> FirstRunCopy {
             step_uses: "Uses",
             step_traces: "Traces",
             step_private_ai: "Private AI",
+            step_terms: "Terms",
             custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} traces",
+            session_count_one: "1 trace",
             undo: "Undo",
             choose: "Choose…",
             back: "Back",
@@ -497,9 +570,24 @@ pub fn first_run_copy() -> FirstRunCopy {
             close: "Close",
         },
         welcome: WelcomeCopy {
-            title: "Welcome to Near AI",
+            title: concat!("Welcome to ", crate::app_name!()),
             body: "Private AI solutions that put you in control of your data.",
             start: "Get started",
+            legal: WelcomeLegalCopy {
+                title_light: "Read the ",
+                accept: "I accept the Terms of Service",
+                terms: "Terms of Service",
+                privacy: "Privacy Policy",
+                terms_url: crate::channel::TERMS_URL,
+                privacy_url: crate::channel::PRIVACY_URL,
+                // DRAFT, NEEDS APPROVAL (the six strings below).
+                scroll_hint: "Scroll to the end to accept",
+                loading: "Loading the Terms of Service",
+                failed: "Couldn't load the Terms of Service. Check your connection.",
+                retry: "Try again",
+                not_in_effect: "These terms are a draft and are not yet in effect.",
+                accept_button: "Accept",
+            },
         },
         join: JoinCopy {
             title_light: "Sign in and choose an org for ",
@@ -562,7 +650,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             trajectory_label: "Exported traces",
             neither: "Neither",
             one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
-            private_ai_only: "Use Private AI only",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -600,16 +687,18 @@ pub fn first_run_copy() -> FirstRunCopy {
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
             reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
-            // "Set a folder to Never" was "Ignore a folder": the mode is
-            // named Never. DRAFT, NEEDS APPROVAL (2026-11-04).
-            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Set a folder to Never to exclude it.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P120).
+            automatic_scope: "Sends past and new traces once they've been unchanged for 24 hours.",
             ask_each_time: "Ask each time",
-            // DRAFT, NEEDS APPROVAL (2026-10-30).
-            settings_sharing_note: "A folder set to Ask keeps asking, even when Automatic is on. A folder set to Never is never shared.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P122).
+            settings_sharing_note: "Folders set to Ask or Never keep their own setting.",
             keep_asks_title: "Keep folders set to Ask?",
-            keep_asks_body: "Folders set to Ask: {count}. Keep them asking, or make every folder Automatic.",
-            keep_asks_keep: "Keep them on Ask",
-            keep_asks_all: "Make all Automatic",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P123).
+            keep_asks_body: "Folders set to Ask: {count}.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P130).
+            keep_asks_keep: "Keep Ask",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P132).
+            keep_asks_all: "All Automatic",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",
             optional_some_on: "{count} optional uses · {selected} on",
@@ -620,9 +709,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             sharing_save_failed: "Sharing couldn't be saved. Setup hasn't finished; try Start sharing again.",
-            // DRAFT, NEEDS APPROVAL (2026-11-04).
-            settings_sharing_refused: "Automatic wasn't turned on. Sharing is on Ask.",
-            settings_sharing_save_failed: "Sharing couldn't be saved. Choose again.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P126).
+            settings_sharing_refused: "Automatic wasn't turned on.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P131).
+            settings_sharing_save_failed: "Sharing couldn't be saved.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -631,8 +721,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             you_review: "You review",
             the_commons: "The commons",
             automatic_after_sign_in: "Starts when setup finishes after sign-in.",
-            allow_all: "Allow all",
-            only_required: "Only required",
             always_on: "Always on: {title} for shared traces",
             credit_scope: crate::consent_copy::DATA_USE_CREDIT_SCOPE,
             credit_required: crate::consent_copy::DATA_USE_CREDIT_REQUIRED,
@@ -657,6 +745,14 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "Private AI",
             can_connect: "of {total} tools can connect",
             can_connect_one: "of {total} tool can connect",
+        },
+        // DRAFT, NEEDS APPROVAL (all four): new notices the owner asked
+        // for on 2026-11-09; their wording is not approved yet.
+        terms_hold: TermsHoldCopy {
+            notice_title: "New Terms of Service",
+            notice_body: "Uploads are paused until you accept the new terms.",
+            review: "Review terms",
+            menu_row: "Uploads paused: new Terms of Service",
         },
     }
 }
@@ -758,6 +854,16 @@ mod tests {
             first_run_copy().join.invite_joined,
             "Joined {host} · {pay_range}"
         );
+    }
+
+    /// One session reads "1 trace", not "1 traces": the singular has no
+    /// hole, and the plural keeps its `{count}`.
+    #[test]
+    fn a_single_session_reads_in_the_singular() {
+        let frame = &first_run_copy().frame;
+        assert_eq!(frame.session_count_one, "1 trace");
+        assert!(!frame.session_count_one.contains('{'));
+        assert!(frame.session_count.contains("{count}"));
     }
 
     /// Every `{...}` in the table is one the module doc lists, so a shell
@@ -956,14 +1062,15 @@ mod tests {
     }
 
     /// The Private AI card's lead and the rest it discloses are the offer's
-    /// own sentences, split once: together they are `OFFER_WHAT` exactly,
-    /// in the core's NEAR AI spelling (owner, 2026-10-08).
+    /// own sentences, split once: together they are first run's offer
+    /// exactly, in the core's NEAR AI spelling (owner, 2026-10-08). Settings
+    /// reads the shorter `OFFER_WHAT` since the Settings copy pass (P178).
     #[test]
     fn the_private_ai_lead_and_rest_are_the_offer_split_once() {
         let copy = first_run_copy().private_ai;
         assert_eq!(
             format!("{} {}", copy.offer_lead, copy.offer_more),
-            crate::private_inference_copy::OFFER_WHAT
+            crate::private_inference_copy::OFFER_WHAT_FIRST_RUN
         );
         assert!(
             copy.offer_lead
@@ -1079,15 +1186,6 @@ mod tests {
         assert!(line.contains("try again"), "{line}");
     }
 
-    /// Private AI only is an action (copy guide rule 1) naming the
-    /// destination the way the rest of the app does ("Private AI").
-    #[test]
-    fn private_ai_only_is_named_by_its_destination() {
-        let copy = first_run_copy();
-        assert_eq!(copy.tools.private_ai_only, "Use Private AI only");
-        assert_ne!(copy.tools.private_ai_only, copy.frame.continue_button);
-    }
-
     /// Every way leaving Folders or Tools can stop has a sentence, so
     /// Continue never does nothing in silence. A sign-in that did not finish
     /// reads the core's existing Private AI sign-in line rather than a
@@ -1127,7 +1225,7 @@ mod tests {
     #[test]
     fn the_animated_first_run_has_its_words() {
         let copy = first_run_copy();
-        assert_eq!(copy.welcome.title, "Welcome to Near AI");
+        assert_eq!(copy.welcome.title, "Welcome to Near AI Gateway");
         assert_eq!(
             copy.welcome.body,
             "Private AI solutions that put you in control of your data."
@@ -1165,7 +1263,15 @@ mod tests {
     fn no_two_keys_carry_the_same_string() {
         // The Private AI step's name and its title's bold half read the
         // same; one names a step, the other ends a sentence.
-        const MAY_DIVERGE: &[&[&str]] = &[&[".frame.step_private_ai", ".private_ai.title_bold"]];
+        // The terms reader's retry and Rules' retry read the same today; one
+        // reloads a document over the network, the other rescans folders.
+        const MAY_DIVERGE: &[&[&str]] = &[
+            // Closing agent guidance and closing another onboarding sheet are
+            // independent actions, even when their labels agree.
+            &[".agent_configuration.close", ".frame.close"],
+            &[".frame.step_private_ai", ".private_ai.title_bold"],
+            &[".rules.retry", ".welcome.legal.retry"],
+        ];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),
@@ -1252,5 +1358,51 @@ mod tests {
         assert_eq!(line(serde_json::json!({"traces": null})), None);
         assert_eq!(line(serde_json::json!({})), None);
         assert_eq!(traces_estimate_line_json("not json"), None);
+    }
+
+    /// The terms reader's and the terms hold's strings are all present, and
+    /// the labels (buttons, a hint, a row, a title) end without a period;
+    /// only the sentences do.
+    #[test]
+    fn terms_strings_are_present_and_labels_have_no_trailing_period() {
+        let copy = first_run_copy();
+        let legal = &copy.welcome.legal;
+        let hold = &copy.terms_hold;
+        let labels = [
+            legal.scroll_hint,
+            legal.loading,
+            legal.retry,
+            legal.accept_button,
+            hold.notice_title,
+            hold.review,
+            hold.menu_row,
+        ];
+        for label in labels {
+            assert!(!label.trim().is_empty(), "empty label");
+            assert!(!label.ends_with('.'), "{label}");
+        }
+        for sentence in [legal.failed, legal.not_in_effect, hold.notice_body] {
+            assert!(!sentence.trim().is_empty(), "empty sentence");
+            assert!(sentence.ends_with('.'), "{sentence}");
+        }
+        assert_eq!(legal.scroll_hint, "Scroll to the end to accept");
+        assert_eq!(legal.loading, "Loading the Terms of Service");
+        assert_eq!(
+            legal.failed,
+            "Couldn't load the Terms of Service. Check your connection."
+        );
+        assert_eq!(legal.retry, "Try again");
+        assert_eq!(
+            legal.not_in_effect,
+            "These terms are a draft and are not yet in effect."
+        );
+        assert_eq!(legal.accept_button, "Accept");
+        assert_eq!(hold.notice_title, "New Terms of Service");
+        assert_eq!(
+            hold.notice_body,
+            "Uploads are paused until you accept the new terms."
+        );
+        assert_eq!(hold.review, "Review terms");
+        assert_eq!(hold.menu_row, "Uploads paused: new Terms of Service");
     }
 }

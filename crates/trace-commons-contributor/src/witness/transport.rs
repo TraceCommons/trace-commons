@@ -31,6 +31,11 @@ pub const WITNESS_CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
 /// The header the signature travels in.
 pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
+/// The error label a witness answers with when its own request deadline
+/// ran out (`504`). One spelling, shared with the witness through
+/// `trace_commons_protocol::witness_refusal`.
+pub use trace_commons_protocol::witness_refusal::WITNESS_REQUEST_TIMED_OUT;
+
 /// A contributor's attestation nonce: exactly 32 bytes, fresh per
 /// verification.
 ///
@@ -174,7 +179,9 @@ pub trait WitnessTransport: Send + Sync {
     /// `POST /v1/attestation-collateral` against **ingest**, not the witness.
     async fn collateral(&self, quote: &[u8]) -> Result<Collateral, WitnessTrustError>;
 
-    /// `POST /v1/witness` with the raw contribution.
+    /// Review the raw contribution: submit it as a job to
+    /// `POST /v1/witness/jobs` and poll for the answer, or, on the
+    /// admission-evidence profile, `POST /v1/witness/admission`.
     ///
     /// Takes `&VerifiedWitness` rather than a URL, and that is the whole
     /// point: an implementation cannot be called without one, and only
@@ -474,7 +481,8 @@ fn verify_admission_context(
     Ok(())
 }
 
-/// The `POST /v1/witness` request document.
+/// The witness request document (`POST /v1/witness/jobs`, and the body the
+/// retired `POST /v1/witness` took).
 ///
 /// Split out of [`witness_contribution`] so that the AGPL crate's
 /// `witness_certificate_cross_implementation` test can drive the server's real
@@ -670,32 +678,6 @@ pub fn verify_certificate(
     Ok(())
 }
 
-/// The redaction pipeline a certificate certifies, read only once
-/// [`verify_certificate`] has accepted it against `pinned_address`.
-///
-/// This is the witness's `redaction_pipeline_version()` alias -- the value
-/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
-/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
-/// read that field any other way: an unverified copy of it is a claim, and
-/// is exactly what a certificate over some other artifact, or from some
-/// other key, would carry.
-///
-/// Returned as the exact string signed. Nothing here trims, lowercases or
-/// otherwise normalises it; a caller comparing it must compare exactly.
-pub fn certified_redaction_pipeline_version(
-    response: &WitnessedEnvelope,
-    pinned_address: &str,
-) -> Result<String, WitnessTrustError> {
-    verify_certificate(response, pinned_address)?;
-    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
-        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
-    certificate
-        .get("redaction_policy_version")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .ok_or(WitnessTrustError::WitnessResponseMalformed)
-}
-
 /// Recover the signer from a stored certificate without exposing its raw
 /// signature or certificate JSON to a shell.
 ///
@@ -847,6 +829,141 @@ pub(crate) async fn fetch_collateral(
     parse_collateral(body).map_err(|_| CollateralUnavailable)
 }
 
+/// Read a non-success witness answer as the refusal it names.
+///
+/// The status alone cannot separate "declined your receipt" from
+/// "answered nonsense", and those are opposite instructions to a
+/// contributor. The body is attacker-influenceable, so it selects
+/// nothing by itself: it is matched against the protocol's closed set and
+/// must agree with the status (`witness_refusal::classify_witness_refusal`).
+/// Only the status can make an answer retryable.
+///
+/// Only the head of the body is read. A refusal envelope is a few
+/// dozen bytes, and a witness that answers a refusal with megabytes
+/// is not one whose body should be buffered whole.
+async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
+    let status = response.status().as_u16();
+    let retry_after_secs = saturation_retry_after(response.headers());
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        // A body that never finishes is the witness not answering in time;
+        // one that breaks off otherwise is read by its status alone.
+        Err(error) => {
+            return send_failure(&error, refusal_from_parts(status, retry_after_secs, None));
+        }
+    };
+    refusal_from_body(status, retry_after_secs, &body)
+}
+
+/// [`refusal_from_parts`] for a refusal whose body was read: the label, and
+/// for a trace too large to review, the two counts beside it.
+fn refusal_from_body(status: u16, retry_after_secs: u32, body: &[u8]) -> WitnessTrustError {
+    let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+    let limits = serde_json::from_slice::<serde_json::Value>(head)
+        .ok()
+        .and_then(|value| trace_commons_protocol::witness_refusal::review_limits(&value));
+    refusal_from_parts_with(
+        status,
+        retry_after_secs,
+        refusal_label(body).as_deref(),
+        limits,
+    )
+}
+
+/// The bound on how much of a refusal body is read.
+const REFUSAL_BODY_BOUND: usize = 4096;
+
+/// The `error` label at the head of a refusal body, if it has one.
+fn refusal_label(body: &[u8]) -> Option<String> {
+    let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+    serde_json::from_slice::<serde_json::Value>(head)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+}
+
+/// [`refusal_from`], once the status, the delay and the label are read, for
+/// a caller that has no body to read counts from.
+fn refusal_from_parts(
+    status: u16,
+    retry_after_secs: u32,
+    label: Option<&str>,
+) -> WitnessTrustError {
+    refusal_from_parts_with(status, retry_after_secs, label, None)
+}
+
+/// [`refusal_from_parts`], with the `(windows_needed, windows_allowed)` a
+/// too-large refusal carries in its body.
+fn refusal_from_parts_with(
+    status: u16,
+    retry_after_secs: u32,
+    label: Option<&str>,
+    review_limits: Option<(u64, u64)>,
+) -> WitnessTrustError {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    use trace_commons_protocol::witness_refusal::{WitnessRefusalClass, classify_witness_refusal};
+    // A declined receipt on the evidence route. Every other refusal in
+    // that set belongs to the ingest gate, which is not what answered here.
+    if label.and_then(|label| AdmissionRefusal::from_response(status, label))
+        == Some(AdmissionRefusal::EvidenceRefused)
+    {
+        return WitnessTrustError::WitnessAdmissionEvidenceRefused;
+    }
+    // These exact pairs say the witness received the job but could not
+    // complete its privacy work. Preserve the cause through the queue;
+    // treating them as a failed connection hides why a retry is needed.
+    match (status, label) {
+        (503, Some(trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE)) => {
+            return WitnessTrustError::WitnessClassifierUnavailable;
+        }
+        (503, Some(trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED)) => {
+            return WitnessTrustError::WitnessRedactionFailed;
+        }
+        _ => {}
+    }
+    match classify_witness_refusal(status, label) {
+        // Capacity, and only on the exact pair: a witness that is busy
+        // judged nothing and names its own delay.
+        WitnessRefusalClass::Saturated => WitnessTrustError::WitnessSaturated { retry_after_secs },
+        // The witness's own deadline, or a gateway's, ran out and nothing
+        // was certified. The same instruction to a person as this client's
+        // deadline running out, so the same label.
+        WitnessRefusalClass::TimedOut => WitnessTrustError::WitnessTimeout,
+        // The witness, or the gateway in front of it, cannot serve right
+        // now: a 5xx, or a gateway 404 with no instance behind it. Nothing
+        // was judged, so it is the label the daemon already retries on the
+        // transient backoff (`submit::witness_failure_is_transient`).
+        // Never a final refusal of the trace.
+        WitnessRefusalClass::Unavailable => WitnessTrustError::WitnessUnreachable,
+        // The witness's own size bound: the same instruction as this
+        // client's local one.
+        WitnessRefusalClass::TooLarge => WitnessTrustError::WitnessPayloadTooLarge,
+        // The deployment declined the receipt behind this session under its
+        // attested-inference policy: the same decision, and the same words
+        // to a person, as a declined admission receipt.
+        WitnessRefusalClass::InferenceDeclined => {
+            WitnessTrustError::WitnessAdmissionEvidenceRefused
+        }
+        // Too large to review in time: final for this session, never the
+        // transient backoff, or it would be resubmitted forever. Without
+        // both counts the answer is not the one the contract describes.
+        WitnessRefusalClass::TraceTooLargeForReview => match review_limits {
+            Some((windows_needed, windows_allowed)) => {
+                WitnessTrustError::WitnessTraceTooLargeForReview {
+                    windows_needed,
+                    windows_allowed,
+                }
+            }
+            None => WitnessTrustError::WitnessResponseMalformed,
+        },
+        // About this session's content, not the witness being down: a final
+        // refusal of the session, so the upload pass goes on to the next
+        // one instead of stopping as it does for an outage.
+        WitnessRefusalClass::TextUnclassifiable => WitnessTrustError::WitnessTextUnclassifiable,
+        // A client error this build does not recognise. Terminal, as before.
+        WitnessRefusalClass::Unrecognised => WitnessTrustError::WitnessResponseMalformed,
+    }
+}
+
 /// The HTTP implementation.
 pub struct HttpWitnessTransport {
     http: reqwest::Client,
@@ -859,6 +976,71 @@ pub struct HttpWitnessTransport {
     background_workload: bool,
     /// See [`WitnessTransport::envelope_limit_bytes`].
     envelope_limit: usize,
+    /// The per-request deadline for the quote and the collateral: the
+    /// smaller of the transport's timeout and [`WITNESS_PROBE_TIMEOUT`].
+    probe_timeout: Duration,
+    /// The deadline for a whole job review, submit to answer.
+    review_timeout: Duration,
+    /// Signed runtime routing is rechecked after body serialization.
+    routing_guard: Option<super::configuration::RoutingGuard>,
+}
+
+/// The deadline for a whole witness review: a job from submit to answer
+/// (`/v1/witness/jobs`), or one admission or token-bundle request, body
+/// included.
+///
+/// Derived from the witness's own bound, not chosen beside it: the witness
+/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (540 s since
+/// 2026-11-05, `trace-commons-witness`) and answers
+/// `504 witness_request_timed_out`. A client that gave up first (this was
+/// 120 s, then 330 s against a 300 s witness) abandoned healthy work the
+/// witness was still doing, kept a witness slot busy for nothing, and
+/// reported it as the quote endpoint being down. Thirty seconds over the
+/// witness's bound leaves room for its 504 to arrive, so the witness's own
+/// answer is the one a person normally gets. 570 s also stays under the
+/// dstack gateway's 10-minute idle close in front of the witness.
+pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(570);
+
+/// The deadline for the small witness-path calls: the quote
+/// (`/v1/attestation`) and the collateral ingest serves for it. Neither does
+/// work that scales with the session, so neither may hold a review for the
+/// length of [`WITNESS_REVIEW_TIMEOUT`].
+pub const WITNESS_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The deadline for opening a connection to the witness or to ingest on
+/// this path.
+pub const WITNESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a failed witness request was: a deadline, no connection at all, or
+/// `otherwise` -- the label the call reported before this distinction.
+///
+/// Read from `reqwest`'s own classification, never from the error's text,
+/// which can carry the URL.
+///
+/// The connect phase is asked first. A connection that never opened is
+/// `witness_unreachable` however it failed -- refused at once, or a SYN
+/// nobody answered until the connect deadline ran out. `reqwest` reports
+/// that second case as both a connect error and a timeout; on Windows it is
+/// what a closed port looks like, because the stack retries the SYN for
+/// about two seconds instead of refusing. Only a deadline that ran out once
+/// connected -- the request, the headers, the body -- is `witness_timeout`.
+fn send_failure(error: &reqwest::Error, otherwise: WitnessTrustError) -> WitnessTrustError {
+    if error.is_connect() {
+        WitnessTrustError::WitnessUnreachable
+    } else if error.is_timeout() {
+        WitnessTrustError::WitnessTimeout
+    } else {
+        otherwise
+    }
+}
+
+/// The connect deadline for a transport whose whole-request deadline is
+/// `timeout`: [`WITNESS_CONNECT_TIMEOUT`], and never more than half of
+/// `timeout`, so a connection that never opens always meets the connect
+/// deadline first and is reported as unreachable rather than as the whole
+/// request timing out.
+fn connect_deadline(timeout: Duration) -> Duration {
+    WITNESS_CONNECT_TIMEOUT.min(timeout / 2)
 }
 
 /// The longest a witness's `Retry-After` may hold a session, in seconds. One
@@ -894,9 +1076,14 @@ impl HttpWitnessTransport {
         allowlist: Arc<HostAllowlist>,
         timeout: Duration,
     ) -> Result<Self, WitnessTrustError> {
+        // `timeout` bounds every request whole -- connect, send, headers
+        // and the body read -- because `reqwest`'s client timeout covers the
+        // body too. The quote and the collateral get the shorter
+        // `probe_timeout` per request, below.
         let http = reqwest::Client::builder()
             // Raw sessions are authorized for this attested endpoint only.
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect_deadline(timeout))
             .timeout(timeout)
             .build()
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
@@ -908,7 +1095,22 @@ impl HttpWitnessTransport {
             admission_evidence: false,
             background_workload: false,
             envelope_limit: MAX_ENVELOPE_BYTES,
+            probe_timeout: timeout.min(WITNESS_PROBE_TIMEOUT),
+            review_timeout: timeout,
+            routing_guard: None,
         })
+    }
+
+    pub(crate) fn with_routing_guard(mut self, guard: super::configuration::RoutingGuard) -> Self {
+        self.routing_guard = Some(guard);
+        self
+    }
+
+    fn validate_routing(&self) -> Result<(), WitnessTrustError> {
+        if let Some(guard) = &self.routing_guard {
+            guard.validate()?;
+        }
+        Ok(())
     }
 
     /// Select the distinct evidence route only for an explicitly configured profile.
@@ -970,16 +1172,17 @@ impl WitnessTransport for HttpWitnessTransport {
             .http
             .get(url)
             .query(&[("nonce", nonce.to_hex())])
+            .timeout(self.probe_timeout)
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(WitnessTrustError::WitnessAttestationUnavailable);
         }
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         Ok(AttestationEvidence {
             quote_hex: body
                 .get("quote_hex")
@@ -999,8 +1202,12 @@ impl WitnessTransport for HttpWitnessTransport {
         let url = base
             .join(COLLATERAL_PATH)
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        fetch_collateral(&self.http, url, quote)
+        // Ingest's collateral, bounded like the quote. A collateral fetch
+        // that never answers is still `witness_collateral_unavailable`:
+        // ingest is not the witness, and the label says which one failed.
+        tokio::time::timeout(self.probe_timeout, fetch_collateral(&self.http, url, quote))
             .await
+            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?
             .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
     }
 
@@ -1009,57 +1216,14 @@ impl WitnessTransport for HttpWitnessTransport {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
-        /// Read a non-success witness answer as the refusal it names.
-        ///
-        /// The status alone cannot separate "declined your receipt" from
-        /// "answered nonsense", and those are opposite instructions to a
-        /// contributor. The body is attacker-influenceable, so it selects
-        /// nothing: it is matched against the protocol's closed set, must
-        /// agree with the status, and anything else -- an unknown label, a
-        /// body that is not JSON, no body at all -- keeps the answer this
-        /// client gave before.
-        ///
-        /// Only the head of the body is read. A refusal envelope is a few
-        /// dozen bytes, and a witness that answers a refusal with megabytes
-        /// is not one whose body should be buffered whole.
-        async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
-            const REFUSAL_BODY_BOUND: usize = 4096;
-            let status = response.status().as_u16();
-            let retry_after_secs = saturation_retry_after(response.headers());
-            let Ok(body) = response.bytes().await else {
-                return WitnessTrustError::WitnessResponseMalformed;
-            };
-            let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
-            let label = serde_json::from_slice::<serde_json::Value>(head)
-                .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_string));
-            // Capacity first, and only on the exact pair: a witness that is
-            // busy judged nothing, so this is the one refusal a session is
-            // held through rather than refused on.
-            if label.as_deref().is_some_and(|label| {
-                trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
-            }) {
-                return WitnessTrustError::WitnessSaturated { retry_after_secs };
-            }
-            match label.as_deref().and_then(|label| {
-                trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
-            }) {
-                Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
-                    WitnessTrustError::WitnessAdmissionEvidenceRefused
-                }
-                // Every other refusal in that set belongs to the ingest gate,
-                // which is not what answered here.
-                _ => WitnessTrustError::WitnessResponseMalformed,
-            }
-        }
-
+        self.validate_routing()?;
         let base = self.allowed(witness.url())?;
+        if !self.admission_evidence {
+            return self.witness_job(&base, body).await;
+        }
+        // The admission-evidence review is still one long request.
         let url = base
-            .join(if self.admission_evidence {
-                "/v1/witness/admission"
-            } else {
-                "/v1/witness"
-            })
+            .join("/v1/witness/admission")
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
         let mut request = self
             .http
@@ -1071,46 +1235,388 @@ impl WitnessTransport for HttpWitnessTransport {
             };
             request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
         }
+        // A send that fails is the witness call failing, not the quote
+        // endpoint: a deadline is `witness_timeout`, no connection is
+        // `witness_unreachable`. Anything else keeps the label this call
+        // always reported.
         let response = request
             .body(body.to_vec())
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(refusal_from(response).await);
         }
-        let headers = response.headers().clone();
-        let read = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-                .ok_or(WitnessTrustError::WitnessResponseMalformed)
-        };
-        let certificate_json = read(WITNESS_CERTIFICATE_HEADER)?;
-        let signature_hex = read(WITNESS_SIGNATURE_HEADER)?;
-        let admission = if self.admission_evidence {
-            Some(AdmissionHeaders {
-                evidence_json: read(trace_commons_protocol::admission::EVIDENCE_HEADER)?,
-                signature_hex: read(trace_commons_protocol::admission::SIGNATURE_HEADER)?,
-            })
-        } else {
-            None
-        };
-        // `bytes()`, never `json()`: the certificate covers these exact bytes
-        // and a parse-then-reserialise here would break the digest before the
-        // client ever checked it.
-        let envelope_bytes = response
-            .bytes()
-            .await
-            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
-            .to_vec();
-        Ok(WitnessedEnvelope {
-            envelope_bytes,
-            certificate_json,
-            signature_hex,
-            admission,
+        certified_answer(response, true).await
+    }
+}
+
+/// A `200` witness answer, read as the envelope and its certificate.
+///
+/// `bytes()`, never `json()`: the certificate covers these exact bytes and
+/// a parse-then-reserialise here would break the digest before the client
+/// ever checked it.
+async fn certified_answer(
+    response: reqwest::Response,
+    admission: bool,
+) -> Result<WitnessedEnvelope, WitnessTrustError> {
+    let headers = response.headers().clone();
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or(WitnessTrustError::WitnessResponseMalformed)
+    };
+    let certificate_json = read(WITNESS_CERTIFICATE_HEADER)?;
+    let signature_hex = read(WITNESS_SIGNATURE_HEADER)?;
+    let admission = if admission {
+        Some(AdmissionHeaders {
+            evidence_json: read(trace_commons_protocol::admission::EVIDENCE_HEADER)?,
+            signature_hex: read(trace_commons_protocol::admission::SIGNATURE_HEADER)?,
         })
+    } else {
+        None
+    };
+    let envelope_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
+        .to_vec();
+    Ok(WitnessedEnvelope {
+        envelope_bytes,
+        certificate_json,
+        signature_hex,
+        admission,
+    })
+}
+
+/// Where to poll a job: the witness URL with its gateway id swapped for the
+/// instance that holds the job, or the witness URL itself.
+///
+/// The dstack gateway routes the first label of a host, `<id>[-<port>...]`,
+/// to one instance when `id` is an instance id and to any instance of an app
+/// when it is an app id. So when the witness URL's first label starts with
+/// an app id (lowercase hex), only that id is replaced; the port suffix and
+/// the gateway's domain are kept. The instance id comes from the witness's
+/// answer and is used only if it is 8 to 64 lowercase hex characters, so it
+/// cannot reshape the host. Any other URL is polled as it is.
+///
+/// The derived host is deliberately not checked against the configured
+/// allowlist, which is exact-match: it is the allowlisted host with one
+/// label's id swapped for a validated hex id, and only the fetch secret
+/// goes there, never a session. The answer is still verified against the
+/// pinned signing key, which every instance of the app shares.
+pub(crate) fn instance_poll_base(base: &url::Url, instance_id: Option<&str>) -> url::Url {
+    use trace_commons_protocol::witness_jobs::is_instance_id;
+    let Some(instance_id) = instance_id.filter(|id| is_instance_id(id)) else {
+        return base.clone();
+    };
+    let Some((first, domain)) = base.host_str().and_then(|host| host.split_once('.')) else {
+        return base.clone();
+    };
+    let (app_id, port_suffix) = match first.split_once('-') {
+        Some((app_id, suffix)) => (app_id, Some(suffix)),
+        None => (first, None),
+    };
+    if !is_instance_id(app_id) {
+        return base.clone();
+    }
+    let label = match port_suffix {
+        Some(suffix) => format!("{instance_id}-{suffix}"),
+        None => instance_id.to_string(),
+    };
+    let mut polled = base.clone();
+    if polled.set_host(Some(&format!("{label}.{domain}"))).is_err() {
+        return base.clone();
+    }
+    polled
+}
+
+/// A submitted job, as this client holds it: in memory, for one review.
+struct SubmittedJob {
+    job_id: String,
+    secret_hex: String,
+    poll_base: url::Url,
+    poll_after_secs: u32,
+}
+
+impl std::fmt::Debug for SubmittedJob {
+    /// Withholds the id and the secret.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SubmittedJob { .. }")
+    }
+}
+
+/// Why polling stopped without an answer that can be returned as is.
+enum PollMiss {
+    /// The witness no longer has the job (restarted, expired, cancelled,
+    /// unreadable). Resubmit.
+    Gone,
+    /// The instance holding the job could not be reached, or something
+    /// other than the witness answered. Resubmit.
+    InstanceUnreachable,
+    /// A final answer from the witness, or a deadline.
+    Final(WitnessTrustError),
+}
+
+/// One second of `poll_after_secs`, in milliseconds. Ten in this crate's
+/// own tests, so the many witness doubles that answer at once do not each
+/// cost a second of wall clock; the clamping and jitter are the same.
+#[cfg(not(test))]
+const POLL_UNIT_MS: u64 = 1000;
+#[cfg(test)]
+const POLL_UNIT_MS: u64 = 10;
+
+/// `poll_after_secs` as a wait: clamped to the contract's range, with
+/// +/-20% jitter so clients that submitted together do not poll together.
+fn poll_wait(poll_after_secs: u32) -> Duration {
+    use ring::rand::SecureRandom as _;
+    use trace_commons_protocol::witness_jobs::{MAX_POLL_AFTER_SECS, MIN_POLL_AFTER_SECS};
+    let base_ms =
+        u64::from(poll_after_secs.clamp(MIN_POLL_AFTER_SECS, MAX_POLL_AFTER_SECS)) * POLL_UNIT_MS;
+    let mut byte = [0u8; 1];
+    // No randomness is a wait without jitter, not a failure.
+    let jitter = if ring::rand::SystemRandom::new().fill(&mut byte).is_ok() {
+        f64::from(byte[0]) / 255.0 * 0.4 - 0.2
+    } else {
+        0.0
+    };
+    Duration::from_millis((base_ms as f64 * (1.0 + jitter)) as u64)
+}
+
+impl HttpWitnessTransport {
+    /// Submit-then-poll (`/v1/witness/jobs`): the review a person or the
+    /// daemon asked for, without a connection held open for its length.
+    ///
+    /// One resubmit through the witness URL when the job is gone or its
+    /// instance cannot be reached; a second miss is `witness_unreachable`,
+    /// which the daemon already retries. The whole review keeps the
+    /// transport's deadline; when it runs out the job is cancelled, best
+    /// effort, and the answer is `witness_timeout`.
+    async fn witness_job(
+        &self,
+        base: &url::Url,
+        body: &[u8],
+    ) -> Result<WitnessedEnvelope, WitnessTrustError> {
+        let deadline = tokio::time::Instant::now() + self.review_timeout;
+        let mut resubmitted = false;
+        loop {
+            // A resubmit is held to the same deadline as the first submit:
+            // the review's budget does not restart.
+            let job = tokio::time::timeout_at(deadline, self.submit_job(base, body))
+                .await
+                .map_err(|_| WitnessTrustError::WitnessTimeout)?
+                .map_err(|error| {
+                    // A first POST already disclosed this request. Do not
+                    // turn a later policy withdrawal into a pre-send pin
+                    // refusal that the caller could refresh and reroute.
+                    if resubmitted
+                        && matches!(error, WitnessTrustError::WitnessMeasurementUnpinned { .. })
+                    {
+                        WitnessTrustError::WitnessUnreachable
+                    } else {
+                        error
+                    }
+                })?;
+            match self.poll_job(&job, deadline).await {
+                Ok(envelope) => return Ok(envelope),
+                Err(PollMiss::Final(error)) => return Err(error),
+                Err(PollMiss::Gone | PollMiss::InstanceUnreachable) if !resubmitted => {
+                    resubmitted = true;
+                }
+                Err(PollMiss::Gone | PollMiss::InstanceUnreachable) => {
+                    return Err(WitnessTrustError::WitnessUnreachable);
+                }
+            }
+        }
+    }
+
+    async fn submit_job(
+        &self,
+        base: &url::Url,
+        body: &[u8],
+    ) -> Result<SubmittedJob, WitnessTrustError> {
+        use ring::rand::SecureRandom as _;
+        use sha2::Digest as _;
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_LEN, WITNESS_FETCH_SECRET_SHA256_HEADER, WITNESS_JOBS_PATH,
+            WitnessJobAccepted, is_hex_of_len,
+        };
+        let mut secret = [0u8; WITNESS_FETCH_SECRET_LEN];
+        ring::rand::SystemRandom::new()
+            .fill(&mut secret)
+            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+        let secret_hash = hex::encode(sha2::Sha256::digest(secret));
+        let url = base
+            .join(WITNESS_JOBS_PATH)
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
+        let mut request = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(WITNESS_FETCH_SECRET_SHA256_HEADER, secret_hash);
+        if self.background_workload {
+            use trace_commons_protocol::witness_pacing::{
+                WITNESS_BACKGROUND_WORKLOAD, WITNESS_WORKLOAD_HEADER,
+            };
+            request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
+        }
+        // A send that fails is the witness call failing, not the quote
+        // endpoint: a deadline is `witness_timeout`, no connection is
+        // `witness_unreachable`. Anything else keeps the label this call
+        // always reported.
+        let request = request.body(body.to_vec());
+        // Also covers the same-endpoint resubmit after a gone/unreachable
+        // job. Recheck after copying the body, directly before every POST.
+        self.validate_routing()?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            // A witness that predates the job routes answers a bare 404 here
+            // (it still serves `/v1/attestation`, so the client got this
+            // far). Nothing was judged: it is the polling witness not being
+            // deployed yet, which the daemon retries as unreachable rather
+            // than refusing the session.
+            let retry_after_secs = saturation_retry_after(response.headers());
+            let body = response.bytes().await.unwrap_or_default();
+            return Err(match refusal_label(&body) {
+                None => WitnessTrustError::WitnessUnreachable,
+                label => refusal_from_parts(404, retry_after_secs, label.as_deref()),
+            });
+        }
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(refusal_from(response).await);
+        }
+        let accepted: WitnessJobAccepted = serde_json::from_slice(
+            &response
+                .bytes()
+                .await
+                .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?,
+        )
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if !is_hex_of_len(
+            &accepted.job_id,
+            trace_commons_protocol::witness_jobs::WITNESS_JOB_ID_LEN,
+        ) {
+            return Err(WitnessTrustError::WitnessResponseMalformed);
+        }
+        Ok(SubmittedJob {
+            job_id: accepted.job_id,
+            secret_hex: hex::encode(secret),
+            poll_base: instance_poll_base(base, accepted.instance_id.as_deref()),
+            poll_after_secs: accepted.poll_after_secs,
+        })
+    }
+
+    fn job_url(job: &SubmittedJob) -> Result<url::Url, WitnessTrustError> {
+        job.poll_base
+            .join(&format!(
+                "{}/{}",
+                trace_commons_protocol::witness_jobs::WITNESS_JOBS_PATH,
+                job.job_id
+            ))
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)
+    }
+
+    async fn poll_job(
+        &self,
+        job: &SubmittedJob,
+        deadline: tokio::time::Instant,
+    ) -> Result<WitnessedEnvelope, PollMiss> {
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_HEADER, WITNESS_JOB_GONE_ERROR, WitnessJobPending,
+        };
+        let url = Self::job_url(job).map_err(PollMiss::Final)?;
+        let mut wait = poll_wait(job.poll_after_secs);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now + wait >= deadline {
+                tokio::time::sleep_until(deadline).await;
+                self.cancel_job(job).await;
+                return Err(PollMiss::Final(WitnessTrustError::WitnessTimeout));
+            }
+            tokio::time::sleep(wait).await;
+            let response = match self
+                .http
+                .get(url.clone())
+                .header(WITNESS_FETCH_SECRET_HEADER, job.secret_hex.as_str())
+                .timeout(self.probe_timeout)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                // A poll that cannot reach the instance, or times out, is
+                // the instance gone as far as this job is concerned.
+                Err(_) => return Err(PollMiss::InstanceUnreachable),
+            };
+            let status = response.status();
+            if status == reqwest::StatusCode::OK {
+                return certified_answer(response, false)
+                    .await
+                    .map_err(PollMiss::Final);
+            }
+            if status == reqwest::StatusCode::ACCEPTED {
+                let pending: WitnessJobPending = match response.bytes().await {
+                    Ok(body) => serde_json::from_slice(&body).map_err(|_| {
+                        PollMiss::Final(WitnessTrustError::WitnessResponseMalformed)
+                    })?,
+                    Err(_) => return Err(PollMiss::InstanceUnreachable),
+                };
+                wait = poll_wait(pending.poll_after_secs);
+                continue;
+            }
+            let retry_after_secs = saturation_retry_after(response.headers());
+            let Ok(body) = response.bytes().await else {
+                return Err(PollMiss::InstanceUnreachable);
+            };
+            return match refusal_label(&body).as_deref() {
+                Some(WITNESS_JOB_GONE_ERROR) if status == reqwest::StatusCode::NOT_FOUND => {
+                    Err(PollMiss::Gone)
+                }
+                // The witness's own answer for this job: the same refusal
+                // the single request used to give.
+                Some(_) => Err(PollMiss::Final(refusal_from_body(
+                    status.as_u16(),
+                    retry_after_secs,
+                    &body,
+                ))),
+                // No label from a gateway that cannot serve (a 5xx, or a
+                // 404 with no instance behind it): something other than
+                // the witness answered, so the job's instance is as good
+                // as unreachable and the job is resubmitted once.
+                None if refusal_from_parts(status.as_u16(), retry_after_secs, None)
+                    == WitnessTrustError::WitnessUnreachable =>
+                {
+                    Err(PollMiss::InstanceUnreachable)
+                }
+                // Any other unlabelled answer is read by its status alone.
+                None => Err(PollMiss::Final(refusal_from_parts(
+                    status.as_u16(),
+                    retry_after_secs,
+                    None,
+                ))),
+            };
+        }
+    }
+
+    /// Best effort: tell the witness to drop a job this client gave up on.
+    async fn cancel_job(&self, job: &SubmittedJob) {
+        let Ok(url) = Self::job_url(job) else {
+            return;
+        };
+        let _ = self
+            .http
+            .delete(url)
+            .header(
+                trace_commons_protocol::witness_jobs::WITNESS_FETCH_SECRET_HEADER,
+                job.secret_hex.as_str(),
+            )
+            .timeout(self.probe_timeout)
+            .send()
+            .await;
     }
 }
 
@@ -1176,19 +1682,38 @@ async fn token_review_refusal(response: reqwest::Response) -> WitnessTrustError 
     const REFUSAL_BODY_BOUND: usize = 4096;
     let status = response.status().as_u16();
     let retry_after_secs = saturation_retry_after(response.headers());
-    let saturated = match response.bytes().await {
+    let body = match response.bytes().await {
         Ok(body) => {
             serde_json::from_slice::<serde_json::Value>(&body[..body.len().min(REFUSAL_BODY_BOUND)])
                 .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_string))
-                .is_some_and(|label| {
-                    trace_commons_protocol::witness_pacing::is_witness_saturation(status, &label)
-                })
         }
-        Err(_) => false,
+        Err(_) => None,
     };
+    let label = body
+        .as_ref()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_string));
+    let saturated = label.as_deref().is_some_and(|label| {
+        trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
+    });
+    let timed_out = label.as_deref() == Some(WITNESS_REQUEST_TIMED_OUT);
+    let too_large = status == 422
+        && label.as_deref()
+            == Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW);
     if saturated {
         WitnessTrustError::WitnessSaturated { retry_after_secs }
+    } else if status == 504 && timed_out {
+        WitnessTrustError::WitnessTimeout
+    } else if let Some((windows_needed, windows_allowed)) = too_large
+        .then_some(body.as_ref())
+        .flatten()
+        .and_then(trace_commons_protocol::witness_refusal::review_limits)
+    {
+        // The same final refusal as on the ordinary route: the session is
+        // too large to review, not declined for its receipt.
+        WitnessTrustError::WitnessTraceTooLargeForReview {
+            windows_needed,
+            windows_allowed,
+        }
     } else {
         WitnessTrustError::WitnessAdmissionEvidenceRefused
     }
@@ -1227,6 +1752,7 @@ impl HttpWitnessTransport {
         if body.len() > MAX_WITNESS_REQUEST_BYTES {
             return Err(WitnessTrustError::WitnessPayloadTooLarge);
         }
+        self.validate_routing()?;
         let url = self
             .allowed(witness.url())?
             .join("/v1/witness/token-bundle")
@@ -1238,7 +1764,7 @@ impl HttpWitnessTransport {
             .body(body)
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(token_review_refusal(response).await);
         }
@@ -1246,7 +1772,7 @@ impl HttpWitnessTransport {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
         {
             if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
                 return Err(WitnessTrustError::WitnessPayloadTooLarge);
@@ -1484,7 +2010,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
+            let _ = axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
                 .with_graceful_shutdown(async {
                     let _ = rx.await;
                 })
@@ -2050,6 +2576,7 @@ mod tests {
                     .unwrap()
                     .unwrap(),
             ],
+            accepted: Vec::new(),
         }
     }
 
@@ -2151,6 +2678,7 @@ mod tests {
         let unpinned = crate::witness::WitnessTrust {
             signing_address: address_of(&test_signer("witness")),
             measurements: Vec::new(),
+            accepted: Vec::new(),
         };
 
         let err = crate::witness::witness_session(
@@ -2205,17 +2733,30 @@ mod tests {
         assert_eq!(err.refusal_label(), refusal.label());
     }
 
-    /// The fail-closed half: a non-2xx that carries no label this client
-    /// knows is still what it always was.
+    /// The fail-closed half: a client error this client does not recognise
+    /// stays terminal, and is still the malformed answer it always was. A
+    /// witness that cannot serve right now (any 5xx, whatever its label) is
+    /// a retryable `witness_unreachable`, never a refusal of the session.
     #[tokio::test]
-    async fn an_unlabelled_failure_is_still_a_malformed_response() {
+    async fn only_an_unrecognised_client_error_is_still_a_malformed_response() {
         let signer = test_signer("witness");
-        for answer in [
-            // No body at all.
-            None,
-            // A label on a status it is never sent with.
-            Some((500, "admission_evidence_refused")),
-            Some((403, "something_else_entirely")),
+        for (answer, expected) in [
+            // A 503 with no body: the witness's own double when it has no
+            // answer, and what a gateway sends with nothing behind it.
+            (None, WitnessTrustError::WitnessUnreachable),
+            // A label on a status it is never sent with: the status wins.
+            (
+                Some((500, "admission_evidence_refused")),
+                WitnessTrustError::WitnessUnreachable,
+            ),
+            (
+                Some((403, "something_else_entirely")),
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
+            (
+                Some((400, "witness_request_malformed")),
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
         ] {
             let server = local_witness(Answers {
                 witness_refusal: answer,
@@ -2231,12 +2772,165 @@ mod tests {
                 witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
                     .await
                     .expect_err("a failed witness call is a refusal");
+            assert_eq!(err, expected, "{answer:?}");
+        }
+    }
+
+    /// Every refusal the witness sends maps to one client refusal, by status
+    /// and label together. Before this, everything outside saturation, the
+    /// witness's own timeout and a declined receipt read as
+    /// `witness_response_malformed`, a terminal refusal: a witness outage
+    /// refused every approved session that met it.
+    #[test]
+    fn each_witness_refusal_maps_to_one_client_refusal() {
+        use WitnessTrustError::*;
+        use trace_commons_protocol::witness_refusal::{
+            WITNESS_INFERENCE_REFUSALS, WITNESS_REQUEST_TOO_LARGE, WITNESS_UNAVAILABLE_REFUSALS,
+        };
+        let mut table: Vec<(u16, Option<&str>, WitnessTrustError)> = vec![
+            (
+                503,
+                Some("witness_saturated"),
+                WitnessSaturated {
+                    retry_after_secs: 7,
+                },
+            ),
+            (504, Some(WITNESS_REQUEST_TIMED_OUT), WitnessTimeout),
+            (504, None, WitnessTimeout),
+            (
+                403,
+                Some("admission_evidence_refused"),
+                WitnessAdmissionEvidenceRefused,
+            ),
+            (413, Some(WITNESS_REQUEST_TOO_LARGE), WitnessPayloadTooLarge),
+            (413, None, WitnessPayloadTooLarge),
+            // A crashed or oversized job's sealed answer.
+            (
+                503,
+                Some("witness_redaction_failed"),
+                WitnessRedactionFailed,
+            ),
+            // The witness's classifier stayed unavailable through its
+            // retries: retried exactly as a redaction failure is.
+            (
+                503,
+                Some("witness_classifier_unavailable"),
+                WitnessClassifierUnavailable,
+            ),
+            // Gateway answers while the witness VM is down.
+            (404, None, WitnessUnreachable),
+            (502, None, WitnessUnreachable),
+            (503, None, WitnessUnreachable),
+            (500, None, WitnessUnreachable),
+            (429, None, WitnessUnreachable),
+            // Client errors and unknown 4xx labels stay terminal.
+            (
+                400,
+                Some("witness_request_malformed"),
+                WitnessResponseMalformed,
+            ),
+            (
+                400,
+                Some("witness_workload_malformed"),
+                WitnessResponseMalformed,
+            ),
+            (403, None, WitnessResponseMalformed),
+            (403, Some("something_else"), WitnessResponseMalformed),
+            // A label never makes a 4xx retryable.
+            (
+                404,
+                Some("witness_redaction_failed"),
+                WitnessResponseMalformed,
+            ),
+            (
+                404,
+                Some("witness_classifier_unavailable"),
+                WitnessResponseMalformed,
+            ),
+        ];
+        for label in WITNESS_UNAVAILABLE_REFUSALS {
+            let expected = match label {
+                "witness_classifier_unavailable" => WitnessClassifierUnavailable,
+                "witness_redaction_failed" => WitnessRedactionFailed,
+                _ => WitnessUnreachable,
+            };
+            table.push((503, Some(label), expected));
+        }
+        // A matching label under another status must not invent a precise
+        // cause. Unknown 5xx remains unavailable; 4xx stays terminal.
+        for label in ["witness_classifier_unavailable", "witness_redaction_failed"] {
+            table.push((500, Some(label), WitnessUnreachable));
+            table.push((400, Some(label), WitnessResponseMalformed));
+        }
+        for label in WITNESS_INFERENCE_REFUSALS {
+            table.push((403, Some(label), WitnessAdmissionEvidenceRefused));
+        }
+        for (status, label, expected) in table {
             assert_eq!(
-                err,
-                WitnessTrustError::WitnessResponseMalformed,
-                "{answer:?}"
+                refusal_from_parts(status, 7, label),
+                expected,
+                "{status} {label:?}"
             );
         }
+    }
+
+    /// The retryable ones are retryable downstream: `submit` keeps the
+    /// session `Failed` rather than refusing it, and the daemon retries it
+    /// on the transient-upload backoff.
+    #[test]
+    fn a_witness_that_cannot_serve_is_a_transient_failure_downstream() {
+        for (status, label) in [
+            (503, Some("witness_signing_unavailable")),
+            (503, Some("witness_contribution_path_unavailable")),
+            (503, Some("witness_redaction_failed")),
+            (503, Some("witness_classifier_unavailable")),
+            (502, None),
+            (404, None),
+            (504, None),
+        ] {
+            let label_out = refusal_from_parts(status, 0, label).refusal_label();
+            assert!(
+                crate::submit::witness_failure_is_transient(label_out),
+                "{status} {label:?} -> {label_out}"
+            );
+        }
+        for (status, label) in [
+            (422, Some("witness_text_unclassifiable")),
+            (413, Some("witness_request_too_large")),
+            (403, Some("witness_inference_receipt_unverified")),
+            (400, Some("witness_request_malformed")),
+        ] {
+            let label_out = refusal_from_parts(status, 0, label).refusal_label();
+            assert!(
+                !crate::submit::witness_failure_is_transient(label_out),
+                "{status} {label:?} -> {label_out}"
+            );
+        }
+    }
+
+    /// A genuine parse failure of a success answer is still malformed: a
+    /// 200 with no certificate header.
+    #[tokio::test]
+    async fn a_success_answer_without_its_certificate_is_still_malformed() {
+        let app = Router::new().route(
+            "/v1/witness",
+            post(|| async { (StatusCode::OK, "not an envelope").into_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
+        });
+        let transport = transport_for(&url, permissive());
+        let key = test_signer("malformed");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("no certificate, no certified answer");
+        assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+        task.abort();
     }
 
     #[tokio::test]
@@ -2315,7 +3009,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
         });
         (url, seen, task)
     }
@@ -2373,27 +3069,35 @@ mod tests {
         }
     }
 
-    /// Only the exact pair is saturation. A 503 with another label, and the
-    /// saturation label on another status, keep the fail-closed reading.
+    /// Only the exact pair is saturation. A 503 with another label is a
+    /// witness that cannot serve (`witness_unreachable`, retried on the
+    /// transient backoff rather than the witness's own delay), and the
+    /// saturation label on another status is no capacity refusal either.
     #[tokio::test]
     async fn only_the_exact_saturation_pair_is_a_capacity_refusal() {
-        let replies: [fn() -> Response; 2] = [
-            || {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({"error": "something_else"})),
-                )
-                    .into_response()
-            },
-            || {
-                (
-                    StatusCode::FORBIDDEN,
-                    axum::Json(serde_json::json!({"error": "witness_saturated"})),
-                )
-                    .into_response()
-            },
+        let replies: [(fn() -> Response, WitnessTrustError); 2] = [
+            (
+                || {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error": "something_else"})),
+                    )
+                        .into_response()
+                },
+                WitnessTrustError::WitnessUnreachable,
+            ),
+            (
+                || {
+                    (
+                        StatusCode::FORBIDDEN,
+                        axum::Json(serde_json::json!({"error": "witness_saturated"})),
+                    )
+                        .into_response()
+                },
+                WitnessTrustError::WitnessResponseMalformed,
+            ),
         ];
-        for reply in replies {
+        for (reply, expected) in replies {
             let (url, _seen, task) = capacity_witness(reply).await;
             let transport = transport_for(&url, permissive());
             let key = test_signer("capacity");
@@ -2403,7 +3107,7 @@ mod tests {
                 witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
                     .await
                     .expect_err("a refusal");
-            assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+            assert_eq!(err, expected);
             task.abort();
         }
     }
@@ -2459,7 +3163,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
         });
         let source = r#"{"metadata":{"trace_commons_admission":"tcad1:malformed"}}"#;
         let profile = crate::submit::admission_profile_for_request(true, Some(source)).unwrap();
@@ -2928,7 +3634,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
 
         let store = crate::config::ConfigStore::open(state.path().to_path_buf()).expect("store");
         let shared = std::sync::Arc::new(
@@ -3017,7 +3727,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("isolated-call");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3097,7 +3811,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("isolated-call");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3187,7 +3905,11 @@ mod tests {
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let task = tokio::spawn(async move {
+                axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                    .await
+                    .unwrap()
+            });
             let transport = transport_for(&url, permissive())
                 .with_admission_evidence(true)
                 .with_background_workload(true);
@@ -3278,7 +4000,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("declaration");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3680,5 +4406,707 @@ mod tests {
         assert_eq!(target_hits.load(Ordering::SeqCst), 0);
         origin_task.abort();
         target_task.abort();
+    }
+
+    // --- Deadlines -------------------------------------------------------
+    //
+    // A witness (or ingest) that accepts the connection and then never
+    // answers must cost a bounded wait and a label that says so, never an
+    // indefinite one. Each stub below holds every accepted socket open
+    // without writing, or writes only part of an answer.
+
+    /// Accepts connections and never answers. Returns the base URL; the
+    /// task holds every socket until it is aborted.
+    async fn silent_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (base, task)
+    }
+
+    /// Answers every request with a complete witness head and then stalls
+    /// the body forever.
+    async fn stalled_body_server() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = socket.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: 1000\r\n{WITNESS_CERTIFICATE_HEADER}: c\r\n\
+                     {WITNESS_SIGNATURE_HEADER}: s\r\n\r\n{{"
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                held.push(socket);
+            }
+        });
+        (base, task)
+    }
+
+    const TEST_DEADLINE: Duration = Duration::from_millis(300);
+    /// Far above `TEST_DEADLINE` and far below anything that reads as a hang.
+    const TEST_CEILING: Duration = Duration::from_secs(10);
+
+    fn deadline_transport(witness: &str, collateral: &str) -> HttpWitnessTransport {
+        HttpWitnessTransport::new(
+            witness.to_string(),
+            collateral.to_string(),
+            Arc::new(permissive()),
+            TEST_DEADLINE,
+        )
+        .expect("the transport builds")
+    }
+
+    #[tokio::test]
+    async fn a_silent_attestation_endpoint_times_out_with_its_own_label() {
+        let (base, task) = silent_server().await;
+        let transport = deadline_transport(&base, &base);
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.attestation(&WitnessNonce::fresh().unwrap()),
+        )
+        .await
+        .expect("the attestation call returned instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, WitnessTrustError::WitnessTimeout);
+        assert!(started.elapsed() < TEST_CEILING);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_collateral_endpoint_is_bounded() {
+        let (base, task) = silent_server().await;
+        let transport = deadline_transport(&base, &base);
+        let error = tokio::time::timeout(TEST_CEILING, transport.collateral(b"quote"))
+            .await
+            .expect("the collateral call returned instead of hanging")
+            .unwrap_err();
+        // Ingest is not the witness: its label names the collateral.
+        assert_eq!(error, WitnessTrustError::WitnessCollateralUnavailable);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_witness_times_out_on_every_route() {
+        let (base, task) = silent_server().await;
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        for admission in [false, true] {
+            let transport = deadline_transport(&base, &base).with_admission_evidence(admission);
+            let error = tokio::time::timeout(
+                TEST_CEILING,
+                transport.witness(&verified, b"private-test-transcript"),
+            )
+            .await
+            .expect("the witness call returned instead of hanging")
+            .err();
+            assert_eq!(error, Some(WitnessTrustError::WitnessTimeout));
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_witness_that_stalls_its_body_times_out() {
+        // The head arrives, so `send()` succeeds; the deadline must still
+        // cover the body read. A client-level `timeout` does, and this is
+        // the test that would fail if it were ever narrowed to the head.
+        let (base, task) = stalled_body_server().await;
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        let transport = deadline_transport(&base, &base);
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.witness(&verified, b"private-test-transcript"),
+        )
+        .await
+        .expect("the body read returned instead of hanging")
+        .err();
+        assert_eq!(error, Some(WitnessTrustError::WitnessTimeout));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_witness_nobody_is_listening_on_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let transport = deadline_transport(&base, &base);
+        assert_eq!(
+            transport
+                .attestation(&WitnessNonce::fresh().unwrap())
+                .await
+                .unwrap_err(),
+            WitnessTrustError::WitnessUnreachable
+        );
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        assert_eq!(
+            transport
+                .witness(&verified, b"private-test-transcript")
+                .await
+                .err(),
+            Some(WitnessTrustError::WitnessUnreachable)
+        );
+    }
+
+    /// A connection that never opens -- no refusal, just no answer to the
+    /// SYN -- is unreachable, not a timeout. TEST-NET-1 (RFC 5737) is never
+    /// routed: the connect either hangs until the connect deadline or fails
+    /// at once with no route, and both must read the same. This is the case
+    /// a closed loopback port takes on Windows.
+    #[tokio::test]
+    async fn a_witness_whose_connection_never_opens_is_unreachable() {
+        let base = "http://192.0.2.1:9";
+        let transport = deadline_transport(base, base);
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.attestation(&WitnessNonce::fresh().unwrap()),
+        )
+        .await
+        .expect("the attestation call returned instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, WitnessTrustError::WitnessUnreachable);
+        let verified = crate::witness::verify::verified_witness_for_test(
+            base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.witness(&verified, b"private-test-transcript"),
+        )
+        .await
+        .expect("the witness call returned instead of hanging")
+        .err();
+        assert_eq!(error, Some(WitnessTrustError::WitnessUnreachable));
+    }
+
+    #[test]
+    fn the_connect_deadline_always_comes_before_the_request_deadline() {
+        for timeout in [
+            TEST_DEADLINE,
+            WITNESS_PROBE_TIMEOUT,
+            WITNESS_REVIEW_TIMEOUT,
+            Duration::from_secs(5),
+        ] {
+            assert!(connect_deadline(timeout) < timeout, "{timeout:?}");
+            assert!(connect_deadline(timeout) < timeout.min(WITNESS_PROBE_TIMEOUT));
+        }
+        assert_eq!(
+            connect_deadline(WITNESS_REVIEW_TIMEOUT),
+            WITNESS_CONNECT_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn the_witness_own_deadline_reads_as_a_timeout() {
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(r#"{{"error":"{WITNESS_REQUEST_TIMED_OUT}"}}"#),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
+        });
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        for admission in [false, true] {
+            let transport = transport_for(&base, permissive()).with_admission_evidence(admission);
+            assert_eq!(
+                transport
+                    .witness(&verified, b"private-test-transcript")
+                    .await
+                    .err(),
+                Some(WitnessTrustError::WitnessTimeout)
+            );
+        }
+        task.abort();
+    }
+
+    #[test]
+    fn the_review_deadline_outlasts_the_witness_own() {
+        // `trace-commons-witness`'s DEFAULT_REQUEST_TIMEOUT_SECS. Written
+        // out because this crate cannot depend on the server's; moving that
+        // default means moving this, or a slow redaction the witness would
+        // still finish is abandoned by the client first.
+        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 540;
+        assert!(WITNESS_REVIEW_TIMEOUT.as_secs() > WITNESS_SERVER_REQUEST_TIMEOUT_SECS);
+        assert!(WITNESS_PROBE_TIMEOUT < WITNESS_REVIEW_TIMEOUT);
+        assert!(WITNESS_CONNECT_TIMEOUT <= WITNESS_PROBE_TIMEOUT);
+    }
+
+    // ---------------------------------------------------------------
+    // Submit-then-poll, against a hand-written job witness.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_poll_host_swaps_only_the_gateway_id_for_a_valid_instance_id() {
+        let base = url::Url::parse(
+            "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+        )
+        .unwrap();
+        let instance = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            instance_poll_base(&base, Some(instance)).as_str(),
+            format!("https://{instance}-8088.dstack-pha-prod9.phala.network/")
+        );
+        let bare = url::Url::parse("https://f1654b0beac2ac2a.gateway.example").unwrap();
+        assert_eq!(
+            instance_poll_base(&bare, Some(instance)).host_str(),
+            Some(format!("{instance}.gateway.example").as_str())
+        );
+        for hostile in [
+            None,
+            Some("short"),
+            Some("ABCDEF0123456789"),
+            Some("abcdef01.evil.example"),
+            Some("abcdef01-443"),
+            Some("abcdef01/../x"),
+        ] {
+            assert_eq!(instance_poll_base(&base, hostile), base, "{hostile:?}");
+        }
+        for not_a_gateway in [
+            "http://127.0.0.1:8088",
+            "http://localhost:8088",
+            "https://witness.example",
+            "https://witness-8088.example",
+        ] {
+            let url = url::Url::parse(not_a_gateway).unwrap();
+            assert_eq!(instance_poll_base(&url, Some(instance)), url);
+        }
+    }
+
+    /// What a hand-written job witness does on each poll.
+    #[derive(Clone, Copy)]
+    enum PollScript {
+        /// `pending` this many times, then the certified answer.
+        PendingThenDone(usize),
+        /// `gone` for the first job, then serve the next normally.
+        GoneOnce,
+        /// `gone` for every job.
+        AlwaysGone,
+        /// The connection drops without an answer for the first job, as the
+        /// gateway does for an instance it no longer routes to.
+        DropsConnectionOnce,
+        /// `pending` forever.
+        NeverDone,
+        /// The job's sealed answer: too large to review, with its counts.
+        TooLargeForReview,
+        /// The job's sealed answer: text the classifier could not classify.
+        TextUnclassifiable,
+        /// The job's sealed answer: the witness's classifier stayed
+        /// unavailable, `503 witness_classifier_unavailable` with a
+        /// `Retry-After`.
+        ClassifierUnavailable,
+        /// The job failed during redaction after it had been accepted.
+        RedactionFailed,
+    }
+
+    #[derive(Default)]
+    struct JobLog {
+        submits: usize,
+        polls: usize,
+        deletes: usize,
+        bad_secrets: usize,
+        legacy_posts: usize,
+    }
+
+    async fn job_witness(
+        script: PollScript,
+        answer: WitnessedEnvelope,
+    ) -> (String, Arc<Mutex<JobLog>>, tokio::task::JoinHandle<()>) {
+        use axum::extract::Path;
+        use sha2::Digest as _;
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_HEADER, WITNESS_FETCH_SECRET_SHA256_HEADER,
+        };
+        let log = Arc::new(Mutex::new(JobLog::default()));
+        let secrets: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let app = Router::new()
+            .route(
+                "/v1/witness",
+                post({
+                    let log = log.clone();
+                    move || {
+                        log.lock().unwrap().legacy_posts += 1;
+                        async { StatusCode::NOT_FOUND }
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness/jobs",
+                post({
+                    let (log, secrets) = (log.clone(), secrets.clone());
+                    move |headers: HeaderMap| {
+                        let mut log = log.lock().unwrap();
+                        log.submits += 1;
+                        let job_id = format!("{:032x}", log.submits);
+                        let hash = headers
+                            .get(WITNESS_FETCH_SECRET_SHA256_HEADER)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string();
+                        secrets.lock().unwrap().insert(job_id.clone(), hash);
+                        async move {
+                            (
+                                StatusCode::ACCEPTED,
+                                axum::Json(serde_json::json!({
+                                    "job_id": job_id,
+                                    "poll_after_secs": 1,
+                                    "queue_position": 0
+                                })),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness/jobs/{job_id}",
+                axum::routing::get({
+                    let (log, secrets, answer) = (log.clone(), secrets.clone(), answer.clone());
+                    move |Path(job_id): Path<String>, headers: HeaderMap| {
+                        let mut log = log.lock().unwrap();
+                        log.polls += 1;
+                        let presented = headers
+                            .get(WITNESS_FETCH_SECRET_HEADER)
+                            .and_then(|v| hex::decode(v.to_str().ok()?).ok())
+                            .map(|secret| hex::encode(sha2::Sha256::digest(secret)));
+                        let expected = secrets.lock().unwrap().get(&job_id).cloned();
+                        let gone = (
+                            StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "witness_job_gone"})),
+                        )
+                            .into_response();
+                        let pending = (
+                            StatusCode::ACCEPTED,
+                            axum::Json(serde_json::json!({
+                                "state": "pending", "poll_after_secs": 1, "queue_position": 0
+                            })),
+                        )
+                            .into_response();
+                        let first_job = job_id == format!("{:032x}", 1);
+                        let response = if presented.is_none() || presented != expected {
+                            log.bad_secrets += 1;
+                            gone
+                        } else {
+                            match script {
+                                PollScript::PendingThenDone(n) if log.polls <= n => pending,
+                                PollScript::GoneOnce if first_job => gone,
+                                PollScript::AlwaysGone => gone,
+                                PollScript::DropsConnectionOnce if first_job => {
+                                    // A panicking handler drops the
+                                    // connection with no response at all.
+                                    drop(log);
+                                    panic!("test double: drop the connection");
+                                }
+                                PollScript::NeverDone => pending,
+                                PollScript::TextUnclassifiable => (
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_text_unclassifiable"
+                                    })),
+                                )
+                                    .into_response(),
+                                PollScript::TooLargeForReview => (
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    axum::Json(serde_json::json!({
+                                        "error": "witness_trace_too_large_for_review",
+                                        "windows_needed": 1800,
+                                        "windows_allowed": 208,
+                                    })),
+                                )
+                                    .into_response(),
+                                PollScript::ClassifierUnavailable | PollScript::RedactionFailed => (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [(axum::http::header::RETRY_AFTER, "60")],
+                                    axum::Json(serde_json::json!({
+                                        "error": match script {
+                                            PollScript::ClassifierUnavailable => "witness_classifier_unavailable",
+                                            _ => "witness_redaction_failed",
+                                        }
+                                    })),
+                                )
+                                    .into_response(),
+                                _ => witness_answer(Some((
+                                    answer.certificate_json.clone(),
+                                    answer.signature_hex.clone(),
+                                    answer.envelope_bytes.clone(),
+                                ))),
+                            }
+                        };
+                        async move { response }
+                    }
+                })
+                .delete({
+                    let log = log.clone();
+                    move || {
+                        log.lock().unwrap().deletes += 1;
+                        async { StatusCode::NO_CONTENT }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, log, task)
+    }
+
+    async fn review_against(
+        script: PollScript,
+        timeout: Duration,
+    ) -> (
+        Result<WitnessedEnvelope, WitnessTrustError>,
+        Arc<Mutex<JobLog>>,
+    ) {
+        let key = test_signer("job-witness");
+        let (certificate_json, signature_hex, envelope_bytes) =
+            signed_answer(&key, &envelope_bytes());
+        let answer = WitnessedEnvelope {
+            certificate_json,
+            signature_hex,
+            envelope_bytes,
+            admission: None,
+        };
+        let (url, log, task) = job_witness(script, answer).await;
+        let transport =
+            HttpWitnessTransport::new(url.clone(), url.clone(), Arc::new(permissive()), timeout)
+                .unwrap();
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let result =
+            witness_contribution(&transport, &witness, raw_with_secret(), None, &granted()).await;
+        task.abort();
+        (result, log)
+    }
+
+    #[tokio::test]
+    async fn a_job_is_polled_until_done_with_the_secret_its_hash_was_submitted_with() {
+        let (result, log) =
+            review_against(PollScript::PendingThenDone(2), Duration::from_secs(5)).await;
+        result.expect("the certified answer after two pending polls");
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 3);
+        assert_eq!(log.bad_secrets, 0);
+        assert_eq!(log.legacy_posts, 0, "the retired route was called");
+    }
+
+    #[tokio::test]
+    async fn a_gone_job_is_resubmitted_once() {
+        let (result, log) = review_against(PollScript::GoneOnce, Duration::from_secs(5)).await;
+        result.expect("the resubmitted job's answer");
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_drops_the_poll_is_resubmitted_once() {
+        let (result, log) =
+            review_against(PollScript::DropsConnectionOnce, Duration::from_secs(5)).await;
+        result.expect("the resubmitted job's answer");
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    #[tokio::test]
+    async fn a_job_gone_twice_is_unreachable_which_the_daemon_retries() {
+        let (result, log) = review_against(PollScript::AlwaysGone, Duration::from_secs(5)).await;
+        assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessUnreachable);
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    /// A job's classifier or redaction failure is the witness's own answer:
+    /// preserve its cause and leave retrying to the caller, without repeating
+    /// the raw POST or mistaking its Retry-After for saturation.
+    #[tokio::test]
+    async fn a_finished_job_preserves_classifier_or_redaction_failure_without_resubmitting() {
+        for (script, expected, label) in [
+            (
+                PollScript::ClassifierUnavailable,
+                WitnessTrustError::WitnessClassifierUnavailable,
+                "witness_classifier_unavailable",
+            ),
+            (
+                PollScript::RedactionFailed,
+                WitnessTrustError::WitnessRedactionFailed,
+                "witness_redaction_failed",
+            ),
+        ] {
+            let (result, log) = review_against(script, Duration::from_secs(5)).await;
+            let err = result.unwrap_err();
+            assert_eq!(err, expected);
+            assert_eq!(err.refusal_label(), label);
+            assert!(crate::submit::witness_failure_is_transient(label));
+            let log = log.lock().unwrap();
+            assert_eq!(log.submits, 1);
+            assert_eq!(log.polls, 1);
+        }
+    }
+
+    /// A job the witness finished as too large to review is a final refusal
+    /// of the session, with the witness's counts: not resubmitted, not
+    /// transient, so the daemon refuses it instead of retrying it forever.
+    #[tokio::test]
+    async fn a_job_finished_as_too_large_for_review_is_a_final_refusal_with_its_counts() {
+        let (result, log) =
+            review_against(PollScript::TooLargeForReview, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            }
+        );
+        assert_eq!(err.refusal_label(), "witness_trace_too_large_for_review");
+        assert!(!crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// A job the witness finished as `witness_text_unclassifiable` is a final
+    /// refusal of this session -- not the witness being down -- so the
+    /// upload pass goes on to the next session instead of stopping.
+    #[tokio::test]
+    async fn a_job_finished_as_text_unclassifiable_is_a_final_refusal() {
+        let (result, log) =
+            review_against(PollScript::TextUnclassifiable, Duration::from_secs(5)).await;
+        let err = result.unwrap_err();
+        assert_eq!(err, WitnessTrustError::WitnessTextUnclassifiable);
+        assert_eq!(err.refusal_label(), "witness_text_unclassifiable");
+        assert!(!crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 1);
+    }
+
+    /// What a build from before this label reads the same answer as: an
+    /// unknown `422` label is `witness_response_malformed` -- terminal too,
+    /// and offered again on a newer build when it was approved. Documented
+    /// here so the fallback cannot change unnoticed.
+    #[test]
+    fn an_unknown_422_label_reads_as_a_malformed_answer() {
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("a_label_from_a_newer_witness")),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert!(!crate::submit::witness_failure_is_transient(
+            "witness_response_malformed"
+        ));
+        assert!(
+            crate::daemon::queue::REOFFERED_ON_A_NEWER_BUILD
+                .contains(&"witness_response_malformed")
+        );
+        assert_eq!(
+            refusal_from_parts(422, 0, Some("witness_text_unclassifiable")),
+            WitnessTrustError::WitnessTextUnclassifiable
+        );
+    }
+
+    /// The exact pair with both counts is the refusal; without them, or on
+    /// another status, it is not the answer the contract describes.
+    #[test]
+    fn a_too_large_refusal_needs_its_status_label_and_counts() {
+        let label = Some("witness_trace_too_large_for_review");
+        assert_eq!(
+            refusal_from_parts_with(422, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            }
+        );
+        assert_eq!(
+            refusal_from_parts_with(422, 0, label, None),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_body(
+                422,
+                0,
+                br#"{"error":"witness_trace_too_large_for_review","windows_needed":"many","windows_allowed":208}"#,
+            ),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_parts_with(413, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessResponseMalformed
+        );
+        assert_eq!(
+            refusal_from_parts_with(503, 0, label, Some((1800, 208))),
+            WitnessTrustError::WitnessUnreachable
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_past_the_review_deadline_is_cancelled_and_times_out() {
+        let (result, log) = review_against(PollScript::NeverDone, Duration::from_millis(400)).await;
+        assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessTimeout);
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.deletes, 1, "the abandoned job was not cancelled");
+    }
+
+    /// A witness from before the job routes answers the submit with a bare
+    /// 404. That is the new witness not deployed yet, not a judgement on the
+    /// session: unreachable, which the daemon retries.
+    #[tokio::test]
+    async fn a_witness_without_the_job_routes_is_unreachable_not_malformed() {
+        let key = test_signer("old-witness");
+        let app = Router::new().route("/v1/witness", post(|| async { StatusCode::OK }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let transport = transport_for(&url, permissive());
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("an old witness certifies nothing");
+        assert_eq!(err, WitnessTrustError::WitnessUnreachable);
+        assert!(crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        task.abort();
+    }
+
+    #[test]
+    fn a_submitted_job_renders_neither_its_id_nor_its_secret() {
+        let job = SubmittedJob {
+            job_id: "a1b2c3".repeat(5),
+            secret_hex: "d4e5f6".repeat(10),
+            poll_base: url::Url::parse("http://127.0.0.1").unwrap(),
+            poll_after_secs: 1,
+        };
+        let rendered = format!("{job:?}");
+        assert!(!rendered.contains("a1b2c3") && !rendered.contains("d4e5f6"));
     }
 }

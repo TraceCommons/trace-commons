@@ -414,7 +414,7 @@ pub(crate) fn infrastructure_profile_from_state(
 /// `infrastructure_profile_from_state`, or, in a test build only, the test
 /// state's override.
 pub(crate) fn route_infrastructure_profile(state: &AppState) -> ProductionInfrastructureProfile {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(profile) = &state.pipeline_infrastructure_override {
         return profile.clone();
     }
@@ -1634,7 +1634,7 @@ mod tests {
             ..local_store()
         };
         let mut production_state =
-            (*crate::ingest::app::tests::test_state(dir.path().to_path_buf())).clone();
+            (*crate::ingest::app::test_support::test_state(dir.path().to_path_buf())).clone();
         production_state.db_mirror = Some(backend);
         production_state.require_db_mirror_writes = true;
         production_state.artifact_store = Some(gcs.clone());
@@ -2170,6 +2170,7 @@ mod tests {
     /// optional setting: it refuses no start, also in a binary that holds no
     /// pipeline runtime.
     #[test]
+    #[allow(unsafe_code)]
     fn an_empty_trust_store_variable_is_unset() {
         const VARIABLE: &str = "TRACE_COMMONS_PIPELINE_TEST_EMPTY_TRUSTED_KEYS_PATH";
         for value in ["", "   "] {
@@ -2230,7 +2231,7 @@ mod tests {
     #[tokio::test]
     async fn config_status_reports_the_revision_and_the_trust_stores() {
         let dir = tempfile::tempdir().unwrap();
-        let base = crate::ingest::app::tests::test_state(dir.path().to_path_buf());
+        let base = crate::ingest::app::test_support::test_state(dir.path().to_path_buf());
         let fields = [
             "pipeline_code_revision_configured",
             "pipeline_package_trust_store_loaded",
@@ -2270,7 +2271,7 @@ mod tests {
     #[tokio::test]
     async fn config_status_reports_unqualified_routing() {
         let dir = tempfile::tempdir().unwrap();
-        let base = crate::ingest::app::tests::test_state(dir.path().to_path_buf());
+        let base = crate::ingest::app::test_support::test_state(dir.path().to_path_buf());
         for allowed in [false, true] {
             let mut state = (*base).clone();
             state.pipeline_unqualified_routing = allowed;

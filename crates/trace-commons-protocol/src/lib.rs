@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod account_device_code;
 pub mod account_login_change;
 pub mod activity_missions;
@@ -6,6 +8,7 @@ pub mod canonical_json;
 pub mod community_handle;
 pub mod credit_outcome;
 pub mod device_invite_subject;
+pub mod feature_flags;
 pub mod first_run_copy;
 pub mod first_run_estimate;
 pub mod inference_connection;
@@ -29,11 +32,19 @@ pub mod public_run;
 mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
+pub mod skills_catalog;
 pub mod submit_rate;
+pub mod terms;
 pub mod trace_contribution;
 pub mod upload_allowance;
+pub mod usage_analytics;
+pub mod witness_accepted_list;
+pub mod witness_blocked;
+pub mod witness_configuration;
+pub mod witness_jobs;
 pub mod witness_pacing;
 pub mod witness_provenance;
+pub mod witness_refusal;
 
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";

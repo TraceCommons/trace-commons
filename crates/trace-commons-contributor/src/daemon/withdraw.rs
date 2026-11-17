@@ -34,6 +34,22 @@ use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Respons
 /// having to guess from a generic `unavailable`.
 pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 
+/// The submission belongs to an account this device was enrolled under
+/// before the current one (`history::HistoryRecord::previous_account`). The
+/// current account cannot withdraw it, so no call is made.
+pub const ERR_PREVIOUS_ACCOUNT: &str = "previous-account";
+
+/// Whether the history cache marks `submission_id` as a previous account's.
+/// An unreadable cache marks nothing: the server is the authority on what
+/// this account may withdraw, and it refuses what it cannot see.
+fn is_previous_account(shared: &DaemonShared, submission_id: Uuid) -> bool {
+    HistoryCache::load(&shared.store).is_ok_and(|records| {
+        records
+            .iter()
+            .any(|r| r.submission_id == submission_id && r.previous_account)
+    })
+}
+
 /// The account session this daemon presents to the withdrawal endpoint,
 /// with the credential snapshot a rotation is stored against.
 ///
@@ -120,6 +136,10 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
     };
+    // Before the session, so the reason given is the one that applies.
+    if is_previous_account(shared, submission_id) {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERR_PREVIOUS_ACCOUNT);
+    }
     let mut session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
@@ -201,6 +221,8 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
     let targets: Vec<Uuid> = records
         .iter()
         .filter(|r| history::status_bucket(&r.status) == status)
+        // Not this account's to withdraw; see `ERR_PREVIOUS_ACCOUNT`.
+        .filter(|r| !r.previous_account)
         .map(|r| r.submission_id)
         .collect();
 
@@ -488,6 +510,7 @@ mod tests {
                 approved_unattended: None,
                 approved_verdict: None,
                 uploaded_bytes: None,
+                previous_account: false,
             })
             .collect();
         HistoryCache::save(&s.store, &records).unwrap();
@@ -598,6 +621,58 @@ mod tests {
         assert_eq!(status_of(submitted), history::STATUS_WITHDRAWN);
         assert_eq!(status_of(processing), history::STATUS_WITHDRAWN);
         assert_eq!(status_of(held), STATUS_QUARANTINED);
+    }
+
+    /// A previous account's row is not offered to the server: a single
+    /// withdrawal is refused with its own reason, ahead of the session
+    /// check, and a bulk one leaves it out.
+    #[tokio::test]
+    async fn a_previous_accounts_row_is_never_withdrawn() {
+        let (base, seen) =
+            rotating_ingest(axum::http::StatusCode::OK, "tcn1_dGVuYW50.r".to_string()).await;
+        let old = Uuid::new_v4();
+        let current = Uuid::new_v4();
+        let s = signed_in(&base, &[old, current]);
+        let mut records = HistoryCache::load(&s.store).unwrap();
+        records
+            .iter_mut()
+            .filter(|r| r.submission_id == old)
+            .for_each(|r| r.previous_account = true);
+        HistoryCache::save(&s.store, &records).unwrap();
+
+        let r = handle_withdraw(
+            &s,
+            &req(
+                "withdraw",
+                serde_json::json!({"submission_id": old.to_string()}),
+            ),
+        )
+        .await;
+        let err = r.error.unwrap();
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, ERR_PREVIOUS_ACCOUNT);
+        assert!(seen.lock().unwrap().is_empty());
+
+        let r = handle_withdraw_bulk(
+            &s,
+            &req(
+                "withdraw_bulk",
+                serde_json::json!({"status": "quarantined"}),
+            ),
+        )
+        .await;
+        assert_eq!(r.result.unwrap()["withdrawn"], 1);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let status_of = |id: Uuid| {
+            HistoryCache::load(&s.store)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.submission_id == id)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status_of(old), STATUS_QUARANTINED);
+        assert_eq!(status_of(current), history::STATUS_WITHDRAWN);
     }
 
     /// `processing` is not a selector of its own: the rollup has no

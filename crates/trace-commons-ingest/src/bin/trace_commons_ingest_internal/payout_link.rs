@@ -92,13 +92,14 @@ async fn no_store_middleware(request: Request, next: Next) -> axum::response::Re
 
 /// The base `/users/me` is read at. In a shipped build the compiled-in
 /// NEAR AI host and nothing else, the same host the rail pays; the
-/// `cfg(test)` arm reads the same seam login introspection uses.
-#[cfg(not(test))]
+/// test arm (`cfg(test)`, or the tests-only `test-support` feature) reads
+/// the same seam login introspection uses.
+#[cfg(not(any(test, feature = "test-support")))]
 fn users_me_base_url(_state: &AppState) -> &str {
     trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn users_me_base_url(state: &AppState) -> &str {
     state
         .near_ai_introspection_base_url

@@ -1,0 +1,214 @@
+[
+  {
+    "label": "shell_starting",
+    "title": "Starting TraceCommons",
+    "body": "Waiting for the daemon and its first explicit status read.",
+    "controls": [
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_refused",
+    "title": "TraceCommons could not start",
+    "body": "The daemon refused startup; the reason is retained.",
+    "controls": [
+      "Settings",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "welcome",
+    "title": "Welcome",
+    "body": "First run: Welcome.",
+    "controls": [
+      "Continue",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "tools",
+    "title": "Tools",
+    "body": "Choose tools to watch, customize folders, or use Private AI only.",
+    "controls": [
+      "Watch",
+      "Customize",
+      "Use Private AI only",
+      "Continue",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "uses",
+    "title": "Uses",
+    "body": "Choose Ask or Automatic and the uses allowed for traces. Neither sharing choice is preselected.",
+    "controls": [
+      "Ask each time",
+      "Automatic",
+      "Continue",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "traces",
+    "title": "Traces",
+    "body": "Traces found and possible credit; discovery may still be empty.",
+    "controls": [
+      "Continue",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "private_ai",
+    "title": "Private AI",
+    "body": "Private AI information; this first run has no enable switch.",
+    "controls": [
+      "Continue",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "join",
+    "title": "Join",
+    "body": "Sign in with near.ai or use an invite. The current native Join offers no Skip.",
+    "controls": [
+      "Sign in",
+      "Use invite",
+      "Start sharing",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_busy",
+    "title": "Working",
+    "body": "The current daemon call has not answered. Successful earlier calls remain recorded.",
+    "controls": [
+      "Cancel",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_error",
+    "title": "Could not finish setup",
+    "body": "The last daemon call failed; retry from the recorded progress.",
+    "controls": [
+      "Retry",
+      "Back",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_home",
+    "title": "Home",
+    "body": "Read-back comes from daemon status, queue and history.",
+    "controls": [
+      "Private AI",
+      "Traces",
+      "Insights",
+      "Settings",
+      "Sign out",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_offline",
+    "title": "Connection unavailable",
+    "body": "The daemon status read failed; access gates treat onboarding as required.",
+    "controls": [
+      "Settings",
+      "Retry",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_settings",
+    "title": "Settings",
+    "body": "Account, sources, privacy and update settings are separate operations.",
+    "controls": [
+      "Save settings",
+      "Check for updates",
+      "Sign in again",
+      "Sign out",
+      "Set up again",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_settings_saving",
+    "title": "Saving settings",
+    "body": "The daemon has not confirmed the new settings.",
+    "controls": [
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_update_busy",
+    "title": "Checking for updates",
+    "body": "Sparkle owns checks for a self-updating installation.",
+    "controls": [
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_update_external",
+    "title": "Updates",
+    "body": "The installer owns updates, or no updater feed is configured.",
+    "controls": [
+      "Settings",
+      "Close",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_empty",
+    "title": "No window open",
+    "body": "The application and daemon can continue while all windows are closed.",
+    "controls": [
+      "Open",
+      "Quit"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "shell_stopped",
+    "title": "TraceCommons quit",
+    "body": "Calls are refused, subscriptions finish and the handle is drained or deliberately leaked.",
+    "controls": [
+      "Launch"
+    ],
+    "kind": "client"
+  }
+]

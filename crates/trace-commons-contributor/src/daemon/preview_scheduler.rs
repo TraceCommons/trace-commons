@@ -694,12 +694,13 @@ impl PreviewJobRunner for DaemonPreviewRunner {
             )
             .await
             {
-                Ok(summary) => {
-                    PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(&summary)))
-                }
-                Err(_) => PreviewOutcome::Failed {
+                Ok(summary) => PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(
+                    &summary,
+                    super::second_look::RedactionWitness::of_config(cfg.as_ref()),
+                ))),
+                Err(error) => PreviewOutcome::Failed {
                     code: super::ipc::ERR_UNAVAILABLE,
-                    label: "preview-failed",
+                    label: super::preview::reported_failure_label(&error),
                 },
             }
         })

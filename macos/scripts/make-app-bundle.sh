@@ -117,6 +117,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 
 ./scripts/info-plist.sh "$SHORT_VERSION" "$BUILD_VERSION" \
   > "$APP/Contents/Info.plist"
+# The display name (TC_DISPLAY_NAME). See info-plist-strings.sh.
+mkdir -p "$APP/Contents/Resources/en.lproj"
+./scripts/info-plist-strings.sh > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"

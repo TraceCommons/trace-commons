@@ -2944,7 +2944,7 @@ pub(super) const ROUTE_MAIN_GATE: MainGateConfig = MainGateConfig {
 const ROUTE_INDEX_A: &str = "qualified_production_index.v1";
 const ROUTE_INDEX_B: &str = "qualified_production_index_b.v1";
 const ROUTE_PACKAGE_KEY_ID: &str = "route-package-release-key";
-const ROUTE_CHECK_KEY_ID: &str = "route-check-attestation-key";
+pub(super) const ROUTE_CHECK_KEY_ID: &str = "route-check-attestation-key";
 
 /// The configuration of a production-compatible package with `index_id`.
 fn route_config(index_id: &str) -> CompatibilityBundleConfig {
@@ -5867,7 +5867,7 @@ async fn a_rollback_of_a_contained_tenant_keeps_it_contained() {
 impl RouteFixture {
     /// `activate_body` with the caller's `expected_record_id`: a request that
     /// an operator prepared at an earlier time.
-    fn activate_body_expecting(
+    pub(super) fn activate_body_expecting(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         reason_code: &str,

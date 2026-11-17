@@ -1,0 +1,100 @@
+{
+  "status": "selected",
+  "ownerSelection": {
+    "request": "Check all 13 candidates",
+    "scope": "P1 through P13 as verification hypotheses; no production behavior changes authorized",
+    "recordedAtUTC": "2026-11-06T22:20:49.697391+00:00"
+  },
+  "promises": [
+    {
+      "id": "P1",
+      "model": "client_consent",
+      "definition": "P1",
+      "selected": true
+    },
+    {
+      "id": "P2",
+      "model": "client_contribution",
+      "definition": "P2",
+      "selected": true
+    },
+    {
+      "id": "P3",
+      "model": "client_contribution",
+      "definition": "P3",
+      "selected": true
+    },
+    {
+      "id": "P4",
+      "model": "client_contribution",
+      "definition": "P4",
+      "selected": true
+    },
+    {
+      "id": "P12",
+      "model": "client_contribution",
+      "definition": "P12",
+      "selected": true
+    },
+    {
+      "id": "P13",
+      "model": "client_learning",
+      "definition": "P13",
+      "selected": true
+    },
+    {
+      "id": "P5",
+      "model": "server_receipt",
+      "definition": "P5",
+      "selected": true
+    },
+    {
+      "id": "P8",
+      "model": "server_receipt",
+      "definition": "P8",
+      "selected": true
+    },
+    {
+      "id": "P11",
+      "model": "server_receipt",
+      "definition": "P11",
+      "selected": true
+    },
+    {
+      "id": "P6",
+      "model": "server_pipeline",
+      "definition": "P6",
+      "selected": true
+    },
+    {
+      "id": "P7",
+      "model": "server_pipeline",
+      "definition": "P7",
+      "selected": true
+    },
+    {
+      "id": "P8",
+      "model": "server_pipeline",
+      "definition": "P8",
+      "selected": true
+    },
+    {
+      "id": "P9",
+      "model": "server_settlement",
+      "definition": "P9",
+      "selected": true
+    },
+    {
+      "id": "P10",
+      "model": "server_lifecycle",
+      "definition": "P10",
+      "selected": true
+    },
+    {
+      "id": "P11",
+      "model": "server_lifecycle",
+      "definition": "P11",
+      "selected": true
+    }
+  ]
+}

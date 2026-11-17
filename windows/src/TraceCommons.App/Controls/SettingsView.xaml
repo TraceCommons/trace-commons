@@ -367,7 +367,7 @@
                     names.
                 -->
                 <TextBlock Text="{x:Bind Settings.RoutingToolsHeading, Mode=OneWay}"
-                           Visibility="{x:Bind Settings.RoutingAvailable, Mode=OneWay}"
+                           Visibility="{x:Bind Settings.ShowRoutingToolsHeading, Mode=OneWay}"
                            Style="{StaticResource TcEyebrowTextStyle}" />
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
@@ -421,6 +421,7 @@
                                       IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                                       Toggled="OnRoutingToggled" />
                         <TextBlock Text="{x:Bind Settings.RoutingAppliesAtOnceText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasRoutingAppliesAtOnceText, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
 
@@ -688,12 +689,15 @@
                         <TextBlock Text="{x:Bind Settings.InferenceEvidenceHeading}" Style="{StaticResource TcEyebrowTextStyle}" />
                         <TextBlock Text="{x:Bind Settings.InferenceEvidenceDisclosure}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.InferenceEvidenceCaptureNote}" TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceScopeNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.InferenceEvidenceScopeNote}"
+                                   ToolTipService.ToolTip="{x:Bind Settings.InferenceEvidenceScopeTooltip}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.InferenceEvidenceState, Mode=OneWay}" TextWrapping="Wrap" />
                         <Button Content="{x:Bind Settings.InferenceEvidenceEnable, Mode=OneWay}"
+                                ToolTipService.ToolTip="{x:Bind Settings.InferenceEvidenceEnableTooltip}"
                                 IsEnabled="{x:Bind Settings.InferenceEvidenceControlsEnabled, Mode=OneWay}"
                                 Click="OnInferenceEvidence" />
                         <Button Content="{x:Bind Settings.InferenceEvidenceDisable}"
+                                ToolTipService.ToolTip="{x:Bind Settings.InferenceEvidenceDisableTooltip}"
                                 IsEnabled="{x:Bind Settings.WitnessControlsEnabled, Mode=OneWay}"
                                 Click="OnDisableInferenceEvidence" />
                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
@@ -703,15 +707,17 @@
                         <TextBlock Text="{x:Bind Settings.TokenContributionHeading}" Style="{StaticResource TcEyebrowTextStyle}" />
                         <TextBlock Text="{x:Bind Settings.TokenContributionDisclosure}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.TokenContributionCaptureNote}" TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.TokenContributionScopeNote}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.TokenContributionScopeNote}"
+                                   Visibility="{x:Bind Settings.HasTokenContributionScopeNote}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.ProbabilityStorage.CaptureNotice, Mode=OneWay}" TextWrapping="Wrap" />
             <Button Content="{x:Bind Settings.ProbabilityStorage.CaptureLabel, Mode=OneWay}" Click="OnLocalProbabilityCapture" />
             <TextBlock Text="{x:Bind Settings.ProbabilityStorage.StateLine, Mode=OneWay}" TextWrapping="Wrap" />
             <TextBlock Text="{x:Bind Settings.ProbabilityStorage.ScopeNote, Mode=OneWay}" TextWrapping="Wrap" />
-            <Button Content="{x:Bind Settings.ProbabilityStorage.CleanupLabel, Mode=OneWay}" Click="OnCleanProbabilityStorage" />
+            <Button Content="{x:Bind Settings.ProbabilityStorage.CleanupLabel, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind Settings.ProbabilityStorage.CleanupTooltip, Mode=OneWay}" Click="OnCleanProbabilityStorage" />
             <Button Content="{x:Bind Settings.ProbabilityStorage.DiscardLabel, Mode=OneWay}" Click="OnDiscardProbabilityStorage" />
             <TextBlock Text="{x:Bind Settings.TokenContributionState, Mode=OneWay}" TextWrapping="Wrap" />
                         <Button Content="{x:Bind Settings.TokenContributionEnable, Mode=OneWay}"
+                                ToolTipService.ToolTip="{x:Bind Settings.TokenContributionEnableTooltip}"
                                 IsEnabled="{x:Bind Settings.TokenContributionControlsEnabled, Mode=OneWay}"
                                 Click="OnTokenContribution" />
                         <Button Content="{x:Bind Settings.TokenContributionDisable}"

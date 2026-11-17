@@ -15,11 +15,31 @@
 # configuration. The script is how the two are kept from drifting.
 
 services:
+  # TLS terminates inside this CVM. Cloudflare provides DNS only.
+  # tls-alpn-01 renews without a DNS API credential in the guest.
+  ingress:
+    image: ghcr.io/dstack-tee/dstack-ingress:2.8@sha256:60e682449534715a2f2e5b72326ca4229209c8e26c931c6f34d27e02200ac086
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      CHALLENGE_TYPE: "tls-alpn-01"
+      DOMAIN: "witness.tracecommons.ai"
+      TARGET_ENDPOINT: "witness:8088"
+      GATEWAY_DOMAIN: "gateway.dstack-pha-prod9.phala.network"
+      DNS_SETUP_MODE: "wait"
+      SET_CAA: "false" # Operator creates the printed account-bound CAA.
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - witness-cert-data:/etc/letsencrypt
+      - witness-tls-evidences:/evidences
+
   witness:
     # By digest, never a tag: a tag is a moving target and a measurement
     # pinned over one is pinning nothing.
     #
-    # Built by the `witness-image` workflow from commit a692cad -- natively
+    # Built by the `witness-image` workflow from commit f872913 -- natively
     # amd64, because TDX is Intel, and in CI rather than on a developer
     # machine because this image is not reproducibly buildable. A measurement
     # therefore pins a specific artifact only its builder can produce, which
@@ -28,16 +48,18 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:75af1945502ebcd88b597993695549553fb011d0ff578aff357657f7e78e2d5c
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:45bd44bb34a698faeeeb86ba894432aa30c823b6369221ccc1ad87387e93ad51
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
-    # client that has pinned the signing address, and the witness holds no
-    # state that a restart could lose.
+    # client that has pinned the signing address. Jobs in progress are lost on
+    # a restart (the client resubmits); finished results survive it, sealed
+    # on the volume below.
     restart: always
 
-    # The witness writes nothing. A writable root filesystem would be a place
-    # for a raw transcript to land.
+    # The root filesystem stays read-only: a writable one would be a place for
+    # a raw transcript to land. The only writable place is the results volume,
+    # and only sealed results go there -- raw sessions are held in memory.
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
@@ -51,8 +73,14 @@ services:
     # GetKey and GetQuote are reached through. It is not network-reachable;
     # the witness proxies GetQuote on /v1/attestation precisely because a
     # contributor cannot call it directly.
+    #
+    # `witness-results` holds finished job results, AES-256-GCM sealed under a
+    # key derived from GetKey and this image's measurement, so another image
+    # cannot open them. Each is deleted on its first fetch or after 24 hours.
+    # The volume lives on the CVM's encrypted data disk.
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - witness-results:/var/lib/trace-commons-witness/results
 
     environment:
       # 0.0.0.0, not the binary's 127.0.0.1 default. The default is correct for
@@ -194,49 +222,85 @@ services:
       TRACE_NEAR_AI_PRIVACY_BASE_URL: "https://cloud-api.near.ai/v1"
       TRACE_NEAR_AI_PRIVACY_MODEL: "openai/privacy-filter"
 
+      # Most privacy/classify requests a minute, retries included, spaced
+      # evenly; a 429 holds every caller for its Retry-After. NEAR AI
+      # allowed this key 30 a minute on 2026-11-12. Injected encrypted at
+      # deploy time, like the key below, and declared in `allowed_envs`, so
+      # it can follow NEAR AI's limit without a new measurement (owner,
+      # 2026-11-12). The NAME is measured; the VALUE is not. It changes only
+      # how fast traces are reviewed -- never what is redacted, where the
+      # text goes, or which model reads it, which all stay measured above.
+      # Required: a deploy that forgets it fails to start rather than
+      # running unpaced.
+      TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE: ${TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE:?set at deploy time}
+
       # Injected encrypted at deploy time and declared in app-compose.json's
       # `allowed_envs`. The NAME is measured; the VALUE is not, and must never
       # be written into this file -- app-compose.json embeds this compose
       # verbatim and is uploaded to the deployer.
       TRACE_NEAR_AI_PRIVACY_API_KEY: ${TRACE_NEAR_AI_PRIVACY_API_KEY:?set at deploy time}
 
-      # 64 MiB. The redacted-envelope cap is 16 MiB and the measured
-      # raw-to-envelope ratio on this pilot is about 3.4:1.
-      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "67108864"
+      # The largest request body, in bytes. Injected encrypted at deploy time
+      # and declared in `allowed_envs`, like the pace above (owner,
+      # 2026-11-13): the NAME is measured, the VALUE is not, so the bound can
+      # follow real trace sizes without a new measurement. Set to 16 MiB
+      # (16777216) on 2026-11-13: 1 MiB refused traces with a 4 MiB median,
+      # and 16 MiB roughly matches what one review can classify (the up-front
+      # too-large-to-review refusal covers the rest). Sixteen slots at 16 MiB
+      # are on the order of 256 MiB of request bodies. Required: a deploy
+      # that forgets it fails to start, and so does one above the binary's
+      # compiled ceiling of 32 MiB, which the measurement does cover.
+      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: ${TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES:?set at deploy time}
 
-      # THE BOUND ON UNAUTHENTICATED WORK. Both routes are unauthenticated, so
-      # anyone who can reach `POST /v1/witness` can spend this CVM's cores and,
+      # THE BOUND ON UNAUTHENTICATED WORK. The routes are unauthenticated, so
+      # anyone who can reach `POST /v1/witness/jobs` can spend this CVM's cores and,
       # in `full-pipeline`, the NEAR AI capacity billed to the key above. The
-      # 64 MiB cap above is per request; it says nothing about how many arrive
+      # body cap above is per request; it says nothing about how many arrive
       # at once. These two say that.
       #
-      # Both are MEASURED, like everything else here: a contributor who has
-      # pinned this measurement can verify that the witness they are sending a
-      # raw transcript to has a bound at all, and what it is. An operator
-      # cannot quietly widen it without moving the measurement.
+      # Both are MEASURED: a contributor who has pinned this measurement can
+      # verify how many requests run at once and for how long. The per-request
+      # body cap above is a sealed deploy-time value since 2026-11-13, so its
+      # VALUE is not part of the measurement (only that one is required).
       #
-      # Four at once. #456 established that 8 concurrent classify windows
-      # collapse NEAR AI throughput, which is why the filter serialises windows
-      # within a request; N concurrent requests put N windows back in flight at
-      # the same endpoint, so the bound is set strictly under the 8 that is
-      # known to fail. Memory is the other constraint: a request at the 64 MiB
-      # cap is buffered, parsed, redacted and re-serialised, so a slot costs a
-      # couple of hundred megabytes at the cap.
-      TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS: "4"
+      # Sixteen at once (owner decision 2026-11-05; was four). Classifier
+      # calls are bounded separately, process-wide, at two
+      # (TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT, binary default), and
+      # admitted requests take turns at them in arrival order, so a slot is a
+      # place in line, not more load on the key. Past sixteen, or when the
+      # requests ahead would outlast the request timeout at the recent pace,
+      # the answer is an immediate busy.
+      TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS: "16"
 
-      # Five minutes, and the number is measured rather than round. The
-      # classifier's largest proven success is a 243 KiB window in 9.3 s, so a
-      # request classifies on the order of 25 KiB/s serially: five minutes is
-      # several megabytes of transcript. It is also above the ~2 minutes a
-      # single window can legitimately take when it retries against the 30 s
-      # per-call timeout, so a healthy slow request is not abandoned.
+      # Nine minutes. The owner asked for about ten (2026-11-05); the
+      # dstack gateway closes a connection after 10 minutes with no data, and
+      # the witness sends nothing until it answers, so the budget sits a
+      # minute under that. The classifier was measured at ~3 s + 0.4 s/KiB on
+      # 2026-11-05, and the witness passes this deadline to it, so no retry
+      # starts that could not finish inside it.
       #
       # A bound with no deadline is not a bound: one request whose classifier
       # call never returns would hold its slot for the life of the process, and
       # four of those would wedge the witness at full occupancy with nothing
       # running. A timed-out request is refused with 504 and its slot is
       # released.
-      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "300"
+      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "540"
+
+      # Submit-then-poll (docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md).
+      # POST /v1/witness is retired: a job is accepted at once and polled, so
+      # no connection is held for the length of a review. Finished results
+      # are sealed here, at most 256 of them. A full store answers busy.
+      #
+      # The largest sealed result, in bytes: a sealed deploy-time value like
+      # the request cap (owner, 2026-11-13), kept above it so a redacted
+      # result of a maximal request still fits. Set to 20 MiB (20971520) on
+      # 2026-11-13: 256 results at that size is 5 GiB worst case on the
+      # CVM's encrypted data disk. Required: a deploy that forgets it fails
+      # to start, and so does one above the binary's compiled ceiling of
+      # 40 MiB.
+      TRACE_COMMONS_WITNESS_RESULTS_DIR: "/var/lib/trace-commons-witness/results"
+      TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS: "256"
+      TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES: ${TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES:?set at deploy time}
 
       # Path prefixes the deterministic pass treats as known, so they are not
       # reported as findings. Empty reports more, never less.
@@ -250,3 +314,8 @@ services:
 
     ports:
       - "8088:8088"
+
+volumes:
+  witness-results:
+  witness-cert-data:
+  witness-tls-evidences:

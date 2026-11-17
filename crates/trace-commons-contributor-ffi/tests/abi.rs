@@ -3,6 +3,7 @@
 //! included alongside `cdylib`/`staticlib`). Every helper here frees every
 //! string it receives, so a leak-detector run over this file is a genuine
 //! check of the ownership rule stated in `include/trace_commons.h`.
+#![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;
@@ -49,6 +50,7 @@ use trace_commons_contributor_ffi::{
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
+use trace_commons_contributor_ffi::{tc_count_figure, tc_credit_figure};
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
     tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
@@ -2064,6 +2066,12 @@ fn the_routing_vocabulary_crossing_the_abi_is_the_one_in_the_rust() {
         let text = value
             .as_str()
             .unwrap_or_else(|| panic!("{field} is not a string"));
+        // Owner dropped the Tools heading 2026-11-04 (Settings copy pass 2, P117)
+        // and the applies-at-once line (P105); both cross as "".
+        if matches!(field.as_str(), "tools_heading" | "applies_at_once") {
+            assert_eq!(text, "", "{field} is cut and crosses empty");
+            continue;
+        }
         assert!(!text.is_empty(), "{field} crossed the boundary empty");
     }
 }
@@ -3438,6 +3446,18 @@ fn the_private_inference_payload_crosses_whole_and_finished() {
     let fields = value.as_object().expect("an object");
     for (field, value) in fields {
         let text = value.as_str().expect("every field is a string");
+        // Owner dropped these lines 2026-11-04 (Settings copy pass 2, P8, P10,
+        // P177, P209): they cross as "".
+        if matches!(
+            field.as_str(),
+            "account_contribution_pending_credit"
+                | "credential_what"
+                | "harnesses_what"
+                | "harness_not_connected"
+        ) {
+            assert_eq!(text, "", "{field} is cut and crosses empty");
+            continue;
+        }
         assert!(!text.trim().is_empty(), "{field} arrived empty");
         for marker in ["{}", "{port}", "%@", "%s", "%d"] {
             assert!(
@@ -4728,8 +4748,44 @@ fn a_null_remaining_balance_never_crosses_as_zero() {
     // The other two figures use the empty-string convention, and a zero is
     // still not an absence there either.
     assert_eq!(take_owned(tc_near_ai_balance_limit_line(0, 0, 9)), "");
-    assert_eq!(take_owned(tc_near_ai_balance_spent_line(0, 0, 9)), "");
-    assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9)).contains("$0.00"));
+    for remaining in [0, 1] {
+        assert_eq!(
+            take_owned(tc_near_ai_balance_spent_line(0, 0, 9, remaining)),
+            ""
+        );
+        assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9, remaining)).contains("$0.00"));
+    }
+    // Beside a remaining figure Spent rounds up to the cent; with none it is
+    // floored. A sub-cent spend is the phrase either way.
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 18_185_000_000, 9, 1)),
+        "Spent: $18.19"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 18_185_000_000, 9, 0)),
+        "Spent: $18.18"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 1, 9, 1)),
+        "Spent: less than $0.01"
+    );
+}
+
+/// The credit figure crosses the ABI as the core formats it.
+#[test]
+fn credit_figure_crosses_the_abi() {
+    for (value, want) in [
+        (0.0, "0"),
+        (48.0, "48"),
+        (4.25, "4.3"),
+        (0.04, "<0.1"),
+        (1234.5, "1,234.5"),
+        (f64::NAN, "\u{2014}"),
+    ] {
+        assert_eq!(take_owned(tc_credit_figure(value)), want, "{value}");
+    }
+    assert_eq!(take_owned(tc_count_figure(0)), "0");
+    assert_eq!(take_owned(tc_count_figure(1234)), "1,234");
 }
 
 /// A state this build has never heard of borrows nobody's sentence, and is
@@ -5006,6 +5062,7 @@ fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
     for label in [
         "dismissed-by-contributor",
         "expired-without-decision",
+        "no-user-messages",
         "admission_refused",
         "unknown",
     ] {
@@ -5714,7 +5771,7 @@ fn the_account_change_copy_crosses_the_abi() {
     let copy = json_owned(tc_account_change_copy_json());
     assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
     assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
-    assert_eq!(copy["mismatch_change"], "Use a different account");
+    assert_eq!(copy["mismatch_change"], "Switch account");
     assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
 }
 
@@ -5822,7 +5879,7 @@ fn the_health_copy_crosses_the_abi_core_down_and_per_label() {
     let unknown = cstr_str("a-future-label");
     let banner = json_owned(unsafe { tc_health_copy_json(1, unknown.as_ptr(), 500) });
     assert_eq!(banner, serde_json::to_value(on_hold_copy()).unwrap());
-    assert_eq!(banner["title"], "Contributions are on hold.");
+    assert_eq!(banner["title"], "Contributions on hold.");
 
     // A label that is not UTF-8 is still a reported condition: the on-hold
     // banner, never NULL, which a shell would read as healthy.
@@ -6027,35 +6084,18 @@ fn the_external_url_allowlist_crosses_the_abi() {
 }
 
 #[test]
-fn the_quit_prompt_is_chosen_from_the_handle() {
-    isolated_stale_pointer_probe("the_quit_prompt_is_chosen_from_the_handle", || {
-        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
-        use trace_commons_contributor_ffi::tc_quit_prompt_json;
+fn the_quit_prompt_names_what_quitting_stops() {
+    use trace_commons_contributor::quit_copy::quit_prompt;
+    use trace_commons_contributor_ffi::tc_quit_reason_prompt_json;
+    // Nothing live: no prompt, and no error recorded for it.
+    assert!(tc_quit_reason_prompt_json(0, 0).is_null());
+    for (compute, private_ai) in [(1, 0), (0, 1), (1, 1), (7, -1)] {
         assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(std::ptr::null()) }),
-            serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap()
+            json_owned(tc_quit_reason_prompt_json(compute, private_ai)),
+            serde_json::to_value(quit_prompt(compute != 0, private_ai != 0)).unwrap(),
+            "({compute}, {private_ai})"
         );
-        let dir = tempfile::tempdir().unwrap();
-        let h = start(dir.path());
-        let hosting = json_owned(unsafe { tc_quit_prompt_json(h) });
-        assert_eq!(
-            hosting,
-            serde_json::to_value(quit_prompt(QuitRole::Hosting)).unwrap()
-        );
-        assert_eq!(hosting["role"], "hosting");
-        unsafe { tc_daemon_stop(h) };
-        assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-            "unavailable"
-        );
-        unsafe { tc_handle_free(h) };
-        // A freed handle is refused, not dereferenced, and has no watcher.
-        assert_eq!(
-            json_owned(unsafe { tc_quit_prompt_json(h) })["role"],
-            "unavailable"
-        );
-        assert_last_error_contains("invalid-handle-pointer");
-    });
+    }
 }
 
 #[test]

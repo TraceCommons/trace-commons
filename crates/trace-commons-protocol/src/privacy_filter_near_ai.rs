@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -18,101 +18,143 @@ use crate::trace_contribution::{
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
-/// 32,000-token windows measured 5.4 s and the largest success took 9.3 s, so
-/// the previous 10 s default left a window legitimately slower than the
-/// timeout. Raised with the budget it has to serve.
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// The fixed part of a classify request's timeout. The whole timeout grows
+/// with the request body: `base + per_kib x body KiB` (see [`call_timeout`]).
+///
+/// Measured by the owner against the live endpoint on 2026-11-05 with
+/// synthetic text, one request at a time:
+///
+/// | body | plain text | escape-heavy, token-dense text |
+/// |---|---|---|
+/// | tiny | 0.7-1.2 s | |
+/// | 4 KiB | | 3.39 s |
+/// | 20 KiB | 11.3 s | |
+/// | 32 KiB | | 19.41 s |
+/// | 103 KiB | 14.8 s | |
+/// | 128 KiB | | 64.00 s |
+/// | 205 KiB | 36.5 s | |
+/// | 232 KiB | | 96.22 s |
+///
+/// Dense text fits about 3 s + 0.4 s/KiB. That is several times slower than
+/// 2026-09-03 (243 KiB in 9.3 s). Owner decision 2026-11-05: 15 s + 0.6 s/KiB,
+/// so a full 64 KiB window (the cap) gets 53.4 s against ~29 s expected for
+/// dense text, and a tiny request gives up after ~15 s instead of waiting out
+/// a timeout sized for a large one.
+///
+/// Override with `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` (this base) and
+/// `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 
-/// Maximum input tokens per `privacy/classify` request.
+/// The part of a classify request's timeout that grows with its body, per
+/// KiB. See [`DEFAULT_TIMEOUT_MS`].
+pub const DEFAULT_TIMEOUT_PER_KIB_MS: u64 = 600;
+
+/// One classify request's timeout for a body of `body_bytes`: `base_ms`
+/// plus `per_kib_ms` for each started KiB.
+pub const fn call_timeout_ms(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> u64 {
+    let kib = (body_bytes as u64).div_ceil(1024);
+    base_ms.saturating_add(per_kib_ms.saturating_mul(kib))
+}
+
+/// [`call_timeout_ms`] as a `Duration`.
+pub fn call_timeout(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> Duration {
+    Duration::from_millis(call_timeout_ms(base_ms, per_kib_ms, body_bytes))
+}
+
+/// The longest one window can take before the adapter gives up on it:
+/// [`MAX_CLASSIFY_ATTEMPTS`] attempts at the full timeout, plus the backoff
+/// between them, when no caller deadline cuts it shorter. A caller with a
+/// deadline (the witness) passes it through
+/// [`PrivacyFilterAdapter::redact_text_before`], and then no attempt starts
+/// that could not finish by it.
+pub const fn worst_case_window_ms(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> u64 {
+    let attempts = MAX_CLASSIFY_ATTEMPTS as u64;
+    let mut backoff = 0u64;
+    let mut failed = 1;
+    while failed < MAX_CLASSIFY_ATTEMPTS {
+        backoff += backoff_ms(failed);
+        failed += 1;
+    }
+    attempts * call_timeout_ms(base_ms, per_kib_ms, body_bytes) + backoff
+}
+
+/// One full window's worst case with no caller deadline must stay well
+/// inside the witness's request budget (540 s), which also has the rest of a
+/// contribution to classify. At the defaults it is 3 x 53.4 s + 0.75 s of
+/// backoff = 160.95 s.
+pub const MAX_WORST_CASE_WINDOW_MS: u64 = 180_000;
+
+const _: () = assert!(
+    worst_case_window_ms(
+        DEFAULT_TIMEOUT_MS,
+        DEFAULT_TIMEOUT_PER_KIB_MS,
+        MAX_CLASSIFY_REQUEST_BODY_BYTES
+    ) <= MAX_WORST_CASE_WINDOW_MS,
+    "a full window's retries at the default timeout must fit the witness's request limit"
+);
+
+/// Largest `privacy/classify` request BODY, in bytes of the exact serialized
+/// JSON the adapter sends. **Windows are sized by this and nothing else.**
 ///
-/// **The endpoint limits input TOKENS per request and reports exceeding that
-/// as a generic 502** -- not a 413, not a 429 -- so an over-limit request is
-/// indistinguishable from a vendor outage by status code alone. That ambiguity
-/// cost a day of misdiagnosis on 2026-08-27, during which a byte budget was
-/// tuned three times (20_000 -> 4_000 -> 8_000 -> 4_000) without ever
-/// addressing the quantity actually being limited.
-///
-/// A byte budget cannot express this. Token density varies ~1.6x across
-/// realistic content -- measured against the endpoint's own
-/// `usage.input_tokens`, English prose runs ~4.7 bytes/token while the paths,
-/// hashes and UUIDs that fill trace content run ~3.0. So any byte budget is
-/// either too small for prose (needless extra requests) or too large for dense
-/// content (silent 502s). 8_000 bytes was the latter: fine for most windows,
-/// deterministically fatal for token-dense ones, which is exactly the
-/// intermittent failure the #462 fingerprints caught.
-///
-/// Budgeting in tokens fixes both ends at once: prose windows get BIGGER
-/// (~9,400 bytes at this budget, fewer requests than the 4_000-byte cap it
-/// replaces) while dense windows get capped where they actually break.
-///
-/// Sized against measurement, not the advertised context. The served model
-/// reports `context_length: 512` and the cloud-api wrapper splits internally,
-/// so requests spanning several context windows are normal.
-///
-/// **This ceiling moves.** It moved DOWN on 2026-08-31 (to ~1,000) and back UP
-/// on 2026-09-03, when the token ceiling disappeared entirely. Re-measured
-/// against the live endpoint with exact o200k_base counts and trace-realistic
-/// content (3.17 chars/token):
+/// The endpoint's binding limit is the body size. Measured 2026-09-03 against
+/// the live endpoint with trace-realistic content:
 ///
 /// | true tokens | body | result |
 /// |---|---|---|
-/// | 2,000 - 64,000 | 6 KB - 203 KB | 200 OK, 1.5-7.1 s, PII span found each time |
+/// | 2,000 -> 64,000 | 6.4 KB -> 203 KB | 200 OK, 1.5-7.1 s |
 /// | 73,256 | 243 KiB | 200 OK, 9.3 s -- largest success |
 /// | 78,940 | 261 KiB | 413 |
 /// | 100,000 | 330 KiB | 413 |
 ///
-/// The binding limit is now a request BODY SIZE of ~256 KiB, not a token
-/// count, and it reports an honest `413 Failed to buffer the request body`
-/// rather than the generic 502 that made an over-limit request
-/// indistinguishable from an outage.
+/// An over-limit body gets an honest `413 Failed to buffer the request body`.
+/// Before that date the limit was on tokens per request and was reported as
+/// a generic 502 (2026-08-27 to 2026-08-31, ceilings of ~1,000 to ~6,000
+/// tokens); the token budget that answered that era is gone, because a token
+/// budget can only bound the body indirectly through bytes-per-token, which
+/// varies about 2x between prose and trace content and far more for
+/// escape-heavy text.
 ///
-/// The budget is set well under the proven ceiling rather than at it: this
-/// number has moved twice, so the margin is the point. Override with
-/// `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS` -- added because the previous
-/// value was hardcoded, which meant a vendor-side change could only be
-/// answered with a rebuild and a deploy.
+/// So the adapter builds the request body for a candidate window, measures
+/// its length, and cuts the window when it would exceed this cap (see
+/// [`window_ranges`]). That limit has moved before, so a 413 is not fatal:
+/// the window is halved and each half classified, at most
+/// [`MAX_CLASSIFY_413_SPLITS`] times deep.
 ///
-/// Re-measure before trusting this number.
-pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 32_000;
+/// **64 KiB, not the ~240 KiB the body limit would allow, because of time**
+/// (owner decision 2026-11-05). Dense text took 64.0 s at 128 KiB and
+/// 96.2 s at 232 KiB on 2026-11-05 (see [`DEFAULT_TIMEOUT_MS`]); a 64 KiB
+/// window is ~29 s, so each attempt fits its 53.4 s timeout with margin and
+/// a window's retries fit the witness's request budget. Throughput comes
+/// from classifying windows and leaves concurrently instead.
+///
+/// Override with `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES`.
+/// Re-measure before trusting the number.
+pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
-/// Largest input proven to classify successfully, measured 2026-09-03:
-/// 73,256 tokens (243 KiB body) returned 200; 78,940 (261 KiB) returned 413.
-///
-/// Was 1,500 on 2026-08-31 and 3,000 on 2026-08-27. The endpoint regressed,
-/// then recovered past both. Note this is now a body-size boundary expressed
-/// in tokens: dense content hits the byte limit at a lower token count than
-/// prose does, which is why the budget below keeps real margin.
-pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 73_256;
+/// The smallest body proven to be refused with a 413 (261 KiB, 2026-09-03),
+/// rounded down to the 256 KiB the endpoint's buffer limit appears to be.
+pub const MEASURED_CLASSIFY_BODY_LIMIT_BYTES: usize = 256 * 1024;
 
-// Keep real margin under the measured failure point. The budget is not a
-// guess: exceeding it is what produced the intermittent 502s.
-// A compile-time invariant, not a test: a budget set at the measured limit is
-// one vendor change away from failing every window, and this number has moved
-// twice already (down 2026-08-31, up 2026-09-03). Require 2x margin so the
-// build breaks rather than production.
+// A cap at or over the measured limit turns every full window into a 413 and
+// a halving round trip. Enforced at compile time.
 const _: () = assert!(
-    MAX_CLASSIFY_INPUT_TOKENS * 2 <= MEASURED_CLASSIFY_TOKEN_LIMIT,
-    "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
+    MAX_CLASSIFY_REQUEST_BODY_BYTES < MEASURED_CLASSIFY_BODY_LIMIT_BYTES,
+    "MAX_CLASSIFY_REQUEST_BODY_BYTES must stay under the measured body limit"
 );
 
-/// Largest `privacy/classify` request BODY, in bytes of serialized JSON.
-///
-/// The endpoint's binding limit is the body size, not tokens: measured
-/// 2026-09-03, a 232 KB body classified and a 250 KB body returned
-/// `413 Failed to buffer the request body` (see the table on
-/// [`MAX_CLASSIFY_INPUT_TOKENS`]). A 413 is a permanent failure here, so the
-/// trace is charged for it.
-///
-/// The token budget alone does not bound the body. JSON escaping and padding
-/// put far more than prose's ~3-5 bytes in a token: measured o200k_base
-/// tokens of escaped quotes and backslashes carry ~8 body bytes, `\r\n` ~16,
-/// tabs and newlines ~32, runs of `-`/`=` ~64, runs of spaces ~128. A
-/// 32,000-token window of escaped JSON tool output, a padded table or a
-/// whitespace-heavy log is well past 256 KiB. So a window whose body would
-/// exceed this is cut further (see [`window_ranges`]).
-///
-/// 200 KiB leaves margin under the 232 KB proven success.
-pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 200 * 1024;
+/// How many times a window answered with a 413 may be halved before the
+/// field is refused. Four halvings take a full window to 1/16 of the cap
+/// (15 KiB): a limit that has fallen that far is an endpoint change for an
+/// operator to look at, not something to keep bisecting through.
+pub const MAX_CLASSIFY_413_SPLITS: usize = 4;
+
+/// Texts per request when a caller hands the adapter several at once. 1:
+/// batching is off by default. #463 batched windows and was reverted (#468)
+/// when the endpoint limited TOKENS per request and a batch summed them; the
+/// limit has been a body size since 2026-09-03, and batching under it has
+/// not been measured. Turn on with `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS`
+/// only after `scripts/witness-load/near_ai_probe.py batch` says it holds.
+pub const DEFAULT_MAX_BATCH_INPUTS: usize = 1;
 
 /// How many `privacy/classify` requests for a single field may be in flight
 /// at once.
@@ -128,9 +170,13 @@ pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 200 * 1024;
 pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 1;
 
 /// How many times a single `privacy/classify` request is attempted before
-/// giving up. The hosted endpoint returns transient 502s, so retry a few
-/// times with exponential backoff before failing the window closed.
-pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
+/// giving up. The hosted endpoint returns transient 502s, so retry with
+/// exponential backoff before failing the window closed. Three since
+/// 2026-11-05 (owner decision; was four): at the endpoint's current latency
+/// a fourth attempt at a full window would not fit a request budget. A
+/// caller deadline can stop retries sooner; see
+/// [`PrivacyFilterAdapter::redact_text_before`].
+pub const MAX_CLASSIFY_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 struct SecretApiKey(String);
@@ -147,9 +193,17 @@ pub struct NearAiPrivacyFilterAdapter {
     model: String,
     api_key: SecretApiKey,
     max_input_bytes: usize,
-    /// Per-request token budget. Configurable because the endpoint's ceiling
-    /// has moved twice; see [`MAX_CLASSIFY_INPUT_TOKENS`].
-    max_input_tokens: usize,
+    /// Largest serialized request body. Configurable because the endpoint's
+    /// limit has moved before; see [`MAX_CLASSIFY_REQUEST_BODY_BYTES`].
+    max_request_body_bytes: usize,
+    /// Most texts sent in one request as an input array. 1 is off.
+    max_batch_inputs: usize,
+    /// Where each request's outcome and latency are counted. The process-wide
+    /// recorder unless a caller supplies its own; see [`diagnostics`].
+    diagnostics: Arc<diagnostics::Recorder>,
+    /// The timeout's fixed and per-KiB parts; see [`call_timeout`].
+    timeout_base_ms: u64,
+    timeout_per_kib_ms: u64,
     /// Memoized classifications, keyed by SHA-256 of the window text.
     ///
     /// Agent traces re-read the same files and echo the same tool output
@@ -168,6 +222,9 @@ pub struct NearAiPrivacyFilterAdapter {
     /// The key is a hash and the value is offsets and labels, so the cache
     /// holds no plaintext.
     window_cache: std::sync::Mutex<ClassifyWindowCache>,
+    /// Spacing between classify requests, or `None` for none (the
+    /// default). See [`pacing`] and [`Self::with_requests_per_minute`].
+    pacer: Option<Arc<pacing::Pacer>>,
 }
 
 /// Per-adapter memo table. The adapter is constructed once per driver tick,
@@ -234,25 +291,24 @@ impl NearAiPrivacyFilterAdapter {
         timeout: Duration,
         max_input_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
-        Self::with_max_input_tokens(
+        Self::with_max_request_body_bytes(
             base_url,
             model,
             api_key,
             timeout,
             max_input_bytes,
-            MAX_CLASSIFY_INPUT_TOKENS,
+            MAX_CLASSIFY_REQUEST_BODY_BYTES,
         )
     }
 
-    /// As [`Self::new`], with an explicit per-request token budget.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_max_input_tokens(
+    /// As [`Self::new`], with an explicit request-body cap.
+    pub fn with_max_request_body_bytes(
         base_url: impl Into<String>,
         model: impl Into<String>,
         api_key: impl Into<String>,
         timeout: Duration,
         max_input_bytes: usize,
-        max_input_tokens: usize,
+        max_request_body_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
         let base_url = base_url.into();
         // The classify request carries the API key as a bearer token, so the
@@ -281,9 +337,48 @@ impl NearAiPrivacyFilterAdapter {
             model: model.into(),
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
-            max_input_tokens,
+            max_request_body_bytes,
+            max_batch_inputs: DEFAULT_MAX_BATCH_INPUTS,
+            diagnostics: diagnostics::global(),
+            timeout_base_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            timeout_per_kib_ms: DEFAULT_TIMEOUT_PER_KIB_MS,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
+            pacer: None,
         })
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// Send up to `max_batch_inputs` single-window texts per request as an
+    /// input array, when a caller hands several to
+    /// [`PrivacyFilterAdapter::redact_texts`]. 1 turns batching off; 0 is
+    /// treated as 1.
+    pub fn with_max_batch_inputs(mut self, max_batch_inputs: usize) -> Self {
+        self.max_batch_inputs = max_batch_inputs.max(1);
+        self
+    }
+
+    /// Count this adapter's requests in `recorder` instead of the
+    /// process-wide one. For tests, which run in parallel in one process.
+    pub fn with_diagnostics(mut self, recorder: Arc<diagnostics::Recorder>) -> Self {
+        self.diagnostics = recorder;
+        self
+    }
+
+    /// The part of each request's timeout that grows with its body, per KiB.
+    /// `timeout` passed to the constructor is the fixed part.
+    /// Space classify requests so this adapter sends at most `requests` a
+    /// minute, retries included, evenly rather than in a burst. Zero leaves
+    /// it unpaced. Every caller sharing this adapter shares the one
+    /// schedule; the witness builds one adapter for the process.
+    pub fn with_requests_per_minute(mut self, requests: u32) -> Self {
+        self.pacer = pacing::Pacer::per_minute(requests).map(Arc::new);
+        self
+    }
+
+    pub fn with_timeout_per_kib_ms(mut self, per_kib_ms: u64) -> Self {
+        self.timeout_per_kib_ms = per_kib_ms;
+        self
     }
 }
 
@@ -309,6 +404,21 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    let timeout_per_kib_ms = match std::env::var("TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS") {
+        Ok(value) => {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS",
+                    reason: err.to_string(),
+                })?
+        }
+        Err(_) => DEFAULT_TIMEOUT_PER_KIB_MS,
+    };
+
+    // The fixed part of each request's timeout; the part that grows with the
+    // body is the variable above.
     let timeout_ms = match std::env::var("TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS") {
         Ok(value) => {
             value
@@ -333,43 +443,96 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
             Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
         };
 
+    // The token budget this variable set is gone: windows are sized by the
+    // encoded request body. A host that still sets it is refused at startup
+    // rather than silently ignored, so nobody believes a budget is in force
+    // that is not.
+    if std::env::var_os("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS").is_some() {
+        return Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+            reason: "retired: windows are sized by request body; set \
+                     TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES instead"
+                .to_string(),
+        });
+    }
+
     // Zero is rejected rather than silently meaning "unlimited": an unbounded
-    // budget sends the whole text as one request, which is exactly the
-    // over-limit case this budget exists to prevent.
-    let max_input_tokens = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS") {
+    // cap sends the whole field as one request, which is exactly the
+    // over-limit case this cap exists to prevent. A cap at or over the
+    // measured limit is refused for the same reason.
+    let max_request_body_bytes = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES")
+    {
         Ok(value) => {
             let parsed = value.trim().parse::<usize>().map_err(|err| {
                 PrivacyFilterConfigError::InvalidEnv {
-                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES",
+                    reason: err.to_string(),
+                }
+            })?;
+            if parsed == 0 || parsed >= MEASURED_CLASSIFY_BODY_LIMIT_BYTES {
+                return Err(PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES",
+                    reason: format!(
+                        "must be greater than zero and under the measured limit of \
+                         {MEASURED_CLASSIFY_BODY_LIMIT_BYTES} bytes"
+                    ),
+                });
+            }
+            parsed
+        }
+        Err(_) => MAX_CLASSIFY_REQUEST_BODY_BYTES,
+    };
+
+    // Off unless set. Sending several inputs in one request was reverted in
+    // #468, when the endpoint limited tokens per request; whether it holds
+    // under today's body limit has not been measured
+    // (scripts/witness-load/near_ai_probe.py measures it).
+    let max_batch_inputs = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS") {
+        Ok(value) => {
+            let parsed = value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS",
                     reason: err.to_string(),
                 }
             })?;
             if parsed == 0 {
                 return Err(PrivacyFilterConfigError::InvalidEnv {
-                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
-                    reason: "must be greater than zero".to_string(),
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS",
+                    reason: "must be at least 1 (1 is off)".to_string(),
                 });
             }
             parsed
         }
-        Err(_) => MAX_CLASSIFY_INPUT_TOKENS,
+        Err(_) => DEFAULT_MAX_BATCH_INPUTS,
     };
 
-    let adapter = NearAiPrivacyFilterAdapter::with_max_input_tokens(
+    let adapter = NearAiPrivacyFilterAdapter::with_max_request_body_bytes(
         base_url,
         model,
         api_key,
         Duration::from_millis(timeout_ms),
         max_input_bytes,
-        max_input_tokens,
-    )?;
+        max_request_body_bytes,
+    )?
+    .with_max_batch_inputs(max_batch_inputs)
+    .with_timeout_per_kib_ms(timeout_per_kib_ms);
+    // Opt-in: unset is unpaced, as before. The witness sets it in its
+    // measured compose file, so the bound is part of its identity.
+    let adapter = match requests_per_minute_from(
+        std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE")
+            .ok()
+            .as_deref(),
+    )? {
+        Some(requests) => adapter.with_requests_per_minute(requests),
+        None => adapter,
+    };
     Ok(Arc::new(adapter))
 }
 
 #[derive(Serialize)]
-struct ClassifyRequest<'a> {
+struct ClassifyRequest<'a, I: Serialize + ?Sized = str> {
     model: &'a str,
-    input: &'a str,
+    input: &'a I,
 }
 
 #[derive(Deserialize)]
@@ -391,7 +554,7 @@ struct NearAiSpan {
     category: String,
     start: usize,
     end: usize,
-    #[serde(default)]
+    #[serde(default = "crate::privacy_filter_spans::unavailable_classifier_score")]
     score: f64,
     #[serde(default)]
     text: Option<String>,
@@ -402,6 +565,27 @@ struct NearAiSpan {
 /// controls (`\n`, `\r`, `\t`, backspace, form feed) take 2 bytes, every
 /// other control below 0x20 takes 6 (`\u00XX`), and everything else,
 /// including non-ASCII UTF-8, is copied as is.
+/// `TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`: unset or empty is
+/// unpaced; otherwise a whole number of requests a minute, above zero.
+/// Zero is refused rather than read as "unlimited", the same rule the body
+/// cap follows, so nobody believes a bound is in force that is not.
+fn requests_per_minute_from(value: Option<&str>) -> Result<Option<u32>, PrivacyFilterConfigError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    match value.parse::<u32>() {
+        Ok(0) => Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE",
+            reason: "must be greater than zero; unset it for no pacing".to_string(),
+        }),
+        Ok(requests) => Ok(Some(requests)),
+        Err(err) => Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE",
+            reason: err.to_string(),
+        }),
+    }
+}
+
 fn json_escaped_len(text: &str) -> usize {
     text.bytes()
         .map(|byte| match byte {
@@ -412,58 +596,79 @@ fn json_escaped_len(text: &str) -> usize {
         .sum()
 }
 
-/// The windows a field is classified in: [`chunk_token_ranges`]'s token
-/// windows -- unchanged whenever each window's body fits -- with any window
-/// whose JSON-escaped size exceeds `max_input_json_bytes` cut further, after
-/// its last newline under the cap where there is one, so no request goes out
-/// over [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]. Contiguous and covering the
-/// whole text, on char boundaries.
-fn window_ranges(
-    text: &str,
-    max_tokens: usize,
-    max_input_json_bytes: usize,
-) -> Vec<std::ops::Range<usize>> {
+/// The windows a field is classified in: contiguous, covering the whole
+/// text, on char boundaries, each as large as `max_input_json_bytes` of
+/// JSON-escaped input allows. A window ends after the last newline that fits
+/// where there is one, so a line is split only when it alone exceeds the cap.
+///
+/// `max_input_json_bytes` is the request-body cap less the measured envelope
+/// (see [`NearAiPrivacyFilterAdapter::max_input_json_bytes`]), and
+/// [`json_escaped_len`] is exactly what `serde_json` writes, so every window's
+/// serialized body fits the cap. `classify_window` re-measures the real body
+/// before sending anyway.
+///
+/// One linear pass: each character's escaped cost is computed once.
+fn window_ranges(text: &str, max_input_json_bytes: usize) -> Vec<std::ops::Range<usize>> {
     let max_input_json_bytes = max_input_json_bytes.max(1);
     let mut ranges = Vec::new();
-    for range in chunk_token_ranges(text, max_tokens) {
-        if json_escaped_len(&text[range.clone()]) <= max_input_json_bytes {
-            ranges.push(range);
-            continue;
-        }
-        let mut start = range.start;
-        while start < range.end {
-            let mut used = 0usize;
-            let mut end = start;
-            let mut last_newline_end: Option<usize> = None;
-            for (offset, character) in text[start..range.end].char_indices() {
-                let mut buffer = [0u8; 4];
-                let cost = json_escaped_len(character.encode_utf8(&mut buffer));
-                if used + cost > max_input_json_bytes && end > start {
-                    break;
-                }
-                used += cost;
-                end = start + offset + character.len_utf8();
-                if character == '\n' {
-                    last_newline_end = Some(end);
-                }
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut used = 0usize;
+        let mut end = start;
+        let mut last_newline_end: Option<usize> = None;
+        for (offset, character) in text[start..].char_indices() {
+            let mut buffer = [0u8; 4];
+            let cost = json_escaped_len(character.encode_utf8(&mut buffer));
+            if used + cost > max_input_json_bytes && end > start {
+                break;
             }
-            if end < range.end {
-                if let Some(newline_end) = last_newline_end {
-                    end = newline_end;
-                }
+            used += cost;
+            end = start + offset + character.len_utf8();
+            if character == '\n' {
+                last_newline_end = Some(end);
             }
-            ranges.push(start..end);
-            start = end;
         }
+        if end < text.len() {
+            if let Some(newline_end) = last_newline_end {
+                end = newline_end;
+            }
+        }
+        ranges.push(start..end);
+        start = end;
     }
     ranges
 }
 
-/// Hash-only label for a response whose span texts disagree with its offsets.
-const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+/// Where to halve a window the endpoint refused as too large: after the last
+/// newline in the first half when that keeps at least a quarter of the window
+/// on the left, otherwise at the middle char boundary. `None` when the window
+/// is a single character and cannot be split.
+fn split_point(text: &str) -> Option<usize> {
+    let mut middle = text.len() / 2;
+    while middle > 0 && !text.is_char_boundary(middle) {
+        middle -= 1;
+    }
+    if middle == 0 {
+        // The first character is wider than half the window: split after it,
+        // if anything follows.
+        let first = text.chars().next()?.len_utf8();
+        return (first < text.len()).then_some(first);
+    }
+    match text[..middle].rfind('\n') {
+        Some(newline) if newline + 1 >= text.len() / 4 && newline + 1 < text.len() => {
+            Some(newline + 1)
+        }
+        _ => Some(middle),
+    }
+}
 
-/// Fail closed unless every span's reported `text` is exactly the request
-/// input's codepoints `[start, end)`, then return the spans without it.
+const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+const SPAN_OUT_OF_RANGE_LABEL: &str = "privacy_filter_span_out_of_range";
+
+/// Fail closed unless every span lies inside the input (the range rule
+/// `apply_spans` applies, [`crate::privacy_filter_spans::span_fits`]) and its
+/// reported `text` is exactly the input's codepoints `[start, end)`, then
+/// return the spans without it, and how many were re-anchored.
 ///
 /// The endpoint reports, with each span, the text it covers (probed live on
 /// 2026-10-11 with ZWJ emoji, accented and CJK text, CRLF and blank lines:
@@ -475,26 +680,140 @@ const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
 /// success. This check turns that into a refusal. A span with no `text`
 /// cannot be checked, so it refuses too.
 ///
-/// Spans whose offsets are out of range are passed through for
-/// `apply_spans`, which refuses them with its own error. Neither the span
-/// text nor the input is ever logged: the failure carries the label and the
-/// input's hash-only fingerprint.
+/// Re-anchoring (owner, 2026-11-13): NEAR AI answered one real session's
+/// window that way on every request, so refusing alone refused it for good.
+/// A slipped span whose `text` occurs exactly once in the whole window --
+/// overlapping occurrences counted -- is moved onto that occurrence, in
+/// codepoints, keeping its category and score, and must still fit. No
+/// further request is made. Zero or several occurrences, empty text or no
+/// text leave the answer refused. Only an answer every span of which then
+/// verifies is returned, so only that can be cached.
+///
+/// A span out of range is refused here, not left for `apply_spans`: an
+/// answer this accepts is cached, and an out-of-range span that reached the
+/// cache was refused on every later request for its window without the
+/// classifier being asked again (a real session, 2026-11-12). Neither the
+/// span text nor the input is ever logged: the failure carries the label and
+/// the input's hash-only fingerprint.
+/// How many spans verification corrected rather than accepted as reported.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpanCorrections {
+    /// Moved onto the one place their reported text occurs.
+    pub(crate) reanchored: usize,
+    /// Left where they were: the offsets were right and only the reported
+    /// text had characters replaced (see
+    /// [`matches_but_for_replacement_characters`]).
+    pub(crate) text_repaired: usize,
+}
+
+impl std::ops::AddAssign for SpanCorrections {
+    fn add_assign(&mut self, other: Self) {
+        self.reanchored += other.reanchored;
+        self.text_repaired += other.text_repaired;
+    }
+}
+
+/// NEAR AI has been seen to report a span's `text` with a character it
+/// could not decode replaced by U+FFFD, one per undecodable piece: a
+/// Private Use Area character such as U+E202 (three UTF-8 bytes) comes
+/// back as two. The offsets are right; only the reported copy is lossy.
+/// True when `text` equals `covered` except that each run of U+FFFD in
+/// `text` stands for exactly one non-ASCII character of `covered` whose
+/// UTF-8 encoding is at least as long as the run. `text` must contain at
+/// least one U+FFFD; every other character must match exactly.
+fn matches_but_for_replacement_characters(text: &str, covered: &str) -> bool {
+    const REPLACEMENT: char = '\u{fffd}';
+    if !text.contains(REPLACEMENT) {
+        return false;
+    }
+    let mut want = covered.chars().peekable();
+    let mut got = text.chars().peekable();
+    while let Some(c) = got.next() {
+        if c == REPLACEMENT {
+            let mut run = 1usize;
+            while got.peek() == Some(&REPLACEMENT) {
+                got.next();
+                run += 1;
+            }
+            match want.next() {
+                Some(original) if !original.is_ascii() && original.len_utf8() >= run => {}
+                _ => return false,
+            }
+        } else if want.next() != Some(c) {
+            return false;
+        }
+    }
+    want.next().is_none()
+}
+
 fn verify_span_texts(
     input: &str,
     spans: Vec<NearAiSpan>,
-) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+) -> Result<(Vec<ClassifySpan>, SpanCorrections), (diagnostics::BodyShape, String)> {
     let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
     boundaries.push(input.len());
-    let mismatches = spans
+    let codepoints = boundaries.len() - 1;
+    let out_of_range = spans
         .iter()
-        .filter(|span| {
-            if span.start > span.end || span.end >= boundaries.len() {
-                return false;
-            }
-            let covered = &input[boundaries[span.start]..boundaries[span.end]];
-            span.text.as_deref() != Some(covered)
-        })
+        .filter(|span| !crate::privacy_filter_spans::span_fits(span.start, span.end, codepoints))
         .count();
+    if out_of_range > 0 {
+        let diagnostics = classify_input_diagnostics(&[input]);
+        tracing::warn!(
+            classify_input = %diagnostics,
+            out_of_range_spans = out_of_range,
+            spans = spans.len(),
+            failure = SPAN_OUT_OF_RANGE_LABEL,
+            "near-ai privacy classify failed"
+        );
+        return Err((
+            diagnostics::BodyShape::SpanOutOfRange,
+            format!(
+                "near-ai privacy classifier returned out-of-range span: \
+                 {SPAN_OUT_OF_RANGE_LABEL} out_of_range_spans={out_of_range} spans={} {diagnostics}",
+                spans.len()
+            ),
+        ));
+    }
+    // A span whose text is right and whose offsets are not is moved onto
+    // its text when that text occurs exactly once in the window -- anywhere
+    // in it, overlapping occurrences counted. The answer is otherwise
+    // unchanged, so no further request is made. Zero or several
+    // occurrences, or no text to look for, leave it a mismatch.
+    let mut spans = spans;
+    let mut corrections = SpanCorrections::default();
+    let mut mismatches = 0usize;
+    for span in &mut spans {
+        let covered = &input[boundaries[span.start]..boundaries[span.end]];
+        if span.text.as_deref() == Some(covered) {
+            continue;
+        }
+        // Right offsets, lossy reported text: everything but the replaced
+        // characters must equal what the offsets cover, and the span stays
+        // where it is.
+        if span
+            .text
+            .as_deref()
+            .is_some_and(|text| matches_but_for_replacement_characters(text, covered))
+        {
+            corrections.text_repaired += 1;
+            continue;
+        }
+        match span
+            .text
+            .as_deref()
+            .and_then(|text| sole_occurrence(input, text))
+        {
+            Some((start, end))
+                if crate::privacy_filter_spans::span_fits(start, end, codepoints) =>
+            {
+                span.start = start;
+                span.end = end;
+                corrections.reanchored += 1;
+            }
+            _ => mismatches += 1,
+        }
+    }
     if mismatches > 0 {
         let diagnostics = classify_input_diagnostics(&[input]);
         tracing::warn!(
@@ -504,23 +823,53 @@ fn verify_span_texts(
             failure = SPAN_TEXT_MISMATCH_LABEL,
             "near-ai privacy classify failed"
         );
-        return Err(TraceContributionError::RedactionFailed {
-            reason: format!(
+        return Err((
+            diagnostics::BodyShape::SpanTextMismatch,
+            format!(
                 "near-ai privacy classifier span offsets disagree with span text: \
                  {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
                 spans.len()
             ),
-        });
+        ));
     }
-    Ok(spans
-        .into_iter()
-        .map(|span| ClassifySpan {
-            category: span.category,
-            start: span.start,
-            end: span.end,
-            score: span.score,
-        })
-        .collect())
+    Ok((
+        spans
+            .into_iter()
+            .map(|span| ClassifySpan {
+                category: span.category,
+                start: span.start,
+                end: span.end,
+                score: span.score,
+            })
+            .collect(),
+        corrections,
+    ))
+}
+
+/// The codepoint range of `text` in `input` when it occurs there exactly
+/// once, overlapping occurrences counted; `None` for empty text, or for
+/// zero or several occurrences.
+fn sole_occurrence(input: &str, text: &str) -> Option<(usize, usize)> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    let mut from = 0usize;
+    while let Some(offset) = input[from..].find(text) {
+        let at = from + offset;
+        if found.replace(at).is_some() {
+            return None;
+        }
+        // Step one character, not the match, so an overlapping second
+        // occurrence is seen.
+        from = at + input[at..].chars().next().map_or(1, char::len_utf8);
+        if from > input.len() {
+            break;
+        }
+    }
+    let at = found?;
+    let start = input[..at].chars().count();
+    Some((start, start + text.chars().count()))
 }
 
 #[async_trait]
@@ -528,6 +877,69 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
     async fn redact_text(
         &self,
         text: &str,
+    ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+        self.redact_text_by(text, None).await
+    }
+
+    async fn redact_text_before(
+        &self,
+        text: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+        self.redact_text_by(text, Some(deadline)).await
+    }
+
+    fn preferred_batch_inputs(&self) -> usize {
+        self.max_batch_inputs
+    }
+
+    /// One request per distinct window not already in the window cache,
+    /// windowed exactly as [`Self::redact_text`] windows. Blank text and
+    /// text over the input limit send nothing. A 413 split or a retry would
+    /// send more, never fewer, so this is a floor. With batching on, texts
+    /// share requests in a way this does not model, so it declines.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        if self.max_batch_inputs > 1 {
+            return None;
+        }
+        let budget = self.max_input_json_bytes();
+        let mut windows = std::collections::HashSet::new();
+        for text in texts {
+            if text.trim().is_empty() || text.len() > self.max_input_bytes {
+                continue;
+            }
+            for range in window_ranges(text, budget) {
+                let key = window_key(&text[range]);
+                if !self.window_is_cached(&key) {
+                    windows.insert(key);
+                }
+            }
+        }
+        Some(windows.len())
+    }
+
+    fn request_interval(&self) -> Option<Duration> {
+        self.pacer.as_ref().map(|pacer| pacer.interval())
+    }
+
+    async fn redact_texts(&self, texts: &[&str]) -> Vec<Answer> {
+        self.redact_texts_by(texts, None).await
+    }
+
+    async fn redact_texts_before(
+        &self,
+        texts: &[&str],
+        deadline: std::time::Instant,
+    ) -> Vec<Answer> {
+        self.redact_texts_by(texts, Some(deadline)).await
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    async fn redact_text_by(
+        &self,
+        text: &str,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
         if text.trim().is_empty() {
             return Ok(None);
@@ -559,11 +971,10 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
         //
-        // Windows are bounded by the request BODY as well as by tokens (see
-        // MAX_CLASSIFY_REQUEST_BODY_BYTES): for ordinary text they are
-        // exactly the token windows; a window of escape- or whitespace-heavy
-        // text that would be refused with a 413 is cut further.
-        let ranges = window_ranges(text, self.max_input_tokens, self.max_input_json_bytes());
+        // Windows are sized by the serialized request BODY and nothing else
+        // (see MAX_CLASSIFY_REQUEST_BODY_BYTES): the endpoint's limit is a
+        // body size, so a window is as large as the body cap allows.
+        let ranges = window_ranges(text, self.max_input_json_bytes());
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -596,7 +1007,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
                 |(range, codepoint_start)| {
                     let window = &text[range];
                     async move {
-                        self.classify_window(window)
+                        self.classify_window(window, MAX_CLASSIFY_413_SPLITS, deadline)
                             .await
                             .map(|spans| (codepoint_start, spans))
                     }
@@ -608,6 +1019,125 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
 
         apply_windowed_spans("near-ai", text, &windows)
     }
+
+    /// With batching on (`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` above 1),
+    /// texts that fit one window are sent several to a request as an input
+    /// array, packed under the body cap, and each answer is mapped back by
+    /// its index. Everything else -- blank text, a field over the input
+    /// limit, a text needing several windows, a text already in the window
+    /// cache -- goes through [`Self::redact_text`] exactly as it would alone.
+    ///
+    /// Each text's answer is what `redact_text` returns for it given the
+    /// same spans: the same single window, the same verification, the same
+    /// cache entry, the same `apply_windowed_spans`. A failed request fails
+    /// every text it carried; a 413 splits the batch in half, and a single
+    /// text that still draws one is halved by `redact_text` as usual.
+    async fn redact_texts_by(
+        &self,
+        texts: &[&str],
+        deadline: Option<std::time::Instant>,
+    ) -> Vec<Answer> {
+        let mut answers: Vec<Option<Answer>> = vec![None; texts.len()];
+        let mut batchable: Vec<usize> = Vec::new();
+        if self.max_batch_inputs > 1 && texts.len() > 1 {
+            let window_budget = self.max_input_json_bytes();
+            for (index, text) in texts.iter().enumerate() {
+                let fits = !text.trim().is_empty()
+                    && text.len() <= self.max_input_bytes
+                    && json_escaped_len(text) <= window_budget;
+                if !fits {
+                    continue;
+                }
+                let key = window_key(text);
+                match self.cached_window(&key) {
+                    Some(spans) => {
+                        answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]))
+                    }
+                    None => batchable.push(index),
+                }
+            }
+        }
+
+        // Pack in order, under both the item limit and the body cap.
+        let mut pending: Vec<Vec<usize>> = Vec::new();
+        let base = self.batch_body_base_len();
+        let mut current: Vec<usize> = Vec::new();
+        let mut current_len = base;
+        for index in batchable {
+            let cost = json_escaped_len(texts[index]) + 2 + usize::from(!current.is_empty());
+            if !current.is_empty()
+                && (current.len() >= self.max_batch_inputs
+                    || current_len + cost > self.max_request_body_bytes)
+            {
+                pending.push(std::mem::take(&mut current));
+                current_len = base;
+            }
+            current_len += json_escaped_len(texts[index]) + 2 + usize::from(!current.is_empty());
+            current.push(index);
+        }
+        if !current.is_empty() {
+            pending.push(current);
+        }
+        // Batches are sent in order; a halved batch's halves go first.
+        pending.reverse();
+        while let Some(batch) = pending.pop() {
+            if batch.len() == 1 {
+                // Alone it is an ordinary single-window request.
+                continue;
+            }
+            let inputs: Vec<&str> = batch.iter().map(|&index| texts[index]).collect();
+            let body = serde_json::to_vec(&ClassifyRequest {
+                model: &self.model,
+                input: inputs.as_slice(),
+            });
+            let outcome = match body {
+                Ok(body) if body.len() <= self.max_request_body_bytes => {
+                    self.send_window(&inputs, body, deadline).await
+                }
+                // Over the cap after all: treat as the endpoint would.
+                Ok(_) => Ok(WindowAnswer::TooLarge),
+                Err(_) => Err(TraceContributionError::RedactionFailed {
+                    reason: "near-ai privacy classifier request did not serialize".to_string(),
+                }),
+            };
+            match outcome {
+                Ok(WindowAnswer::Spans(all)) => {
+                    for (&index, spans) in batch.iter().zip(all) {
+                        let text = texts[index];
+                        self.remember_window(text, &spans);
+                        answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]));
+                    }
+                }
+                Ok(WindowAnswer::TooLarge) => {
+                    let (left, right) = batch.split_at(batch.len() / 2);
+                    pending.push(right.to_vec());
+                    pending.push(left.to_vec());
+                }
+                Err(error) => {
+                    for &index in &batch {
+                        answers[index] = Some(Err(error.clone()));
+                    }
+                }
+            }
+        }
+
+        // Everything not answered above, in order, exactly as alone.
+        let mut out = Vec::with_capacity(texts.len());
+        for (index, answer) in answers.into_iter().enumerate() {
+            out.push(match answer {
+                Some(answer) => answer,
+                None => self.redact_text_by(texts[index], deadline).await,
+            });
+        }
+        out
+    }
+}
+
+type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+/// The window cache key: SHA-256 of the window's bytes.
+fn window_key(text: &str) -> [u8; 32] {
+    <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into()
 }
 
 impl NearAiPrivacyFilterAdapter {
@@ -637,8 +1167,30 @@ impl NearAiPrivacyFilterAdapter {
         hit
     }
 
+    /// Whether `key` is in the window cache, without counting a hit or a
+    /// miss: a prediction is not a lookup.
+    fn window_is_cached(&self, key: &[u8; 32]) -> bool {
+        match self.window_cache.lock() {
+            Ok(cache) => cache.entries.contains_key(key),
+            Err(poisoned) => poisoned.into_inner().entries.contains_key(key),
+        }
+    }
+
     /// Record a successful classification for reuse within this tick.
-    fn remember_window(&self, key: [u8; 32], spans: &[ClassifySpan]) {
+    /// Cache `spans` as `window`'s verified answer. Spans that do not fit
+    /// the window are never stored: verification refuses them first, and
+    /// this guard keeps any later path from caching what `apply_spans` would
+    /// refuse.
+    fn remember_window(&self, window: &str, spans: &[ClassifySpan]) {
+        if !crate::privacy_filter_spans::spans_fit(window, spans) {
+            tracing::warn!(
+                classify_input = %classify_input_diagnostics(&[window]),
+                failure = SPAN_OUT_OF_RANGE_LABEL,
+                "near-ai privacy classify answer not cached"
+            );
+            return;
+        }
+        let key = window_key(window);
         let mut cache = match self.window_cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
@@ -678,70 +1230,193 @@ impl NearAiPrivacyFilterAdapter {
     /// (in that window's codepoint coordinates). Fail-closed on any
     /// transport error, non-2xx status, malformed body, or empty data
     /// array.
-    async fn classify_window(
+    /// Classify one window, in that window's own codepoint coordinates.
+    ///
+    /// The request body is serialized here and its length checked against
+    /// the cap before anything is sent. A body over the cap, or one the
+    /// endpoint refuses with a 413, is halved (see [`split_point`]) and each
+    /// half classified, at most `splits_left` times deep; the halves' spans
+    /// are shifted back into this window's coordinates, so the caller cannot
+    /// tell a split window from a whole one. The endpoint classifies a span
+    /// the same wherever the window boundary falls only to the extent its
+    /// model does, which is why splitting is the exception and the cap keeps
+    /// it so.
+    fn classify_window<'a>(
+        &'a self,
+        text: &'a str,
+        splits_left: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<ClassifySpan>, TraceContributionError>> {
+        Box::pin(async move {
+            // Memoize on the window's content hash. The lock is taken only
+            // around the map access and released before any await, so it
+            // never spans a network round trip.
+            let key = window_key(text);
+            if let Some(hit) = self.cached_window(&key) {
+                return Ok(hit);
+            }
+            let body = serde_json::to_vec(&ClassifyRequest {
+                model: &self.model,
+                input: text,
+            })
+            .map_err(|_| TraceContributionError::RedactionFailed {
+                reason: "near-ai privacy classifier request did not serialize".to_string(),
+            })?;
+            let spans = if body.len() > self.max_request_body_bytes {
+                self.classify_halves(text, splits_left, deadline).await?
+            } else {
+                match self.send_window(&[text], body, deadline).await? {
+                    WindowAnswer::Spans(mut spans) => spans.swap_remove(0),
+                    WindowAnswer::TooLarge => {
+                        self.classify_halves(text, splits_left, deadline).await?
+                    }
+                }
+            };
+            // Verified before it is remembered (in `send_window`, per
+            // half): a refused response is never served from the cache.
+            self.remember_window(text, &spans);
+            Ok(spans)
+        })
+    }
+
+    /// Classify `text` as two windows and merge their spans into `text`'s
+    /// codepoint coordinates. Refuses, permanently, when the split budget is
+    /// spent or the window is one character.
+    async fn classify_halves(
         &self,
         text: &str,
+        splits_left: usize,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
-        // Memoize on the window's content hash. The lock is taken only around
-        // the map access and released before any await, so it never spans a
-        // network round trip.
-        let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
-        if let Some(hit) = self.cached_window(&key) {
-            return Ok(hit);
-        }
-
-        let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
-        let request_body = ClassifyRequest {
-            model: &self.model,
-            input: text,
+        let split = match (splits_left, split_point(text)) {
+            (0, _) | (_, None) => {
+                let diagnostics = classify_input_diagnostics(&[text]);
+                tracing::warn!(
+                    classify_input = %diagnostics,
+                    failure = "too_large",
+                    "near-ai privacy classify failed"
+                );
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier refused the request as too large after \
+                         {MAX_CLASSIFY_413_SPLITS} halvings {diagnostics}"
+                    ),
+                });
+            }
+            (_, Some(split)) => split,
         };
+        let (left, right) = text.split_at(split);
+        let mut spans = self
+            .classify_window(left, splits_left - 1, deadline)
+            .await?;
+        let shift = left.chars().count();
+        let right_spans = self
+            .classify_window(right, splits_left - 1, deadline)
+            .await?;
+        spans.extend(right_spans.into_iter().map(|span| ClassifySpan {
+            start: span.start + shift,
+            end: span.end + shift,
+            ..span
+        }));
+        Ok(spans)
+    }
+
+    /// One request for one window, with the transient retries. A 413 comes
+    /// back as [`WindowAnswer::TooLarge`] for the caller to split.
+    async fn send_window(
+        &self,
+        inputs: &[&str],
+        body: Vec<u8>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<WindowAnswer, TraceContributionError> {
+        let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
+        let full_attempt = call_timeout(self.timeout_base_ms, self.timeout_per_kib_ms, body.len());
 
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // Every attempt, retries included, takes the next paced slot.
+            // A slot that would start after the caller's deadline is not
+            // taken: the window fails as transient, the slot stays free.
+            if let Some(pacer) = &self.pacer {
+                let now = std::time::Instant::now();
+                match pacer.reserve(now, deadline) {
+                    Some(slot) if slot > now => tokio::time::sleep(slot - now).await,
+                    Some(_) => {}
+                    None => return Err(budget_spent(inputs, attempt)),
+                }
+            }
+            // The first attempt runs, cut short at the caller's deadline if
+            // that comes first; a retry runs only if a whole attempt still
+            // fits before the deadline (`may_retry`). The deadline is the
+            // ceiling: past it the caller has given up.
+            let this_attempt = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(budget_spent(inputs, attempt));
+                    }
+                    full_attempt.min(left)
+                }
+                None => full_attempt,
+            };
             // Transient failures (transport errors, 5xx) are retried with
             // exponential backoff; 4xx and body-shape failures are not.
+            let started = std::time::Instant::now();
+            let mut in_flight = Some(self.diagnostics.enter());
             let send_result = self
                 .client
                 .post(&endpoint)
+                .timeout(this_attempt)
                 .bearer_auth(&self.api_key.0)
-                .json(&request_body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
                 .send()
                 .await;
             let response = match send_result {
                 Ok(response) => response,
                 Err(err) => {
-                    if attempt < MAX_CLASSIFY_ATTEMPTS {
-                        backoff(attempt).await;
+                    in_flight.take();
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
+                    let wait = Duration::from_millis(backoff_ms(attempt));
+                    if may_retry(attempt, wait, full_attempt, deadline) {
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
-                    // Retries are spent and the request never reached the
-                    // classifier: the upstream is down, the trace is fine.
-                    // The input fingerprint rides along hash-only so a
-                    // repeatedly-failing window is identifiable in the logs.
-                    let diagnostics = classify_input_diagnostics(&[text]);
-                    // The driver logs only a hash of the error, so emit the
-                    // input fingerprint here where it is provably hash-only.
-                    tracing::warn!(
-                        classify_input = %diagnostics,
-                        attempts = attempt,
-                        failure = "transport",
-                        "near-ai privacy classify failed"
-                    );
-                    return Err(TraceContributionError::TransientRedactionFailed {
-                        reason: format!(
-                            "near-ai privacy classifier transport error: {} attempts={} {}",
-                            err, attempt, diagnostics
-                        ),
-                    });
+                    return Err(transport_failure(&err, inputs, attempt));
                 }
             };
 
             let status = response.status();
             if !status.is_success() {
+                in_flight.take();
+                self.diagnostics.record(
+                    diagnostics::Outcome::from_status(status.as_u16()),
+                    body.len(),
+                    started.elapsed(),
+                );
+            }
+            if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                return Ok(WindowAnswer::TooLarge);
+            }
+            if !status.is_success() {
                 let transient = crate::privacy_filter_spans::is_transient_classifier_status(status);
-                if transient && attempt < MAX_CLASSIFY_ATTEMPTS {
-                    backoff(attempt).await;
+                let wait = retry_wait(
+                    attempt,
+                    status,
+                    retry_after_secs(response.headers()),
+                    self.pacer.as_ref().map(|pacer| pacer.interval()),
+                );
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // Every caller on this adapter waits out a rate limit,
+                    // not only the one that met it.
+                    if let Some(pacer) = &self.pacer {
+                        pacer.hold_until(std::time::Instant::now() + wait);
+                    }
+                }
+                if transient && may_retry(attempt, wait, full_attempt, deadline) {
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
                 // Hash the body for audit; do not include it verbatim.
@@ -753,7 +1428,7 @@ impl NearAiPrivacyFilterAdapter {
                 // Same split the retry decision above makes, carried out to
                 // the caller: a 5xx, 429 or 408 that outlived our retries is
                 // the vendor's problem, any other 4xx is ours or the trace's.
-                let diagnostics = classify_input_diagnostics(&[text]);
+                let diagnostics = classify_input_diagnostics(inputs);
                 tracing::warn!(
                     classify_input = %diagnostics,
                     attempts = attempt,
@@ -779,45 +1454,188 @@ impl NearAiPrivacyFilterAdapter {
                 });
             }
 
-            let parsed: ClassifyResponse =
-                response
-                    .json()
-                    .await
-                    .map_err(|err| TraceContributionError::RedactionFailed {
-                        reason: format!("near-ai privacy classifier response parse error: {}", err),
-                    })?;
-            let entry =
-                parsed
-                    .data
-                    .into_iter()
-                    .next()
-                    .ok_or(TraceContributionError::RedactionFailed {
-                        reason: "near-ai privacy classifier returned empty data array".to_string(),
-                    })?;
-            // Verified before it is remembered: a refused response must
-            // never be served from the cache.
-            let spans = verify_span_texts(text, entry.spans)?;
-            self.remember_window(key, &spans);
-            return Ok(spans);
+            // The whole body first. A body that never finished arriving is
+            // the connection failing (a timeout or transport outcome), not a
+            // malformed answer: `parse_error` means bytes arrived and were
+            // not the expected JSON.
+            let read = response.bytes().await;
+            in_flight.take();
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    self.diagnostics
+                        .record(transport_outcome(&err), body.len(), started.elapsed());
+                    let wait = Duration::from_millis(backoff_ms(attempt));
+                    if may_retry(attempt, wait, full_attempt, deadline) {
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    return Err(transport_failure(&err, inputs, attempt));
+                }
+            };
+
+            // One request, one outcome, batched or not. A malformed answer
+            // -- unparseable, empty, the wrong number of entries, a span
+            // out of range or not matching its input -- is `body_shape`,
+            // counted under which check it failed. Nothing from it is
+            // applied or cached.
+            return match parse_classify_answer(inputs, &bytes) {
+                Ok((spans, corrections)) => {
+                    self.diagnostics.record_reanchored(corrections.reanchored);
+                    self.diagnostics
+                        .record_text_repaired(corrections.text_repaired);
+                    self.diagnostics.record(
+                        diagnostics::Outcome::Ok,
+                        body.len(),
+                        started.elapsed(),
+                    );
+                    Ok(WindowAnswer::Spans(spans))
+                }
+                Err((kind, reason)) => {
+                    self.diagnostics
+                        .record_body_shape(kind, body.len(), started.elapsed());
+                    let reason = format!("{reason} body_shape={}", kind.label());
+                    // A span answer that could not be verified or
+                    // re-anchored is about the text: NEAR AI answers it the
+                    // same way every time. A body that does not parse, is
+                    // empty or has the wrong entry count is the classifier
+                    // misbehaving, which says nothing about the text.
+                    Err(match kind {
+                        diagnostics::BodyShape::SpanTextMismatch
+                        | diagnostics::BodyShape::SpanOutOfRange => {
+                            TraceContributionError::UnclassifiableText { reason }
+                        }
+                        diagnostics::BodyShape::ParseError
+                        | diagnostics::BodyShape::EmptyData
+                        | diagnostics::BodyShape::EntryCountMismatch => {
+                            TraceContributionError::RedactionFailed { reason }
+                        }
+                    })
+                }
+            };
         }
     }
 }
 
+/// The outcome kind of a request that failed on the wire.
+fn transport_outcome(err: &reqwest::Error) -> diagnostics::Outcome {
+    if err.is_timeout() {
+        diagnostics::Outcome::Timeout
+    } else {
+        diagnostics::Outcome::Transport
+    }
+}
+
+/// A request that failed on the wire after its retries: the upstream is
+/// down, the trace is fine. The input fingerprint rides along hash-only so a
+/// repeatedly-failing window is identifiable in the logs.
+fn transport_failure(
+    err: &reqwest::Error,
+    inputs: &[&str],
+    attempt: usize,
+) -> TraceContributionError {
+    let diagnostics = classify_input_diagnostics(inputs);
+    // The driver logs only a hash of the error, so emit the input
+    // fingerprint here where it is provably hash-only.
+    tracing::warn!(
+        classify_input = %diagnostics,
+        attempts = attempt,
+        failure = "transport",
+        "near-ai privacy classify failed"
+    );
+    TraceContributionError::TransientRedactionFailed {
+        reason: format!(
+            "near-ai privacy classifier transport error: {} attempts={} {}",
+            err, attempt, diagnostics
+        ),
+    }
+}
+
+/// Read a 200's body into verified spans per input, in input order, or say
+/// which way it was malformed.
+///
+/// One entry per input, in input order. A single-input request reads the
+/// first entry, as it always has; a batch must account for every input
+/// exactly, or none of it is used. Every span is verified before anything
+/// is returned, so a refused answer can never reach the cache.
+///
+/// The reasons are label-only: a JSON error's own text can quote the body,
+/// so only its category is kept.
+fn parse_classify_answer(
+    inputs: &[&str],
+    body: &[u8],
+) -> Result<(Vec<Vec<ClassifySpan>>, SpanCorrections), (diagnostics::BodyShape, String)> {
+    let parsed: ClassifyResponse = serde_json::from_slice(body).map_err(|err| {
+        (
+            diagnostics::BodyShape::ParseError,
+            format!(
+                "near-ai privacy classifier response parse error: category={:?} body_len={}",
+                err.classify(),
+                body.len()
+            ),
+        )
+    })?;
+    if parsed.data.is_empty() {
+        return Err((
+            diagnostics::BodyShape::EmptyData,
+            "near-ai privacy classifier returned empty data array".to_string(),
+        ));
+    }
+    if inputs.len() > 1 && parsed.data.len() != inputs.len() {
+        return Err((
+            diagnostics::BodyShape::EntryCountMismatch,
+            format!(
+                "near-ai privacy classifier returned {} entries for {} inputs",
+                parsed.data.len(),
+                inputs.len()
+            ),
+        ));
+    }
+    let mut corrections = SpanCorrections::default();
+    let mut answers = Vec::with_capacity(inputs.len());
+    for (input, entry) in inputs.iter().zip(parsed.data) {
+        let (spans, corrected) = verify_span_texts(input, entry.spans)?;
+        corrections += corrected;
+        answers.push(spans);
+    }
+    Ok((answers, corrections))
+}
+
+/// What one classify request answered.
+enum WindowAnswer {
+    /// Verified spans per input, each in that input's own codepoint
+    /// coordinates, in input order.
+    Spans(Vec<Vec<ClassifySpan>>),
+    /// A 413: the body was over the endpoint's limit.
+    TooLarge,
+}
+
 impl NearAiPrivacyFilterAdapter {
+    /// Body bytes of a batch request with no inputs (`"input":[]`); each
+    /// input adds its escaped length, two quotes and, after the first, a
+    /// comma.
+    fn batch_body_base_len(&self) -> usize {
+        let empty: &[&str] = &[];
+        serde_json::to_vec(&ClassifyRequest {
+            model: &self.model,
+            input: empty,
+        })
+        .map(|body| body.len())
+        .unwrap_or(self.max_request_body_bytes)
+    }
+
     /// The escaped-input budget that keeps a request's whole serialized body
-    /// within [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]: the body is the request
-    /// envelope (model, keys, the input's quotes) plus the input's
-    /// JSON-escaped bytes, and the envelope is measured, not guessed.
+    /// within the adapter's body cap: the body is the request envelope
+    /// (model, keys, the input's quotes) plus the input's JSON-escaped bytes,
+    /// and the envelope is measured, not guessed.
     fn max_input_json_bytes(&self) -> usize {
         let envelope = serde_json::to_vec(&ClassifyRequest {
             model: &self.model,
             input: "",
         })
         .map(|body| body.len())
-        .unwrap_or(MAX_CLASSIFY_REQUEST_BODY_BYTES);
-        MAX_CLASSIFY_REQUEST_BODY_BYTES
-            .saturating_sub(envelope)
-            .max(1)
+        .unwrap_or(self.max_request_body_bytes);
+        self.max_request_body_bytes.saturating_sub(envelope).max(1)
     }
 }
 
@@ -850,19 +1668,476 @@ fn classify_input_diagnostics(windows: &[&str]) -> String {
 
 /// Exponential backoff before retrying a classify attempt: 250ms, 500ms,
 /// 1s, ... keyed on the just-failed attempt number (1-based).
-async fn backoff(failed_attempt: usize) {
-    let millis = 250u64.saturating_mul(1u64 << (failed_attempt.saturating_sub(1)).min(5));
-    tokio::time::sleep(Duration::from_millis(millis)).await;
+/// Whether another attempt may start after `attempt` failed: attempts are
+/// left, and -- with a caller deadline -- the backoff and a whole attempt at
+/// `full_attempt` still fit before it.
+fn may_retry(
+    attempt: usize,
+    wait: Duration,
+    full_attempt: Duration,
+    deadline: Option<std::time::Instant>,
+) -> bool {
+    if attempt >= MAX_CLASSIFY_ATTEMPTS {
+        return false;
+    }
+    deadline.is_none_or(|deadline| std::time::Instant::now() + wait + full_attempt <= deadline)
+}
+
+/// The longest `Retry-After` honoured. Past it the window gives up and the
+/// trace is retried later on the caller's own schedule.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// How long to wait after the `attempt`th failure, answered `status`.
+///
+/// Never less than [`backoff_ms`]. A 429 waits for its `Retry-After`, or
+/// one pacing interval when it names none: the plain 250 ms backoff spent
+/// all three attempts inside a second against a per-minute limit. A 503
+/// with a `Retry-After` waits for it too. Both are capped at
+/// [`MAX_RETRY_AFTER`].
+fn retry_wait(
+    attempt: usize,
+    status: reqwest::StatusCode,
+    retry_after_secs: Option<u64>,
+    pacing_interval: Option<Duration>,
+) -> Duration {
+    let backoff = Duration::from_millis(backoff_ms(attempt));
+    let asked = match status {
+        reqwest::StatusCode::TOO_MANY_REQUESTS => retry_after_secs
+            .map(Duration::from_secs)
+            .or(pacing_interval),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => retry_after_secs.map(Duration::from_secs),
+        _ => None,
+    };
+    asked.map_or(backoff, |asked| backoff.max(asked.min(MAX_RETRY_AFTER)))
+}
+
+/// A `Retry-After` given in seconds. The HTTP-date form is not read.
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The caller's deadline passed before a window could be attempted.
+/// Transient: the same window may well classify in a later request.
+fn budget_spent(inputs: &[&str], attempt: usize) -> TraceContributionError {
+    let diagnostics = classify_input_diagnostics(inputs);
+    tracing::warn!(
+        classify_input = %diagnostics,
+        attempts = attempt - 1,
+        failure = "deadline",
+        "near-ai privacy classify failed"
+    );
+    TraceContributionError::TransientRedactionFailed {
+        reason: format!(
+            "near-ai privacy classifier: caller deadline reached before attempt {attempt} {diagnostics}"
+        ),
+    }
+}
+
+/// The pause after the `failed_attempt`th failure: 250 ms, doubling.
+const fn backoff_ms(failed_attempt: usize) -> u64 {
+    let shift = if failed_attempt == 0 {
+        0
+    } else {
+        failed_attempt - 1
+    };
+    let shift = if shift > 5 { 5 } else { shift };
+    250u64 << shift
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // These exercise the windowing helpers, which now live in the shared
-    // module because both backends window. The tests stayed here rather than
-    // moving with them: they are written against this backend's token budget
-    // and its measured endpoint behaviour.
-    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
+
+    /// The exact body the adapter would send for `input`.
+    fn request_body_len(input: &str) -> usize {
+        serde_json::to_vec(&ClassifyRequest {
+            model: DEFAULT_MODEL,
+            input,
+        })
+        .expect("serializes")
+        .len()
+    }
+
+    fn input_budget(cap: usize) -> usize {
+        cap - request_body_len("")
+    }
+
+    /// Escape-heavy text: quotes, backslashes, newlines, tabs, other control
+    /// characters, and 2-, 3- and 4-byte UTF-8.
+    fn escape_heavy(lines: usize) -> String {
+        (0..lines)
+            .map(|i| {
+                format!(
+                    "{i} \"quoted\" C:\\path\\x\t\u{1}\u{1f} caf\u{e9} \u{4e2d}\u{6587} \u{1f600} {}\r\n",
+                    "\\\"".repeat(i % 7)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn missing_endpoint_confidence_remains_unavailable_after_verification() {
+        let raw: Vec<NearAiSpan> = serde_json::from_str(
+            r#"[{"category":"private_person","start":0,"end":5,"text":"Alice"}]"#,
+        )
+        .unwrap();
+        assert!(raw[0].score.is_nan());
+        let (spans, _) = verify_span_texts("Alice", raw).unwrap();
+        let result = crate::privacy_filter_spans::apply_spans("test", "Alice", &spans)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
+    }
+
+    // ---- What may be cached. An answer that verification accepts is cached
+    // and later applied without asking again, so anything `apply_spans`
+    // would refuse must be refused here first.
+
+    fn near_span(start: usize, end: usize, text: Option<&str>) -> NearAiSpan {
+        NearAiSpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+            text: text.map(str::to_string),
+        }
+    }
+
+    /// Every single-span answer over every offset pair around each text's
+    /// end, reporting either the true covered text or a wrong one: whatever
+    /// verification accepts, `apply_spans` applies. Two-span answers with
+    /// one bad span are refused whole.
+    #[test]
+    fn every_answer_verification_accepts_applies_cleanly() {
+        let texts = [
+            "",
+            "a",
+            "hi Zo\u{eb} \u{1f600} \u{674e}\r\n ok",
+            "plain ascii text",
+        ];
+        let (mut accepted, mut refused) = (0usize, 0usize);
+        for text in texts {
+            let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            boundaries.push(text.len());
+            let codepoints = boundaries.len() - 1;
+            for start in 0..=codepoints + 2 {
+                for end in 0..=codepoints + 2 {
+                    let covered = (start <= end && end <= codepoints)
+                        .then(|| &text[boundaries[start]..boundaries[end]]);
+                    for reported in [covered, Some("not the text"), None] {
+                        match verify_span_texts(text, vec![near_span(start, end, reported)]) {
+                            Ok((spans, _)) => {
+                                accepted += 1;
+                                assert!(
+                                    crate::privacy_filter_spans::apply_spans(
+                                        "near-ai", text, &spans
+                                    )
+                                    .is_ok(),
+                                    "accepted but not applicable: {start}..{end} in {:?}",
+                                    text.len()
+                                );
+                            }
+                            Err(_) => refused += 1,
+                        }
+                    }
+                    if let Some(covered) = covered {
+                        let bad = near_span(start, codepoints + 1, Some(covered));
+                        let pair = vec![near_span(start, end, Some(covered)), bad];
+                        assert!(verify_span_texts(text, pair).is_err());
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0 && refused > 0, "{accepted} {refused}");
+    }
+
+    /// NEAR AI reports a Private Use Area character it could not decode as
+    /// two U+FFFD (seen 2026-11-13 on Codex transcripts carrying U+E202).
+    /// The offsets are right: the span is accepted where it is, counted as
+    /// repaired, and not moved.
+    #[test]
+    fn a_span_whose_text_replaced_a_private_use_character_is_accepted_in_place() {
+        let input = "see \u{e202}turn0 for Zoe now";
+        // "\u{e202}turn0" is codepoints 4..10.
+        let reported = "\u{fffd}\u{fffd}turn0";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(4, 10, Some(reported))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (4, 10));
+        assert_eq!(corrections.text_repaired, 1);
+        assert_eq!(corrections.reanchored, 0);
+    }
+
+    /// One U+FFFD for one non-ASCII character, lengths equal.
+    #[test]
+    fn a_single_replacement_character_for_one_non_ascii_character_is_accepted() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let (spans, corrections) =
+            verify_span_texts(input, vec![near_span(8, 11, Some("Zo\u{fffd}"))]).unwrap();
+        assert_eq!((spans[0].start, spans[0].end), (8, 11));
+        assert_eq!(corrections.text_repaired, 1);
+    }
+
+    /// Accepted only when everything but the replaced characters matches
+    /// exactly, each run stands for one non-ASCII character, and the run is
+    /// no longer than that character's UTF-8 encoding.
+    #[test]
+    fn replacement_characters_never_stand_for_ascii_or_hide_other_differences() {
+        let input = "Contact Zo\u{eb} Smith now";
+        let reject = |reported: &str| {
+            assert!(
+                verify_span_texts(input, vec![near_span(8, 11, Some(reported))]).is_err(),
+                "{reported:?}"
+            )
+        };
+        reject("Z\u{fffd}\u{fffd}"); // a run standing for ASCII "o" then more
+        reject("\u{fffd}o\u{eb}"); // stands for ASCII "Z"
+        reject("Zo\u{fffd}\u{fffd}\u{fffd}"); // longer than U+00EB's two bytes
+        reject("Za\u{fffd}"); // another character differs
+        reject("Zo\u{fffd}x"); // trailing extra character
+        reject("Zq"); // no replacement character, not the text, not in the window
+    }
+
+    /// Plain ASCII mismatches are untouched: no replacement character, so
+    /// the answer stays a mismatch (or re-anchors as before).
+    #[test]
+    fn an_ascii_mismatch_is_not_repaired() {
+        let input = "Contact Zoe Smith now and Zoe again";
+        assert!(verify_span_texts(input, vec![near_span(0, 3, Some("Bob"))]).is_err());
+        let (_, corrections) =
+            verify_span_texts(input, vec![near_span(0, 3, Some("Con"))]).unwrap();
+        assert_eq!(corrections.text_repaired, 0);
+    }
+
+    /// The cache's own guard: spans that do not fit the window they would be
+    /// cached under are never stored, whoever asks.
+    #[test]
+    fn the_window_cache_never_holds_spans_that_do_not_fit_their_window() {
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            "http://127.0.0.1:1",
+            DEFAULT_MODEL,
+            "stub-not-a-key",
+            Duration::from_secs(1),
+            1_000_000,
+        )
+        .unwrap();
+        let window = "say hi to Zo\u{eb}";
+        let codepoints = window.chars().count();
+        let span = |start, end| ClassifySpan {
+            category: "private_person".to_string(),
+            start,
+            end,
+            score: 0.9,
+        };
+        adapter.remember_window(window, &[span(10, codepoints + 1)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(12, 10)]);
+        assert!(adapter.cached_window(&window_key(window)).is_none());
+        adapter.remember_window(window, &[span(10, codepoints)]);
+        assert!(adapter.cached_window(&window_key(window)).is_some());
+    }
+
+    // ---- Pacing (owner, 2026-11-12: NEAR AI allows 30 classify requests a
+    // minute). Schedules are checked on injected instants, never the wall
+    // clock; adapter tests count requests rather than time them.
+
+    #[test]
+    fn the_pacer_spaces_requests_evenly_with_no_burst() {
+        let pacer = pacing::Pacer::per_minute(30).expect("30 is a rate");
+        assert_eq!(pacer.interval(), Duration::from_secs(2));
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(2)));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(4)));
+        // A caller arriving after the queue drained starts at once.
+        let later = t0 + Duration::from_secs(60);
+        assert_eq!(pacer.reserve(later, None), Some(later));
+    }
+
+    #[test]
+    fn a_slot_past_the_deadline_is_refused_and_not_spent() {
+        let pacer = pacing::Pacer::per_minute(30).unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        // The next slot is t0+2s; a caller that must be done by t0+1s gets
+        // none, and the slot stays free for the next caller.
+        assert_eq!(pacer.reserve(t0, Some(t0 + Duration::from_secs(1))), None);
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_rate_limit_answer_holds_every_caller() {
+        let pacer = pacing::Pacer::per_minute(30).unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(pacer.reserve(t0, None), Some(t0));
+        pacer.hold_until(t0 + Duration::from_secs(20));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(20)));
+        // Holding to an earlier time never pulls the schedule back.
+        pacer.hold_until(t0 + Duration::from_secs(5));
+        assert_eq!(pacer.reserve(t0, None), Some(t0 + Duration::from_secs(22)));
+    }
+
+    #[test]
+    fn zero_is_not_a_rate() {
+        assert!(pacing::Pacer::per_minute(0).is_none());
+    }
+
+    #[test]
+    fn the_rate_setting_is_off_when_unset_and_refuses_zero_or_junk() {
+        assert_eq!(requests_per_minute_from(None).unwrap(), None);
+        assert_eq!(requests_per_minute_from(Some("")).unwrap(), None);
+        assert_eq!(requests_per_minute_from(Some(" 30 ")).unwrap(), Some(30));
+        for bad in ["0", "-1", "thirty", "1.5"] {
+            assert!(requests_per_minute_from(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_waits_for_retry_after_capped_and_never_less_than_backoff() {
+        use reqwest::StatusCode;
+        let interval = Some(Duration::from_secs(2));
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, Some(7), interval),
+            Duration::from_secs(7)
+        );
+        // No Retry-After: one pacing interval.
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, None, interval),
+            Duration::from_secs(2)
+        );
+        // A huge Retry-After is capped.
+        assert_eq!(
+            retry_wait(1, StatusCode::TOO_MANY_REQUESTS, Some(3_600), interval),
+            MAX_RETRY_AFTER
+        );
+        // Never shorter than the plain backoff.
+        assert_eq!(
+            retry_wait(2, StatusCode::TOO_MANY_REQUESTS, Some(0), None),
+            Duration::from_millis(backoff_ms(2))
+        );
+        // A 502 keeps the plain backoff.
+        assert_eq!(
+            retry_wait(1, StatusCode::BAD_GATEWAY, None, interval),
+            Duration::from_millis(backoff_ms(1))
+        );
+    }
+
+    fn classify_ok() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "data": [{ "spans": [] }] }))
+    }
+
+    /// A paced adapter sends nothing it cannot start before the caller's
+    /// deadline: the second window waits for a slot a minute away, so it
+    /// fails as transient and the classifier sees one request, not two.
+    #[tokio::test]
+    async fn a_paced_adapter_does_not_send_past_the_deadline() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(classify_ok())
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap()
+        .with_requests_per_minute(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        assert!(
+            adapter
+                .redact_text_before("first window", deadline)
+                .await
+                .is_ok()
+        );
+        let second = adapter.redact_text_before("second window", deadline).await;
+        assert!(
+            matches!(
+                second,
+                Err(TraceContributionError::TransientRedactionFailed { .. })
+            ),
+            "{second:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A 429 whose Retry-After will not fit the deadline is not retried
+    /// at once (the old 250 ms backoff would have spent all three attempts
+    /// inside a second): one request, then a transient failure.
+    #[tokio::test]
+    async fn a_rate_limited_window_is_not_hammered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap()
+        .with_requests_per_minute(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let answer = adapter.redact_text_before("one window", deadline).await;
+        assert!(
+            matches!(
+                answer,
+                Err(TraceContributionError::TransientRedactionFailed { .. })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// Unpaced (the default, and what `new` builds) is unchanged: three
+    /// windows go out back to back.
+    #[tokio::test]
+    async fn an_unpaced_adapter_is_unchanged() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(classify_ok())
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for text in ["a window", "b window", "c window"] {
+            assert!(
+                adapter.redact_text_before(text, deadline).await.is_ok(),
+                "{text}"
+            );
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
 
     /// A span whose reported text is not the text at its offsets fails the
     /// server's prose-PII rescrub closed, with the hash-only label, and
@@ -883,6 +2158,8 @@ mod tests {
                 let input = body["input"].as_str().unwrap();
                 // Every "Ada" found, reported one codepoint late with the
                 // right text: an offset slip the range check cannot see.
+                // "Ada" occurs twice in its event, so the slip cannot be
+                // re-anchored to one place and the answer stays invalid.
                 let spans: Vec<serde_json::Value> = input
                     .match_indices("Ada")
                     .map(|(byte, _)| {
@@ -940,7 +2217,7 @@ mod tests {
             },
             "events": [
                 event("nothing here"),
-                event("Ada reviewed the change"),
+                event("Ada reviewed Ada's change"),
                 event("ran the tests"),
             ],
             "outcome": {"task_success": "unknown", "user_feedback": "none"},
@@ -980,7 +2257,7 @@ mod tests {
                 .expect_err("a span text mismatch must fail closed");
         assert!(matches!(
             error,
-            TraceContributionError::RedactionFailed { .. }
+            TraceContributionError::UnclassifiableText { .. }
         ));
         assert!(error.to_string().contains(SPAN_TEXT_MISMATCH_LABEL));
         assert!(!error.to_string().contains("Ada"), "never echo the text");
@@ -1020,31 +2297,140 @@ mod tests {
         }
     }
 
-    /// A padded, escaped table costs few tokens and megabytes of body: its
-    /// windows are cut under the cap, cover it exactly, and ordinary text
-    /// keeps its token windows unchanged.
+    /// Every window's serialized request body -- measured by serializing
+    /// it, not by the arithmetic `window_ranges` uses -- fits the cap, for
+    /// escape-heavy text whose body is several times its length.
     #[test]
-    fn windows_are_cut_under_the_body_cap_and_unchanged_otherwise() {
-        const CAP: usize = 200 * 1024;
-        let table: String = (0..3_000)
-            .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
-            .collect();
-        let windows = window_ranges(&table, MAX_CLASSIFY_INPUT_TOKENS, CAP);
-        assert!(windows.len() > 1);
+    fn escape_heavy_windows_stay_under_the_cap_after_encoding() {
+        let cap = MAX_CLASSIFY_REQUEST_BODY_BYTES;
+        let text = escape_heavy(12_000);
         assert!(
-            windows
-                .iter()
-                .all(|w| json_escaped_len(&table[w.clone()]) <= CAP),
-            "every window fits the body cap"
+            request_body_len(&text) > 3 * cap,
+            "the fixture must need several windows"
         );
-        let covered: String = windows.iter().map(|w| &table[w.clone()]).collect();
-        assert_eq!(covered, table);
+        let windows = window_ranges(&text, input_budget(cap));
+        assert!(windows.len() > 3);
+        for window in &windows {
+            let body = request_body_len(&text[window.clone()]);
+            assert!(body <= cap, "a {body}-byte body is over the {cap}-byte cap");
+        }
+        let covered: String = windows.iter().map(|w| &text[w.clone()]).collect();
+        assert_eq!(covered, text);
+    }
 
-        let prose = "An ordinary line of prose about a code review.\n".repeat(4_000);
-        assert_eq!(
-            window_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS, CAP),
-            chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS)
+    /// The cap is used, not wasted: each window but the last is full to
+    /// within one line of the cap, so a field costs as few requests as the
+    /// body limit allows.
+    #[test]
+    fn windows_fill_the_cap_to_within_a_line() {
+        let cap = MAX_CLASSIFY_REQUEST_BODY_BYTES;
+        let text = escape_heavy(12_000);
+        let longest_line = text
+            .split_inclusive('\n')
+            .map(|line| request_body_len(line) - request_body_len(""))
+            .max()
+            .expect("lines");
+        let windows = window_ranges(&text, input_budget(cap));
+        for window in &windows[..windows.len() - 1] {
+            assert!(
+                request_body_len(&text[window.clone()]) + longest_line > cap,
+                "a window stopped more than a line short of the cap"
+            );
+            assert!(
+                text[window.clone()].ends_with('\n'),
+                "a window split a line"
+            );
+        }
+    }
+
+    /// The defaults leave a full window's retries inside the witness's 300 s
+    /// request limit, with room; the compile-time assert says the same, and
+    /// this pins the number it computes.
+    #[test]
+    fn a_full_windows_worst_case_fits_the_witness_limit() {
+        let worst = worst_case_window_ms(
+            DEFAULT_TIMEOUT_MS,
+            DEFAULT_TIMEOUT_PER_KIB_MS,
+            MAX_CLASSIFY_REQUEST_BODY_BYTES,
         );
+        assert_eq!(worst, 3 * (15_000 + 600 * 64) + 250 + 500);
+        assert!(worst < 540_000);
+        // The 2026-11-05 dense-text times (4 and 32 KiB measured, 64 KiB from
+        // the measured fit of ~3 s + 0.4 s/KiB) sit at least 1.7x inside
+        // each call's timeout.
+        for (kib, measured_ms) in [(4, 3_390), (32, 19_410), (64, 28_600)] {
+            let timeout =
+                call_timeout_ms(DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_PER_KIB_MS, kib * 1024);
+            assert!(timeout * 10 >= measured_ms * 17, "{kib} KiB: {timeout} ms");
+        }
+    }
+
+    /// A 241 KB single field of ordinary tool output -- the size that took
+    /// 115 s on the live witness -- is a few requests, not dozens.
+    #[test]
+    fn a_large_ordinary_field_takes_few_requests() {
+        let text: String = (0..6_000)
+            .map(|i| {
+                format!(
+                    "[{i:06}] INFO build::module took {}ms /home/u/src/f{i}.rs\n",
+                    i % 997
+                )
+            })
+            .collect();
+        assert!(text.len() > 240_000);
+        let windows = window_ranges(&text, input_budget(MAX_CLASSIFY_REQUEST_BODY_BYTES));
+        assert!(windows.len() <= 7, "{} windows", windows.len());
+    }
+
+    /// No window boundary falls inside a codepoint, including in a run with
+    /// no newline at all, where the cut is at the cap itself. (`&text[..]` on
+    /// a non-boundary would panic, so the slice is the assertion; the
+    /// explicit check says what is being tested.)
+    #[test]
+    fn windows_never_split_a_codepoint() {
+        let text = "\u{e9}\u{4e2d}\u{1f600}\"\\".repeat(40_000);
+        let envelope = request_body_len("");
+        for input_cap in [
+            4,
+            5,
+            6,
+            7,
+            1_000,
+            input_budget(MAX_CLASSIFY_REQUEST_BODY_BYTES),
+        ] {
+            let windows = window_ranges(&text, input_cap);
+            for window in &windows {
+                assert!(text.is_char_boundary(window.start) && text.is_char_boundary(window.end));
+                assert!(!window.is_empty());
+                assert!(request_body_len(&text[window.clone()]) <= envelope + input_cap);
+            }
+            let covered: String = windows.iter().map(|w| &text[w.clone()]).collect();
+            assert_eq!(covered, text);
+        }
+    }
+
+    /// The 413 split point is a char boundary that leaves both halves
+    /// non-empty, prefers a newline, and refuses a single character.
+    #[test]
+    fn split_points_are_char_boundaries_inside_the_window() {
+        let accents = "\u{e9}".repeat(1001);
+        for text in [
+            "\u{1f600}\u{1f600}\u{1f600}",
+            "ab",
+            "\u{1f600}a",
+            "line one\nline two\nline three\nline four\n",
+            accents.as_str(),
+        ] {
+            let split = split_point(text).expect("splittable");
+            assert!(split > 0 && split < text.len(), "{text:?} at {split}");
+            assert!(text.is_char_boundary(split));
+        }
+        assert_eq!(
+            split_point("line one\nline two\nline three\nline four\n"),
+            Some("line one\nline two\n".len())
+        );
+        assert_eq!(split_point("\u{1f600}"), None);
+        assert_eq!(split_point("a"), None);
     }
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
@@ -1152,175 +2538,6 @@ mod tests {
         );
     }
 
-    /// The tokenizer must be the one the endpoint actually charges against.
-    /// These counts are the endpoint's own `usage.input_tokens`, recorded
-    /// 2026-08-27; `cl100k_base` disagrees on several of them.
-    #[test]
-    fn tokenizer_reproduces_the_endpoints_own_counts() {
-        let cases: &[(&str, usize)] = &[
-            ("hello", 1),
-            ("hello world", 2),
-            ("The quick brown fox jumps over the lazy dog.", 10),
-            ("alice@example.com", 3),
-            ("/usr/local/lib/python3.11/site-packages/", 11),
-            ("a7f3c9d2e1b48856f0c1d2e3a4b5c6d7", 29),
-            ("tenant_id submission_id auth_principal_ref", 8),
-            ("supercalifragilisticexpialidocious", 10),
-        ];
-        for (text, expected) in cases {
-            assert_eq!(
-                classifier_token_count(text),
-                Some(*expected),
-                "token count drifted from the endpoint's accounting for {text:?}"
-            );
-        }
-    }
-
-    /// The property the whole change exists for: no window may exceed the
-    /// budget, whatever the content's token density.
-    #[test]
-    fn every_window_fits_the_token_budget() {
-        let prose = "Please email alice@example.com about invoice 12345. ".repeat(600);
-        let dense = (0..600)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(400);
-
-        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
-            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
-            for range in &ranges {
-                let tokens = classifier_token_count(&text[range.clone()]).expect("tokenizer");
-                assert!(
-                    tokens <= MAX_CLASSIFY_INPUT_TOKENS,
-                    "{label}: window of {tokens} tokens exceeds the budget of {}",
-                    MAX_CLASSIFY_INPUT_TOKENS
-                );
-            }
-        }
-    }
-
-    /// The endpoint's real limit is a request BODY SIZE (~256 KiB measured
-    /// 2026-09-03), not a token count. A token budget only respects that
-    /// indirectly, via bytes-per-token -- which varies about 2x between dense
-    /// trace content and prose. This asserts the budget cannot produce a body
-    /// over the limit for any representative content type, because exceeding
-    /// it is a 413 for the whole window, not a partial result.
-    #[test]
-    fn a_full_budget_window_stays_under_the_measured_body_limit() {
-        const MEASURED_BODY_LIMIT_BYTES: usize = 243 * 1024; // largest proven success
-
-        let prose = "Please email alice@example.com about invoice 12345. ".repeat(4000);
-        let dense = (0..4000)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(3000);
-
-        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
-            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
-            let widest = ranges
-                .iter()
-                .map(|r| text[r.clone()].len())
-                .max()
-                .expect("at least one window");
-            assert!(
-                widest <= MEASURED_BODY_LIMIT_BYTES,
-                "{label}: a {MAX_CLASSIFY_INPUT_TOKENS}-token window reached {widest} bytes, \
-                 over the {MEASURED_BODY_LIMIT_BYTES}-byte limit proven to work"
-            );
-        }
-    }
-
-    /// Ranges must be contiguous and cover the whole field: a gap would drop
-    /// text from classification entirely, which is a silent privacy hole
-    /// rather than a performance bug.
-    #[test]
-    fn token_windows_cover_the_whole_field_without_gaps() {
-        let text = (0..300)
-            .map(|i| format!("line {i} with alice@example.com and /var/log/f{i}.log"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let ranges = chunk_token_ranges(&text, MAX_CLASSIFY_INPUT_TOKENS);
-
-        assert_eq!(ranges.first().expect("at least one window").start, 0);
-        assert_eq!(ranges.last().expect("at least one window").end, text.len());
-        for pair in ranges.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start, "gap or overlap between windows");
-        }
-        let rebuilt: String = ranges.iter().map(|r| &text[r.clone()]).collect();
-        assert_eq!(rebuilt, text, "windows must reconstruct the field exactly");
-    }
-
-    /// Budgeting in tokens is what lets sparse content travel in FEWER
-    /// requests than dense content of the same size -- the thing a byte
-    /// budget structurally cannot do, and the reason dense windows used to
-    /// 502 while prose windows of identical size were fine.
-    #[test]
-    fn sparse_content_packs_into_fewer_windows_than_dense() {
-        // Line-delimited on purpose. The greedy packer this test is about
-        // works on line segments; an UNBROKEN run takes the bisection path
-        // instead, which halves until each piece fits and so quantises the
-        // window count to a power of two. Two inputs of very different token
-        // density then land on the same count -- prose at 149k tokens and
-        // dense at 250k both produced 8 windows -- and the comparison says
-        // nothing. The original fixtures were single lines and passed only
-        // because, at the old 1,000-token budget, they happened to fall in
-        // different bisection bands.
-        // Sized from measurement: at 16,000 lines prose is ~176k tokens (~6
-        // windows) and dense ~256k (~8), a margin of two. At 4,000 both round
-        // to 2 and tie; a margin of one is fragile to packing slack.
-        let lines = 16_000;
-        let prose = "The agent reviewed the report and summarised the findings.\n".repeat(lines);
-        let dense = (0..lines)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs\n"))
-            .collect::<String>();
-
-        let prose_tokens = classifier_token_count(&prose).expect("tokenizer");
-        let dense_tokens = classifier_token_count(&dense).expect("tokenizer");
-        assert!(
-            prose_tokens > MAX_CLASSIFY_INPUT_TOKENS && dense_tokens > MAX_CLASSIFY_INPUT_TOKENS,
-            "both fixtures must exceed the budget or neither splits"
-        );
-        assert!(
-            dense_tokens > prose_tokens,
-            "the dense fixture must actually be denser: prose {prose_tokens}, dense {dense_tokens}"
-        );
-
-        let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
-        let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
-        assert!(
-            prose_windows < dense_windows,
-            "prose took {prose_windows} windows and dense took {dense_windows}; \
-             token budgeting should give sparse content larger windows"
-        );
-    }
-
-    /// A single line longer than the budget still has to be split, or one
-    /// base64 blob or long log line stalls its whole field.
-    #[test]
-    fn an_oversized_single_line_is_split() {
-        // Size the fixture FROM the budget. A literal repeat count was sized
-        // for a 1,000-token budget and silently stopped exceeding it when the
-        // budget rose to 32,000 -- the test still passed its inner assertion
-        // while no longer testing splitting at all.
-        let unit = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7";
-        let unit_tokens = classifier_token_count(unit).expect("tokenizer");
-        let repeats = (MAX_CLASSIFY_INPUT_TOKENS / unit_tokens) * 2 + 8;
-        let one_line = unit.repeat(repeats);
-        assert!(!one_line.contains('\n'));
-        assert!(
-            classifier_token_count(&one_line).expect("tokenizer") > MAX_CLASSIFY_INPUT_TOKENS,
-            "fixture must exceed the budget or this test proves nothing"
-        );
-        let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
-        assert!(ranges.len() > 1, "an oversized single line must be split");
-        for range in &ranges {
-            let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
-            assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
-        }
-    }
-
     /// A cold cache is all misses. Sampling only on hits meant the telemetry
     /// stayed silent exactly when it was most needed -- right after a deploy
     /// -- and "no telemetry" could not be distinguished from "no lookups".
@@ -1356,43 +2573,6 @@ mod tests {
     }
 
     #[test]
-    fn chunk_byte_ranges_cover_text_and_respect_limit() {
-        let text = "line one\nline two\nline three\n";
-        let ranges = chunk_byte_ranges(text, 12);
-        assert_eq!(ranges.first().unwrap().start, 0);
-        assert_eq!(ranges.last().unwrap().end, text.len());
-        let mut prev = 0;
-        for r in &ranges {
-            assert_eq!(r.start, prev, "ranges must be contiguous");
-            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
-            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-            prev = r.end;
-        }
-        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
-        assert_eq!(joined, text, "windows must reconstruct the input");
-        // Newline-preferring: no window splits mid-line here.
-        for r in &ranges {
-            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
-        }
-    }
-
-    #[test]
-    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
-        // A single line longer than the limit must still be split, on a
-        // char boundary, into covering windows.
-        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
-        let ranges = chunk_byte_ranges(&text, 8);
-        let mut prev = 0;
-        for r in &ranges {
-            assert_eq!(r.start, prev);
-            assert!(r.end - r.start <= 8);
-            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-            prev = r.end;
-        }
-        assert_eq!(prev, text.len());
-    }
-
-    #[test]
     fn windowed_spans_shift_into_full_text_codepoints() {
         // Two windows over multibyte text. Window 2 starts at codepoint 4
         // ("café") and reports an email at window-local codepoints 1..16.
@@ -1414,5 +2594,477 @@ mod tests {
         let debug = format!("{secret:?}");
         assert!(!debug.contains("super-secret-token"));
         assert!(debug.contains("***"));
+    }
+}
+
+/// What the classify requests made in this process did, by kind, and how long
+/// the successful ones took, by body size. **Label-only**: counts, gauges and
+/// durations; no text, no request identity, no key, no host.
+///
+/// The witness serves a snapshot at `GET /v1/diagnostics`, because its CVM's
+/// logs are not readable and this is the only way an operator can tell a
+/// rejected key from a slow endpoint from a down one.
+/// Even spacing between classify requests.
+///
+/// NEAR AI allows the witness 30 `privacy/classify` requests a minute
+/// (2026-11-12). The witness held at most two in flight and paced nothing,
+/// so at the endpoint's quicker latencies it went over. Requests are spaced
+/// one interval apart with no burst: a slot is reserved under a short lock
+/// and the wait happens outside it.
+pub mod pacing {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    pub struct Pacer {
+        interval: Duration,
+        /// The earliest the next request may start; `None` before the first.
+        next: Mutex<Option<Instant>>,
+    }
+
+    impl Pacer {
+        /// `requests` a minute, or `None` for zero.
+        pub fn per_minute(requests: u32) -> Option<Self> {
+            (requests > 0).then(|| Self {
+                interval: Duration::from_secs(60) / requests,
+                next: Mutex::new(None),
+            })
+        }
+
+        pub fn interval(&self) -> Duration {
+            self.interval
+        }
+
+        /// Reserve the first free slot at or after `now` and return when it
+        /// starts. `None`, reserving nothing, when that slot would start at
+        /// or after `latest`.
+        pub fn reserve(&self, now: Instant, latest: Option<Instant>) -> Option<Instant> {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let slot = next.map_or(now, |next| next.max(now));
+            if latest.is_some_and(|latest| slot >= latest) {
+                return None;
+            }
+            *next = Some(slot + self.interval);
+            Some(slot)
+        }
+
+        /// Hold every later slot until at least `until`: the endpoint said
+        /// to wait. Never moves the schedule earlier.
+        pub fn hold_until(&self, until: Instant) {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *next = Some(next.map_or(until, |next| next.max(until)));
+        }
+    }
+}
+
+pub mod diagnostics {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    use serde::Serialize;
+
+    /// How one classify request ended.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        /// 200 with a well-formed, verified answer.
+        Ok,
+        /// No answer within the request timeout.
+        Timeout,
+        /// The connection failed some other way.
+        Transport,
+        /// 401 or 403: the key was refused.
+        Auth,
+        /// 402 or 429: out of credit or rate limited.
+        Quota,
+        /// Any 5xx.
+        ServerError,
+        /// 413: the body was over the endpoint's limit.
+        TooLarge,
+        /// Any other non-2xx.
+        OtherClientError,
+        /// 200 whose body did not parse, had no entry, or whose spans did not
+        /// match the text sent. [`BodyShape`] says which; this is their total.
+        BodyShape,
+    }
+
+    /// Which way a 200 answer was malformed. Each one is also counted as
+    /// [`Outcome::BodyShape`], which stays the total.
+    ///
+    /// Label-only: which check failed, never what the answer or the input
+    /// held.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum BodyShape {
+        /// The body arrived and was not the expected JSON.
+        ParseError,
+        /// The body parsed and its `data` array was empty.
+        EmptyData,
+        /// A batch was answered with a different number of entries than it
+        /// carried inputs.
+        EntryCountMismatch,
+        /// A span's reported `text` was not the input's codepoints at its
+        /// offsets, or it reported no `text`.
+        SpanTextMismatch,
+        /// A span's offsets were reversed or ran past the end of the input.
+        SpanOutOfRange,
+    }
+
+    impl BodyShape {
+        /// Every kind, in the order a snapshot lists them.
+        pub const ALL: [BodyShape; 5] = [
+            BodyShape::ParseError,
+            BodyShape::EmptyData,
+            BodyShape::EntryCountMismatch,
+            BodyShape::SpanTextMismatch,
+            BodyShape::SpanOutOfRange,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                BodyShape::ParseError => "parse_error",
+                BodyShape::EmptyData => "empty_data",
+                BodyShape::EntryCountMismatch => "entry_count_mismatch",
+                BodyShape::SpanTextMismatch => "span_text_mismatch",
+                BodyShape::SpanOutOfRange => "span_out_of_range",
+            }
+        }
+
+        fn index(self) -> usize {
+            match self {
+                BodyShape::ParseError => 0,
+                BodyShape::EmptyData => 1,
+                BodyShape::EntryCountMismatch => 2,
+                BodyShape::SpanTextMismatch => 3,
+                BodyShape::SpanOutOfRange => 4,
+            }
+        }
+    }
+
+    impl Outcome {
+        /// Every outcome, in the order a snapshot lists them.
+        pub const ALL: [Outcome; 9] = [
+            Outcome::Ok,
+            Outcome::Timeout,
+            Outcome::Transport,
+            Outcome::Auth,
+            Outcome::Quota,
+            Outcome::ServerError,
+            Outcome::TooLarge,
+            Outcome::OtherClientError,
+            Outcome::BodyShape,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                Outcome::Ok => "ok",
+                Outcome::Timeout => "timeout",
+                Outcome::Transport => "transport",
+                Outcome::Auth => "auth_401_403",
+                Outcome::Quota => "quota_402_429",
+                Outcome::ServerError => "server_5xx",
+                Outcome::TooLarge => "too_large_413",
+                Outcome::OtherClientError => "other_4xx",
+                Outcome::BodyShape => "body_shape",
+            }
+        }
+
+        /// The outcome for a non-2xx status.
+        pub fn from_status(status: u16) -> Outcome {
+            match status {
+                401 | 403 => Outcome::Auth,
+                402 | 429 => Outcome::Quota,
+                413 => Outcome::TooLarge,
+                500..=599 => Outcome::ServerError,
+                _ => Outcome::OtherClientError,
+            }
+        }
+
+        fn index(self) -> usize {
+            Outcome::ALL
+                .iter()
+                .position(|outcome| *outcome == self)
+                .unwrap_or(0)
+        }
+    }
+
+    /// Body-size buckets for latency, by request body bytes.
+    const BUCKETS: [(&str, usize); 4] = [
+        ("under_4_kib", 4 * 1024),
+        ("4_to_32_kib", 32 * 1024),
+        ("32_to_128_kib", 128 * 1024),
+        ("128_kib_and_over", usize::MAX),
+    ];
+
+    /// Recent successful latencies kept per bucket.
+    const SAMPLES_PER_BUCKET: usize = 256;
+
+    /// Counts and recent latencies. One per process in production
+    /// ([`global`]); tests make their own.
+    #[derive(Default)]
+    pub struct Recorder {
+        counts: [AtomicU64; 9],
+        body_shapes: [AtomicU64; 5],
+        spans_reanchored: AtomicU64,
+        spans_text_repaired: AtomicU64,
+        in_flight: AtomicUsize,
+        latency_ms: Mutex<[VecDeque<u64>; 4]>,
+    }
+
+    /// Decrements the in-flight gauge when the request it counts ends, on
+    /// every path, including cancellation.
+    pub struct InFlight<'a>(&'a Recorder);
+
+    impl Drop for InFlight<'_> {
+        fn drop(&mut self) {
+            self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Recorder {
+        /// A request is starting.
+        pub fn enter(&self) -> InFlight<'_> {
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
+            InFlight(self)
+        }
+
+        /// A request ended. Only successful requests contribute latency: a
+        /// timeout's duration is the timeout, and a refusal's says nothing
+        /// about how fast the endpoint classifies.
+        pub fn record(&self, outcome: Outcome, body_bytes: usize, elapsed: Duration) {
+            self.counts[outcome.index()].fetch_add(1, Ordering::Relaxed);
+            if outcome != Outcome::Ok {
+                return;
+            }
+            let bucket = BUCKETS
+                .iter()
+                .position(|(_, under)| body_bytes < *under)
+                .unwrap_or(BUCKETS.len() - 1);
+            let mut latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
+            let samples = &mut latency[bucket];
+            if samples.len() == SAMPLES_PER_BUCKET {
+                samples.pop_front();
+            }
+            samples.push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+        }
+
+        /// A request ended in a malformed answer of kind `kind`: counted as
+        /// [`Outcome::BodyShape`] and under its kind.
+        pub fn record_body_shape(&self, kind: BodyShape, body_bytes: usize, elapsed: Duration) {
+            self.body_shapes[kind.index()].fetch_add(1, Ordering::Relaxed);
+            self.record(Outcome::BodyShape, body_bytes, elapsed);
+        }
+
+        /// A count of outcome `outcome` so far.
+        pub fn count(&self, outcome: Outcome) -> u64 {
+            self.counts[outcome.index()].load(Ordering::Relaxed)
+        }
+
+        /// `spans` spans were moved onto the one place their reported text
+        /// occurs, in an answer that was then accepted.
+        pub fn record_reanchored(&self, spans: usize) {
+            self.spans_reanchored
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans re-anchored so far.
+        pub fn spans_reanchored(&self) -> u64 {
+            self.spans_reanchored.load(Ordering::Relaxed)
+        }
+
+        /// `spans` spans were accepted where they were although their
+        /// reported text had characters replaced, in an answer that was
+        /// then accepted.
+        pub fn record_text_repaired(&self, spans: usize) {
+            self.spans_text_repaired
+                .fetch_add(u64::try_from(spans).unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+
+        /// Spans whose reported text was repaired so far.
+        pub fn spans_text_repaired(&self) -> u64 {
+            self.spans_text_repaired.load(Ordering::Relaxed)
+        }
+
+        /// A count of malformed answers of kind `kind` so far.
+        pub fn body_shape_count(&self, kind: BodyShape) -> u64 {
+            self.body_shapes[kind.index()].load(Ordering::Relaxed)
+        }
+
+        pub fn snapshot(&self) -> Snapshot {
+            let outcomes = Outcome::ALL
+                .iter()
+                .map(|outcome| (outcome.label(), self.count(*outcome)))
+                .collect();
+            let body_shapes = BodyShape::ALL
+                .iter()
+                .map(|kind| (kind.label(), self.body_shape_count(*kind)))
+                .collect();
+            let latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
+            let latency_ms = BUCKETS
+                .iter()
+                .zip(latency.iter())
+                .map(|((label, _), samples)| (*label, BucketLatency::of(samples)))
+                .collect();
+            Snapshot {
+                outcomes,
+                body_shapes,
+                spans_reanchored: self.spans_reanchored(),
+                spans_text_repaired: self.spans_text_repaired(),
+                in_flight: self.in_flight.load(Ordering::Relaxed),
+                latency_ms,
+            }
+        }
+    }
+
+    /// The process-wide recorder every adapter uses unless told otherwise.
+    pub fn global() -> Arc<Recorder> {
+        static GLOBAL: OnceLock<Arc<Recorder>> = OnceLock::new();
+        GLOBAL.get_or_init(|| Arc::new(Recorder::default())).clone()
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct Snapshot {
+        /// Requests by outcome, since the process started. Every attempt
+        /// counts, retries included.
+        pub outcomes: BTreeMap<&'static str, u64>,
+        /// The `body_shape` outcomes by which check failed, every retry
+        /// counted. Sums to `outcomes.body_shape`; kept apart from
+        /// `outcomes` so a reader summing that map does not count twice.
+        pub body_shapes: BTreeMap<&'static str, u64>,
+        /// Spans whose offsets disagreed with their text and were moved onto
+        /// the one place in the window that text occurs, in answers then
+        /// accepted. Counted apart from `span_text_mismatch`, which counts
+        /// only answers that could not be corrected.
+        pub spans_reanchored: u64,
+        /// Spans whose offsets were right but whose reported text had
+        /// non-ASCII characters replaced by U+FFFD; accepted where they
+        /// were. Also apart from `span_text_mismatch`.
+        pub spans_text_repaired: u64,
+        /// Requests on the wire right now.
+        pub in_flight: usize,
+        /// Successful requests' latency by request-body size, over the last
+        /// few hundred in each bucket.
+        pub latency_ms: BTreeMap<&'static str, BucketLatency>,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct BucketLatency {
+        pub samples: usize,
+        pub p50: Option<u64>,
+        pub p90: Option<u64>,
+        pub p99: Option<u64>,
+        pub max: Option<u64>,
+    }
+
+    impl BucketLatency {
+        fn of(samples: &VecDeque<u64>) -> Self {
+            let mut sorted: Vec<u64> = samples.iter().copied().collect();
+            sorted.sort_unstable();
+            let at = |fraction: f64| -> Option<u64> {
+                if sorted.is_empty() {
+                    return None;
+                }
+                let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
+                sorted.get(index).copied()
+            };
+            Self {
+                samples: sorted.len(),
+                p50: at(0.50),
+                p90: at(0.90),
+                p99: at(0.99),
+                max: sorted.last().copied(),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn statuses_map_to_their_kinds() {
+            for (status, outcome) in [
+                (401, Outcome::Auth),
+                (403, Outcome::Auth),
+                (402, Outcome::Quota),
+                (429, Outcome::Quota),
+                (413, Outcome::TooLarge),
+                (500, Outcome::ServerError),
+                (503, Outcome::ServerError),
+                (400, Outcome::OtherClientError),
+                (404, Outcome::OtherClientError),
+            ] {
+                assert_eq!(Outcome::from_status(status), outcome, "{status}");
+            }
+        }
+
+        #[test]
+        fn latency_is_bucketed_by_body_and_bounded() {
+            let recorder = Recorder::default();
+            for ms in 1..=300u64 {
+                recorder.record(Outcome::Ok, 100, Duration::from_millis(ms));
+            }
+            recorder.record(Outcome::Ok, 200 * 1024, Duration::from_millis(36_500));
+            recorder.record(Outcome::Timeout, 200 * 1024, Duration::from_secs(90));
+            let snapshot = recorder.snapshot();
+            let small = &snapshot.latency_ms["under_4_kib"];
+            assert_eq!(small.samples, SAMPLES_PER_BUCKET);
+            assert_eq!(small.max, Some(300));
+            assert_eq!(small.p50, Some(173));
+            let large = &snapshot.latency_ms["128_kib_and_over"];
+            assert_eq!(large.samples, 1, "a timeout contributes no latency");
+            assert_eq!(snapshot.outcomes["ok"], 301);
+            assert_eq!(snapshot.outcomes["timeout"], 1);
+            assert_eq!(snapshot.latency_ms["4_to_32_kib"].p50, None);
+        }
+
+        #[test]
+        fn body_shapes_are_counted_by_kind_and_in_the_total() {
+            let recorder = Recorder::default();
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                for _ in 0..=times {
+                    recorder.record_body_shape(kind, 100, Duration::from_millis(5));
+                }
+            }
+            let snapshot = recorder.snapshot();
+            assert_eq!(
+                snapshot.body_shapes.keys().copied().collect::<Vec<_>>(),
+                [
+                    "empty_data",
+                    "entry_count_mismatch",
+                    "parse_error",
+                    "span_out_of_range",
+                    "span_text_mismatch",
+                ]
+            );
+            for (times, kind) in BodyShape::ALL.into_iter().enumerate() {
+                assert_eq!(snapshot.body_shapes[kind.label()], times as u64 + 1);
+            }
+            assert_eq!(
+                snapshot.outcomes["body_shape"],
+                snapshot.body_shapes.values().sum::<u64>()
+            );
+            assert_eq!(snapshot.outcomes["ok"], 0, "a malformed answer is not ok");
+            assert_eq!(
+                snapshot.latency_ms["under_4_kib"].samples, 0,
+                "a malformed answer contributes no latency"
+            );
+        }
+
+        #[test]
+        fn in_flight_counts_until_dropped() {
+            let recorder = Recorder::default();
+            let first = recorder.enter();
+            let second = recorder.enter();
+            assert_eq!(recorder.snapshot().in_flight, 2);
+            drop(first);
+            drop(second);
+            assert_eq!(recorder.snapshot().in_flight, 0);
+        }
     }
 }

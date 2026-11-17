@@ -161,11 +161,10 @@ final class PrivateInferenceSurfaceTests: XCTestCase {
         XCTAssertEqual(parsed.port, 8463)
     }
 
-    /// The quit sentence is added only while the switch is on, and it is the
-    /// payload's words rather than this shell's.
-    func testTheQuitSentenceIsOnlyAddedWhenTheSwitchIsOn() {
-        XCTAssertNil(PrivateInferenceSurface.quitDetail(on: false, state: .init(label: "", port: nil), copy: copy(), calls: calls()))
-        XCTAssertNil(PrivateInferenceSurface.quitDetail(on: true, state: .init(label: "", port: nil), copy: nil, calls: calls()))
-        XCTAssertEqual(PrivateInferenceSurface.quitDetail(on: true, state: .init(label: "", port: nil), copy: copy(), calls: calls()), "QUIT")
+    /// Quitting asks about Private AI only when the core says quitting
+    /// would stop it.
+    func testQuitStopsPrivateAIOnlyWhenTheCoreSaysSo() {
+        XCTAssertFalse(PrivateInferenceSurface.quitStops(on: false, state: .init(label: "", port: nil), calls: calls()))
+        XCTAssertTrue(PrivateInferenceSurface.quitStops(on: true, state: .init(label: "", port: nil), calls: calls()))
     }
 }

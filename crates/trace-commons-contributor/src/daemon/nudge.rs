@@ -470,8 +470,9 @@ impl NeverProjects {
 /// landed (`None` when nothing did) and the next marks: one per submission
 /// still in `next`, so marks for ids gone from the cache are pruned.
 ///
-/// Withdrawn or revoked records, and records from a Never folder, are never
-/// counted, but their marks still advance, so a folder later set back to
+/// Withdrawn or revoked records, records from a Never folder, and a
+/// previous account's records are never counted, but their marks still
+/// advance, so a folder later set back to
 /// Ask does not replay its old verdicts. `rejected` is not news.
 #[must_use]
 pub fn verdict_delta(
@@ -532,10 +533,12 @@ pub fn verdict_delta(
     (VerdictDelta::from_submissions(found), next_marks)
 }
 
-/// Whether a record's verdicts can be news: not taken back, and not in a
-/// Never folder.
+/// Whether a record's verdicts can be news: not taken back, not in a
+/// Never folder, and not a previous account's
+/// (`HistoryRecord::previous_account`), whose verdicts are not this
+/// account's news.
 fn counts_as_news(record: &HistoryRecord, never: &NeverProjects) -> bool {
-    !is_taken_back(record) && !never.contains(&record.project_id)
+    !is_taken_back(record) && !never.contains(&record.project_id) && !record.previous_account
 }
 
 /// What one successful history poll does to the verdict bookkeeping.
@@ -1292,6 +1295,7 @@ mod tests {
             approved_unattended: Some(false),
             approved_verdict: None,
             uploaded_bytes: None,
+            previous_account: false,
         }
     }
 
@@ -1403,6 +1407,26 @@ mod tests {
 
         // The folder is set back to Ask: its old verdict stays old.
         let (replayed, _) = verdict_delta(&marks, &[never_rec], &no_never(), now());
+        assert_eq!(replayed, None);
+    }
+
+    /// A previous account's verdicts are never news, and its mark still
+    /// advances, so a row that comes back under this account is not replayed.
+    #[test]
+    fn a_previous_accounts_verdicts_are_never_news() {
+        let old = HistoryRecord {
+            previous_account: true,
+            ..final_rec(1, STATUS_ACCEPTED, 2.0)
+        };
+        let next = std::slice::from_ref(&old);
+        let (got, marks) = verdict_delta(&BTreeMap::new(), next, &no_never(), now());
+        assert_eq!(got, None);
+        assert!(marks[&sid(1).to_string()].accepted, "{marks:?}");
+        let back = HistoryRecord {
+            previous_account: false,
+            ..old
+        };
+        let (replayed, _) = verdict_delta(&marks, &[back], &no_never(), now());
         assert_eq!(replayed, None);
     }
 

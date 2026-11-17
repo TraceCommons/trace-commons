@@ -5,6 +5,7 @@
 //! Every assertion compares against `trace_commons_contributor::channel`, so
 //! the same tests hold in a default build and under the contributor's
 //! `near-ai-staging` feature.
+#![allow(unsafe_code)]
 
 use std::collections::BTreeSet;
 use std::ffi::{CStr, c_char};
@@ -240,4 +241,15 @@ fn the_override_refused_line_is_the_core_sentence_and_names_no_path() {
     for name in [channel::STATE_DIR_NAME, channel::OTHER_STATE_DIR_NAME] {
         assert!(!line.contains(name), "the sentence names no directory");
     }
+}
+
+#[test]
+fn feature_profile_export_matches_the_core() {
+    let raw = trace_commons_contributor_ffi::tc_feature_profile_json();
+    let exported: trace_commons_contributor::feature_flags::BuildProfileIdentity =
+        serde_json::from_str(&take_owned(raw)).unwrap();
+    assert_eq!(
+        exported,
+        trace_commons_contributor::feature_flags::build_profile_identity().unwrap()
+    );
 }

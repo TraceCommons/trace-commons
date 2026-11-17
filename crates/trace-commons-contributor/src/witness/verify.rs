@@ -86,13 +86,16 @@ pub fn verify_witness(
         .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
     let verified = verify_witness_quote(&quote, collateral, now_unix)?;
 
-    check_quote(&verified, nonce, pin)?;
+    // The address of whichever candidate admitted the quote: the sign-up
+    // pin's, or a signed accepted-list entry's. The certificate is later
+    // checked against exactly that address.
+    let signing_address = admitting_signer(&verified, nonce, pin)?.to_string();
 
     // The one construction site in this crate. See the module docs, and
     // `there_is_no_way_to_build_a_verified_witness_but_verification`.
     Ok(VerifiedWitness {
         url: url.to_string(),
-        signing_address: pin.signing_address.clone(),
+        signing_address,
     })
 }
 
@@ -112,12 +115,55 @@ pub fn check_quote(
     nonce: &WitnessNonce,
     pin: &WitnessTrust,
 ) -> Result<(), WitnessTrustError> {
+    admitting_signer(quote, nonce, pin).map(|_| ())
+}
+
+/// [`check_quote`], returning the signing address of the candidate that
+/// admitted the quote.
+///
+/// The sign-up pin is tried first, exactly as it always was. Only when it
+/// does not admit the quote is each signed accepted-list pair in
+/// `pin.accepted` tried, each as a pair: an entry's measurement admits only a
+/// quote whose report data names that entry's own address. When nothing
+/// admits the quote the sign-up pin's own error is returned, so a client with
+/// no list behaves, and reports, as before.
+pub fn admitting_signer<'a>(
+    quote: &VerifiedQuote,
+    nonce: &WitnessNonce,
+    pin: &'a WitnessTrust,
+) -> Result<&'a str, WitnessTrustError> {
+    let primary = check_candidate(quote, nonce, &pin.signing_address, &pin.measurements);
+    if primary.is_ok() {
+        return Ok(&pin.signing_address);
+    }
+    for accepted in &pin.accepted {
+        if check_candidate(
+            quote,
+            nonce,
+            &accepted.signing_address,
+            std::slice::from_ref(&accepted.measurements),
+        )
+        .is_ok()
+        {
+            return Ok(&accepted.signing_address);
+        }
+    }
+    primary.map(|()| pin.signing_address.as_str())
+}
+
+/// One candidate: an address and the measurement sets admitted for it.
+fn check_candidate(
+    quote: &VerifiedQuote,
+    nonce: &WitnessNonce,
+    signing_address: &str,
+    measurements: &[trace_commons_attestation::measurements::ExpectedMeasurements],
+) -> Result<(), WitnessTrustError> {
     // Reconstructed whole and compared in one shot, not field by field. A
     // field-by-field check has to decide what to do about the bytes it did
     // not name, and the honest answer -- they must be zero -- is one a
     // reconstruction gets for free and a sequence of slice comparisons gets
     // only if somebody remembers.
-    let Some(address) = decode_address(&pin.signing_address) else {
+    let Some(address) = decode_address(signing_address) else {
         // A malformed pin is not a quote failure. It is reported as an
         // unexpected signer rather than silently admitting anything, because
         // the client cannot tell whose machine this is without a pin to
@@ -149,7 +195,7 @@ pub fn check_quote(
 
     // Any pinned set matching is a pass. Nothing configured is a refusal.
     let mut last_reported = None;
-    for expected_set in &pin.measurements {
+    for expected_set in measurements {
         match check_measurements_opt(
             Some(expected_set),
             quote,
@@ -318,6 +364,7 @@ mod tests {
         WitnessTrust {
             signing_address: ADDRESS.to_string(),
             measurements: sets.iter().map(|(a, b)| set(a, b)).collect(),
+            accepted: Vec::new(),
         }
     }
 
@@ -325,6 +372,7 @@ mod tests {
         WitnessTrust {
             signing_address: ADDRESS.to_string(),
             measurements: Vec::new(),
+            accepted: Vec::new(),
         }
     }
 
@@ -512,6 +560,7 @@ mod tests {
         let trust = WitnessTrust {
             signing_address: "not-an-address".to_string(),
             measurements: vec![set(MRTD, MRCONFIGID)],
+            accepted: Vec::new(),
         };
         let err = check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
@@ -588,6 +637,95 @@ mod tests {
             constructors, 1,
             "a second constructor bypasses the verification"
         );
+    }
+
+    fn with_accepted(mut trust: WitnessTrust, address: &str, mrconfigid: &str) -> WitnessTrust {
+        trust.accepted.push(crate::witness::AcceptedWitnessPin {
+            signing_address: address.to_string(),
+            measurements: set(MRTD, mrconfigid),
+        });
+        trust
+    }
+
+    #[test]
+    fn a_signed_list_entry_admits_its_own_measurement_and_address() {
+        // The redeployed image: a new measurement under a new address, known
+        // only from the signed list.
+        let trust = with_accepted(trust(), OTHER_ADDRESS, MRCONFIGID_NEXT);
+        let quote = quote_for(OTHER_ADDRESS, &our_nonce(), MRTD, MRCONFIGID_NEXT);
+        assert_eq!(
+            admitting_signer(&quote, &our_nonce(), &trust),
+            Ok(OTHER_ADDRESS)
+        );
+        // The sign-up pin still admits the old image, under its own address.
+        let old = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
+        assert_eq!(admitting_signer(&old, &our_nonce(), &trust), Ok(ADDRESS));
+    }
+
+    #[test]
+    fn a_list_entry_is_judged_as_a_pair_never_mixed_with_the_pin() {
+        // The entry's measurement under the sign-up address, and the sign-up
+        // measurement under the entry's address: neither is a pair anyone
+        // signed, so neither is admitted.
+        let trust = with_accepted(trust(), OTHER_ADDRESS, MRCONFIGID_NEXT);
+        let crossed = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID_NEXT);
+        assert!(matches!(
+            admitting_signer(&crossed, &our_nonce(), &trust),
+            Err(WitnessTrustError::WitnessMeasurementUnpinned { .. })
+        ));
+        let crossed = quote_for(OTHER_ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
+        assert_eq!(
+            admitting_signer(&crossed, &our_nonce(), &trust),
+            Err(WitnessTrustError::WitnessSignerUnexpected)
+        );
+        let stranger = quote_for(OTHER_ADDRESS, &our_nonce(), MRTD, MRCONFIGID_STRANGER);
+        assert!(admitting_signer(&stranger, &our_nonce(), &trust).is_err());
+    }
+
+    #[test]
+    fn a_list_entry_does_not_admit_a_replayed_quote() {
+        let trust = with_accepted(trust(), OTHER_ADDRESS, MRCONFIGID_NEXT);
+        let replayed = quote_for(OTHER_ADDRESS, &other_nonce(), MRTD, MRCONFIGID_NEXT);
+        assert_eq!(
+            admitting_signer(&replayed, &our_nonce(), &trust),
+            Err(WitnessTrustError::WitnessQuoteReplayed)
+        );
+    }
+
+    #[test]
+    fn a_list_entry_does_not_count_as_a_pin() {
+        let trust = with_accepted(no_pins(), OTHER_ADDRESS, MRCONFIGID_NEXT);
+        assert!(!trust.is_pinned());
+    }
+
+    #[test]
+    fn verification_carries_the_admitting_entrys_address_forward() {
+        // The certificate is checked against `signing_address()`, so it must
+        // be the address that admitted the quote, not the sign-up one.
+        let collateral = trace_commons_attestation::quote::parse_collateral(include_str!(
+            "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+        ))
+        .unwrap();
+        let fixture = register_quote_fixture(quote_for(
+            OTHER_ADDRESS,
+            &our_nonce(),
+            MRTD,
+            MRCONFIGID_NEXT,
+        ));
+        let evidence = AttestationEvidence {
+            quote_hex: hex::encode(&fixture.0),
+            signing_address: OTHER_ADDRESS.into(),
+        };
+        let verified = verify_witness(
+            "https://fixture.invalid",
+            &evidence,
+            &collateral,
+            &our_nonce(),
+            1,
+            &with_accepted(trust(), OTHER_ADDRESS, MRCONFIGID_NEXT),
+        )
+        .expect("the signed entry admits this quote");
+        assert_eq!(verified.signing_address(), OTHER_ADDRESS);
     }
 
     #[test]

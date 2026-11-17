@@ -41,11 +41,12 @@ public class SourceCheckTests
         Assert.Equal(
             "Claude Code traces read from the usual place",
             Line(SourceChecks.Claude, "unset"));
+        // Owner dropped ". Previously queued traces are not removed" 2026-11-04 (Settings copy pass 2, P71, P72).
         Assert.Equal(
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed",
+            "Claude Code marked not used, so nothing is opened for it",
             Line(SourceChecks.Claude, "off"));
         Assert.Equal(
-            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed",
+            "Codex marked not used, so nothing is opened for it",
             Line(SourceChecks.Codex, "off"));
     }
 
@@ -64,7 +65,7 @@ public class SourceCheckTests
         Assert.Equal("Cline traces folder set", Line("cline", "watch"));
         Assert.Equal("Cline is not set up, so nothing is opened for it", Line("cline", "unset"));
         Assert.Equal(
-            "Cline marked not used, so nothing is opened for it. Previously queued traces are not removed",
+            "Cline marked not used, so nothing is opened for it",
             Line("cline", "off"));
     }
 

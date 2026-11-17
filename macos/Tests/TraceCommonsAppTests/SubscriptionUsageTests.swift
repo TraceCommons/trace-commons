@@ -651,6 +651,10 @@ final class SubscriptionUsageTests: XCTestCase {
     }
 }
 
+/// How long a gate waits for an expected call before reporting it missing.
+/// Only a failing run ever waits this long.
+private let usageWaitTimeout: Duration = .seconds(10)
+
 private actor UsageReaderGate {
     private var requests: [(Bool, Bool, String?, String?)] = []
     private var continuations: [Int: CheckedContinuation<DaemonData.SubscriptionUsage, Error>] = [:]
@@ -670,7 +674,13 @@ private actor UsageReaderGate {
             if requests.count >= count { return true }
             await Task.yield()
         }
-        return false
+        // A yield budget is not a bound: on a loaded machine it runs out
+        // before the main actor is scheduled. Wait on the clock as well.
+        let deadline = ContinuousClock.now + usageWaitTimeout
+        while requests.count < count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return requests.count >= count
     }
     func resolve(_ index: Int, value: DaemonData.SubscriptionUsage) { continuations.removeValue(forKey: index)?.resume(returning: value) }
 }
@@ -702,7 +712,11 @@ private actor UsageWriterGate {
             if started { return true }
             await Task.yield()
         }
-        return false
+        let deadline = ContinuousClock.now + usageWaitTimeout
+        while !started, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return started
     }
     func resolve() { continuation?.resume(); continuation = nil }
 }

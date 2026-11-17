@@ -31,8 +31,9 @@ final class CoreCopyExportTests: XCTestCase {
 
     func testTheIgnoreBodyAgreesInNumber() throws {
         let one = try ignoreCopy(1).body
-        XCTAssertTrue(one.contains("1 waiting trace "), one)
-        XCTAssertFalse(one.contains("traces"), one)
+        XCTAssertTrue(one.contains("1 waiting trace."), one)
+        // "Traces already sent" follows, so the check is on the count's noun.
+        XCTAssertFalse(one.contains("waiting traces"), one)
         let many = try ignoreCopy(12).body
         XCTAssertTrue(many.contains("12 waiting traces"), many)
     }
@@ -46,10 +47,16 @@ final class CoreCopyExportTests: XCTestCase {
     }
 
     func testTheIgnoreBodyAlwaysNamesTheWayBack() throws {
-        for n in [0, 1, 7] {
-            let body = try ignoreCopy(n).body
-            XCTAssertTrue(body.contains("undo this in Settings"), "n=\(n): \(body)")
-            XCTAssertTrue(body.contains("Nothing already submitted is affected."), "n=\(n)")
+        let none = try ignoreCopy(0).body
+        XCTAssertTrue(none.contains("undo this in Settings"), none)
+        XCTAssertTrue(none.contains("Nothing already submitted is affected."), none)
+        // Owner dropped "undo this in Settings" and "Nothing already submitted is affected." from
+        // the body with traces waiting 2026-11-04 (Settings copy pass 2, P121); the way back is the
+        // Never button's tooltip.
+        for n in [1, 7] {
+            let copy = try ignoreCopy(n)
+            XCTAssertTrue(copy.body.contains("Traces already sent aren't affected."), "n=\(n): \(copy.body)")
+            XCTAssertEqual(copy.ignoreProjectTooltip, "Setting it back to Ask can offer the removed traces again.")
         }
     }
 
@@ -88,8 +95,9 @@ final class CoreCopyExportTests: XCTestCase {
     /// Settings' confirmation before Automatic, in Ron's #1146 words.
     func testTheSettingsConfirmationIsRons() throws {
         let copy = try armingCopy(0)
-        XCTAssertEqual(copy.settingsQuestion, "Enable automatic contribution for api?")
-        XCTAssertEqual(copy.settingsDescription, "Confirm project-wide automatic contribution.")
+        XCTAssertEqual(copy.settingsQuestion, "Set api to Automatic?")
+        // Owner cut the subtitle 2026-11-04 (Settings copy pass 2, P127).
+        XCTAssertEqual(copy.settingsDescription, "")
         XCTAssertEqual(copy.settingsDecline, "Ask")
         XCTAssertEqual(copy.settingsConfirm, "Enable")
     }
@@ -216,77 +224,27 @@ final class CoreCopyExportTests: XCTestCase {
 
     // MARK: - Quit
 
-    /// With no watcher the prompt claims neither that quitting stops one nor
-    /// that nothing moves.
-    func testTheNoWatcherQuitPromptClaimsNothingItCannotKnow() throws {
-        let prompt = try XCTUnwrap(QuitPrompt.decode(
-            fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()))
-        XCTAssertEqual(prompt.role, "unavailable")
-        XCTAssertEqual(prompt.title, "Quit Near.ai?")
-        XCTAssertFalse(prompt.body.contains("Quitting stops"), prompt.body)
-        XCTAssertFalse(prompt.body.contains("stays waiting"), prompt.body)
+    /// Nothing live: the export has no prompt to give. A shell does not ask
+    /// it then; this pins that NULL means exactly that case.
+    func testNothingLiveHasNoQuitPrompt() {
+        XCTAssertNil(TCCoreCopy.quitReasonPromptJSON(stopsCompute: false, stopsPrivateAI: false))
     }
 
-    /// The other two roles (K8, #1173), the counterpart of the Tauri
-    /// frontend's `quit-confirmation-copy.test.mjs`: "each watcher role
-    /// keeps the sentence Rust chose for it". Exercised against a real
-    /// daemon, hosting and then attached to, rather than hand-built JSON --
-    /// `tc_quit_prompt_json` reads the role off the handle itself, and that
-    /// reading is exactly what this pins.
-    func testEveryQuitRoleKeepsItsOwnSentenceAgainstARealDaemon() throws {
-        let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
-        let directory = URL(fileURLWithPath: "/private/tmp/tc-quit-\(UUID().uuidString.prefix(8))")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let hosting = try TCDaemon(configDir: directory.path, settingsJSON: settings)
-        defer { hosting.shutdown() }
-        let hostingPrompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: hosting.quitPromptJSON()))
-        XCTAssertEqual(hostingPrompt.role, "hosting")
-        XCTAssertTrue(hostingPrompt.body.contains("Quitting stops"), hostingPrompt.body)
-
-        let attached = try TCDaemon(attachingTo: directory.path)
-        defer { attached.shutdown() }
-        let attachedPrompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: attached.quitPromptJSON()))
-        XCTAssertEqual(attachedPrompt.role, "attached")
-        XCTAssertFalse(attachedPrompt.body.contains("Quitting stops"), attachedPrompt.body)
-        XCTAssertTrue(attachedPrompt.body.contains("keeps running"), attachedPrompt.body)
-
-        // The heading and the two buttons do not depend on the role.
-        XCTAssertEqual(hostingPrompt.title, attachedPrompt.title)
-        XCTAssertEqual(hostingPrompt.confirm, attachedPrompt.confirm)
-        XCTAssertEqual(hostingPrompt.cancel, attachedPrompt.cancel)
-    }
-
-    /// All three roles from the real export (moved here from
-    /// `TCShellCoreTests/QuitPromptTests`, which cannot link the core and
-    /// only round-tripped hand-built JSON): each decodes with the role the
-    /// handle implies and a body of its own, and the heading and buttons are
-    /// shared.
-    func testEachRoleDecodesWithItsOwnBody() throws {
-        let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
-        let directory = URL(fileURLWithPath: "/private/tmp/tc-roles-\(UUID().uuidString.prefix(8))")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let hosting = try TCDaemon(configDir: directory.path, settingsJSON: settings)
-        defer { hosting.shutdown() }
-        let attached = try TCDaemon(attachingTo: directory.path)
-        defer { attached.shutdown() }
-
-        let prompts = try [
-            ("hosting", hosting.quitPromptJSON()),
-            ("attached", attached.quitPromptJSON()),
-            ("unavailable", TCCoreCopy.quitPromptWithoutWatcherJSON()),
-        ].map { role, json -> QuitPrompt in
-            let prompt = try XCTUnwrap(QuitPrompt.decode(fromJSON: json), role)
-            XCTAssertEqual(prompt.role, role)
-            return prompt
+    /// Each live combination gets one short sentence saying why, and
+    /// nothing more (owner, 2026-11-12). The heading and buttons are shared.
+    func testEachLiveCombinationSaysWhyInOneSentence() throws {
+        let prompts = try [(true, false), (false, true), (true, true)].map { compute, privateAI in
+            try XCTUnwrap(QuitPrompt.decode(fromJSON: TCCoreCopy.quitReasonPromptJSON(
+                stopsCompute: compute, stopsPrivateAI: privateAI)))
         }
-        XCTAssertEqual(Set(prompts.map(\.body)).count, 3, "each role keeps its own body")
-        XCTAssertEqual(Set(prompts.map(\.title)).count, 1)
-        XCTAssertEqual(Set(prompts.map(\.confirm)).count, 1)
-        XCTAssertEqual(Set(prompts.map(\.cancel)).count, 1)
+        XCTAssertEqual(prompts.map(\.body), [
+            "Quitting stops compute on this computer.",
+            "Quitting stops Private AI on this computer.",
+            "Quitting stops compute and Private AI on this computer.",
+        ])
+        XCTAssertEqual(Set(prompts.map(\.title)), ["Quit Near AI Gateway?"])
+        XCTAssertEqual(Set(prompts.map(\.confirm)), ["Quit"])
+        XCTAssertEqual(Set(prompts.map(\.cancel)), ["Cancel"])
     }
 
     // MARK: - Withdrawal, and the copy no macOS screen renders yet

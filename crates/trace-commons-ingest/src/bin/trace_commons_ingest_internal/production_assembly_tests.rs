@@ -1218,7 +1218,7 @@ async fn default_build_serves_no_pipeline() {
         .is_none()
     );
 
-    let state = super::super::tests::test_state_with_options(
+    let state = super::super::test_support::test_state_with_options(
         dir.path().to_path_buf(),
         None,
         None,
@@ -1666,7 +1666,8 @@ async fn a_boot_refused_after_assembly_writes_no_result() {
     .await
     .unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut state = (*crate::ingest::app::tests::test_state(root.path().to_path_buf())).clone();
+    let mut state =
+        (*crate::ingest::app::test_support::test_state(root.path().to_path_buf())).clone();
     state.pipeline_service = Some(service);
     let state = Arc::new(state);
     let dir = tempfile::tempdir().unwrap();

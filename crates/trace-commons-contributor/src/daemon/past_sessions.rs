@@ -255,7 +255,7 @@ pub fn rows_for(
         .lock()
         .expect("settings lock")
         .quiescence_secs;
-    let admission_evidence = shared.admission_evidence() == Some(true);
+    let admission_evidence = shared.eligibility_applies() == Some(true);
     let queue = shared.queue.lock().expect("queue lock");
     let latest_at = latest_offers(&queue);
 
@@ -532,7 +532,7 @@ pub async fn include_past_sessions(
         .lock()
         .expect("settings lock")
         .quiescence_secs;
-    let admission_evidence = shared.admission_evidence() == Some(true);
+    let admission_evidence = shared.eligibility_applies() == Some(true);
     let mut skipped: Vec<SkippedSession> = Vec::new();
     let skip = |d: &DiscoveredSession, label: &'static str| SkippedSession {
         session_id: d.session_id.clone(),

@@ -1,10 +1,8 @@
 //! The roots screen: which session folders this shell may watch.
 //!
 //! It runs BEFORE the daemon starts, and therefore before any IPC exists.
-//! That is why it is not one of the six onboarding screens in
-//! [`super::onboarding`] -- every one of those is answered by a daemon call,
-//! so none of them could ever clear a refusal that stops the daemon coming
-//! up. Until this window existed the Linux shell answered an undeclared-roots
+//! The production Welcome/Tools handoff resumes onboarding after startup.
+//! The connected Tools variant uses IPC only once the daemon is available. Until this window existed the Linux shell answered an undeclared-roots
 //! refusal by printing a label and calling `std::process::exit(1)`: the
 //! process simply vanished, with nothing on screen saying why.
 //!
@@ -79,26 +77,53 @@ impl Choice {
     }
 }
 
-/// Show the roots window. `on_declared` runs once both answers are saved.
+thread_local! {
+    static FIRST_RUN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A successful production Tools declaration carries first run into Private AI
+/// after startup. Reading consumes the handoff; injected display fixtures do not
+/// set it, and a failed declaration cannot set it.
+pub(super) fn take_first_run_handoff() -> bool {
+    FIRST_RUN_HANDOFF.with(|handoff| handoff.replace(false))
+}
+
+/// Show Welcome and Tools before the daemon is started.
 pub fn present<F>(application: &adw::Application, dir: PathBuf, on_declared: F)
 where
     F: Fn() + 'static,
 {
-    present_with(
+    present_mode(
         application,
         dir,
         discovery::probe_this_machine(),
-        on_declared,
+        move || {
+            FIRST_RUN_HANDOFF.with(|handoff| handoff.set(true));
+            on_declared();
+        },
+        true,
     );
 }
 
-/// The testable half: the candidates are injected rather than probed, so a
-/// test never has to look at the developer's real home directory.
+/// Existing injected-candidate test entry retains its direct Tools behavior.
+#[cfg(all(test, target_os = "linux"))]
 fn present_with<F>(
     application: &adw::Application,
     dir: PathBuf,
     candidates: Vec<SourceCandidate>,
     on_declared: F,
+) where
+    F: Fn() + 'static,
+{
+    present_mode(application, dir, candidates, on_declared, false);
+}
+
+fn present_mode<F>(
+    application: &adw::Application,
+    dir: PathBuf,
+    candidates: Vec<SourceCandidate>,
+    on_declared: F,
+    welcome: bool,
 ) where
     F: Fn() + 'static,
 {
@@ -284,9 +309,189 @@ fn present_with<F>(
             .title_widget(&adw::WindowTitle::new(copy::APP_NAME, ""))
             .build(),
     );
-    content.append(&outer);
+    if welcome {
+        let words = trace_commons_contributor::first_run_copy::first_run_copy();
+        heading.set_label(&format!(
+            "{} {}",
+            words.tools.title_light, words.tools.title_bold
+        ));
+        let stack = gtk::Stack::new();
+        stack.set_vexpand(true);
+        stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
+        let intro = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::L)
+            .margin_top(space::XL)
+            .margin_bottom(space::XL)
+            .margin_start(space::XL)
+            .margin_end(space::XL)
+            .build();
+        let title = body_label(words.welcome.title);
+        title.add_css_class("tc-brand-dialog-title");
+        intro.append(&title);
+        intro.append(&body_label(words.welcome.body));
+        let start = gtk::Button::with_label(words.welcome.start);
+        start.add_css_class("suggested-action");
+        intro.append(&start);
+        let back = gtk::Button::with_label(words.frame.back);
+        back.add_css_class("flat");
+        outer.prepend(&back);
+        let tools = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&outer)
+            .build();
+        stack.add_named(&intro, Some("welcome"));
+        stack.add_named(&tools, Some("tools"));
+        let pages = stack.clone();
+        start.connect_clicked(move |_| pages.set_visible_child_name("tools"));
+        let pages = stack.clone();
+        back.connect_clicked(move |_| pages.set_visible_child_name("welcome"));
+        stack.set_visible_child_name("welcome");
+        content.append(&stack);
+    } else {
+        content.append(&outer);
+    }
     window.set_content(Some(&content));
     window.present();
+}
+
+/// Tools for a running daemon. Each row still requires an explicit answer;
+/// discovery alone does not grant access or change a watched source. The UI
+/// uses the existing native folder chooser so Linux portal semantics are kept.
+pub(super) fn connected(app: &Rc<super::App>, on_saved: impl Fn() + 'static) -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, space::L);
+    let words = trace_commons_contributor::first_run_copy::first_run_copy();
+    let title = body_label(&format!(
+        "{} {}",
+        words.tools.title_light, words.tools.title_bold
+    ));
+    title.add_css_class("tc-brand-dialog-title");
+    root.append(&title);
+    root.append(&body_label(copy::ROOTS_BODY));
+    let loading = gtk::Spinner::new();
+    loading.start();
+    root.append(&loading);
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(discovery::probe_this_machine());
+    });
+    let generation = Rc::new(std::cell::Cell::new(0_u64));
+    root.connect_unmap({
+        let generation = generation.clone();
+        move |_| generation.set(generation.get().wrapping_add(1))
+    });
+    let weak_root = root.downgrade();
+    let weak_app = Rc::downgrade(app);
+    gtk::glib::spawn_future_local(async move {
+        let Ok(candidates) = rx.recv().await else {
+            return;
+        };
+        let (Some(root), Some(app)) = (weak_root.upgrade(), weak_app.upgrade()) else {
+            return;
+        };
+        root.remove(&loading);
+        let choices: Rc<Vec<_>> = Rc::new(
+            candidates
+                .iter()
+                .map(|candidate| build_choice(&root, candidate, &app.window))
+                .collect(),
+        );
+        let failure = body_label(copy::ROOTS_FAILED);
+        failure.add_css_class("tc-refused");
+        failure.set_visible(false);
+        root.append(&failure);
+        let button = gtk::Button::with_label(words.frame.continue_button);
+        button.add_css_class("suggested-action");
+        button.set_sensitive(false);
+        root.append(&button);
+        let pending = Rc::new(std::cell::Cell::new(false));
+        let update: Rc<dyn Fn()> = {
+            let choices = choices.clone();
+            let pending = pending.clone();
+            let button = button.clone();
+            Rc::new(move || {
+                let complete = !choices.is_empty()
+                    && choices.iter().all(|choice| choice.declaration().is_some());
+                for choice in choices.iter() {
+                    choice.group.set_sensitive(!pending.get());
+                }
+                button.set_sensitive(complete && !pending.get());
+            })
+        };
+        for choice in choices.iter() {
+            for toggle in [&choice.watch, &choice.off] {
+                let update = update.clone();
+                toggle.connect_toggled(move |_| update());
+            }
+        }
+        let on_saved = Rc::new(on_saved);
+        let weak_root = root.downgrade();
+        let weak_app = Rc::downgrade(&app);
+        button.connect_clicked(move |_| {
+            let (Some(root), Some(app)) = (weak_root.upgrade(), weak_app.upgrade()) else {
+                return;
+            };
+            if !root.is_mapped() || pending.replace(true) {
+                return;
+            }
+            update();
+            let params = declaration_params(&choices);
+            let Some(params) = params else {
+                pending.set(false);
+                update();
+                failure.set_visible(true);
+                return;
+            };
+            let pending = pending.clone();
+            let update = update.clone();
+            let failure = failure.clone();
+            let on_saved = on_saved.clone();
+            let weak_root = root.downgrade();
+            let expected = params.clone();
+            let submitted_generation = generation.get();
+            let generation = generation.clone();
+            app.call("set_settings", params, move |_, result| {
+                pending.set(false);
+                update();
+                if generation.get() != submitted_generation
+                    || !weak_root.upgrade().is_some_and(|root| root.is_mapped())
+                {
+                    return;
+                }
+                let confirmed = result
+                    .as_ref()
+                    .is_ok_and(|settings| declarations_confirmed(&expected, settings));
+                failure.set_visible(!confirmed);
+                if confirmed {
+                    on_saved();
+                }
+            });
+        });
+    });
+    root
+}
+
+fn declarations_confirmed(expected: &serde_json::Value, settings: &serde_json::Value) -> bool {
+    expected.as_object().is_some_and(|fields| {
+        !fields.is_empty()
+            && fields
+                .iter()
+                .all(|(key, value)| settings.get(key) == Some(value))
+    })
+}
+
+fn declaration_params(choices: &[Choice]) -> Option<serde_json::Value> {
+    if choices.is_empty() {
+        return None;
+    }
+    let mut fields = serde_json::Map::new();
+    for choice in choices {
+        let declaration = choice.declaration()?;
+        let key = trace_commons_contributor::daemon::settings::source_settings_key(&choice.source)?;
+        fields.insert(key.to_owned(), serde_json::to_value(declaration).ok()?);
+    }
+    Some(serde_json::Value::Object(fields))
 }
 
 fn build_choice(
@@ -449,6 +654,29 @@ fn body_label(text: &str) -> gtk::Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_handoff_is_consumed_once() {
+        FIRST_RUN_HANDOFF.with(|handoff| handoff.set(true));
+        assert!(take_first_run_handoff());
+        assert!(!take_first_run_handoff());
+    }
+
+    #[test]
+    fn connected_tools_requires_acknowledgement_of_every_declaration() {
+        use serde_json::json;
+        let expected = json!({"claude_source": {"mode":"off"}, "codex_source": {"mode":"watch", "path":"/chosen/codex"}});
+        assert!(declarations_confirmed(&expected, &expected));
+        assert!(!declarations_confirmed(&expected, &json!({"ok":true})));
+        assert!(!declarations_confirmed(
+            &expected,
+            &json!({"claude_source":{"mode":"off"}})
+        ));
+        let mut changed = expected.clone();
+        changed["codex_source"]["path"] = json!("/different/path");
+        assert!(!declarations_confirmed(&expected, &changed));
+        assert!(!declarations_confirmed(&json!({}), &json!({})));
+    }
 
     fn candidate(source: &str, count: u64, exists: bool) -> SourceCandidate {
         SourceCandidate {

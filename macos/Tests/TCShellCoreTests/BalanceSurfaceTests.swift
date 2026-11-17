@@ -63,8 +63,8 @@ final class BalanceSurfaceTests: XCTestCase {
         limit: @escaping @Sendable (Int32, Int64, UInt8) -> String? = { p, n, s in
             p == 0 ? "" : "LIMIT:\(n)@\(s)"
         },
-        spent: @escaping @Sendable (Int32, Int64, UInt8) -> String? = { p, n, s in
-            p == 0 ? "" : "SPENT:\(n)@\(s)"
+        spent: @escaping @Sendable (Int32, Int64, UInt8, Int32) -> String? = { p, n, s, r in
+            p == 0 ? "" : "SPENT:\(n)@\(s)" + (r == 0 ? "" : "+R")
         },
         observed: @escaping @Sendable (Int64) -> String? = { $0 < 0 ? "" : "OBSERVED:\($0)" }
     ) -> BalanceCalls {
@@ -196,7 +196,14 @@ final class BalanceSurfaceTests: XCTestCase {
 
         let nothingSpent = known(limit: 0, spent: 0)
         XCTAssertEqual(BalanceSurface.limitLine(nothingSpent, calls: calls()), "LIMIT:0@9")
-        XCTAssertEqual(BalanceSurface.spentLine(nothingSpent, calls: calls()), "SPENT:0@9")
+        XCTAssertEqual(BalanceSurface.spentLine(nothingSpent, calls: calls()), "SPENT:0@9+R")
+    }
+
+    /// Spent is told whether a remaining figure is beside it, since that
+    /// picks its rounding in the core, and is told nothing else about it.
+    func testTheSpentLineIsToldWhetherARemainingFigureIsBesideIt() {
+        XCTAssertEqual(BalanceSurface.spentLine(known(remaining: 1), calls: calls()), "SPENT:1500000000@9+R")
+        XCTAssertEqual(BalanceSurface.spentLine(known(remaining: nil), calls: calls()), "SPENT:1500000000@9")
     }
 
     // MARK: - The scale comes off the wire
@@ -209,7 +216,7 @@ final class BalanceSurfaceTests: XCTestCase {
         _ = BalanceSurface.remaining(sixes, copy: copy(), calls: calls(recorder: recorder))
         XCTAssertEqual(recorder.amountCalls.map(\.2), [6])
         XCTAssertEqual(BalanceSurface.limitLine(sixes, calls: calls()), "LIMIT:10000000000@6")
-        XCTAssertEqual(BalanceSurface.spentLine(sixes, calls: calls()), "SPENT:1500000000@6")
+        XCTAssertEqual(BalanceSurface.spentLine(sixes, calls: calls()), "SPENT:1500000000@6+R")
     }
 
     /// A payload with no `scale` at all cannot be formatted honestly, and

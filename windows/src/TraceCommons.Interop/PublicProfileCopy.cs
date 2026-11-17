@@ -95,8 +95,8 @@ public static class PublicProfileCopy
         + "you didn't send.";
 
     public const string GoPublicAcknowledgement =
-        "I understand my handle and aggregate counts become public. Leaving the roster removes "
-        + "me from future snapshots.";
+        "I understand my handle and counts become public. Leaving removes me from "
+        + "future snapshots only.";
 
     public const string GoPublicConfirm = "Go public";
 

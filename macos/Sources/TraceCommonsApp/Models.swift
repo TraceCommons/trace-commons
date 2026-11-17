@@ -259,6 +259,10 @@ struct DaemonStatus: Decodable, Equatable {
     var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
+    /// An in-effect Terms of Service version is owed: the daemon uploads
+    /// nothing until it is accepted. Separate from `paused`; Resume does not
+    /// clear it. A daemon that predates the key holds nothing.
+    let termsHold: Bool
     let queueDepth: Int
     /// The daemon's K6 count, never inferred from a pending list or queue
     /// depth. Older daemons omit it, which means unavailable, not zero.
@@ -310,6 +314,7 @@ struct DaemonStatus: Decodable, Equatable {
         case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
+        case termsHold = "terms_hold"
         case queueDepth = "queue_depth"
         case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
@@ -339,6 +344,7 @@ struct DaemonStatus: Decodable, Equatable {
         accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
+        termsHold: Bool = false,
         queueDepth: Int,
         decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
@@ -361,6 +367,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
+        self.termsHold = termsHold
         self.queueDepth = queueDepth
         self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
@@ -386,6 +393,7 @@ struct DaemonStatus: Decodable, Equatable {
         accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        termsHold = (try? c.decodeIfPresent(Bool.self, forKey: .termsHold)).flatMap { $0 } ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
         decisionsOwed = try c.decodeIfPresent(Int.self, forKey: .decisionsOwed)
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
@@ -432,7 +440,7 @@ struct DaemonStatus: Decodable, Equatable {
         DaemonStatus(
             schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
             accountScope: nil, consentScopes: consentScopes, paused: paused,
-            queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
+            termsHold: termsHold, queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
             health: health, routing: routing, grantVoids: grantVoids,
             witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
             legacyInviteMigration: .none, accountAttention: .none)
@@ -619,6 +627,10 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
     let creditPointsFinal: Double?
     let explanations: [String]
     let lastRefreshedAt: Date?
+    /// The submission belongs to an account this Mac was enrolled under
+    /// before the current one. The current account cannot withdraw it, so
+    /// Withdraw is never offered on it. `false` when the daemon omits it.
+    var previousAccount: Bool = false
 
     var id: String { submissionID }
 
@@ -634,6 +646,7 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
         case creditPointsFinal = "credit_points_final"
         case explanations
         case lastRefreshedAt = "last_refreshed_at"
+        case previousAccount = "previous_account"
     }
 }
 
@@ -923,6 +936,7 @@ struct EnrollResult: Decodable, Equatable {
 // MARK: - Events
 
 enum DaemonEvent: Equatable {
+    case featureFlagsChanged
     case snapshot(pending: [QueueEntry], status: DaemonStatus)
     case queueChanged
     case statusChanged
@@ -949,6 +963,10 @@ enum DaemonEvent: Equatable {
     /// cache -- see the contract's note that a cache hit "no event
     /// follows".
     case previewReady(PreviewRequestResult)
+    /// `witness_review_ready`: a review started in the background finished.
+    /// `failure` is `nil` when it was pinned, else the refusal or busy
+    /// answer with the daemon's own `view`, as a synchronous call throws it.
+    case witnessReviewReady(entryID: String, failure: DaemonClient.Failure?)
     /// `near_ai_balance_changed`: NEAR AI credit arrived; read the balance
     /// again.
     case nearAiBalanceChanged
@@ -1123,7 +1141,8 @@ extension HistoryRecord {
             creditPointsPending: try c.decode(Double.self, forKey: .creditPointsPending),
             creditPointsFinal: try c.decodeIfPresent(Double.self, forKey: .creditPointsFinal),
             explanations: try c.decode([String].self, forKey: .explanations),
-            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt)
+            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt),
+            previousAccount: try c.decodeIfPresent(Bool.self, forKey: .previousAccount) ?? false
         )
     }
 }
@@ -1140,6 +1159,9 @@ struct TokenStorageView: Decodable, Equatable {
     let stateLine: String
     let scopeNote: String
     let cleanupLabel: String
+    /// Clean up's hover tip. Optional so an older daemon still decodes.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P279).
+    let cleanupTooltip: String?
     let discardLabel: String
     /// The discard confirmation's title: the full name the short button drops.
     let discardTitle: String?
@@ -1151,6 +1173,7 @@ struct TokenStorageView: Decodable, Equatable {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
         case captureConfirmTitle = "capture_confirm_title", captureConfirmLabel = "capture_confirm_label"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
+        case cleanupTooltip = "cleanup_tooltip"
         case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }

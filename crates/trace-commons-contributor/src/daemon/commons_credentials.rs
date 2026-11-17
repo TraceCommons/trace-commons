@@ -110,7 +110,7 @@ fn record(bytes: &[u8]) -> Result<Option<Record>> {
     }
     Ok(Some(record))
 }
-fn authority(cfg: &ContributorConfig) -> String {
+pub(super) fn authority(cfg: &ContributorConfig) -> String {
     let bytes = serde_json::to_vec(&(
         &cfg.ingest_url,
         &cfg.issuer_url,
@@ -709,6 +709,7 @@ fn replace_with_lifecycle(
             &serde_json::to_vec(&record).map_err(|_| unavailable())?,
         )?;
         if let Some(config) = enrollment {
+            super::first_trace::reset_locked(store, config, chrono::Utc::now())?;
             // Use a create-only link to preserve concurrent invite enrollment.
             let temporary =
                 store.daemon_path(&format!(".commons-enrollment-{}", uuid::Uuid::new_v4()));
@@ -950,6 +951,7 @@ pub(crate) fn save_config(store: &ConfigStore, cfg: &ContributorConfig, body: &[
         .map_err(|_| unavailable())?;
     if before.as_ref().map(authority) != Some(authority(cfg)) {
         clear_checked(store, &[Kind::Account], Some(&expected), || {
+            super::first_trace::reset_locked(store, cfg, chrono::Utc::now())?;
             write(store, &store.daemon_path("contributor.json"), body)
         })
     } else {

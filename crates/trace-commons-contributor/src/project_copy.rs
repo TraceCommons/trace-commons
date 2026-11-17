@@ -1,26 +1,36 @@
 //! Shared project controls shown beside the contribution queue.
 
-pub const IGNORE_PROJECT: &str = "Ignore project";
+/// The mode is named Never, so the button says so (it was "Ignore
+/// project"). Approved by the owner 2026-11-04 (Settings copy pass 2, P133).
+pub const IGNORE_PROJECT: &str = "Never";
 /// The confirmation's way out, which keeps the project as it is (#1146's
-/// `ignore-project-control.tsx`; owner ruling, 2026-10-06).
-pub const KEEP_PROJECT: &str = "Keep project";
+/// `ignore-project-control.tsx`). Approved by the owner 2026-11-04 (Settings copy pass 2, P134).
+pub const KEEP_PROJECT: &str = "Keep";
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
 /// The mode is named Never, so the title says so (it was "Ignore
-/// {project}?"). DRAFT, NEEDS APPROVAL (2026-11-04).
+/// {project}?"). Approved by the owner 2026-11-04 (#1963).
 pub fn ignore_project_title(project: &str) -> String {
     format!("Set {project} to Never?")
 }
 
+/// The confirmation's body. With traces waiting: Approved by the owner 2026-11-04 (Settings copy pass 2, P121).
+/// With none waiting the sentence is unchanged.
 pub fn ignore_project_body(pending: usize) -> String {
-    let tail = "Nothing already submitted is affected. You can undo this in Settings.";
     if pending == 0 {
-        return format!("Stops this project being offered. {tail}");
+        return "Stops this project being offered. Nothing already submitted is affected. \
+                You can undo this in Settings."
+            .to_string();
     }
     let noun = if pending == 1 { "trace" } else { "traces" };
-    format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
+    format!("This removes {pending} waiting {noun}. Traces already sent aren't affected.")
 }
+
+/// The Never button's help text in the ignore confirmation: the way back the
+/// body no longer names. Approved by the owner 2026-11-04 (Settings copy pass 2, P121).
+pub const IGNORE_PROJECT_BODY_TOOLTIP: &str =
+    "Setting it back to Ask can offer the removed traces again.";
 
 pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
     if purged == promised as u64 {
@@ -53,17 +63,16 @@ pub fn arming_offer_question(project_label: &str) -> String {
 pub const ARMING_OFFER_CONFIRM: &str = "Enable";
 pub const ARMING_OFFER_DECLINE: &str = "Not now";
 
-/// Settings' confirmation before a project's mode is set to Automatic, in
-/// Ron's #1146 words (`project-mode-field.tsx`); its body is
-/// [`ARMING_BODY`], and the mode names stay [`FOLDER_MODE_LABELS`]'.
-/// Approved 2026-10-07, with the buttons "Ask" / "Enable" (owner ruling).
-/// The heading and both buttons were the offer's ("Contribute from {project} automatically?",
-/// "Not now", "Turn on automatic contributing").
+/// Settings' confirmation before a project's mode is set to Automatic
+/// (#1146, `project-mode-field.tsx`); its body is [`ARMING_BODY`], and the
+/// mode names stay [`FOLDER_MODE_LABELS`]'. It names the mode, Automatic.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P135).
 pub fn settings_arming_question(project_label: &str) -> String {
-    format!("Enable automatic contribution for {project_label}?")
+    format!("Set {project_label} to Automatic?")
 }
-/// Approved 2026-10-07.
-pub const SETTINGS_ARMING_DESCRIPTION: &str = "Confirm project-wide automatic contribution.";
+/// The confirmation's subtitle, cut: the question and the body say it.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P127).
+pub const SETTINGS_ARMING_DESCRIPTION: &str = "";
 /// Approved 2026-10-07.
 pub const SETTINGS_ARMING_DECLINE: &str = "Ask";
 /// Approved 2026-10-07.
@@ -189,6 +198,9 @@ pub struct IgnoreProjectCopy {
     pub tooltip: &'static str,
     /// The confirmation's cancel: [`KEEP_PROJECT`].
     pub keep: &'static str,
+    /// The Never button's help text in the confirmation:
+    /// [`IGNORE_PROJECT_BODY_TOOLTIP`].
+    pub ignore_project_tooltip: &'static str,
 }
 
 /// The ignore-project words for `project` with `pending` sessions waiting.
@@ -200,6 +212,92 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
         button: IGNORE_PROJECT,
         tooltip: IGNORE_PROJECT_TOOLTIP,
         keep: KEEP_PROJECT,
+        ignore_project_tooltip: IGNORE_PROJECT_BODY_TOOLTIP,
+    }
+}
+
+/// A bulk or group change's projects as one name (#1952, #1954): the
+/// project's own label when the change reaches one, else how many, in
+/// `shell_words_copy::ProjectsManagerWords::projects_count`'s words (filled
+/// from that table, so the two cannot differ).
+#[must_use]
+pub fn bulk_projects_name(labels: &[&str]) -> String {
+    match labels {
+        [one] => (*one).to_string(),
+        _ => crate::shell_words_copy::projects_manager_words()
+            .projects_count
+            .replace("{count}", &labels.len().to_string()),
+    }
+}
+
+/// The line a bulk or group change that turns off Automatic says first
+/// (owner decision 2026-11-04 on #1952: such a change always asks, with
+/// the count). Approved by the owner 2026-11-04 (#1963).
+#[must_use]
+pub fn bulk_turns_off_automatic(count: usize) -> String {
+    if count == 1 {
+        "This turns off Automatic for 1 project.".to_string()
+    } else {
+        format!("This turns off Automatic for {count} projects.")
+    }
+}
+
+/// The confirmation a bulk or group mode change asks before it runs:
+/// every word, composed here so no shell assembles a consent sentence.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct BulkModeConfirmation {
+    pub title: String,
+    pub body: String,
+    /// The confirm button: the mode's own name.
+    pub button: &'static str,
+    /// [`KEEP_PROJECT`].
+    pub keep: &'static str,
+    /// The confirm button's help, [`IGNORE_PROJECT_BODY_TOOLTIP`], when a
+    /// Never removes waiting traces; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<&'static str>,
+    /// Whether the confirm is drawn as destructive: a Never.
+    pub destructive: bool,
+}
+
+/// The words for setting the projects `name`d to Never (`never`) or Ask,
+/// turning off Automatic on `automatic_off` of them and, for a Never,
+/// removing `pending` waiting traces.
+///
+/// The Never title is [`ignore_project_title`]'s; the Ask title has the
+/// same shape. Both approved by the owner 2026-11-04 (#1963). The
+/// pending sentence is [`ignore_project_body`]'s (approved), said only
+/// when traces wait.
+#[must_use]
+pub fn bulk_mode_confirmation(
+    name: &str,
+    never: bool,
+    automatic_off: usize,
+    pending: usize,
+) -> BulkModeConfirmation {
+    let mut lines = Vec::new();
+    if automatic_off > 0 {
+        lines.push(bulk_turns_off_automatic(automatic_off));
+    }
+    let removes = never && pending > 0;
+    if removes {
+        lines.push(ignore_project_body(pending));
+    }
+    BulkModeConfirmation {
+        title: if never {
+            ignore_project_title(name)
+        } else {
+            format!("Set {name} to {CONTRIBUTION_MODE_ASK_LABEL}?")
+        },
+        body: lines.join(" "),
+        button: if never {
+            CONTRIBUTION_MODE_NEVER_LABEL
+        } else {
+            CONTRIBUTION_MODE_ASK_LABEL
+        },
+        keep: KEEP_PROJECT,
+        help: removes.then_some(IGNORE_PROJECT_BODY_TOOLTIP),
+        destructive: never,
     }
 }
 
@@ -573,14 +671,12 @@ mod settings_arming_copy_tests {
     #[test]
     fn the_settings_arming_confirmation_is_rons_over_the_arming_body() {
         let copy = arming_offer_copy("api", 0);
-        assert_eq!(
-            copy.settings_question,
-            "Enable automatic contribution for api?"
-        );
+        assert_eq!(copy.settings_question, "Set api to Automatic?");
         assert_eq!(copy.body, ARMING_BODY);
+        // Owner dropped the subtitle 2026-11-04 (Settings copy pass 2, P127).
+        assert_eq!(copy.settings_description, "");
         for text in [
             copy.settings_question.as_str(),
-            copy.settings_description,
             copy.settings_decline,
             copy.settings_confirm,
         ] {
@@ -807,7 +903,7 @@ mod copy_table_tests {
         assert!(
             ignore_project_copy("api", 1)
                 .body
-                .contains("1 waiting trace ")
+                .contains("1 waiting trace.")
         );
         assert!(!ignore_project_copy("api", 0).body.contains("waiting trace"));
     }
@@ -821,8 +917,15 @@ mod copy_table_tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 5);
-        for key in ["title", "body", "button", "tooltip", "keep"] {
+        assert_eq!(keys.len(), 6);
+        for key in [
+            "title",
+            "body",
+            "button",
+            "tooltip",
+            "keep",
+            "ignore_project_tooltip",
+        ] {
             assert!(value[key].is_string(), "{key}");
         }
     }
@@ -832,7 +935,8 @@ mod copy_table_tests {
     #[test]
     fn the_ignore_confirmation_keeps_the_project() {
         let copy = ignore_project_copy("api", 2);
-        assert_eq!(copy.keep, "Keep project");
+        // Owner replaced "Keep project" 2026-11-04 (Settings copy pass 2, P134).
+        assert_eq!(copy.keep, "Keep");
         assert_ne!(copy.keep, copy.button);
     }
 

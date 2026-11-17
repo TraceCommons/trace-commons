@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace TraceCommons.App;
 
@@ -23,6 +24,7 @@ public sealed partial class OnboardingWindow : Window
     /// <see cref="MainWindow"/>'s quit dialog.
     /// </summary>
     private bool _removedDialogOpen;
+    private bool _agentDialogOpen;
 
     public OnboardingWindow(DaemonHost host, OnboardingState state)
     {
@@ -191,6 +193,55 @@ public sealed partial class OnboardingWindow : Window
         {
             _removedDialogOpen = false;
         }
+    }
+
+    private async void OnAgentConfiguration(object sender, RoutedEventArgs e)
+    {
+        if (_agentDialogOpen || ViewModel.AgentConfiguration is not { } copy) return;
+        var body = new StackPanel { Spacing = 16 };
+        body.Children.Add(new TextBlock { Text = copy.Body, TextWrapping = TextWrapping.Wrap });
+        body.Children.Add(new TextBlock { Text = copy.Prerequisite, TextWrapping = TextWrapping.Wrap });
+        body.Children.Add(new TextBlock
+        {
+            Text = copy.Prompt,
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
+        });
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = copy.Title,
+            Content = new ScrollViewer
+            {
+                Content = body,
+                MaxHeight = 420,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            },
+            PrimaryButtonText = copy.Copy,
+            CloseButtonText = copy.Close,
+            DefaultButton = ContentDialogButton.Close,
+        };
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            // Copy keeps the reference open and never advances onboarding.
+            args.Cancel = true;
+            try
+            {
+                var package = new DataPackage();
+                package.SetText(copy.Prompt);
+                Clipboard.SetContent(package);
+                dialog.PrimaryButtonText = copy.Copied;
+            }
+            catch (Exception)
+            {
+                // A busy clipboard is retryable; never claim a successful copy.
+                dialog.PrimaryButtonText = copy.Copy;
+            }
+        };
+        _agentDialogOpen = true;
+        try { await Controls.DialogGuard.ShowOnceAsync(dialog); }
+        finally { _agentDialogOpen = false; }
     }
 
     private void OnFinished() => Close();

@@ -1,0 +1,251 @@
+[
+  {
+    "label": "services_home",
+    "title": "Private AI",
+    "body": "Connection, saved sign-in, spending organization and running sessions are independent.",
+    "controls": [
+      "Sign in",
+      "Connect",
+      "Disconnect",
+      "Launch",
+      "Refresh",
+      "Spending organization",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_login",
+    "title": "Sign in",
+    "body": "Finish signing in in your browser. The app observes a named attempt.",
+    "controls": [
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_org_empty",
+    "title": "Spending organization",
+    "body": "No active organizations were returned.",
+    "controls": [
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_org",
+    "title": "Choose an organization",
+    "body": "Select one of the active organizations.",
+    "controls": [
+      "Select organization",
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_org_busy",
+    "title": "Spending organization",
+    "body": "Mint and validate the replacement key before moving the proxy.",
+    "controls": [
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_busy",
+    "title": "Working",
+    "body": "The operation has not answered. Existing sessions can still report. ",
+    "controls": [
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_error",
+    "title": "Private AI",
+    "body": "The operation was not confirmed. Existing saved state may remain.",
+    "controls": [
+      "Retry",
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_offline",
+    "title": "Private AI",
+    "body": "The backend or balance service is unavailable.",
+    "controls": [
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_exposure",
+    "title": "Route AI requests through NEAR AI",
+    "body": "Connecting a tool can first require enabling the local listener.",
+    "controls": [
+      "Continue",
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_plan",
+    "title": "Change this tool\u2019s settings?",
+    "body": "Review the held plan before applying it.",
+    "controls": [
+      "Apply",
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_launch",
+    "title": "Launch managed session",
+    "body": "Choose the tool, account, folder and model.",
+    "controls": [
+      "Launch",
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_sessions_empty",
+    "title": "Sessions",
+    "body": "No sessions yet.",
+    "controls": [
+      "Launch",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_session",
+    "title": "Sessions",
+    "body": "The selected session has its own launch ticket, lease and collection status.",
+    "controls": [
+      "Stop",
+      "Start again",
+      "Resume",
+      "Dismiss",
+      "Select session",
+      "Launch",
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_account",
+    "title": "Account",
+    "body": "Profile, contribution credit, referrals, billing and payout links are separate read-backs.",
+    "controls": [
+      "Update profile",
+      "Withdraw",
+      "Refresh",
+      "Link",
+      "Unlink",
+      "Confirm",
+      "Billing",
+      "Devices",
+      "Sign out",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_profile_busy",
+    "title": "Profile",
+    "body": "Publication or withdrawal is waiting for the server. ",
+    "controls": [
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_credit_empty",
+    "title": "Credit",
+    "body": "No credit read-back is available yet.",
+    "controls": [
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_payout_confirm",
+    "title": "Payout account",
+    "body": "Confirm the held link or unlink operation.",
+    "controls": [
+      "Confirm",
+      "Cancel",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_devices",
+    "title": "Devices",
+    "body": "Device management is a coarse authority interface.",
+    "controls": [
+      "Revoke device",
+      "Refresh",
+      "Private AI",
+      "Account",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "services_closed",
+    "title": "No window open",
+    "body": "Daemon work, browser callbacks and managed processes can continue.",
+    "controls": [
+      "Open"
+    ],
+    "kind": "client"
+  }
+]

@@ -215,7 +215,8 @@ request onto the window route. Malformed request JSON is refused when selecting
 the account-bound profile. No unsigned local fallback is introduced.
 
 A window-enabled deployment must allow receipt-less requests on its ordinary
-`POST /v1/witness` route. In the current witness binary, leave
+review route (`POST /v1/witness/jobs` since 2026-11-05; formerly
+`POST /v1/witness`). In the current witness binary, leave
 `TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE` unset/false on the witness
 published for that onboarding path. This controls the ordinary route only in
 practice: `/v1/witness/admission` independently always requires its trusted

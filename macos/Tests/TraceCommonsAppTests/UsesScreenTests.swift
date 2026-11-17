@@ -104,50 +104,6 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
 
-    /// The optional uses start unticked (R7) and two buttons of equal weight
-    /// sit above them (owner, 2026-10-27): Allow all ticks every optional
-    /// data use, never the handle; Only required unticks them and keeps the
-    /// required use. Nothing ticks a box but the person.
-    func test_theOptionalUsesStartUntickedAndTheTwoButtonsAreEqual() throws {
-        let uses = try copy().uses
-        XCTAssertEqual(uses.allowAll, "Allow all")
-        XCTAssertEqual(uses.onlyRequired, "Only required")
-        let optional = UsesScreenLayout.optionalScopes(options)
-        let fresh = UsesScreenLayout.includingRequired(
-            FirstRunState(step: .uses), required: UsesScreenLayout.requiredScope(options))
-        XCTAssertEqual(fresh.scopes, ["debugging_evaluation"], "nothing optional is ticked for the person")
-        XCTAssertEqual(UsesScreenLayout.group(fresh.scopes, optional: optional), .none)
-
-        let all = UsesScreenLayout.pressing(.allowAll, fresh, optional: optional)
-        XCTAssertEqual(
-            all.scopes, ["debugging_evaluation", "benchmark_only", "ranking_training", "model_training"])
-        XCTAssertFalse(all.scopes.contains("public_attribution"))
-        XCTAssertEqual(UsesScreenLayout.pressing(.allowAll, all, optional: optional), all, "pressing again changes nothing")
-
-        let required = UsesScreenLayout.pressing(.onlyRequired, all, optional: optional)
-        XCTAssertEqual(required.scopes, ["debugging_evaluation"])
-        XCTAssertEqual(UsesScreenLayout.pressing(.onlyRequired, required, optional: optional), required)
-
-        // A box still toggles on its own after either press, and nothing
-        // but the scopes changes.
-        var one = required
-        one.scopes.insert("ranking_training")
-        XCTAssertEqual(UsesScreenLayout.group(one.scopes, optional: optional), .some)
-        var others = all
-        others.scopes = fresh.scopes
-        XCTAssertEqual(others, fresh)
-
-        // Same style, same width, side by side, in one loop: neither is
-        // emphasised.
-        let source = try Self.source()
-        XCTAssertEqual(UsesScreenLayout.Bulk.allCases, [.allowAll, .onlyRequired])
-        XCTAssertTrue(source.contains("ForEach(UsesScreenLayout.Bulk.allCases, id: \\.self) { bulk in"))
-        XCTAssertTrue(source.contains("Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)"))
-        XCTAssertEqual(source.components(separatedBy: "GlassButtonStyle(").count - 1, 1)
-        XCTAssertFalse(source.contains("uses.allowAll)"), "no button of its own for either")
-        XCTAssertFalse(source.contains(".onAppear { runner.state.scopes"))
-    }
-
     /// The required use is one Always on line under the choices, its scope
     /// the tooltip, so every box shown is a real choice (owner, 2026-10-28).
     func test_theRequiredUseIsOneAlwaysOnLine() throws {
@@ -209,7 +165,7 @@ final class UsesScreenTests: XCTestCase {
         // Off the first run's Uses (owner, 2026-10-28); Settings keeps it.
         XCTAssertFalse(source.contains("Text(copy.uses.rewardOpportunities"))
         XCTAssertEqual(try copy().uses.rewardOpportunities,
-                       "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.")
+                       "Allow Train coding models to earn credit. The other uses may earn more.")
         let profile = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PublicProfileSection.swift"), encoding: .utf8)
@@ -297,7 +253,8 @@ final class UsesScreenTests: XCTestCase {
         let uses = try copy().uses
         let grant = try grant()
         let scrub = try XCTUnwrap(grant.scrub)
-        XCTAssertEqual(grant.pathAskFirstTitle, "Review each trace yourself.")
+        // Owner dropped Ask's first line 2026-11-04 (Settings copy pass 2, P125).
+        XCTAssertEqual(grant.pathAskFirstTitle, "")
         XCTAssertEqual(grant.pathAskFirstDetail, "Nothing is contributed until you approve it.")
         XCTAssertEqual(grant.pathAutomaticTitle, "Contribute automatically from projects that first appear.")
         XCTAssertFalse(try XCTUnwrap(grant.pathAskFirst).contains("later"))
@@ -320,7 +277,8 @@ final class UsesScreenTests: XCTestCase {
         // the first line of the core's words for it.
         XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
         XCTAssertEqual(full.map(\.title), [try XCTUnwrap(uses.askEachTime), modes.label(for: .autoUpload)])
-        XCTAssertEqual(full.map(\.sub), [grant.pathAskFirstTitle, try XCTUnwrap(uses.automaticScope)])
+        // Ask's cut first line leaves its radio with no sub-line (P125).
+        XCTAssertEqual(full.map(\.sub), [nil, try XCTUnwrap(uses.automaticScope)])
         // Before sign-in Automatic is offered too, and says it turns on once
         // the person signs in, the last step.
         let before = UsesScreenLayout.sharingOptions(for: FirstRunState(step: .uses), modes: modes, grant: grant, uses: uses)

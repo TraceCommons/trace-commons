@@ -30,7 +30,13 @@ use crate::canonical_json;
 use crate::llm::recording::{TraceFile, TraceResponse};
 use crate::redaction::redact_sensitive_json;
 
+mod key_privacy;
 mod tool_output_detectors;
+#[cfg(feature = "near-ai-privacy-filter")]
+use key_privacy::ReviewKeyScanner;
+pub use key_privacy::{
+    REVIEW_KEY_CATALOG_VERSION, ReviewKeyDiagnostics, ReviewKeyFinding, ReviewKeyReason,
+};
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
@@ -41,12 +47,25 @@ pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
 /// v2 refuses classifier errors; v1 could return deterministic-only output.
 /// Never treat a historical v1 certificate as proof of a complete pipeline.
-pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
-pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+/// v3 is v2 with the structural classifier skip (see
+/// [`classifier_skips_structural_text`], owner decision 2026-11-05).
+pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v3";
+/// The near-ai pipeline with the structural classifier skip. Its v1 is the
+/// same pipeline without it.
+pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v2";
 /// Distinct from the near-ai suffix even though both serve the same weights:
 /// the hosted endpoint wraps a 512-context model in an internal splitter, so
 /// a stored summary must record which one actually produced the redaction.
-pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v1";
+/// v2 has the structural classifier skip; v1 is the same pipeline without it.
+pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v2";
+
+/// The classifier suffixes of the same pipelines with the structural skip
+/// off (`TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0`), which is every pipeline
+/// before 2026-11-05: what the live witness and 0.24.4 apps report.
+pub const PRIVACY_FILTER_SIDECAR_NO_SKIP_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
+pub const PRIVACY_FILTER_NEAR_AI_NO_SKIP_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+pub const PRIVACY_FILTER_SELF_HOSTED_NO_SKIP_PIPELINE_SUFFIX: &str =
+    "privacy-filter-self-hosted-v1";
 
 /// Exact known fail-closed classifier pipelines, shared by client and server.
 ///
@@ -55,7 +74,15 @@ pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-sel
 /// membership does not replace consent, risk holds or operator trust policy.
 /// Historical sidecar v1 is deliberately excluded: it could silently fall back.
 /// New versions require explicit review; do not accept prefixes or normalize.
+///
+/// Both generations are listed through the structural-skip bump
+/// (2026-11-05): the first three name pipelines with the skip, the last
+/// three the same pipelines without it, which the live witness and 0.24.4
+/// apps still report until they are replaced.
 pub const FULL_REDACTION_PIPELINE_VERSIONS: &[&str] = &[
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
@@ -2571,18 +2598,32 @@ fn merge_privacy_filter_summary(
 /// redaction witness -- reports the same alias from the same function
 /// instead of assembling its own string that can drift.
 pub fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
-    match backend {
-        PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
-        PrivacyFilterBackendTag::Sidecar => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX}"
-        ),
-        PrivacyFilterBackendTag::NearAi => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX}"
-        ),
-        PrivacyFilterBackendTag::SelfHosted => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX}"
-        ),
-    }
+    redaction_pipeline_version_for(backend, structural_skip_from_env())
+}
+
+/// The alias for `backend` with the structural classifier skip on or off.
+/// A redactor reports its own through
+/// [`DeterministicTraceRedactor::pipeline_version`]; [`redaction_pipeline_version`]
+/// is this with the process environment's setting, which is what a redactor
+/// built from that environment uses.
+pub fn redaction_pipeline_version_for(
+    backend: PrivacyFilterBackendTag,
+    skip_structural: bool,
+) -> String {
+    let suffix = match (backend, skip_structural) {
+        (PrivacyFilterBackendTag::None, _) => {
+            return DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string();
+        }
+        (PrivacyFilterBackendTag::Sidecar, true) => PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::Sidecar, false) => PRIVACY_FILTER_SIDECAR_NO_SKIP_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::NearAi, true) => PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::NearAi, false) => PRIVACY_FILTER_NEAR_AI_NO_SKIP_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::SelfHosted, true) => PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::SelfHosted, false) => {
+            PRIVACY_FILTER_SELF_HOSTED_NO_SKIP_PIPELINE_SUFFIX
+        }
+    };
+    format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{suffix}")
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -2602,6 +2643,17 @@ pub enum TraceContributionError {
     /// by inspecting `reason`.
     #[error("trace contribution redaction failed (transient upstream): {reason}")]
     TransientRedactionFailed { reason: String },
+    /// The privacy classifier's answer for some of the text could not be
+    /// verified or corrected: a span whose text does not match its offsets
+    /// and occurs zero or several times in the window, a span with no text,
+    /// or a span out of range. NEAR AI answers such text the same way every
+    /// time, so it is about the content, not the classifier being down.
+    /// Permanent: nothing was treated as classified, and retrying costs the
+    /// caller its attempt budget for nothing.
+    #[error(
+        "trace contribution redaction failed (text the classifier could not classify): {reason}"
+    )]
+    UnclassifiableText { reason: String },
 }
 
 impl TraceContributionError {
@@ -2668,6 +2720,73 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         &self,
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+    /// How many texts a caller holding many should hand to one
+    /// [`Self::redact_texts`] call. 1 (the default) means the backend gains
+    /// nothing from being handed several at once.
+    fn preferred_batch_inputs(&self) -> usize {
+        1
+    }
+
+    /// Redact several independent texts, one answer per text in the same
+    /// order. Each answer must be exactly what [`Self::redact_text`] would
+    /// return for that text given the same classifier answers; a backend
+    /// overrides this only to make fewer round trips. The default asks
+    /// about each text in turn.
+    async fn redact_texts(
+        &self,
+        texts: &[&str],
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text(text).await);
+        }
+        answers
+    }
+
+    /// As [`Self::redact_text`], for a caller that will give up at
+    /// `deadline`: a backend that retries starts no retry that could not
+    /// finish by then, and fails transiently instead. The answer for a text
+    /// is otherwise the same. The default ignores the deadline.
+    async fn redact_text_before(
+        &self,
+        text: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+        let _ = deadline;
+        self.redact_text(text).await
+    }
+
+    /// [`Self::redact_texts`] for a caller that will give up at `deadline`,
+    /// as [`Self::redact_text_before`] is to [`Self::redact_text`]. The
+    /// default asks about each text in turn with the deadline.
+    async fn redact_texts_before(
+        &self,
+        texts: &[&str],
+        deadline: std::time::Instant,
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text_before(text, deadline).await);
+        }
+        answers
+    }
+
+    /// How many classifier requests asking about `texts` would send now,
+    /// before any retry or split, given what this adapter already holds.
+    /// Never more than it would send: a caller refuses work on this count,
+    /// and an over-count would refuse work that fits. `None` (the default)
+    /// when the backend cannot say.
+    fn requests_needed(&self, texts: &[&str]) -> Option<usize> {
+        let _ = texts;
+        None
+    }
+
+    /// The spacing this adapter keeps between its requests, when it paces
+    /// them. `None` (the default) when it does not.
+    fn request_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 pub struct NoopPrivacyFilterAdapter;
@@ -2879,7 +2998,8 @@ pub fn privacy_filter_adapter_from_env() -> Result<
 ///
 /// Defaults to `AllEvents`: an operator who has not made this decision keeps
 /// today's behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum PiiClassifyPolicy {
     /// Examine every event. Today's behaviour.
     #[default]
@@ -3870,31 +3990,35 @@ fn overlaps_merged(merged: &[std::ops::Range<usize>], probe: &std::ops::Range<us
         .is_some_and(|range| range.start < probe.end)
 }
 
+// Word boundaries in these patterns, and in the email, token, URL and tenant
+// patterns, are ASCII ones (`(?-u:\b)`). A Unicode `\b` treats a CJK or
+// accented letter as a word character, so a key or address touching one --
+// CJK prose has no spaces -- had no boundary and was sent unredacted.
 fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
     static SECRET_LEAK_PATTERNS: LazyLock<Vec<SecretLeakPattern>> = LazyLock::new(|| {
         vec![
             SecretLeakPattern {
                 name: "openai_api_key",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bsk-[A-Za-z0-9_-]{20,}\b")
+                regex: Regex::new(r"(?-u:\b)sk-[A-Za-z0-9_-]{20,}(?-u:\b)")
                     .expect("hardcoded OpenAI key regex must compile"),
             },
             SecretLeakPattern {
                 name: "github_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
+                regex: Regex::new(r"(?-u:\b)gh[pousr]_[A-Za-z0-9_]{10,}(?-u:\b)")
                     .expect("hardcoded GitHub token regex must compile"),
             },
             SecretLeakPattern {
                 name: "aws_access_key",
                 severity: SecretLeakSeverity::High,
-                regex: Regex::new(r"\bAKIA[0-9A-Z]{16}\b")
+                regex: Regex::new(r"(?-u:\b)AKIA[0-9A-Z]{16}(?-u:\b)")
                     .expect("hardcoded AWS access key regex must compile"),
             },
             SecretLeakPattern {
                 name: "provider_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
+                regex: Regex::new(r"(?i)(?-u:\b)(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)")
                     .expect("hardcoded provider token regex must compile"),
             },
             SecretLeakPattern {
@@ -3939,27 +4063,27 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                 // 40-character minimum is what keeps it off ordinary text.
                 name: "cursor_api_key",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"(?i)\bcrsr_[0-9a-f]{40,}")
+                regex: Regex::new(r"(?i)(?-u:\b)crsr_[0-9a-f]{40,}")
                     .expect("hardcoded Cursor API key regex must compile"),
             },
             SecretLeakPattern {
                 name: "jwt",
                 severity: SecretLeakSeverity::Critical,
                 regex: Regex::new(
-                    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                    r"(?-u:\b)eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?-u:\b)",
                 )
                 .expect("hardcoded JWT regex must compile"),
             },
             SecretLeakPattern {
                 name: "npm_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b")
+                regex: Regex::new(r"(?-u:\b)npm_[A-Za-z0-9]{36}(?-u:\b)")
                     .expect("hardcoded npm token regex must compile"),
             },
             SecretLeakPattern {
                 name: "google_api_key",
                 severity: SecretLeakSeverity::High,
-                regex: Regex::new(r"\bAIza[0-9A-Za-z_-]{35,}\b")
+                regex: Regex::new(r"(?-u:\b)AIza[0-9A-Za-z_-]{35,}(?-u:\b)")
                     .expect("hardcoded Google API key regex must compile"),
             },
             SecretLeakPattern {
@@ -3989,11 +4113,92 @@ pub fn secret_leak_pattern_names() -> Vec<&'static str> {
     secret_leak_patterns().iter().map(|p| p.name).collect()
 }
 
+/// Whether the prose-PII classifier may skip `text` (owner decision
+/// 2026-11-05).
+///
+/// The rule, exactly: skip a value that is a single structural token --
+/// one to forty characters, each an ASCII letter, digit or one of `_ . - / :`
+/// -- **and** that contains no uppercase letter followed by a lowercase one.
+/// So `bash`, `edit_file`, `src/main.rs`, `200`, a hex digest, `true` and an
+/// ISO date are skipped; anything with whitespace, any non-ASCII character,
+/// or a capitalized word (`Jane`, `Sam`, `McDonald`) is classified however
+/// short, and so is any token over forty characters.
+///
+/// Object keys are never classified at all (see `redact_metadata_value`).
+///
+/// This is the classifier stage only. The deterministic detectors -- emails,
+/// phones, keys, IPs, paths, hostnames -- run on every field, skipped or not,
+/// before this is asked. The client's redaction and the witness's share this
+/// one function, so they skip the same texts and make the same edits.
+/// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0` turns it off.
+pub fn classifier_skips_structural_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 40 {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b':'))
+    {
+        return false;
+    }
+    if bytes
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_uppercase() && pair[1].is_ascii_lowercase())
+    {
+        return false;
+    }
+    // Shapes that carry an address, a host or a phone number are classified
+    // however short (owner follow-up, 2026-11-05).
+    let dotted_without_slash = bytes.contains(&b'.') && !bytes.contains(&b'/');
+    let ipv6_shaped = bytes.iter().filter(|b| **b == b':').count() >= 2
+        && bytes.iter().all(|b| b.is_ascii_hexdigit() || *b == b':');
+    let long_digit_run = bytes
+        .split(|b| !b.is_ascii_digit())
+        .any(|run| run.len() >= 7);
+    !(dotted_without_slash || ipv6_shaped || long_digit_run)
+}
+
+/// Keys whose values name a person or an account. A value under one of
+/// these, at any depth, is always classified, whatever its shape (owner
+/// decision 2026-11-05). Matched case-insensitively against the whole key.
+pub const IDENTITY_KEYS: [&str; 9] = [
+    "author",
+    "user",
+    "username",
+    "name",
+    "owner",
+    "email",
+    "login",
+    "committer",
+    "assignee",
+];
+
+/// Whether `key` is one of [`IDENTITY_KEYS`], ignoring case.
+pub fn is_identity_key(key: &str) -> bool {
+    IDENTITY_KEYS
+        .iter()
+        .any(|identity| identity.eq_ignore_ascii_case(key))
+}
+
+/// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`: unset, `1`, `true` or `on` skip
+/// (the default); anything else classifies everything. An unrecognized value
+/// errs toward classifying more.
+fn structural_skip_from_env() -> bool {
+    match std::env::var("TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL") {
+        Err(_) => true,
+        Ok(value) => matches!(value.trim(), "" | "1" | "true" | "on"),
+    }
+}
+
 pub struct DeterministicTraceRedactor {
     leak_detector: SecretLeakDetector,
     known_path_prefixes: Vec<String>,
     privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>,
     privacy_filter_backend: PrivacyFilterBackendTag,
+    /// Whether the prose classifier skips object keys and structural tokens;
+    /// see [`classifier_skips_structural_text`].
+    skip_structural: bool,
 }
 
 impl Default for DeterministicTraceRedactor {
@@ -4018,6 +4223,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes,
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
+            skip_structural: structural_skip_from_env(),
         }
     }
 
@@ -4035,6 +4241,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes: Vec::new(),
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
+            skip_structural: structural_skip_from_env(),
         }
     }
 
@@ -4056,6 +4263,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes,
             privacy_filter,
             privacy_filter_backend,
+            skip_structural: structural_skip_from_env(),
         })
     }
 
@@ -4068,6 +4276,20 @@ impl DeterministicTraceRedactor {
             known_path_prefixes.push(path_to_string(current_dir));
         }
         Self::new(known_path_prefixes)
+    }
+
+    /// The alias of the pipeline this redactor runs: its classifier backend,
+    /// and whether the structural skip is on.
+    pub fn pipeline_version(&self) -> String {
+        redaction_pipeline_version_for(self.privacy_filter_backend, self.skip_structural)
+    }
+
+    /// Turn the structural skip on or off regardless of
+    /// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`. For tests and for a caller
+    /// that must match another party's setting exactly.
+    pub fn with_structural_skip(mut self, skip: bool) -> Self {
+        self.skip_structural = skip;
+        self
     }
 
     pub fn with_privacy_filter(
@@ -4095,8 +4317,14 @@ impl DeterministicTraceRedactor {
         report: &mut RedactionReport,
         privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
     ) -> Result<String, TraceContributionError> {
-        self.apply_privacy_filter_to_text_mapped(text, report, privacy_filter_summary, &mut None)
-            .await
+        self.apply_privacy_filter_to_text_mapped(
+            text,
+            report,
+            privacy_filter_summary,
+            &mut None,
+            false,
+        )
+        .await
     }
     async fn apply_privacy_filter_to_text_mapped(
         &self,
@@ -4104,10 +4332,18 @@ impl DeterministicTraceRedactor {
         report: &mut RedactionReport,
         privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
         map: &mut Option<crate::private_edit_map::EditMap>,
+        force_classify: bool,
     ) -> Result<String, TraceContributionError> {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
         };
+        // A structural token -- an id, a path, a number, a lowercase name --
+        // carries no prose for the classifier to find. The deterministic
+        // pass has already run over it. See `classifier_skips_structural_text`.
+        // A value under an identity key is classified regardless.
+        if self.skip_structural && !force_classify && classifier_skips_structural_text(&text) {
+            return Ok(text);
+        }
         // A configured prose classifier is a required control. Preserve its
         // error category; never certify deterministic-only fallback as full.
         let redaction = match adapter.redact_text(&text).await? {
@@ -4275,18 +4511,15 @@ impl DeterministicTraceRedactor {
     ) -> Result<String, TraceContributionError> {
         let (redacted, child_report) = self.redact_text_with_state(input, state);
         report.merge(child_report);
-        if state.edit_map.is_some() {
-            self.apply_privacy_filter_to_text_mapped(
-                redacted,
-                report,
-                privacy_filter_summary,
-                &mut state.edit_map,
-            )
-            .await
-        } else {
-            self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
-                .await
-        }
+        let force_classify = state.force_classify;
+        self.apply_privacy_filter_to_text_mapped(
+            redacted,
+            report,
+            privacy_filter_summary,
+            &mut state.edit_map,
+            force_classify,
+        )
+        .await
     }
 
     // Metadata is also contributor input. Share the exact text pipeline and
@@ -4342,15 +4575,17 @@ impl DeterministicTraceRedactor {
                     if exhausted || !context.charge(text.len()) {
                         return Ok(Value::String(text));
                     }
-                    Value::String(
-                        self.redact_text_with_state_through_prose_filter(
+                    context.state.force_classify = context.identity;
+                    let redacted = self
+                        .redact_text_with_state_through_prose_filter(
                             &text,
                             context.state,
                             context.report,
                             context.summary,
                         )
-                        .await?,
-                    )
+                        .await;
+                    context.state.force_classify = false;
+                    Value::String(redacted?)
                 }
                 Value::Array(values) => {
                     // Every child consumes at least one node. Stop before
@@ -4394,20 +4629,36 @@ impl DeterministicTraceRedactor {
                             }
                             continue;
                         }
+                        let identity_key = is_identity_key(&key);
                         let key = if redact_keys && context.charge(key.len()) {
-                            self.redact_text_with_state_through_prose_filter(
-                                &key,
-                                context.state,
-                                context.report,
-                                context.summary,
-                            )
-                            .await?
+                            if self.skip_structural && classifier_skips_structural_text(&key) {
+                                // An identifier-shaped key does not go to the
+                                // classifier (owner decisions 2026-11-05); the
+                                // deterministic detectors still run over it.
+                                // Any other key is classified like a value.
+                                let (redacted, key_report) =
+                                    self.redact_text_with_state(&key, context.state);
+                                context.report.merge(key_report);
+                                redacted
+                            } else {
+                                self.redact_text_with_state_through_prose_filter(
+                                    &key,
+                                    context.state,
+                                    context.report,
+                                    context.summary,
+                                )
+                                .await?
+                            }
                         } else {
                             key
                         };
+                        let outer_identity = context.identity;
+                        context.identity = outer_identity || identity_key;
                         let value = self
                             .redact_metadata_value(value, child_keys, depth + 1, context)
-                            .await?;
+                            .await;
+                        context.identity = outer_identity;
+                        let value = value?;
                         if redacted.insert(key, value).is_some() {
                             return Err(TraceContributionError::RedactionFailed {
                                 reason: METADATA_KEY_COLLISION_REFUSAL.into(),
@@ -4742,6 +4993,9 @@ impl DeterministicTraceRedactor {
 struct RedactionState {
     edit_map: Option<crate::private_edit_map::EditMap>,
     placeholders: PlaceholderMap,
+    /// Set while redacting a value under an identity key: the classifier
+    /// sees it even when it has the structural-skip shape.
+    force_classify: bool,
 }
 
 impl RedactionState {
@@ -4887,6 +5141,7 @@ impl DeterministicTraceRedactor {
                     summary: &mut privacy_filter_summary,
                     refuse_on_secret: true,
                     exhausted: false,
+                    identity: false,
                 },
             )
             .await?;
@@ -4922,6 +5177,7 @@ impl DeterministicTraceRedactor {
                         summary: &mut privacy_filter_summary,
                         refuse_on_secret: true,
                         exhausted: false,
+                        identity: false,
                     },
                 )
                 .await?;
@@ -4982,6 +5238,7 @@ impl DeterministicTraceRedactor {
                         // the detector finds here.
                         refuse_on_secret: false,
                         exhausted: false,
+                        identity: false,
                     },
                 )
                 .await?;
@@ -5042,7 +5299,7 @@ impl DeterministicTraceRedactor {
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
-            redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
+            redaction_pipeline_version: self.pipeline_version(),
             redaction_counts: report.counts,
             redaction_distinct_counts: state.placeholders.distinct_counts(),
             privacy_filter_summary,
@@ -5244,10 +5501,63 @@ const STRUCTURED_PAYLOAD_MAX_FIELD_BYTES: usize = 32_000;
 const STRUCTURED_PAYLOAD_MAX_NODES: usize = 4_000;
 const STRUCTURED_PAYLOAD_MAX_DEPTH: usize = 24;
 
+#[derive(Clone, Copy)]
+struct ClassifierCoverageLimits {
+    aggregate_bytes: usize,
+    field_bytes: usize,
+    nodes: usize,
+    depth: usize,
+}
+
+impl Default for ClassifierCoverageLimits {
+    fn default() -> Self {
+        Self {
+            aggregate_bytes: STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES,
+            field_bytes: STRUCTURED_PAYLOAD_MAX_FIELD_BYTES,
+            nodes: STRUCTURED_PAYLOAD_MAX_NODES,
+            depth: STRUCTURED_PAYLOAD_MAX_DEPTH,
+        }
+    }
+}
+
+// Fixed operator-review profile, not runtime/user-configurable. The largest
+// measured held traces are under 19 MiB. 32 MiB covers their total classifier
+// input with headroom, below the 256 MiB source cap and residual node bound.
+// The service additionally owns the single permit and deadline; adapters keep
+// their existing window, input and request limits. The depth stays unchanged.
+const REVIEW_CLASSIFIER_MAX_BYTES: usize = 32 * 1024 * 1024;
+const REVIEW_CLASSIFIER_MAX_NODES: usize = REVIEW_CLASSIFIER_MAX_BYTES / 8;
+const _: () = assert!(REVIEW_CLASSIFIER_MAX_BYTES <= MAX_TRACE_ENVELOPE_BYTES);
+const _: () = assert!(REVIEW_CLASSIFIER_MAX_NODES <= RESIDUAL_SCAN_MAX_NODES);
+
 #[derive(Default)]
 struct StructuredPayloadBudget {
     aggregate_bytes: usize,
     nodes: usize,
+    limits: ClassifierCoverageLimits,
+}
+
+impl StructuredPayloadBudget {
+    fn review() -> Self {
+        Self {
+            limits: ClassifierCoverageLimits {
+                aggregate_bytes: REVIEW_CLASSIFIER_MAX_BYTES,
+                field_bytes: REVIEW_CLASSIFIER_MAX_BYTES,
+                nodes: REVIEW_CLASSIFIER_MAX_NODES,
+                depth: STRUCTURED_PAYLOAD_MAX_DEPTH,
+            },
+            ..Self::default()
+        }
+    }
+
+    fn charge_field(&mut self, len: usize) -> bool {
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > self.limits.nodes || len > self.limits.field_bytes {
+            return false;
+        }
+        self.aggregate_bytes = self.aggregate_bytes.saturating_add(len);
+        self.aggregate_bytes <= self.limits.aggregate_bytes
+    }
 }
 
 struct MetadataRedactionContext<'a> {
@@ -5261,6 +5571,9 @@ struct MetadataRedactionContext<'a> {
     /// so a hit on that path would be a mask reported as a leak.
     refuse_on_secret: bool,
     exhausted: bool,
+    /// Inside the value of an identity key (`author`, `email`, ...); see
+    /// [`is_identity_key`].
+    identity: bool,
 }
 
 impl MetadataRedactionContext<'_> {
@@ -5376,43 +5689,55 @@ const TYPED_METADATA_FIELDS: &[&str] = &[
 /// `Ok(false)` the moment any budget is exceeded (aggregate bytes, a single
 /// field's bytes, node count, or recursion depth) - the caller treats that
 /// as incomplete coverage, never as a silent skip.
+#[cfg(feature = "near-ai-privacy-filter")]
 fn classify_structured_payload_node<'a>(
     adapter: &'a dyn PrivacyFilterAdapter,
     value: &'a mut Value,
     depth: usize,
     budget: &'a mut StructuredPayloadBudget,
     report: &'a mut RedactionReport,
+    review_recheck: bool,
+    keys: &'a mut ReviewKeyScanner,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'a>,
 > {
     Box::pin(async move {
-        if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+        if depth > budget.limits.depth {
             return Ok(false);
         }
         match value {
             Value::String(text) => {
-                budget.nodes += 1;
-                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
-                    return Ok(false);
-                }
-                if text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
-                    return Ok(false);
-                }
-                budget.aggregate_bytes += text.len();
-                if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                if !budget.charge_field(text.len()) {
                     return Ok(false);
                 }
                 if let Some(redaction) = adapter.redact_text(text).await? {
+                    if review_recheck
+                        && (redaction.summary.decoded_mismatch
+                            || redaction.report.coverage_incomplete)
+                    {
+                        report.coverage_incomplete = true;
+                        return Ok(false);
+                    }
                     report.merge(redaction.report);
                     *text = redaction.redacted_text;
                 }
                 Ok(true)
             }
             Value::Array(items) => {
-                for item in items.iter_mut() {
-                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
-                        .await?
-                    {
+                for (index, item) in items.iter_mut().enumerate() {
+                    let parent = keys.push_index(index);
+                    let result = classify_structured_payload_node(
+                        adapter,
+                        item,
+                        depth + 1,
+                        budget,
+                        report,
+                        review_recheck,
+                        keys,
+                    )
+                    .await;
+                    keys.restore(parent);
+                    if !result? {
                         return Ok(false);
                     }
                 }
@@ -5420,28 +5745,39 @@ fn classify_structured_payload_node<'a>(
             }
             Value::Object(entries) => {
                 for (key, item) in entries.iter_mut() {
-                    budget.nodes += 1;
-                    if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
-                        return Ok(false);
-                    }
-                    if key.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
-                        return Ok(false);
-                    }
-                    budget.aggregate_bytes += key.len();
-                    if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
-                        return Ok(false);
-                    }
-                    if let Some(redaction) = adapter.redact_text(key).await? {
-                        let has_finding = !redaction.report.counts.is_empty()
-                            || !redaction.report.pii_labels_present.is_empty()
-                            || redaction.report.blocked_secret_detected;
-                        if has_finding {
-                            report.key_finding_detected = true;
+                    if review_recheck {
+                        if !keys
+                            .inspect(adapter, key, Some(item), budget, report)
+                            .await?
+                        {
+                            return Ok(false);
+                        }
+                    } else {
+                        if !budget.charge_field(key.len()) {
+                            return Ok(false);
+                        }
+                        if let Some(redaction) = adapter.redact_text(key).await? {
+                            if !redaction.report.counts.is_empty()
+                                || !redaction.report.pii_labels_present.is_empty()
+                                || redaction.report.blocked_secret_detected
+                            {
+                                report.key_finding_detected = true;
+                            }
                         }
                     }
-                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
-                        .await?
-                    {
+                    let parent = keys.push_key(key);
+                    let result = classify_structured_payload_node(
+                        adapter,
+                        item,
+                        depth + 1,
+                        budget,
+                        report,
+                        review_recheck,
+                        keys,
+                    )
+                    .await;
+                    keys.restore(parent);
+                    if !result? {
                         return Ok(false);
                     }
                 }
@@ -5545,6 +5881,367 @@ pub async fn rescrub_envelope_prose_pii_with(
     envelope: &mut TraceContributionEnvelope,
     policy: PiiClassifyPolicy,
 ) -> Result<Vec<ResidualRiskCondition>, TraceContributionError> {
+    rescrub_envelope_prose_pii_impl(adapter, envelope, policy, false)
+        .await
+        .map(|evidence| evidence.basis)
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+struct ReviewSideProse<'a> {
+    adapter: &'a dyn PrivacyFilterAdapter,
+    budget: StructuredPayloadBudget,
+    report: RedactionReport,
+    summary: Option<SafePrivacyFilterSummary>,
+    keys: ReviewKeyScanner,
+    sweeper: DeterministicTraceRedactor,
+    state: RedactionState,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+impl<'a> ReviewSideProse<'a> {
+    fn new(adapter: &'a dyn PrivacyFilterAdapter, budget: StructuredPayloadBudget) -> Self {
+        Self {
+            adapter,
+            budget,
+            report: RedactionReport::default(),
+            summary: None,
+            keys: ReviewKeyScanner::default(),
+            sweeper: DeterministicTraceRedactor::bare(),
+            state: RedactionState::default(),
+        }
+    }
+
+    fn charge(&mut self, text: &str) -> bool {
+        let covered = self.budget.charge_field(text.len());
+        if !covered {
+            self.report.coverage_incomplete = true;
+        }
+        covered
+    }
+
+    async fn redact(&mut self, text: &mut String) -> Result<bool, TraceContributionError> {
+        if text.trim().is_empty() {
+            return Ok(true);
+        }
+        let (local, local_report) = self.sweeper.redact_text_with_state(text, &mut self.state);
+        *text = local;
+        self.report.merge(local_report);
+        if !self.charge(text) {
+            return Ok(false);
+        }
+        if let Some(redaction) = self.adapter.redact_text(text).await? {
+            if redaction.summary.decoded_mismatch || redaction.report.coverage_incomplete {
+                self.report.coverage_incomplete = true;
+                return Ok(false);
+            }
+            merge_privacy_filter_summary(&mut self.summary, &redaction.summary);
+            self.report.merge(redaction.report);
+            *text = redaction.redacted_text;
+        }
+        // A classifier may not recognize patterned secrets, and it may emit
+        // one. This is the same complementary sweep used on event prose.
+        let (redacted, report) = self.sweeper.redact_text_with_state(text, &mut self.state);
+        *text = redacted;
+        self.report.merge(report);
+        Ok(!self.report.coverage_incomplete)
+    }
+
+    async fn inspect_key(&mut self, key: &str) -> Result<bool, TraceContributionError> {
+        self.keys
+            .inspect(self.adapter, key, None, &mut self.budget, &mut self.report)
+            .await
+    }
+
+    fn redact_value<'b>(
+        &'b mut self,
+        value: &'b mut Value,
+        depth: usize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'b>,
+    > {
+        Box::pin(async move {
+            self.budget.nodes = self.budget.nodes.saturating_add(1);
+            if depth > self.budget.limits.depth || self.budget.nodes > self.budget.limits.nodes {
+                self.report.coverage_incomplete = true;
+                return Ok(false);
+            }
+            let mut covered = true;
+            match value {
+                Value::String(text) => covered &= self.redact(text).await?,
+                Value::Array(items) => {
+                    for (index, item) in items.iter_mut().enumerate() {
+                        let parent = self.keys.push_index(index);
+                        let result = self.redact_value(item, depth + 1).await;
+                        self.keys.restore(parent);
+                        covered &= result?;
+                    }
+                }
+                Value::Object(entries) => {
+                    for (key, item) in entries {
+                        covered &= self.inspect_key(key).await?;
+                        let parent = self.keys.push_key(key);
+                        let result = self.redact_value(item, depth + 1).await;
+                        self.keys.restore(parent);
+                        covered &= result?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(covered)
+        })
+    }
+
+    async fn inspect_correction(
+        &mut self,
+        text: Option<&str>,
+    ) -> Result<ReviewCorrectionStatus, TraceContributionError> {
+        let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(ReviewCorrectionStatus::Absent);
+        };
+        if !self.charge(text) {
+            return Ok(ReviewCorrectionStatus::Unresolved);
+        }
+        let credentials = self.sweeper.detect_correction_credentials(text);
+        let (_, observations) = self.sweeper.redact_text(text);
+        let mut unresolved = credentials.blocked_secret_detected
+            || credentials.key_finding_detected
+            || credentials.coverage_incomplete
+            || observations
+                .counts
+                .keys()
+                .any(|label| label_bears_severity(label))
+            || observations
+                .pii_labels_present
+                .iter()
+                .any(|label| label_bears_severity(label));
+        if unresolved {
+            self.report.coverage_incomplete = true;
+            return Ok(ReviewCorrectionStatus::Unresolved);
+        }
+        if let Some(redaction) = self.adapter.redact_text(text).await? {
+            // Detection only. Neither returned text nor its "removed" counts
+            // may enter the corrected artifact: S5 preserves this field.
+            unresolved |= redaction.redacted_text != text
+                || !redaction.report.counts.is_empty()
+                || !redaction.report.pii_labels_present.is_empty()
+                || redaction.report.blocked_secret_detected
+                || redaction.report.key_finding_detected
+                || redaction.report.coverage_incomplete
+                || redaction.summary.decoded_mismatch;
+        }
+        if unresolved {
+            self.report.coverage_incomplete = true;
+            Ok(ReviewCorrectionStatus::Unresolved)
+        } else {
+            Ok(ReviewCorrectionStatus::CheckedUnchanged)
+        }
+    }
+}
+
+/// The review-only treatment of the contributor's immutable correction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewCorrectionStatus {
+    Absent,
+    CheckedUnchanged,
+    Unresolved,
+}
+
+/// Trusted output of a fresh review privacy check, never an envelope claim.
+///
+/// Coverage is under `policy`: `prose-only` retains its documented tool-event
+/// classifier gap. A complete scan is not approval; callers must also inspect
+/// risk, unresolved correction status and exact corrected-version identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewPrivacyRecheckEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_diagnostics: Option<ReviewKeyDiagnostics>,
+    pub basis: Vec<ResidualRiskCondition>,
+    pub coverage_complete: bool,
+    pub correction_status: ReviewCorrectionStatus,
+    pub residual_scan_complete: bool,
+    pub useful_classifier_result: bool,
+    pub policy: PiiClassifyPolicy,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn review_original_keys_have_findings(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+    keys: &mut ReviewKeyScanner,
+) -> Result<bool, ResidualScanError> {
+    fn walk(
+        redactor: &DeterministicTraceRedactor,
+        value: &Value,
+        depth: usize,
+        nodes: &mut usize,
+        keys: &mut ReviewKeyScanner,
+    ) -> Result<bool, ResidualScanError> {
+        if depth > RESIDUAL_SCAN_MAX_DEPTH {
+            return Err(ResidualScanError::BudgetExceeded);
+        }
+        match value {
+            Value::String(_) => {
+                *nodes = nodes.saturating_add(1);
+                if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                    return Err(ResidualScanError::BudgetExceeded);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    let parent = keys.push_index(index);
+                    let found = walk(redactor, item, depth + 1, nodes, keys);
+                    keys.restore(parent);
+                    if found? {
+                        return Ok(true);
+                    }
+                }
+            }
+            Value::Object(entries) => {
+                for (key, item) in entries {
+                    *nodes = nodes.saturating_add(1);
+                    if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                        return Err(ResidualScanError::BudgetExceeded);
+                    }
+                    let (_, report) = redactor.redact_text(key);
+                    if report.blocked_secret_detected
+                        || report.key_finding_detected
+                        || report.coverage_incomplete
+                        || report
+                            .counts
+                            .keys()
+                            .any(|label| label_bears_severity(label))
+                        || report
+                            .pii_labels_present
+                            .iter()
+                            .any(|label| label_bears_severity(label))
+                    {
+                        keys.note_deterministic(key, report.blocked_secret_detected);
+                        return Ok(true);
+                    }
+                    let parent = keys.push_key(key);
+                    let found = walk(redactor, item, depth + 1, nodes, keys);
+                    keys.restore(parent);
+                    if found? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+    let value =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    walk(redactor, &value, 0, &mut 0, keys)
+}
+
+/// Recheck a held trace for a separately stored reviewed version.
+///
+/// First scrubs mutable fields with the local deterministic detector, then
+/// extends the ordinary prose pass to all deterministic side-channel prose,
+/// replay notes and hindsight. The correction is classified on a copy only: its exact bytes are preserved, and
+/// any detected finding or suggested rewrite keeps it unresolved and High.
+/// One fixed review budget spans event prose, payloads, side prose and the
+/// correction: 32 MiB total/field, 4,194,304 nodes and depth 24. There is no
+/// per-event reset. Adapter window/input limits still apply independently.
+/// Original High is never reset. All mutations occur on a private clone and
+/// are committed to `envelope` only after every awaited call succeeds.
+#[cfg(feature = "near-ai-privacy-filter")]
+pub async fn recheck_envelope_for_review_with(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
+) -> Result<ReviewPrivacyRecheckEvidence, TraceContributionError> {
+    let mut candidate = envelope.clone();
+    // Inspect immutable object keys before the ordinary deterministic pass
+    // could rewrite metadata-map keys. A key finding is held locally, never
+    // handed to an external classifier. This covers nested event payloads,
+    // assertions and every metadata map without changing the legacy helper.
+    let key_scan = residual_secret_labels(&DeterministicTraceRedactor::bare(), &candidate);
+    let mut key_diagnostics = ReviewKeyScanner::default();
+    let risk_keys = review_original_keys_have_findings(
+        &DeterministicTraceRedactor::bare(),
+        &candidate,
+        &mut key_diagnostics,
+    );
+    let key_hold = match (&key_scan, &risk_keys) {
+        (Err(_), _) | (_, Err(_)) => Some(ResidualRiskCondition::ResidualScanUnavailable),
+        (Ok(locations), Ok(risk_key))
+            if *risk_key || locations.keys().any(|location| location.ends_with("#key")) =>
+        {
+            Some(ResidualRiskCondition::KeyFinding)
+        }
+        _ => None,
+    };
+    if let Some(condition) = key_hold {
+        candidate.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        let correction_status = if candidate
+            .outcome
+            .human_correction
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            ReviewCorrectionStatus::Unresolved
+        } else {
+            ReviewCorrectionStatus::Absent
+        };
+        let mut keys = key_diagnostics;
+        if keys.diagnostics.findings.is_empty() {
+            keys.note_scan_failure(if condition == ResidualRiskCondition::KeyFinding {
+                ReviewKeyReason::DeterministicFinding
+            } else {
+                ReviewKeyReason::BudgetExceeded
+            });
+        }
+        let evidence = ReviewPrivacyRecheckEvidence {
+            key_diagnostics: Some(keys.diagnostics),
+            basis: vec![condition],
+            coverage_complete: false,
+            correction_status,
+            residual_scan_complete: key_scan.is_ok() && risk_keys.is_ok(),
+            useful_classifier_result: false,
+            policy,
+        };
+        *envelope = candidate;
+        return Ok(evidence);
+    }
+    // Prevent fresh patterned credentials in mutable fields from reaching
+    // an external classifier. Corrections remain immutable and are checked
+    // separately without sending detected credentials to that classifier.
+    // Preserve every dynamic metadata key, including harmless paths. Taking
+    // the maps out avoids lossy restoration after a legacy key rewrite or
+    // collision. ReviewSideProse locally scrubs their values before sending.
+    let flags = std::mem::take(&mut candidate.ironclaw.feature_flags);
+    let manifests = std::mem::take(&mut candidate.replay.tool_manifest_hashes);
+    let deterministic_basis =
+        rescrub_trace_envelope_with(&DeterministicTraceRedactor::bare(), &mut candidate);
+    candidate.ironclaw.feature_flags = flags;
+    candidate.replay.tool_manifest_hashes = manifests;
+    let mut evidence =
+        rescrub_envelope_prose_pii_impl(adapter, &mut candidate, policy, true).await?;
+    for condition in deterministic_basis {
+        // Fresh complete evidence may resolve a pre-classifier survivor or
+        // scan failure. Retain removal annotations, not stale forcing holds.
+        if (!condition.forces_high()
+            || !evidence.coverage_complete
+            || !evidence.residual_scan_complete)
+            && !evidence.basis.contains(&condition)
+        {
+            evidence.basis.push(condition);
+        }
+    }
+    *envelope = candidate;
+    Ok(evidence)
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+async fn rescrub_envelope_prose_pii_impl(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
+    review_recheck: bool,
+) -> Result<ReviewPrivacyRecheckEvidence, TraceContributionError> {
     // Same concordance floor as the sync server re-scrub: under-reported
     // consent must not survive into residual_risk / status decisions.
     reconcile_consent_declarations(envelope);
@@ -5559,8 +6256,15 @@ pub async fn rescrub_envelope_prose_pii_with(
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
     let mut structured_complete = true;
+    let mut keys = ReviewKeyScanner::default();
     let mut examined_events: u32 = 0;
     let mut skipped_events: u32 = 0;
+
+    let mut classifier_budget = if review_recheck {
+        StructuredPayloadBudget::review()
+    } else {
+        StructuredPayloadBudget::default()
+    };
 
     for (index, event) in envelope.events.iter().enumerate() {
         if !policy_examines_event(policy, event.event_type) {
@@ -5570,8 +6274,20 @@ pub async fn rescrub_envelope_prose_pii_with(
         let Some(content) = event.redacted_content.as_deref() else {
             continue;
         };
+        if review_recheck && !classifier_budget.charge_field(content.len()) {
+            report.coverage_incomplete = true;
+            structured_complete = false;
+            continue;
+        }
         examined_events += 1;
         if let Some(redaction) = adapter.redact_text(content).await? {
+            if review_recheck
+                && (redaction.summary.decoded_mismatch || redaction.report.coverage_incomplete)
+            {
+                report.coverage_incomplete = true;
+                structured_complete = false;
+                continue;
+            }
             merge_privacy_filter_summary(&mut summary, &redaction.summary);
             report.merge(redaction.report);
             // The classifier is trained on prose PII, not credential formats,
@@ -5601,7 +6317,6 @@ pub async fn rescrub_envelope_prose_pii_with(
     // so a mid-traversal adapter error (propagated via `?`) leaves the real
     // envelope untouched, matching the atomicity of the prose passes above.
     {
-        let mut budget = StructuredPayloadBudget::default();
         for (index, event) in envelope.events.iter().enumerate() {
             if !policy_examines_event(policy, event.event_type) {
                 continue;
@@ -5610,15 +6325,119 @@ pub async fn rescrub_envelope_prose_pii_with(
                 continue;
             }
             let mut clone = event.structured_payload.clone();
-            let covered =
-                classify_structured_payload_node(adapter, &mut clone, 0, &mut budget, &mut report)
-                    .await?;
+            keys.begin_event(index, event);
+            let covered = classify_structured_payload_node(
+                adapter,
+                &mut clone,
+                0,
+                &mut classifier_budget,
+                &mut report,
+                review_recheck,
+                &mut keys,
+            )
+            .await?;
             structured_updates.push((index, clone));
             if !covered {
                 structured_complete = false;
                 break;
             }
         }
+    }
+
+    let mut correction_status = ReviewCorrectionStatus::Absent;
+    let mut review_coverage_complete = true;
+    if review_recheck {
+        let mut side = ReviewSideProse::new(adapter, classifier_budget);
+        side.keys = keys;
+        side.keys.begin_side("ironclaw", "feature_flags");
+        for (key, value) in &mut envelope.ironclaw.feature_flags {
+            review_coverage_complete &= side.inspect_key(key).await?;
+            review_coverage_complete &= side.redact(value).await?;
+        }
+        if let Some(model) = envelope.ironclaw.model_name.as_mut() {
+            review_coverage_complete &= side.redact(model).await?;
+        }
+        if let Some(conversation) = envelope.conversation_id.as_mut() {
+            review_coverage_complete &= side.redact(conversation).await?;
+        }
+        for explanation in &mut envelope.value.explanation {
+            review_coverage_complete &= side.redact(explanation).await?;
+        }
+        for event in &mut envelope.events {
+            if let Some(tool) = event.tool_name.as_mut() {
+                review_coverage_complete &= side.redact(tool).await?;
+            }
+            for failure in &mut event.failure_modes {
+                if let TraceFailureMode::Other(detail) = failure {
+                    review_coverage_complete &= side.redact(detail).await?;
+                }
+            }
+        }
+        for taxonomy in &mut envelope.outcome.error_taxonomy {
+            review_coverage_complete &= side.redact(taxonomy).await?;
+        }
+        for failure in &mut envelope.outcome.failure_modes {
+            if let TraceFailureMode::Other(detail) = failure {
+                review_coverage_complete &= side.redact(detail).await?;
+            }
+        }
+        for tool in &mut envelope.replay.required_tools {
+            review_coverage_complete &= side.redact(tool).await?;
+        }
+        for note in &mut envelope.replay.replay_notes {
+            review_coverage_complete &= side.redact(note).await?;
+        }
+        side.keys.begin_side("replay", "tool_manifest_hashes");
+        for (key, value) in &mut envelope.replay.tool_manifest_hashes {
+            review_coverage_complete &= side.inspect_key(key).await?;
+            review_coverage_complete &= side.redact(value).await?;
+        }
+        side.keys.begin_side("replay", "expected_assertions");
+        for (index, assertion) in envelope.replay.expected_assertions.iter_mut().enumerate() {
+            let parent = side.keys.push_index(index);
+            review_coverage_complete &= side.redact_value(assertion, 0).await?;
+            side.keys.restore(parent);
+        }
+        if let Some(embedding) = envelope.embedding_analysis.as_mut() {
+            for tag in &mut embedding.coverage_tags {
+                review_coverage_complete &= side.redact(tag).await?;
+            }
+        }
+        for category in &mut envelope.trace_card.tool_categories {
+            review_coverage_complete &= side.redact(category).await?;
+        }
+        for limitation in &mut envelope.value_card.limitations {
+            review_coverage_complete &= side.redact(limitation).await?;
+        }
+        for explanation in &mut envelope.value_card.user_visible_explanation {
+            review_coverage_complete &= side.redact(explanation).await?;
+        }
+        if let Some(hindsight) = envelope.hindsight.as_mut() {
+            if let Some(summary) = hindsight.original_goal_summary.as_mut() {
+                review_coverage_complete &= side.redact(summary).await?;
+            }
+            for subgoal in &mut hindsight.achieved_subgoals {
+                review_coverage_complete &= side.redact(subgoal).await?;
+            }
+            if let Some(TraceFailureMode::Other(detail)) = hindsight.failure_type.as_mut() {
+                review_coverage_complete &= side.redact(detail).await?;
+            }
+        }
+        if let Some(process) = envelope.process_evaluation.as_mut() {
+            if let Some(name) = process.evaluator_name.as_mut() {
+                review_coverage_complete &= side.redact(name).await?;
+            }
+        }
+        correction_status = side
+            .inspect_correction(envelope.outcome.human_correction.as_deref())
+            .await?;
+        review_coverage_complete &= correction_status != ReviewCorrectionStatus::Unresolved
+            && !side.report.coverage_incomplete;
+        if let Some(side_summary) = side.summary {
+            merge_privacy_filter_summary(&mut summary, &side_summary);
+        }
+        report.merge(side.report);
+        keys = side.keys;
     }
 
     // Second pass: no awaits below this line, so the updates collected
@@ -5695,13 +6514,31 @@ pub async fn rescrub_envelope_prose_pii_with(
         }
     });
 
+    let residual_scan_complete = residual.is_ok();
+    let coverage_complete = residual_scan_complete
+        && structured_complete
+        && if review_recheck {
+            review_coverage_complete && !report.coverage_incomplete && !report.key_finding_detected
+        } else {
+            !uncovered_prose_present(envelope)
+        };
     let prior_risk = envelope.privacy.residual_pii_risk;
     let (resolved_risk, basis) = match residual {
         Ok(residual_findings) => {
-            log_residual_secret_locations(&residual_findings);
+            // Legacy location logs can contain contributor-selected keys.
+            // The review path returns fixed basis labels to its caller and
+            // never logs raw residual locations.
+            if !review_recheck {
+                log_residual_secret_locations(&residual_findings);
+            }
             let backstop_pass_risk = residual_risk(&envelope.consent, &report);
+            let residual_findings = if review_recheck {
+                review_severity_residuals(residual_findings)
+            } else {
+                residual_findings
+            };
             let assessment = PostScrubAssessment {
-                complete_coverage: structured_complete && !uncovered_prose_present(envelope),
+                complete_coverage: coverage_complete,
                 useful_classifier_result,
                 findings: report.clone(),
                 residual_findings,
@@ -5753,7 +6590,15 @@ pub async fn rescrub_envelope_prose_pii_with(
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
-    Ok(basis)
+    Ok(ReviewPrivacyRecheckEvidence {
+        key_diagnostics: review_recheck.then_some(keys.diagnostics),
+        basis,
+        coverage_complete,
+        correction_status,
+        residual_scan_complete,
+        useful_classifier_result,
+        policy,
+    })
 }
 
 /// Redact one owned string in place, folding its report into `report`.
@@ -6076,18 +6921,18 @@ fn residual_envelope_scan(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
 ) -> Result<RedactionReport, ResidualScanError> {
-    let mut report = RedactionReport::default();
     let serialized =
         serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    residual_json_scan(redactor, &serialized)
+}
+
+fn residual_json_scan(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+) -> Result<RedactionReport, ResidualScanError> {
+    let mut report = RedactionReport::default();
     let mut nodes = 0usize;
-    scan_json_leaves(
-        redactor,
-        &serialized,
-        &mut report,
-        0,
-        &mut nodes,
-        "envelope",
-    )?;
+    scan_json_leaves(redactor, value, &mut report, 0, &mut nodes, "envelope")?;
     Ok(report)
 }
 
@@ -6206,7 +7051,27 @@ pub fn residual_secret_labels(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
 ) -> Result<BTreeMap<String, u32>, ResidualScanError> {
-    let report = residual_envelope_scan(redactor, envelope)?;
+    let value =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    residual_secret_labels_json(redactor, &value)
+}
+
+/// Detection-only residual secret scan of the exact JSON representation.
+///
+/// Uses the same per-leaf detector, depth and node bounds as the typed
+/// envelope scan, including fields a typed deserializer would discard.
+/// This does not validate an envelope, run a prose-PII classifier, mutate
+/// content, or establish approval eligibility. An empty result only means
+/// this detector found no patterned secret within a complete bounded scan.
+///
+/// Returned location labels can include contributor-controlled object keys.
+/// Treat them as private: hash or otherwise protect labels before logging
+/// or displaying them to operators. Never log raw matched content.
+pub fn residual_secret_labels_json(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+) -> Result<BTreeMap<String, u32>, ResidualScanError> {
+    let report = residual_json_scan(redactor, value)?;
     Ok(report
         .counts
         .into_iter()
@@ -6279,6 +7144,21 @@ fn resolve_post_scrub_risk(
     } else {
         max_residual_risk(prior_risk, derived_risk)
     }
+}
+
+/// For the review-only downgrade decision, ignore exactly the detector
+/// observations the established severity policy says do not bear risk.
+/// A preserved S5 correction can legitimately contain a path; its presence
+/// must not undo otherwise complete, useful fresh classifier evidence.
+/// Unknown and namespaced labels remain conservative, and flags are never
+/// cleared. This is not used by the ordinary scrub entry point.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn review_severity_residuals(mut report: RedactionReport) -> RedactionReport {
+    report.counts.retain(|label, _| label_bears_severity(label));
+    report
+        .pii_labels_present
+        .retain(|label| label_bears_severity(label));
+    report
 }
 
 /// Redaction labels that are recorded but do not, on their own, raise the
@@ -8255,7 +9135,7 @@ fn apply_labeled_ranges(
 fn private_email_regex() -> &'static Regex {
     static PRIVATE_EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+        Regex::new(r"(?i)(?-u:\b)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?-u:\b)")
             .expect("hardcoded private email regex must compile")
     });
     &PRIVATE_EMAIL_REGEX
@@ -8282,7 +9162,7 @@ fn local_path_regex() -> &'static Regex {
 fn trace_queue_secret_like_reason_regex() -> &'static Regex {
     static TRACE_QUEUE_SECRET_LIKE_REASON_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by queue diagnostics tests.
-        Regex::new(r"(?ix)\b(?:sk|pk|rk|ghp|gho|ghu|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
+        Regex::new(r"(?ix)(?-u:\b)(?:sk|pk|rk|ghp|gho|ghu|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)")
             .expect("hardcoded trace queue secret-like reason regex must compile")
     });
     &TRACE_QUEUE_SECRET_LIKE_REASON_REGEX
@@ -8291,7 +9171,7 @@ fn trace_queue_secret_like_reason_regex() -> &'static Regex {
 fn remote_credit_explanation_url_regex() -> &'static Regex {
     static REMOTE_CREDIT_EXPLANATION_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by local status-history safety tests.
-        Regex::new(r#"(?i)\bhttps?://[^\s'"`<>{}\[\]]+"#)
+        Regex::new(r#"(?i)(?-u:\b)https?://[^\s'"`<>{}\[\]]+"#)
             .expect("hardcoded remote credit explanation URL regex must compile")
     });
     &REMOTE_CREDIT_EXPLANATION_URL_REGEX
@@ -8300,7 +9180,7 @@ fn remote_credit_explanation_url_regex() -> &'static Regex {
 fn remote_credit_explanation_tenant_ref_regex() -> &'static Regex {
     static REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by local status-history safety tests.
-        Regex::new(r"(?i)\btenant[-_][a-z0-9][a-z0-9_-]{1,}\b")
+        Regex::new(r"(?i)(?-u:\b)tenant[-_][a-z0-9][a-z0-9_-]{1,}(?-u:\b)")
             .expect("hardcoded remote credit explanation tenant-ref regex must compile")
     });
     &REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX
@@ -9416,6 +10296,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn read_privacy_env_prefers_canonical_then_legacy() {
         use super::read_privacy_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9552,6 +10433,110 @@ mod tests {
         }
     }
 
+    /// The structural-skip alias bump (owner decision 2026-11-05): the new
+    /// aliases are accepted, the aliases from before the skip are still
+    /// accepted (the live witness and 0.24.4 apps emit them through a
+    /// redeploy), and an unknown alias is refused.
+    #[test]
+    fn both_the_pre_skip_and_the_structural_skip_aliases_are_full_pipelines() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+        ] {
+            assert!(
+                super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+        }
+        for unknown in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v4",
+            "ironclaw-deterministic-secret-path-v4+privacy-filter-near-ai-v2",
+        ] {
+            assert!(
+                !super::is_full_redaction_pipeline_version(unknown),
+                "{unknown}"
+            );
+        }
+    }
+
+    /// The alias names whether the structural skip ran: the new suffix with
+    /// it, the pre-skip suffix without it, for every classifier backend.
+    #[test]
+    fn the_alias_says_whether_the_structural_skip_ran() {
+        use super::{
+            DETERMINISTIC_REDACTION_PIPELINE_VERSION as D, PrivacyFilterBackendTag as B,
+            redaction_pipeline_version_for,
+        };
+        for (backend, with_skip, without_skip) in [
+            (
+                B::NearAi,
+                "privacy-filter-near-ai-v2",
+                "privacy-filter-near-ai-v1",
+            ),
+            (
+                B::SelfHosted,
+                "privacy-filter-self-hosted-v2",
+                "privacy-filter-self-hosted-v1",
+            ),
+            (
+                B::Sidecar,
+                "privacy-filter-sidecar-v3",
+                "privacy-filter-sidecar-v2",
+            ),
+        ] {
+            assert_eq!(
+                redaction_pipeline_version_for(backend, true),
+                format!("{D}+{with_skip}")
+            );
+            assert_eq!(
+                redaction_pipeline_version_for(backend, false),
+                format!("{D}+{without_skip}")
+            );
+        }
+        assert_eq!(redaction_pipeline_version_for(B::None, true), D);
+        assert_eq!(redaction_pipeline_version_for(B::None, false), D);
+    }
+
+    /// The envelope a redactor writes carries the alias of the pipeline that
+    /// actually ran, skip on or off.
+    #[tokio::test]
+    async fn the_envelope_records_the_alias_of_the_pipeline_that_ran() {
+        let raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "hello".to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                state: None,
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        for (skip, suffix) in [(true, "near-ai-v2"), (false, "near-ai-v1")] {
+            let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .with_privacy_filter(
+                    Arc::new(NoopPrivacyFilterAdapter),
+                    PrivacyFilterBackendTag::NearAi,
+                )
+                .with_structural_skip(skip);
+            assert!(redactor.pipeline_version().ends_with(suffix));
+            let envelope = redactor.redact_trace(raw.clone()).await.expect("redacts");
+            assert_eq!(
+                envelope.privacy.redaction_pipeline_version,
+                redactor.pipeline_version()
+            );
+        }
+    }
+
     #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{
@@ -9564,22 +10549,24 @@ mod tests {
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v2")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v3")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v2")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::SelfHosted),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-self-hosted-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-self-hosted-v2")
         );
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_returns_none_when_unset() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -9588,9 +10575,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_rejects_unknown_backend() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
         }
@@ -9601,12 +10590,14 @@ mod tests {
             Err(other) => panic!("expected UnknownBackend, got err {other:?}"),
             Ok(_) => panic!("expected UnknownBackend, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn self_hosted_backend_resolves_without_an_api_key() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9623,6 +10614,7 @@ mod tests {
             std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
         }
         let resolved = privacy_filter_adapter_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
             std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
@@ -9640,6 +10632,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn self_hosted_backend_without_a_base_url_is_refused() {
         use super::privacy_filter_adapter_from_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -9650,6 +10643,7 @@ mod tests {
             std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
         }
         let resolved = privacy_filter_adapter_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -9667,9 +10661,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "near-ai");
             std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
@@ -9687,6 +10683,7 @@ mod tests {
             Err(other) => panic!("unexpected err: {other:?}"),
             Ok(_) => panic!("expected MissingEnv or FeatureDisabled, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -10066,12 +11063,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn legacy_privacy_env_emits_deprecation_warning_once() {
         use super::{read_privacy_env, reset_legacy_privacy_env_warning_for_tests};
         let _guard = ENV_LOCK.lock().unwrap();
         reset_legacy_privacy_env_warning_for_tests();
         let canonical = "TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
         let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var(canonical);
             std::env::set_var(legacy, "legacy-only");
@@ -10092,6 +11091,7 @@ mod tests {
         // Second read; latch should remain true (idempotent).
         let _ = read_privacy_env(canonical, legacy);
         assert!(super::LEGACY_PRIVACY_ENV_WARNED.load(std::sync::atomic::Ordering::SeqCst));
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var(legacy);
         }
@@ -10099,9 +11099,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_adapter_from_env_requires_sidecar_command() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
@@ -10115,9 +11117,52 @@ mod tests {
             Err(other) => panic!("unexpected err: {other:?}"),
             Ok(_) => panic!("expected MissingEnv, got Ok"),
         }
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    /// CJK prose has no spaces, and an accented letter can follow a token
+    /// directly. A Unicode word boundary counts those letters as word
+    /// characters, found no edge there, and the address or key went through
+    /// unredacted.
+    #[test]
+    fn a_cjk_or_accented_letter_touching_an_email_or_key_does_not_hide_it() {
+        let r = DeterministicTraceRedactor::bare();
+        let email = "jane.doe@example.com";
+        for input in [
+            format!("\u{8bf7}\u{8054}\u{7cfb}{email}\u{8c22}\u{8c22}"),
+            format!("{email}\u{e9}"),
+            format!("\u{e9}{email}"),
+        ] {
+            let (out, _) = r.redact_text(&input);
+            assert!(!out.contains(email), "email survived: {out}");
+        }
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+            "sk-abcdefghijklmnopqrstuvwxyz0123",
+            "ghp_abcdefghijklmnop1234",
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
+            "xoxb-BjLhV6l8mlJ7rzgnlpCQ",
+        ] {
+            for input in [
+                format!("\u{5bc6}\u{94a5}{secret}\u{3002}"),
+                format!("\u{e9}{secret}\u{e9}"),
+                format!("{secret}\u{4e2d}"),
+            ] {
+                let (out, rep) = r.redact_text(&input);
+                assert!(!out.contains(secret), "secret survived: {out}");
+                assert!(rep.blocked_secret_detected, "not flagged: {input}");
+            }
+        }
+        // The status-history URL check finds a link glued to CJK text too.
+        assert!(
+            remote_credit_explanation_url_regex()
+                .is_match("\u{8bf4}\u{660e}https://example.com/explain")
+        );
     }
 
     #[test]
@@ -10495,7 +11540,10 @@ mod tests {
         // this literal both have to be brought along deliberately.
         assert_eq!(
             provider.regex.as_str(),
-            r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b",
+            // Its boundaries became ASCII ones so a token touching a CJK or
+            // accented letter is still found; the prefixes and tail are as
+            // before.
+            r"(?i)(?-u:\b)(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)",
             "provider_token's regex moved; this change was supposed to leave it alone"
         );
 
@@ -12814,6 +13862,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn deterministic_only_constructor_ignores_inherited_backend() {
         use super::DeterministicTraceRedactor;
 
@@ -12827,6 +13876,7 @@ mod tests {
             DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
         let has_filter = redactor.attached_privacy_filter().is_some();
         let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        // SAFETY: ENV_LOCK serializes process-environment mutation across every env-touching test.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -13987,9 +15037,11 @@ mod tests {
     // deployment can demand that one exists.
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_reports_none_when_unset() {
         use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -14002,6 +15054,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_reports_the_configured_backend() {
         use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
         // Sidecar rather than near-ai: the near-ai adapter is behind an
@@ -14010,11 +15063,13 @@ mod tests {
         // backend. The server crate compiles the near-ai feature in
         // unconditionally.
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::set_var("TRACE_PRIVACY_FILTER_COMMAND", "/bin/true");
         }
         let backend = privacy_filter_backend_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
@@ -14027,6 +15082,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn privacy_filter_backend_from_env_surfaces_a_misconfigured_backend() {
         use super::privacy_filter_backend_from_env;
         // A backend named without its required configuration is the one
@@ -14034,12 +15090,14 @@ mod tests {
         // surfaced per-submission instead of at boot, which is how a filter
         // stays broken unnoticed.
         let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
             std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
             std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
         }
         let result = privacy_filter_backend_from_env();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests in this module.
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
@@ -15854,3 +16912,333 @@ mod attested_body_redaction_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod structural_skip_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records every text the classifier is asked about, and redacts the
+    /// marker names so the classifier's effect is visible in the output.
+    #[derive(Default)]
+    struct Recording {
+        asked: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for Recording {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            self.asked.lock().unwrap().push(text.to_string());
+            Ok(None)
+        }
+    }
+
+    fn redactor(adapter: Arc<Recording>, skip: bool) -> DeterministicTraceRedactor {
+        DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi)
+            .with_structural_skip(skip)
+    }
+
+    fn contribution(payload: serde_json::Value, content: &str) -> RawTraceContribution {
+        serde_json::from_value(serde_json::json!({
+            "consent": {
+                "correction_included": false, "message_text_included": true,
+                "policy_version": "2026-04-24", "revocable": true,
+                "routing_metadata_included": false, "scopes": ["debugging_evaluation"],
+                "tool_payloads_included": true,
+            },
+            "contributor": {"revocation_handle": uuid::Uuid::from_u128(7)},
+            "created_at": "2026-11-05T00:00:00Z",
+            "embedding_analysis": null,
+            "events": [{
+                "content": content, "cost_usd": null, "latency_ms": null,
+                "token_counts": null, "event_id": uuid::Uuid::from_u128(1),
+                "event_type": "tool_result", "structured_payload": payload,
+                "success": true, "timestamp": "2026-11-05T00:00:01Z",
+                "tool_call_id": "call_1", "tool_name": "shell",
+            }],
+            "ironclaw": {"channel": "cli", "version": "0.1.0"},
+            "outcome": {"task_success": "success", "user_feedback": "none"},
+            "replay": {"replay_notes": [], "replayable": true, "required_tools": ["shell"]},
+            "submission_id": uuid::Uuid::from_u128(8),
+            "trace_id": uuid::Uuid::from_u128(9),
+            "value": {"credit_points_pending": 0.0, "submission_score": 0.0},
+        }))
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn the_rule_skips_structural_tokens_and_nothing_with_prose_in_it() {
+        for skipped in [
+            "bash",
+            "edit_file",
+            "src/main.rs",
+            "200",
+            "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7e8f90123",
+            "true",
+            "2026-11-05T00:00:01Z",
+            "call_1",
+            "ERROR",
+            "x",
+        ] {
+            assert!(classifier_skips_structural_text(skipped), "{skipped:?}");
+        }
+        // Owner follow-up, 2026-11-05: shapes that can carry an address, a
+        // host or a phone number are always classified, however short.
+        for classified in [
+            "203.0.113.7",
+            "10.0.0.12",
+            "build.corp.internal",
+            "main.rs",
+            "v1.2.3",
+            "2001:db8::1",
+            "fe80::1",
+            "4155550123",
+            "id-1234567",
+        ] {
+            assert!(
+                !classifier_skips_structural_text(classified),
+                "{classified:?}"
+            );
+        }
+        for still_skipped in ["src/main.rs", "123456", "2026-11-05T00:00:01Z", "a:b"] {
+            assert!(
+                classifier_skips_structural_text(still_skipped),
+                "{still_skipped:?}"
+            );
+        }
+        for classified in [
+            "Jane Doe",
+            "Jane",
+            "Dear Sam",
+            "fix the login bug",
+            "Jos\u{e9}",
+            "Sam",
+            "McDonald",
+            "ab",
+            "a".repeat(41).as_str(),
+            "",
+            "with space",
+            "tab\there",
+            "line\nbreak",
+            "<EMAIL_1>",
+            "50%",
+        ] {
+            if classified == "ab" {
+                // Lowercase two-letter tokens are structural by the rule.
+                assert!(classifier_skips_structural_text(classified));
+                continue;
+            }
+            assert!(
+                !classifier_skips_structural_text(classified),
+                "{classified:?}"
+            );
+        }
+        assert!(classifier_skips_structural_text(&"a".repeat(40)));
+    }
+
+    /// Keys never reach the classifier; skipped values do not either;
+    /// prose, names and non-ASCII always do.
+    #[tokio::test]
+    async fn keys_and_structural_values_are_not_classified() {
+        let payload = serde_json::json!({
+            "tool": "bash",
+            "Jane Doe": "edit_file",
+            "path": "src/main.rs",
+            "status": 200,
+            "code": "200",
+            "sha": "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7e8f90123",
+            "ok": "true",
+            "who": "Jane",
+            "greeting": "Dear Sam",
+            "task": "fix the login bug",
+            "name": "Jos\u{e9}",
+            "long": "a".repeat(41),
+        });
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "fix the login bug for Jane"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        // Identifier-shaped keys are not classified; a key that is not
+        // identifier-shaped is (owner follow-up, 2026-11-05).
+        for key in ["tool", "path", "status", "code", "sha", "who", "greeting"] {
+            assert!(
+                !asked.iter().any(|t| t == key),
+                "key {key:?} was classified"
+            );
+        }
+        assert!(
+            asked.iter().any(|t| t == "Jane Doe"),
+            "a key that is not identifier-shaped must be classified"
+        );
+        for skipped in ["bash", "edit_file", "src/main.rs", "200", "true"] {
+            assert!(
+                !asked.iter().any(|t| t == skipped),
+                "{skipped:?} was classified"
+            );
+        }
+        assert!(!asked.iter().any(|t| t.starts_with("a7f3c9d2")));
+        for classified in ["Jane", "Dear Sam", "fix the login bug", "Jos\u{e9}"] {
+            assert!(
+                asked.iter().any(|t| t == classified),
+                "{classified:?} was not classified"
+            );
+        }
+        assert!(asked.iter().any(|t| t.len() == 41));
+        assert!(
+            asked.iter().any(|t| t.contains("for Jane")),
+            "event content"
+        );
+    }
+
+    /// Every value under an identity key is classified, however token-shaped,
+    /// matched case-insensitively and through nesting; the same value under
+    /// any other key is skipped.
+    #[tokio::test]
+    async fn values_under_identity_keys_are_always_classified() {
+        let payload = serde_json::json!({
+            "author": "jdoe",
+            "USERNAME": "x1",
+            "Owner": {"id": "bob_smith"},
+            "login": "jdoe2",
+            "email": "nobody",
+            "committer": "ci-bot",
+            "assignee": ["qa_lead"],
+            "user": "u42",
+            "name": "nm",
+            "other": "jdoe3",
+        });
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        for value in [
+            "jdoe",
+            "x1",
+            "bob_smith",
+            "jdoe2",
+            "nobody",
+            "ci-bot",
+            "qa_lead",
+            "u42",
+            "nm",
+        ] {
+            assert!(
+                asked.iter().any(|t| t == value),
+                "{value:?} under an identity key was not classified"
+            );
+        }
+        assert!(
+            !asked.iter().any(|t| t == "jdoe3"),
+            "the same shape under another key is skipped"
+        );
+        for key in ["author", "USERNAME", "login", "other"] {
+            assert!(
+                !asked.iter().any(|t| t == key),
+                "key {key:?} was classified"
+            );
+        }
+        // A capitalized key is not identifier-shaped, so it is classified.
+        assert!(asked.iter().any(|t| t == "Owner"));
+    }
+
+    /// With the skip off, keys and structural values go to the classifier
+    /// as before.
+    #[tokio::test]
+    async fn the_skip_can_be_turned_off() {
+        let payload = serde_json::json!({"tool": "bash", "Jane Doe": "edit_file"});
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), false)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        for text in ["tool", "bash", "Jane Doe", "edit_file"] {
+            assert!(
+                asked.iter().any(|t| t == text),
+                "{text:?} was not classified"
+            );
+        }
+    }
+
+    /// The trade-off the skip makes, pinned. These token-shaped values are
+    /// NOT removed by the deterministic pass, so with the skip on nothing
+    /// looks at them; before it, the classifier did. Recorded in the witness
+    /// scaling spec; if a detector starts catching one, move it to the
+    /// caught list in `deterministic_detectors_still_redact_skipped_shape_values`
+    /// and update the spec.
+    #[tokio::test]
+    async fn skip_shaped_values_the_deterministic_pass_does_not_catch() {
+        // Since the owner's follow-up (2026-11-05) the address, host and
+        // phone shapes are classified; a bare lowercase username outside an
+        // identity key is the gap that remains.
+        for now_classified in [
+            "203.0.113.7",
+            "build.corp.internal",
+            "2001:db8::1",
+            "4155550123",
+        ] {
+            assert!(
+                !classifier_skips_structural_text(now_classified),
+                "{now_classified:?}"
+            );
+        }
+        for sample in ["jdoe"] {
+            assert!(classifier_skips_structural_text(sample), "{sample:?}");
+            let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .redact_trace(contribution(serde_json::json!({ "v": sample }), sample))
+                .await
+                .expect("redacts");
+            let event = serde_json::to_string(&envelope.events[0]).unwrap();
+            assert!(
+                event.contains(&format!("\"v\":\"{sample}\"")),
+                "{sample:?} is now caught deterministically: update the spec"
+            );
+        }
+    }
+
+    /// The deterministic detectors still run on a value the classifier
+    /// skips: a token-shaped email, phone, access key and IP are removed
+    /// from the output.
+    #[tokio::test]
+    async fn deterministic_detectors_still_redact_skipped_shape_values() {
+        let secret = concat!("AKIA", "QQWERTYUIOPASDFG");
+        let payload = serde_json::json!({
+            "email": "a@b.co",
+            "phone": "+1-415-555-0123",
+            "key": secret,
+            "ip": "10.0.0.12",
+            "url": "https://intranet.example.corp/wiki",
+            "home": "/home/jdoe/notes.txt",
+        });
+        // Not every one of these has the skip shape (`@` and `+` do not);
+        // what matters is that none survives either way.
+        let adapter = Arc::new(Recording::default());
+        let envelope = redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let output = serde_json::to_string(&envelope).unwrap();
+        for leaked in [
+            "a@b.co",
+            "415-555-0123",
+            secret,
+            "10.0.0.12",
+            "intranet.example.corp",
+            "jdoe",
+        ] {
+            assert!(!output.contains(leaked), "{leaked:?} survived: {output}");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "near-ai-privacy-filter"))]
+#[path = "trace_contribution/review_recheck_tests.rs"]
+mod review_recheck_tests;

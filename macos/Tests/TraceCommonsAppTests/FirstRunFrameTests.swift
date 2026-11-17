@@ -32,13 +32,14 @@ final class FirstRunFrameTests: XCTestCase {
     func test_theThreadNamesTheStepsInTheCoresWords() throws {
         let copy = try words()
         XCTAssertEqual(copy.threadLabels, [
-            copy.frame.stepTools, copy.frame.stepUses, copy.frame.stepTraces, copy.frame.stepPrivateAi,
-            copy.frame.stepJoin,
+            copy.frame.stepTools, copy.frame.stepPrivateAi, copy.frame.stepTraces, copy.frame.stepUses,
+            copy.frame.stepTerms, copy.frame.stepJoin,
         ])
         XCTAssertNil(copy.threadLabel(for: .welcome), "Welcome shows no thread")
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .welcome), nil)
         XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .tools), 0)
-        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .terms), 4)
+        XCTAssertEqual(FirstRunStageLayout.threadIndex(of: .join), 5)
     }
 
     /// The stretch before a step is travelled once it is reached; the
@@ -61,7 +62,7 @@ final class FirstRunFrameTests: XCTestCase {
         let frame = try Self.source()
         XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
         let back = try XCTUnwrap(frame.range(of: "Button(copy.frame.back)"))
-        let after = String(frame[back.upperBound...].prefix(320))
+        let after = String(frame[back.upperBound...].prefix(480))
         XCTAssertTrue(after.contains("FirstRunNavigation.back(state)"))
         // While a commit runs, Back is the screen's own (Join's sign-in),
         // never a plain step back the runner could undo.
@@ -207,7 +208,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertFalse(uses.contains("GlassTag(copy.uses.required"))
         // The required use is one "Always on" line now (owner, 2026-10-28).
         XCTAssertFalse(uses.contains("Text(copy.uses.required)"))
-        XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
+        // "Required to earn credit." is an amber heads-up (product owner,
+        // 2026-11-05), no longer the on colour.
+        XCTAssertTrue(uses.contains("GlassTokens.Color.statusAskText"))
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
         XCTAssertTrue(join.contains("busy: starting && runner.isCommitting"))
         XCTAssertFalse(join.contains("bodyEmphasis"))

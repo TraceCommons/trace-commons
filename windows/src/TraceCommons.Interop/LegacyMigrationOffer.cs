@@ -31,6 +31,9 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>Asked only after <c>legacy_migration_invite_needed</c>.</summary>
     [JsonPropertyName("invite_prompt")] public string InvitePrompt { get; init; } = string.Empty;
 
+    /// <summary>Tooltip on the invite link field (P5): what the link is used for.</summary>
+    [JsonPropertyName("invite_link_tooltip")] public string InviteLinkTooltip { get; init; } = string.Empty;
+
     /// <summary>The move could not be started at all; nothing ran.</summary>
     [JsonPropertyName("start_failed")] public string StartFailed { get; init; } = string.Empty;
 
@@ -58,7 +61,7 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>The payload fields this shell decodes, by wire name.</summary>
     public static readonly IReadOnlyList<string> ConsumedFields = new[]
     {
-        "title", "body", "action", "working", "invite_prompt", "start_failed",
+        "title", "body", "action", "working", "invite_prompt", "invite_link_tooltip", "start_failed",
         "dismiss", "later", "passkey_waiting", "passkey_failed", "passkey_cancel",
         "action_name_notice", "action_name_settings",
     };
@@ -102,7 +105,7 @@ public static class LegacyMigrationOffers
 
             foreach (string sentence in new[]
             {
-                copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.StartFailed,
+                copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.InviteLinkTooltip, copy.StartFailed,
                 copy.Dismiss, copy.Later, copy.LoginWaiting, copy.LoginFailed, copy.LoginCancel,
                 copy.ActionNameNotice, copy.ActionNameSettings,
             })

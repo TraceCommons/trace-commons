@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! Operator CLI for the tenant-scoped reward pilot.
 //!
 //! INTEGRATION: Cargo auto-discovers this bin. The server's mission_rewards

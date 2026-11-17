@@ -200,6 +200,17 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let privacyConfirmDescription: String?
     public let localCapture: String?
     public let localStorage: String?
+    /// Hover tips on the token card's Enable button and on the model-call
+    /// card's Enable, Disable and scope line. Optional so an older core
+    /// still draws the card.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P270).
+    public let tokenEnableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P262).
+    public let inferenceEnableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
+    public let inferenceDisableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P265).
+    public let inferenceScopeTooltip: String?
     public let review: WitnessReviewCopy?
     public let onboarding: FirstContributionCopy?
     public let wallet: WalletCopy?
@@ -253,6 +264,10 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case privacyConfirmDescription = "privacy_confirm_description"
         case localCapture = "local_capture"
         case localStorage = "local_storage"
+        case tokenEnableTooltip = "token_enable_tooltip"
+        case inferenceEnableTooltip = "inference_enable_tooltip"
+        case inferenceDisableTooltip = "inference_disable_tooltip"
+        case inferenceScopeTooltip = "inference_scope_tooltip"
 
     }
 

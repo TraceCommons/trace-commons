@@ -76,9 +76,16 @@ final class RoutingCopyExportTests: XCTestCase {
         guard let copy = copy() else { return }
         let mirror = Mirror(reflecting: copy)
         var checked = 0
+        // Owner dropped the Tools heading and the applies-at-once line
+        // 2026-11-04 (Settings copy pass 2, P117, P105): each arrives "".
+        let cut: Set<String> = ["toolsHeading", "appliesAtOnce"]
         for child in mirror.children {
             guard let text = child.value as? String else { continue }
-            XCTAssertFalse(text.isEmpty, "\(child.label ?? "?") arrived empty")
+            if cut.contains(child.label ?? "") {
+                XCTAssertEqual(text, "", "\(child.label ?? "?") was cut")
+            } else {
+                XCTAssertFalse(text.isEmpty, "\(child.label ?? "?") arrived empty")
+            }
             checked += 1
         }
         XCTAssertEqual(checked, 30, "the payload's field count changed")

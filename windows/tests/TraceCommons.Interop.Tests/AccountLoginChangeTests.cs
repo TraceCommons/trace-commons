@@ -295,7 +295,8 @@ public sealed class AccountLoginChangeSurfaceTests
         Assert.Equal(AccountChangeCopy.ConsumedFields.OrderBy(k => k, StringComparer.Ordinal), keys);
 
         AccountChangeCopy copy = Assert.IsType<AccountChangeCopy>(AccountChangeCopy.Copy());
-        Assert.Equal("Use a different account", copy.Change);
+        // Owner changed this 2026-11-04 (Settings copy pass 2, P53).
+        Assert.Equal("Switch account", copy.Change);
         Assert.Equal("Switch", copy.Confirm);
         Assert.Equal("Switch to Google", copy.Render(copy.ConfirmAccessibilityName, @new: "google"));
     }

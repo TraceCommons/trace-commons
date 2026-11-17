@@ -38,6 +38,7 @@ struct ManagedCLIOptionsSection: View {
                 set: { model.managedCLIOptionsDrafts.edit(tool: tool, options: $0) }
             ), showsLabel: false)
             .accessibilityLabel(model.managedText(tool) + " " + model.managedText("cli_options_label"))
+            .helpIfAny(model.managedText("cli_options_tooltip"))
             .disabled(model.managedBusy)
             HStack {
                 Spacer()

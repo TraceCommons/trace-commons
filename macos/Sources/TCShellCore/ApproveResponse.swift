@@ -53,6 +53,9 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
     /// Present on every group call, absent on a single-entry call, where the
     /// filter does not run. Not part of `skipped` or `excludedIneligible`.
     public let excludedHeld: UInt64?
+    /// Whether any trace this call approved goes to the privacy witness.
+    /// Absent from an older daemon, which reads as false: nothing is said.
+    public let witnessReview: Bool?
 
     public init(
         approved: UInt64,
@@ -62,7 +65,8 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         holdSecs: UInt64,
         holdUntil: String?,
         excludedIneligible: UInt64? = nil,
-        excludedHeld: UInt64? = nil
+        excludedHeld: UInt64? = nil,
+        witnessReview: Bool? = nil
     ) {
         self.approved = approved
         self.flagged = flagged
@@ -72,6 +76,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         self.holdUntil = holdUntil
         self.excludedIneligible = excludedIneligible
         self.excludedHeld = excludedHeld
+        self.witnessReview = witnessReview
     }
 
     enum CodingKeys: String, CodingKey {
@@ -83,6 +88,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case holdUntil = "hold_until"
         case excludedIneligible = "excluded_ineligible"
         case excludedHeld = "excluded_held"
+        case witnessReview = "witness_review"
     }
 
     /// Whether this response is the correction-credential refusal.
@@ -111,8 +117,25 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
             approved: approved,
             redactions: totalRedactions,
             flagged: flagged,
-            skipped: skipped.map(\.reasonLabel)
+            skipped: skipped.map(\.reasonLabel),
+            includesScrubResult: witnessReview != true || !redactions.isEmpty
         )
+    }
+
+    /// Group exclusions are separate from skipped entries: those traces were
+    /// never selected, and must not disappear from the result explanation.
+    public func toast(undoCopy: MonitorUndoCopy?) -> SubmitToast {
+        // A group can exclude every entry before previewing any of them.
+        // Its empty redactions map then says no scrub ran, not that a scrub
+        // ran and matched nothing. Keep ordinary processed outcomes intact.
+        let heldOnly = (excludedHeld ?? 0) > 0 && approved == 0 && flagged == 0
+            && redactions.isEmpty && skipped.isEmpty
+        let base = heldOnly
+            ? SubmitToast(line: SubmitToast.approvedClause(approved), offerUndo: false) : toast
+        guard let held = excludedHeld, held > 0, let undoCopy else { return base }
+        let template = held == 1 ? undoCopy.heldForReviewOne : undoCopy.heldForReview
+        let detail = template.replacingOccurrences(of: "{count}", with: String(held))
+        return SubmitToast(line: base.line + " " + detail, offerUndo: base.offerUndo)
     }
 
     /// Which of `attempted` this response actually approved.

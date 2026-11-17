@@ -257,6 +257,7 @@ mod near_config_tests {
     const NET: &str = "TRACE_COMMONS_NEAR_NETWORK";
     const RECIP: &str = "TRACE_COMMONS_NEAR_LOGIN_RECIPIENT";
 
+    #[allow(unsafe_code)]
     fn clear_all() {
         for key in [RPC, NET, RECIP] {
             // SAFETY: the tests serialize all env mutation through ENV_LOCK, so no
@@ -265,6 +266,7 @@ mod near_config_tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn set(key: &str, value: &str) {
         // SAFETY: serialized through ENV_LOCK (see `clear_all`).
         unsafe { std::env::set_var(key, value) };

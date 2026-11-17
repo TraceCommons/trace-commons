@@ -155,8 +155,10 @@ public struct BalanceCalls: Sendable {
     public let remainingLine: @Sendable (Int32, Int64, UInt8) -> String?
     /// The configured ceiling, or the empty string.
     public let limitLine: @Sendable (Int32, Int64, UInt8) -> String?
-    /// What the whole account has spent, or the empty string.
-    public let spentLine: @Sendable (Int32, Int64, UInt8) -> String?
+    /// What the whole account has spent, or the empty string. The last
+    /// argument is whether the reading's remaining figure is present: beside
+    /// one Spent rounds up so the row adds up, and without one it does not.
+    public let spentLine: @Sendable (Int32, Int64, UInt8, Int32) -> String?
     /// How long ago this computer asked. A negative value is "no
     /// observation" and gives the empty string.
     public let observedLine: @Sendable (Int64) -> String?
@@ -168,7 +170,7 @@ public struct BalanceCalls: Sendable {
         amount: @escaping @Sendable (Int32, Int64, UInt8) -> String?,
         remainingLine: @escaping @Sendable (Int32, Int64, UInt8) -> String?,
         limitLine: @escaping @Sendable (Int32, Int64, UInt8) -> String?,
-        spentLine: @escaping @Sendable (Int32, Int64, UInt8) -> String?,
+        spentLine: @escaping @Sendable (Int32, Int64, UInt8, Int32) -> String?,
         observedLine: @escaping @Sendable (Int64) -> String?
     ) {
         self.stateLine = stateLine
@@ -345,9 +347,14 @@ public enum BalanceSurface {
 
     /// What the whole account has spent -- not this computer. A zero is a
     /// real `$0.00` and is drawn; an absence is drawn as no line at all.
+    ///
+    /// The core picks the rounding from whether a remaining figure is
+    /// beside it (so Limit, Spent and what is left add up); this passes
+    /// only whether there is one.
     public static func spentLine(_ status: BalanceStatus, calls: BalanceCalls) -> String? {
         let (present, nanos) = wire(status.totalSpentNanos)
-        return nonEmpty(calls.spentLine(present, nanos, status.scale))
+        let (remainingPresent, _) = wire(status.remainingNanos)
+        return nonEmpty(calls.spentLine(present, nanos, status.scale, remainingPresent))
     }
 
     /// How long ago THIS COMPUTER asked, or nothing.

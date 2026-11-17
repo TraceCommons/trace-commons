@@ -116,6 +116,8 @@ pub enum ManagedError {
     /// DRAFT, NEEDS APPROVAL (2026-11-04).
     #[error("open the {} app before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
+    #[error("Update and reopen {} before launching Codex.", crate::brand::APP_NAME)]
+    DaemonUpdateRequired,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,
     #[error("invalid managed request")]
@@ -156,6 +158,10 @@ pub enum ManagedError {
 /// CLI turns back into its sentence and the shells map to the shared
 /// `project_chooses_model` line.
 pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
+
+/// A launcher that needs native Codex Responses must not use an older
+/// daemon's Chat translation route.
+pub const DAEMON_UPDATE_REQUIRED_LABEL: &str = "managed-daemon-update-required";
 
 /// The daemon's label for [`ManagedError::ProjectSetsAutoModeServer`], which
 /// the CLI turns back into its sentence and the shells map to the shared

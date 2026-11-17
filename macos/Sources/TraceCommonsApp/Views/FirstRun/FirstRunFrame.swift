@@ -16,11 +16,11 @@ struct FirstRunFooter {
     /// waits on, when the screen has one (the near.ai browser sign-in).
     let cancel: Cancel?
     /// A link left of the action that opens more of the step in place
-    /// (Customize on Tools, Ron 2026-10-21).
+    /// (Customize on Uses, Ron 2026-11-05). It leaves once used.
     let link: Link?
-    /// A second way off the step, beside the action, in the secondary
-    /// style (Private AI only on Tools).
-    let secondary: Secondary?
+    /// What Back does instead of leaving the step, while the step has more
+    /// open (Customize closes back to Uses).
+    let backInStep: (() -> Void)?
     /// Back while a commit runs, when the screen has a safe one (Join's
     /// sign-in, `JoinScreenLayout.backWhileCommitting`); otherwise Back is
     /// withdrawn while committing.
@@ -32,12 +32,6 @@ struct FirstRunFooter {
         let action: () -> Void
     }
 
-    struct Secondary {
-        let title: String
-        let isEnabled: Bool
-        let action: () -> Void
-    }
-
     struct BackWhileCommitting {
         let isEnabled: Bool
         let action: () -> Void
@@ -46,13 +40,12 @@ struct FirstRunFooter {
     struct Link {
         let title: String
         let isEnabled: Bool
-        let isOpen: Bool
         let action: () -> Void
     }
 
     init(
         title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, cancel: Cancel? = nil,
-        link: Link? = nil, secondary: Secondary? = nil, backWhileCommitting: BackWhileCommitting? = nil,
+        link: Link? = nil, backInStep: (() -> Void)? = nil, backWhileCommitting: BackWhileCommitting? = nil,
         action: @escaping () -> Void
     ) {
         self.title = title
@@ -61,7 +54,7 @@ struct FirstRunFooter {
         self.busy = busy
         self.cancel = cancel
         self.link = link
-        self.secondary = secondary
+        self.backInStep = backInStep
         self.backWhileCommitting = backWhileCommitting
         self.action = action
     }
@@ -77,6 +70,7 @@ extension FirstRunCopy {
         case .uses: return frame.stepUses
         case .traces: return frame.stepTraces
         case .privateAI: return frame.stepPrivateAi
+        case .terms: return frame.stepTerms
         case .join: return frame.stepJoin
         }
     }
@@ -85,12 +79,6 @@ extension FirstRunCopy {
     /// there, this only names each step.
     var threadLabels: [String] {
         FirstRunNavigation.threadSteps.compactMap(threadLabel(for:))
-    }
-
-    /// The names of the steps on this first run's path (Private AI only
-    /// has no Uses or Traces).
-    func threadLabels(for state: FirstRunState) -> [String] {
-        FirstRunNavigation.threadSteps(for: state).compactMap(threadLabel(for:))
     }
 }
 
@@ -246,6 +234,8 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
                 Button(copy.frame.back) {
                     if isCommitting {
                         footer.backWhileCommitting?.action()
+                    } else if let backInStep = footer.backInStep {
+                        backInStep()
                     } else {
                         state = FirstRunNavigation.back(state)
                     }
@@ -255,28 +245,13 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
             }
             Spacer(minLength: 0)
             if let link = footer.link {
-                Button(action: link.action) {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        Text(link.title)
-                        Image(systemName: "chevron.up")
-                            .glassGlyph(9, weight: .semibold)
-                            .rotationEffect(.degrees(link.isOpen ? 180 : 0))
-                            .animation(GlassMotion.standard(reduceMotion), value: link.isOpen)
-                            .accessibilityHidden(true)
-                    }
-                }
-                .buttonStyle(GlassButtonStyle(.link, size: .stage))
-                .disabled(!link.isEnabled)
-                .accessibilityAddTraits(link.isOpen ? .isSelected : [])
+                Button(link.title, action: link.action)
+                    .buttonStyle(GlassButtonStyle(.link, size: .stage))
+                    .disabled(!link.isEnabled)
             }
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
                     .buttonStyle(GlassButtonStyle(.secondary, size: .stage))
-            }
-            if let secondary = footer.secondary {
-                Button(secondary.title, action: secondary.action)
-                    .buttonStyle(GlassButtonStyle(.secondary, size: .stage))
-                    .disabled(!secondary.isEnabled)
             }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {

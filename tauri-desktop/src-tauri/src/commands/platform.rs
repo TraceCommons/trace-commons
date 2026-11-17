@@ -6,7 +6,7 @@ use std::{
 
 use tauri::{AppHandle, Runtime, State};
 
-use trace_commons_contributor::quit_copy::{self, QuitRole};
+use trace_commons_contributor::quit_copy;
 
 use crate::state::AppState;
 
@@ -154,17 +154,22 @@ pub(crate) fn open_system_settings(area: String) -> Result<(), String> {
     open_url(url)
 }
 
-/// The quit prompt that is true for this process: hosting the watcher,
-/// attached to one another process runs, or connected to none.
+/// The quit prompt naming what quitting would stop, or `null` when nothing
+/// is live and the app should quit without asking. An error means the
+/// state could not be read, which is never taken as "nothing".
 #[tauri::command]
 pub(crate) fn quit_confirmation_copy(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    quit_prompt_value(state.inner().quit_role())
+    let (stops_compute, stops_private_ai) = state.inner().quit_stops()?;
+    quit_prompt_value(stops_compute, stops_private_ai)
 }
 
-fn quit_prompt_value(role: QuitRole) -> Result<serde_json::Value, String> {
-    serde_json::to_value(quit_copy::quit_prompt(role))
+fn quit_prompt_value(
+    stops_compute: bool,
+    stops_private_ai: bool,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(quit_copy::quit_prompt(stops_compute, stops_private_ai))
         .map_err(|_| "quit-copy-unavailable".to_owned())
 }
 
@@ -370,25 +375,20 @@ mod tests {
         REVIEW_DEEP_LINK, existing_directory, external_url_is_allowed, git_repository,
         installed_by_homebrew, is_tracecommons_deep_link, quit_prompt_value, wallet_url_is_valid,
     };
-    use trace_commons_contributor::quit_copy::{self, QuitRole};
+    use trace_commons_contributor::quit_copy;
 
     #[test]
-    fn quit_prompt_reaches_the_frontend_with_the_role_it_was_chosen_for() {
-        for (role, label, body) in [
-            (QuitRole::Hosting, "hosting", quit_copy::QUIT_HOSTING_BODY),
-            (
-                QuitRole::Attached,
-                "attached",
-                quit_copy::QUIT_ATTACHED_BODY,
-            ),
-            (
-                QuitRole::Unavailable,
-                "unavailable",
-                quit_copy::QUIT_UNAVAILABLE_BODY,
-            ),
+    fn quit_prompt_reaches_the_frontend_only_when_something_is_live() {
+        assert_eq!(
+            quit_prompt_value(false, false).unwrap(),
+            serde_json::Value::Null
+        );
+        for (compute, private_ai, body) in [
+            (true, false, quit_copy::QUIT_STOPS_COMPUTE),
+            (false, true, quit_copy::QUIT_STOPS_PRIVATE_AI),
+            (true, true, quit_copy::QUIT_STOPS_COMPUTE_AND_PRIVATE_AI),
         ] {
-            let value = quit_prompt_value(role).unwrap();
-            assert_eq!(value["role"], label);
+            let value = quit_prompt_value(compute, private_ai).unwrap();
             assert_eq!(value["body"], body);
             assert_eq!(value["title"], quit_copy::QUIT_TITLE);
             assert_eq!(value["confirm"], quit_copy::QUIT_CONFIRM);

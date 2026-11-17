@@ -325,9 +325,9 @@ enum InsightsLimitsRows {
         return providers.flatMap { provider -> [Row] in
             let name = text("analytics_subscriptions_provider_" + provider.provider)
             return provider.logins.map { login in
-                let account = provider.logins.count > 1 && !login.defaultLogin ? "\(name) · \(login.label)" : name
-                let measured = login.state == "observed" && !login.windows.isEmpty
                 let words = InsightsSubscriptionWords.login(login, provider: provider.provider, now: now, copy: copy)
+                let account = provider.logins.count > 1 ? "\(name) · \(words.label)" : name
+                let measured = login.state == "observed" && !login.windows.isEmpty
                 let live = measured ? login.windows.filter { window in
                     window.usedPermille != nil && (window.resetsAt.map { $0 > now } ?? true)
                 } : []

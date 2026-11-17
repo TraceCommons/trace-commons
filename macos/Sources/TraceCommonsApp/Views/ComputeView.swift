@@ -45,10 +45,14 @@ struct ComputeContent: View {
                         Text(snapshot.title)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                             .foregroundStyle(GlassColor.textPrimary)
-                        Text(snapshot.detail)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        // Some states carry no detail since the owner cut it
+                        // 2026-11-04 (Settings copy pass 2, P303, P309, P313).
+                        if !snapshot.detail.isEmpty {
+                            Text(snapshot.detail)
+                                .glassType(GlassTokens.TypeScale.body)
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .accessibilityElement(children: .combine)
                 }

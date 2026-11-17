@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-witness` — the redaction witness, served over HTTP.
 //!
 //! Runs inside a dstack TDX guest. It takes a raw transcript, redacts it,
@@ -37,11 +39,17 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use sha2::Digest as _;
 use tokio::net::TcpListener;
+use trace_commons_server::witness_service::diagnostics::{
+    WitnessDiagnosticsInfo, diagnostics_router,
+};
 use trace_commons_server::witness_service::enclave::{DSTACK_SOCKET_PATH, DstackSocketAgent};
 use trace_commons_server::witness_service::http::{WitnessLoadBound, witness_router};
 use trace_commons_server::witness_service::inference::{
     DEFAULT_MAX_BODY_BYTES, InferenceAttestationPolicy, parse_gateway_key_pins,
     parse_model_key_pins,
+};
+use trace_commons_server::witness_service::jobs::{
+    JobLimits, RESULT_TTL, ResultSealer, WitnessJobs,
 };
 use trace_commons_server::witness_service::surface::WitnessService;
 use trace_commons_server::witness_service::{
@@ -68,60 +76,106 @@ const DETERMINISTIC_ONLY: &str = "deterministic-only";
 /// certificate quietly claiming coverage the pass did not have.
 const FULL_PIPELINE: &str = "full-pipeline";
 
-/// 64 MiB, and the reasoning matters more than the number.
+/// 1 MiB: the per-trace ceiling plus room for the request around it.
 ///
-/// The redacted-envelope cap is 16 MiB; the measured raw-to-envelope ratio on
-/// this pilot is about 3.4:1, and 7% of real sessions already exceed the cap
-/// before that multiplier. 64 MiB clears 16 MiB × 3.4 with room, and is still
-/// a bound rather than a gesture: the body is read through a limiter that
-/// stops at it, so an oversized request costs this much and not what the
-/// sender chose to send.
-const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Owner decision 2026-11-05: the client refuses a trace over 256 KB of raw
+/// contribution before sending it (witness-at-submission spec, Q9), and the
+/// witness holds sixteen requests at once. A request body is that raw
+/// contribution as JSON -- escaping can double escape-heavy text -- plus the
+/// grants and envelope fields, so 1 MiB holds the largest legitimate request
+/// with room. It is read through a limiter that stops at this many bytes.
+///
+/// Memory at the cap: one request holds the body, the parsed contribution,
+/// the record pass's copy, the redacted envelope and its serialization --
+/// about six copies, ~6 MiB -- so sixteen slots are on the order of 100 MiB.
+/// (It was 64 MiB per request with four slots, a gigabyte or more.)
+const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
-/// Four `POST /v1/witness` requests at once, and the number is argued rather
-/// than round.
+/// Sixteen requests at once (owner decision 2026-11-05; was four).
 ///
-/// The binding evidence is #456: raising the privacy filter's in-flight
-/// classify windows from 1 to 8 collapsed throughput on the pilot -- every
-/// backstop tick returned `done=0 transient=3 breaker_tripped=true` -- and
-/// `MAX_CONCURRENT_CLASSIFY_WINDOWS` has been 1 ever since. That constant
-/// serialises windows *within* one request; N concurrent requests put N
-/// windows in flight at the same endpoint and reintroduce exactly the
-/// concurrency that collapsed. So the bound is set strictly under the 8 that
-/// is known to fail, not at some number that merely sounds safe.
+/// A slot no longer means a classifier call. Classifier calls are bounded on
+/// their own, process-wide (`--max-classify-in-flight`, 2), and admitted
+/// requests take turns at them in arrival order. So a slot is a place in
+/// line: sixteen lets a burst of submissions queue instead of being turned
+/// away, without putting more load on the classifier key.
 ///
-/// The other constraint is memory, and it is what rules out a much larger
-/// value: a request at the 64 MiB body cap is buffered whole, parsed into an
-/// owned transcript, redacted into another, and serialised again -- several
-/// tens of megabytes each, so a couple of hundred megabytes per slot at the
-/// cap. Four slots is on the order of a gigabyte in the worst case, which a
-/// modestly provisioned CVM survives and sixteen would not.
+/// Beyond sixteen the answer is an immediate `503 witness_saturated`, as
+/// before. A request is also answered busy at once when the requests ahead
+/// of it would, at the recent pace, keep it waiting past the request
+/// timeout, so a slot is never given to a request that could only time out.
 ///
-/// In `full-pipeline` a request is IO-bound -- a serial chain of network calls
-/// -- so four is not about cores. In `deterministic-only` it is CPU-bound and
-/// four oversubscribes a small guest, but each pass is a linear scan that
-/// finishes; oversubscription there costs latency, not stability.
-const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 4;
+/// Memory bounds the number: see [`DEFAULT_MAX_REQUEST_BYTES`]. Sixteen
+/// slots at a 1 MiB body are on the order of 100 MiB.
+///
+/// #456 is still the evidence on classifier concurrency (eight in flight
+/// collapsed throughput); it now governs `--max-classify-in-flight`, not
+/// this number.
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 
-/// Five minutes, and this one is measured.
+/// Nine minutes: the owner asked for about ten (2026-11-05), and the layer in
+/// front sets the ceiling.
 ///
-/// The classifier's largest proven success is a 243 KiB window in 9.3 s
-/// (`privacy_filter_near_ai`), so a request classifies on the order of
-/// 25 KiB/s of prose, serially. Five minutes is therefore several megabytes of
-/// transcript -- comfortably the whole of a typical session -- while bounding
-/// the worst case: a fully occupied witness returns to service within five
-/// minutes with no operator action.
+/// The witness answers once, at the end, so while it classifies the
+/// connection carries no data. dstack-gateway's `timeouts.idle` closes a
+/// connection after **10 minutes without data** (default in
+/// `gateway/dstack-app/builder/entrypoint.sh` and `gateway.toml`;
+/// `timeouts.total` is 5 h). A 600 s budget would race that close, so the
+/// budget is 540 s, a minute under it. Phala's production gateway may be
+/// configured differently; that has not been checked against a live one.
+/// Nothing in this binary times a request out sooner: `axum::serve` sets no
+/// request timeout.
 ///
-/// The floor is set by the layer below. A single window may retry up to
-/// `MAX_CLASSIFY_ATTEMPTS` times against a 30 s per-call timeout with backoff,
-/// so a request whose one window merely retried can legitimately take over two
-/// minutes. A request timeout under that would abandon healthy work and read
-/// as flakiness.
+/// What it has to hold: classifier windows at the measured 2026-11-05
+/// latency (dense text ~3 s + 0.4 s/KiB; ~29 s for a full 64 KiB window),
+/// two in flight. A window's worst case with no deadline is 160.95 s (three
+/// attempts at 53.4 s plus backoff), and the contribution path passes its
+/// deadline to the classifier so no retry starts that could not finish
+/// inside this budget.
 ///
-/// A body at the 64 MiB cap will exceed this and be refused. That is the
-/// intended answer: the alternative is one caller holding a slot for the
-/// three-quarters of an hour that classifying 64 MiB serially would take.
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+/// A timed-out request is refused with 504 and its slot released. The
+/// client waits longer than this (570 s), so the witness's own answer is the
+/// one a person gets.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 540;
+
+/// Where sealed job results live: the compose's `witness-results` volume.
+const DEFAULT_RESULTS_DIR: &str = "/var/lib/trace-commons-witness/results";
+
+/// 256 results at 4 MiB is 1 GiB of disk at worst.
+const DEFAULT_MAX_STORED_RESULTS: usize = 256;
+
+/// Four times the request cap: a redacted envelope is about the size of the
+/// session it came from.
+const DEFAULT_MAX_RESULT_BYTES: usize = 4 * DEFAULT_MAX_REQUEST_BYTES;
+
+/// The highest request-body bound this binary starts with. The deployed value
+/// is a sealed deploy-time setting (owner, 2026-11-13), so it is not in the
+/// measurement; this ceiling is, being compiled in. 32 MiB is the largest
+/// witness request the contributor client sends, so a higher bound could
+/// only admit requests no client makes.
+const MAX_REQUEST_BYTES_CEILING: usize = 32 * 1024 * 1024;
+
+/// The highest sealed-result bound this binary starts with, for the same
+/// reason. 256 stored results at 40 MiB is 10 GiB of the CVM's 20 GiB data
+/// disk at worst.
+const MAX_RESULT_BYTES_CEILING: usize = 40 * 1024 * 1024;
+
+/// Refuse a request or result bound of zero, or above its compiled ceiling.
+/// Zero is refused rather than read as "unbounded" or "serve nothing"; a
+/// value above the ceiling is refused so the measured binary, not the
+/// unmeasured setting, decides how far the bound can go.
+fn check_size_caps(max_request_bytes: usize, max_result_bytes: usize) -> Result<(), String> {
+    if max_request_bytes == 0 || max_request_bytes > MAX_REQUEST_BYTES_CEILING {
+        return Err(format!(
+            "TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES must be between 1 and {MAX_REQUEST_BYTES_CEILING}"
+        ));
+    }
+    if max_result_bytes == 0 || max_result_bytes > MAX_RESULT_BYTES_CEILING {
+        return Err(format!(
+            "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES must be between 1 and {MAX_RESULT_BYTES_CEILING}"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -183,20 +237,63 @@ struct Args {
     )]
     max_concurrent_requests: usize,
 
+    /// Prose-classifier calls in flight at once, across every request this
+    /// process serves. Only `full-pipeline` makes such calls. A contribution's
+    /// text leaves are classified concurrently up to this bound instead of one
+    /// at a time. See
+    /// [`trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT`]
+    /// for why the default is what it is.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT",
+        default_value_t = trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT
+    )]
+    max_classify_in_flight: usize,
+
     /// Slots left available to ordinary calls when background calls fill
     /// their cooperative budget. Defaults to one, or zero for a one-slot
     /// witness. This does not increase the global concurrency limit.
     #[arg(long, env = "TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS")]
     reserved_interactive_slots: Option<usize>,
 
-    /// How long one `POST /v1/witness` request may take before it is
-    /// abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+    /// How long one witness job (or admission / token-bundle request) may
+    /// take, from acceptance, before it is abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
     #[arg(
         long,
         env = "TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS",
         default_value_t = DEFAULT_REQUEST_TIMEOUT_SECS
     )]
     request_timeout_secs: u64,
+
+    /// Where finished job results are sealed. Encrypted under a key derived
+    /// inside the CVM from the dstack key service and this witness's
+    /// measurement; raw sessions are never written here or anywhere. Must be
+    /// writable at startup, or the witness does not start.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_RESULTS_DIR",
+        default_value = DEFAULT_RESULTS_DIR
+    )]
+    results_dir: std::path::PathBuf,
+
+    /// The most finished, unfetched results kept at once. With
+    /// `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES`, this bounds the disk the
+    /// results can use. A full store answers busy.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS",
+        default_value_t = DEFAULT_MAX_STORED_RESULTS
+    )]
+    max_stored_results: usize,
+
+    /// The largest finished answer that is sealed. A larger one is kept as
+    /// `witness_redaction_failed` instead.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES",
+        default_value_t = DEFAULT_MAX_RESULT_BYTES
+    )]
+    max_result_bytes: usize,
 
     /// Comma-separated filesystem path prefixes the deterministic pass treats
     /// as known, so they are not reported as findings. Empty is a safe
@@ -350,14 +447,15 @@ async fn main() -> Result<()> {
              `{FULL_PIPELINE}`"
         );
     }
-    if args.max_request_bytes == 0 {
-        bail!("TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES must be greater than zero");
-    }
+    check_size_caps(args.max_request_bytes, args.max_result_bytes).map_err(anyhow::Error::msg)?;
     // Zero is refused rather than read as "unbounded" in one case and "serve
     // nothing" in the other. Both readings are guesses about what an operator
     // who typed 0 meant, and one of them silently removes the bound.
     if args.max_concurrent_requests == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS must be greater than zero");
+    }
+    if args.max_classify_in_flight == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT must be greater than zero");
     }
     let reserved_interactive_slots = resolved_reserved_interactive_slots(
         args.max_concurrent_requests,
@@ -366,6 +464,9 @@ async fn main() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
     if args.request_timeout_secs == 0 {
         bail!("TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS must be greater than zero");
+    }
+    if args.max_stored_results == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS must be greater than zero");
     }
 
     // The retired gateway pin. It is no longer read, and a witness that
@@ -412,6 +513,20 @@ async fn main() -> Result<()> {
         .measurement()
         .await
         .map_err(|_| anyhow::anyhow!("the enclave could not report its own measurement"))?;
+    let enclave_signing_address = enclave.signing_address().to_string();
+
+    // The sealed-results store, before the listener binds. A witness that
+    // cannot derive its results key or write its results directory must not
+    // start: there is no plaintext fallback.
+    let results_key = enclave
+        .results_key()
+        .await
+        .context("could not derive the job results key from the dstack guest agent")?;
+    let sealer = ResultSealer::open(&args.results_dir, results_key)
+        .map_err(|_| anyhow::anyhow!("TRACE_COMMONS_WITNESS_RESULTS_DIR is not usable"))?;
+    // Optional: without it a `202` names no instance and the client polls
+    // the app URL, which is correct for a single instance.
+    let instance_id = enclave.instance_id().await.ok();
 
     // Both are hash-only, and both are what an operator pins. Nothing else
     // about a request is ever logged by this process.
@@ -421,6 +536,10 @@ async fn main() -> Result<()> {
         max_request_bytes = args.max_request_bytes,
         max_concurrent_requests = args.max_concurrent_requests,
         request_timeout_secs = args.request_timeout_secs,
+        max_classify_in_flight = args.max_classify_in_flight,
+        max_stored_results = args.max_stored_results,
+        max_result_bytes = args.max_result_bytes,
+        instance_addressed = instance_id.is_some(),
         "witness ready"
     );
 
@@ -435,6 +554,11 @@ async fn main() -> Result<()> {
     // Resolved before the listener binds, like the signing identity above: a
     // witness that cannot build the pipeline it was told to run must fail to
     // start, not fail per request.
+    let mut near_ai_classifier = false;
+    let mut redaction_pipeline =
+        trace_commons_protocol::trace_contribution::DETERMINISTIC_REDACTION_PIPELINE_VERSION
+            .to_string();
+    let mut classify_queue = None;
     let (redactor, contribution_redactor): (
         Arc<dyn TranscriptRedactor>,
         Arc<dyn trace_commons_server::witness_service::ContributionRedactor>,
@@ -448,12 +572,34 @@ async fn main() -> Result<()> {
                      prose-PII classifier: set TRACE_PRIVACY_FILTER_BACKEND"
                     )
                 })?;
+        redaction_pipeline =
+            trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend);
         tracing::info!(
-            redaction_pipeline = %trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend),
+            redaction_pipeline = %redaction_pipeline,
             "witness redaction pipeline"
         );
-        (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
-         Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::with_privacy_filter(known_path_prefixes, adapter, backend)))
+        if backend == trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi {
+            near_ai_classifier = true;
+            classifier_startup_check(adapter.as_ref()).await?;
+        }
+        (
+            Arc::new(FullPipelineRedaction::new(
+                known_path_prefixes.clone(),
+                adapter.clone(),
+                backend,
+            )),
+            {
+                trace_commons_server::witness_service::prefetch::check_review_capacity(
+                    classify_budget(args.request_timeout_secs),
+                    adapter.request_interval(),
+                )
+                .map_err(|reason| anyhow::anyhow!(reason))?;
+                let redaction = trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)
+                 .with_classify_budget(classify_budget(args.request_timeout_secs));
+                classify_queue = Some(redaction.classify_queue());
+                Arc::new(redaction)
+            },
+        )
     } else {
         (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
          Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))
@@ -591,19 +737,185 @@ async fn main() -> Result<()> {
     }
     let service = Arc::new(service);
 
-    let load = WitnessLoadBound::with_reservation(
+    let mut load = WitnessLoadBound::with_reservation(
         args.max_concurrent_requests,
         reserved_interactive_slots,
         Duration::from_secs(args.request_timeout_secs),
     )
     .map_err(anyhow::Error::msg)?;
+    let mut jobs = WitnessJobs::new(
+        sealer,
+        JobLimits {
+            max_active: load.max_concurrent_requests(),
+            max_active_background: load.max_background_requests(),
+            max_stored: args.max_stored_results,
+            max_result_bytes: args.max_result_bytes,
+            result_ttl: RESULT_TTL,
+        },
+        load.request_timeout(),
+    )
+    .with_instance_id(instance_id);
+    if let Some(queue) = classify_queue {
+        jobs = jobs.with_classify_queue(queue.clone());
+        load = load.with_classify_queue(queue);
+    }
+    let jobs = Arc::new(jobs);
+    tracing::info!(
+        recovered_results = jobs.counts().done_unfetched,
+        "witness job store ready"
+    );
+    let _sweeper = jobs.spawn_sweeper();
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
-    axum::serve(listener, witness_router(service, load))
-        .await
-        .context("the witness listener stopped")?;
+    let diagnostics = diagnostics_router(
+        load.clone(),
+        jobs.clone(),
+        WitnessDiagnosticsInfo {
+            build: trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")).to_string(),
+            witness_measurement: measurement.to_string(),
+            signing_address: enclave_signing_address,
+            redaction_pipeline,
+            near_ai_classifier,
+        },
+    );
+    axum::serve(
+        listener,
+        witness_router(service, load, jobs).merge(diagnostics),
+    )
+    .await
+    .context("the witness listener stopped")?;
     Ok(())
+}
+
+/// A synthetic text for the startup check. Nothing about it identifies
+/// anyone; it exists to make one classify request.
+const CLASSIFIER_STARTUP_CHECK_TEXT: &str =
+    "witness startup check: the build passed on the second try";
+
+/// One tiny synthetic classify request before the listener binds.
+///
+/// A key the endpoint refuses (401/403) stops the witness from starting: it
+/// could certify nothing, and a witness that boots and then refuses every
+/// request after its retries is how the 2026-11-05 outage looked from
+/// outside. Any other failure -- a timeout, a 5xx, a slow endpoint -- is
+/// logged by kind and the witness starts anyway, because those recover on
+/// their own and each request still refuses for itself while they last.
+/// The result is label-only: the outcome kind, never the text or a body.
+async fn classifier_startup_check(
+    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
+) -> anyhow::Result<()> {
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, global};
+    let recorder = global();
+    let before: Vec<u64> = Outcome::ALL.iter().map(|o| recorder.count(*o)).collect();
+    let result = adapter.redact_text(CLASSIFIER_STARTUP_CHECK_TEXT).await;
+    let grew = |outcome: Outcome| {
+        let index = Outcome::ALL.iter().position(|o| *o == outcome).unwrap_or(0);
+        recorder.count(outcome) > before[index]
+    };
+    if grew(Outcome::Auth) {
+        tracing::error!(
+            classifier_startup_check = "auth_401_403",
+            "the NEAR AI classifier refused the configured key"
+        );
+        bail!(
+            "the NEAR AI privacy classifier refused TRACE_NEAR_AI_PRIVACY_API_KEY (401/403); \
+             the witness will not start without a working key"
+        );
+    }
+    match result {
+        Ok(_) => tracing::info!(
+            classifier_startup_check = "ok",
+            "NEAR AI classifier answered"
+        ),
+        Err(_) => {
+            let failures: Vec<&str> = Outcome::ALL
+                .iter()
+                .filter(|outcome| **outcome != Outcome::Ok && grew(**outcome))
+                .map(|outcome| outcome.label())
+                .collect();
+            tracing::warn!(
+                classifier_startup_check = "failed",
+                failures = %failures.join(","),
+                "NEAR AI classifier did not answer at startup; starting, and each request \
+                 refuses until it does"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How long the contribution path's classifier calls may run: the request
+/// budget less what reading the body, the replay, signing and the answer
+/// need. Retries that could not finish inside it are not started.
+fn classify_budget(request_timeout_secs: u64) -> Duration {
+    Duration::from_secs(
+        request_timeout_secs
+            .saturating_sub(CLASSIFY_BUDGET_MARGIN_SECS)
+            .max(1),
+    )
+}
+
+/// What the rest of a request needs besides classifier calls. The witness's
+/// own work on a 900 KB contribution measured 0.41 s; 20 s covers a slow
+/// body upload too.
+const CLASSIFY_BUDGET_MARGIN_SECS: u64 = 20;
+
+#[cfg(test)]
+mod size_cap_ceiling_tests {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    /// The deploy-time size caps are sealed values, not measured, so the
+    /// binary -- which is measured -- holds the ceiling a contributor can
+    /// verify: zero and anything above the ceiling refuse to start.
+    #[test]
+    fn size_caps_are_bounded_by_the_measured_ceiling() {
+        assert_eq!(check_size_caps(16 * MIB, 20 * MIB), Ok(()));
+        assert_eq!(
+            check_size_caps(MAX_REQUEST_BYTES_CEILING, MAX_RESULT_BYTES_CEILING),
+            Ok(())
+        );
+        assert!(check_size_caps(0, 20 * MIB).is_err());
+        assert!(check_size_caps(16 * MIB, 0).is_err());
+        assert!(check_size_caps(MAX_REQUEST_BYTES_CEILING + 1, 20 * MIB).is_err());
+        assert!(check_size_caps(16 * MIB, MAX_RESULT_BYTES_CEILING + 1).is_err());
+        // The ceilings themselves: the client's own largest witness request,
+        // and a disk bound of 256 stored results within 10 GiB.
+        assert_eq!(MAX_REQUEST_BYTES_CEILING, 32 * MIB);
+        const { assert!(DEFAULT_MAX_STORED_RESULTS * MAX_RESULT_BYTES_CEILING <= 10 * 1024 * MIB) };
+    }
+}
+
+#[cfg(test)]
+mod classify_deadline_tests {
+    use super::*;
+
+    /// One classifier window's worst case -- every attempt timing out at
+    /// the default per-call timeout, plus backoff -- fits inside the
+    /// request limit, so a request whose one window retries is not
+    /// abandoned for it.
+    #[test]
+    fn a_windows_worst_case_fits_the_request_timeout() {
+        use trace_commons_protocol::privacy_filter_near_ai as near_ai;
+        let worst_ms = near_ai::worst_case_window_ms(
+            near_ai::DEFAULT_TIMEOUT_MS,
+            near_ai::DEFAULT_TIMEOUT_PER_KIB_MS,
+            near_ai::MAX_CLASSIFY_REQUEST_BODY_BYTES,
+        );
+        assert!(
+            worst_ms < DEFAULT_REQUEST_TIMEOUT_SECS * 1000,
+            "{worst_ms} ms"
+        );
+        // Under dstack-gateway's 10-minute idle close, with a minute spare.
+        const { assert!(DEFAULT_REQUEST_TIMEOUT_SECS + 60 <= 600) };
+        // The classify pass's deadline leaves the rest of the request room.
+        assert!(
+            classify_budget(DEFAULT_REQUEST_TIMEOUT_SECS)
+                < Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -346,6 +346,78 @@ async fn only_this_attempts_same_origin_choice_of_an_offered_login_is_taken() {
     assert_eq!(server.await.unwrap().unwrap(), "github");
 }
 
+/// Safari 27.0.1 marks a person's click on the page's own button
+/// `Sec-Fetch-Site: none`, not `same-origin` (a scripted click gets
+/// `same-origin`). The request below has the headers Safari sent on a real
+/// click, captured 2026-11-11. That click is taken; `none` with any other
+/// origin, or with none, is still refused.
+#[tokio::test]
+async fn safaris_click_marked_fetch_site_none_is_taken() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let authority = format!("127.0.0.1:{}", address.port());
+    let own = format!("http://{authority}");
+    let state = crate::daemon::nearai_credential::loopback::random_state().unwrap();
+    let server = tokio::spawn({
+        let state = state.clone();
+        async move {
+            receive_choice(&listener, &state, &["google", "github"], None)
+                .await
+                .map(|chosen| chosen.provider)
+        }
+    });
+
+    for origin in [Some("https://evil.example"), Some("null"), None] {
+        let request = post(
+            &authority,
+            origin,
+            "Sec-Fetch-Site: none\r\n",
+            &format!("state={state}&provider=google"),
+        );
+        let response = send(address, request.clone()).await;
+        assert_eq!(status(&response), "HTTP/1.1 400 Bad Request", "{request}");
+    }
+    assert!(!server.is_finished(), "a refused choice ended the chooser");
+
+    let body = format!("state={state}&provider=google");
+    let safari = format!(
+        "POST {CHOOSE_PATH} HTTP/1.1\r\n\
+         Host: {authority}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\n\
+         Origin: {own}\r\n\
+         Sec-Fetch-Site: none\r\n\
+         Upgrade-Insecure-Requests: 1\r\n\
+         Sec-Fetch-Mode: navigate\r\n\
+         User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+         (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15\r\n\
+         Referer: {own}{PAGE_PATH}?state={state}\r\n\
+         Sec-Fetch-Dest: document\r\n\
+         Content-Length: {}\r\n\
+         Accept-Language: en-US,en;q=0.9\r\n\
+         Priority: u=0, i\r\n\
+         Accept-Encoding: gzip, deflate\r\n\
+         Connection: keep-alive\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(safari.as_bytes()).await.unwrap();
+    // A refusal answers and keeps waiting, so a refused click shows up here
+    // as the read ending with a 400 rather than the chooser returning.
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        !response.starts_with("HTTP/1.1 400"),
+        "Safari's click was refused: {response}"
+    );
+    assert_eq!(server.await.unwrap().unwrap(), "google");
+}
+
 /// Drive a ceremony that named no login through its page to `provider`, and
 /// return the browser URL `begin` handed out, the redirect, and the port.
 #[cfg(not(feature = "near-ai-staging"))]

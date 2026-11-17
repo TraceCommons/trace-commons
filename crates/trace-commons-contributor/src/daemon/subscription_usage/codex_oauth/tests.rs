@@ -135,7 +135,13 @@ fn login(root: &std::path::Path) -> LoginSpec {
 }
 
 /// A process the Codex process guard recognizes, alive for the test's duration.
-/// Unix only, like every test that needs one (it symlinks `/bin/sleep`).
+/// Unix only, like every test that needs one.
+///
+/// A shell whose `$0` is a `codex` path, not a `codex` symlink to
+/// `/bin/sleep`: since Ubuntu 26.04 (`ubuntu-latest` from 2026-11-11)
+/// `sleep` is uutils' multi-call binary, which picks its tool by `argv[0]`
+/// and exits at once as `codex`. The trailing `:` keeps the shell from
+/// exec'ing `sleep` in its place.
 #[cfg(unix)]
 struct RunningCodex(std::process::Child);
 #[cfg(unix)]
@@ -147,11 +153,10 @@ impl Drop for RunningCodex {
 }
 #[cfg(unix)]
 fn running_codex(dir: &std::path::Path) -> RunningCodex {
-    let executable = dir.join("codex");
-    std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
     RunningCodex(
-        std::process::Command::new(&executable)
-            .arg("30")
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30; :"])
+            .arg(dir.join("codex"))
             .spawn()
             .unwrap(),
     )

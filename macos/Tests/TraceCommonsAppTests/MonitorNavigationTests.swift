@@ -405,8 +405,10 @@ final class MonitorNavigationTests: XCTestCase {
 
     /// The launch's own request (R-44, owner decision 2026-10-05): first
     /// run, activated and alone (the Monitor SwiftUI may have opened is
-    /// closed); the Monitor, quietly, over a refused daemon; nothing for an
-    /// onboarded install. `LaunchRoutingTests` covers the choice itself.
+    /// closed); the Monitor, quietly, over a refused daemon; for an
+    /// onboarded install, the Monitor in front on a launch the person
+    /// started and nothing on a quiet one. `LaunchRoutingTests` covers the
+    /// choice itself.
     func test_theLaunchOpensFirstRunAloneOrNothing() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("""
@@ -422,10 +424,15 @@ final class MonitorNavigationTests: XCTestCase {
                     OpenMonitor.request()
                 case .monitor:
                     OpenMonitor.request(activate: false)
+                case .focusedMonitor:
+        """), "first run must open alone, and a refused daemon's Monitor quietly")
+        XCTAssertTrue(main.contains("""
+                    guard !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else { return }
+                    OpenMonitor.request()
                 case .nothing, .wait:
                     break
                 }
-        """), "an onboarded launch must open nothing, and first run must open alone")
+        """), "a launch the person started opens the Monitor in front unless a window is up; a quiet one opens nothing")
         XCTAssertFalse(main.contains("launchActivates"), "the launch no longer opens a quiet window for an onboarded install")
     }
 
@@ -844,18 +851,6 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(model.statusReadFailed)
         XCTAssertTrue(model.requiresOnboarding, "the placeholder status requires onboarding")
         XCTAssertEqual(LaunchRouting.opening(nil, startup: .running, requiresOnboarding: model.requiresOnboarding, onboardingKnown: true).window, .firstRun)
-    }
-
-    /// The failure is recorded from the `status` read itself, and cleared
-    /// by its next answer.
-    func test_theStatusReadRecordsItsFailure() throws {
-        let model = try Self.text("AppModel.swift")
-        XCTAssertTrue(model.contains(#"""
-                perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
-                    self.publishIfChanged(\.status, $0)
-                    self.publishIfChanged(\.statusReadFailed, false)
-                }
-        """#))
     }
 
     /// The Monitor's Settings button opens Settings before onboarding too

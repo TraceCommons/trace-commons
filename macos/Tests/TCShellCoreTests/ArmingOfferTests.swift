@@ -38,5 +38,10 @@ final class ArmingOfferTests: XCTestCase {
         XCTAssertNil(ProjectArmingCopy.decode(fromJSON: json.replacingOccurrences(
             of: "\"Q\"", with: "\"\"")))
         XCTAssertNil(ProjectArmingCopy.decode(fromJSON: nil))
+        // The settings subtitle is the one field the owner cut 2026-11-04
+        // (Settings copy pass 2, P127): empty, it still decodes.
+        let cut = try XCTUnwrap(ProjectArmingCopy.decode(fromJSON: json.replacingOccurrences(
+            of: "\"SD\"", with: "\"\"")))
+        XCTAssertEqual(cut.settingsDescription, "")
     }
 }

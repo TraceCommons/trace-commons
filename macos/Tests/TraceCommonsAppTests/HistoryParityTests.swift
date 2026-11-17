@@ -474,6 +474,30 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertTrue(home.contains("case .retry: if let record { Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }"))
     }
 
+    /// A previous account's row offers no Withdraw, signed in or not: the
+    /// current account cannot withdraw it. The app's record decodes the
+    /// daemon's `previous_account`, and an older daemon's row without it is
+    /// the current account's.
+    @MainActor
+    func test_aPreviousAccountsRowOffersNoWithdraw() throws {
+        var old = Self.record("accepted")
+        old.previousAccount = true
+        for account: AppModel.AccountSessionRead in [.signedIn, .signedOut, .unread, .checking] {
+            XCTAssertEqual(HistoryList.rowWithdraw(record: old, detail: nil, result: nil, account: account), .none)
+        }
+        XCTAssertEqual(HistoryList.rowWithdraw(record: Self.record("accepted"), detail: nil, result: nil, account: .signedIn),
+                       .withdraw)
+
+        let json = #"{"submission_id":"a","submitted_at":"2026-03-14T15:00:00Z","project_label":"p","source":"claude-code","status":"accepted","consent_scopes":[],"credit_points_pending":0,"explanations":[]%@}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let marked = try decoder.decode(
+            HistoryRecord.self, from: Data(json.replacingOccurrences(of: "%@", with: #","previous_account":true"#).utf8))
+        XCTAssertTrue(marked.previousAccount)
+        let legacy = try decoder.decode(HistoryRecord.self, from: Data(json.replacingOccurrences(of: "%@", with: "").utf8))
+        XCTAssertFalse(legacy.previousAccount)
+    }
+
     /// Ron's `HistoryRow`: wherever Withdraw would be offered and the
     /// account session is not known to be active, the row offers the core's
     /// sign-in instead, through the native identity path; while the session
@@ -495,7 +519,7 @@ final class HistoryParityTests: XCTestCase {
             "case .signIn: if let words { HistorySignInControl(words: words) }",
             "case .checkingAccount: if let words { Text(words.checkingAccount)",
             "Button(label) { Task { await model.signInToWithdraw() } }",
-            "model.canRestartNearAiBrowserSignIn",
+            "model.canRetryAccountSignIn",
             "if model.accountSigningIn { Text(words.completeSignIn)",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
@@ -686,8 +710,8 @@ final class HistoryParityTests: XCTestCase {
         let card = Self.flat(String(home[period.lowerBound..<periodEnd.lowerBound]))
         for needle in [
             #"SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])"#,
-            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted))",
-            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted))",
+            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.contributed))",
+            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.contributed))",
             ".init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack))",
         ] {
             XCTAssertTrue(card.contains(needle), "the record by period lacks \(needle)")
@@ -696,10 +720,10 @@ final class HistoryParityTests: XCTestCase {
         let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
-            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, credit: credit)",
-            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail)",
-            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))",
-            "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))",
+            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, submitted: rollup?.allTime?.submitted, credit: credit)",
+            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail,",
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),",
+            "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),",
         ] {
             XCTAssertTrue(stats.contains(needle), "History's stat cards lack \(needle)")
         }

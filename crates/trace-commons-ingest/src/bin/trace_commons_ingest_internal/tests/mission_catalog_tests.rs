@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use crate::ingest::app::tests::test_state;
+use crate::ingest::app::test_support::test_state;
 use crate::ingest::app::{AppState, app};
 
 use axum::body::Body;

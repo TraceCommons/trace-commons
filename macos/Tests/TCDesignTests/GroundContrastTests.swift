@@ -24,17 +24,36 @@ final class GroundContrastTests: XCTestCase {
         XCTAssertNil(GlassTier.controlSelected.ground)
     }
 
-    /// A control's hover follows its fill onto a menu or a selection; any
-    /// other hover is the caller's and stays.
+    /// A control's hover follows its fill onto a card, a menu or a
+    /// selection; any other hover is the caller's and stays.
     func test_aControlsHoverFollowsItsGround() {
         let hover = GlassTokens.Color.controlHover
         XCTAssertEqual(GlassGround.pane.hover(hover, tier: .control), hover)
-        XCTAssertEqual(GlassGround.card.hover(hover, tier: .control), hover)
+        XCTAssertEqual(GlassGround.card.hover(hover, tier: .control, theme: .classic), hover)
+        let cardHover = GlassGround.card.hover(hover, tier: .control, theme: .flat)
+        XCTAssertEqual(cardHover.dark, hover.dark)
+        XCTAssertEqual(cardHover.light, GlassTokens.Color.controlOnCardHover.light)
         XCTAssertEqual(GlassGround.menu.hover(hover, tier: .control), GlassTokens.Color.controlOnMenuHover)
         XCTAssertEqual(GlassGround.selection.hover(hover, tier: .control), GlassTokens.Color.controlOnSelectionHover)
         let card = GlassTokens.Color.cardHover
         XCTAssertEqual(GlassGround.menu.hover(card, tier: .card), card)
         XCTAssertEqual(GlassGround.menu.hover(GlassTokens.Color.menuHover, tier: .control), GlassTokens.Color.menuHover)
+    }
+
+    /// Classic keeps every gradient stop in both appearances. Flat Dark
+    /// inherits the ordinary control gradient, so it cannot drift separately.
+    func test_cardControlsPreserveClassicAndDarkGradients() {
+        let fill = GlassTokens.Gradient.controlFill
+        XCTAssertEqual(GlassGround.card.controlFill(theme: .classic), fill)
+        XCTAssertEqual(GlassGround.pane.controlFill(theme: .flat), fill)
+        let card = GlassGround.card.controlFill(theme: .flat)
+        XCTAssertEqual(card.angle, fill.angle)
+        XCTAssertEqual(card.stops.count, fill.stops.count)
+        for (actual, original) in zip(card.stops, fill.stops) {
+            XCTAssertEqual(actual.location, original.location)
+            XCTAssertEqual(actual.color.dark, original.color.dark)
+            XCTAssertEqual(actual.color.light, GlassTokens.Color.controlOnCard.light)
+        }
     }
 
     /// On a selected row a control's label, the submit pill's and the
@@ -50,6 +69,7 @@ final class GroundContrastTests: XCTestCase {
             }
         }
         XCTAssertEqual(GlassButtonStyle.submitInk(done: true, enabled: true), GlassTokens.Color.statusOnText)
+        XCTAssertEqual(GlassButtonStyle.submitInk(done: false, enabled: false), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassKebab.ink(lit: false, ground: .selection), rowInk)
         XCTAssertEqual(GlassKebab.ink(lit: false, ground: .pane), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassKebab.ink(lit: true, ground: .pane), GlassTokens.Color.textPrimary)
@@ -87,6 +107,50 @@ final class GroundContrastTests: XCTestCase {
             XCTAssertGreaterThan(Flat.contrast(hover, menu), Flat.contrast(control, menu), theme)
             for fill in [control, hover] {
                 XCTAssertGreaterThanOrEqual(Flat.contrast(Flat.over(fill, text), fill), 4.5, theme)
+            }
+        }
+    }
+
+    /// A control on a card (Private AI's install buttons, Settings' Refresh)
+    /// stands out from the card in Light, more than the control fill did,
+    /// and under the pointer more again; Dark keeps its control fill and
+    /// hover. Its label clears 4.5:1 on it in both.
+    func test_aControlOnACardStandsOut() throws {
+        for theme in Self.themes {
+            let panes = [
+                ("desktop", try Flat.grounds(theme)[0].1),
+                ("opaque", try Flat.colour("paneOpaque", theme: theme).rgb),
+                ("settings", try Flat.colour("settingsGround", theme: theme).rgb),
+            ]
+            for (backing, pane) in panes {
+                for outer in ["cardFill", "cardFillQuiet"] {
+                    let card = Flat.over(pane, try Flat.gradientMax(outer, theme: theme))
+                    let control = Flat.over(card, try theme == "flatLight"
+                        ? Flat.colour("controlOnCard", theme: theme) : Flat.gradientMax("controlFill", theme: theme))
+                    let hover = Flat.over(card, try Flat.colour(
+                        theme == "flatLight" ? "controlOnCardHover" : "controlHover", theme: theme))
+                    XCTAssertGreaterThan(Flat.contrast(hover, card), Flat.contrast(control, card), "\(theme) \(outer)")
+                    for fill in [control, hover] {
+                        for ink in ["textPrimary", "textSecondary", "destructiveText", "statusOnText"] {
+                            let text = try Flat.colour(ink, theme: theme)
+                            XCTAssertGreaterThanOrEqual(Flat.contrast(Flat.over(fill, text), fill), 4.5,
+                                                        "\(theme) \(outer) \(ink)")
+                        }
+                        // Disabled submit uses statusOff plus disabledSubmit opacity;
+                        // disabled labels are exempt from WCAG's active-text floor.
+                        let disabled = try Flat.colour("statusOff", theme: theme)
+                        let dim = GlassTokens.Opacity.disabledSubmit
+                        let dimmedFill = Flat.over(card, Flat.RGBA(rgb: fill, alpha: dim))
+                        let dimmedInk = Flat.over(card, Flat.RGBA(rgb: Flat.over(fill, disabled), alpha: dim))
+                        XCTAssertGreaterThan(Flat.contrast(dimmedInk, dimmedFill), 1,
+                                             "\(theme) \(outer) disabled submit remains distinguishable")
+                    }
+                    if theme == "flatLight", backing != "desktop" {
+                        let well = Flat.over(card, try Flat.gradientMax("controlFill", theme: theme))
+                        XCTAssertGreaterThanOrEqual(Flat.contrast(control, card), 1.15, "\(theme) \(outer)")
+                        XCTAssertGreaterThan(Flat.contrast(control, card), Flat.contrast(well, card) + 0.05, "\(theme) \(outer)")
+                    }
+                }
             }
         }
     }

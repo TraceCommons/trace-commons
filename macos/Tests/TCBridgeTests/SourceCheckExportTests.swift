@@ -37,10 +37,11 @@ final class SourceCheckExportTests: XCTestCase {
             "Claude Code traces read from the usual place")
         XCTAssertEqual(
             line(TCSourceChecks.claude, "off"),
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed")
+            // Owner dropped ". Previously queued traces are not removed" 2026-11-04 (Settings copy pass 2, P72).
+            "Claude Code marked not used, so nothing is opened for it")
         XCTAssertEqual(
             line(TCSourceChecks.codex, "off"),
-            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed")
+            "Codex marked not used, so nothing is opened for it")
     }
 
     /// No mode's sentence contains another's. "Private" is a substring of
@@ -99,7 +100,9 @@ extension SourceCheckExportTests {
             let unset = try XCTUnwrap(TCSourceChecks.checkLine(tool: tool.key, sourceMode: "unset"))
             XCTAssertEqual(unset.contains("read from the usual place"), tool.unsetScansConventional)
             let off = try XCTUnwrap(TCSourceChecks.checkLine(tool: tool.key, sourceMode: "off"))
-            XCTAssertTrue(off.contains("Previously queued traces are not removed"))
+            // Owner dropped "Previously queued traces are not removed" 2026-11-04 (Settings copy pass 2,
+            // P71, P72); the explanation below still says the queue is kept.
+            XCTAssertTrue(off.hasSuffix("turned off") || off.hasSuffix("marked not used, so nothing is opened for it"), off)
         }
         XCTAssertTrue(copy.explanation.contains("does not remove traces already queued"))
         XCTAssertTrue(copy.consentSaveFailed.contains("Couldn't confirm"))
@@ -112,11 +115,11 @@ extension SourceCheckExportTests {
         let copy = try XCTUnwrap(TCSourceChecks.settingsCopy())
         let evidence = try XCTUnwrap(copy.evidence)
         XCTAssertEqual(evidence.missing, "Not found on this machine")
-        XCTAssertEqual(evidence.empty, "Found, but holding no traces yet")
+        XCTAssertEqual(evidence.empty, "Found, no traces yet")
         XCTAssertEqual(evidence.countOne, "1 trace")
         XCTAssertEqual(evidence.count, "{count} traces")
         XCTAssertEqual(evidence.mostRecent, "{traces}, most recent {age}")
-        XCTAssertEqual(evidence.relocated, "{evidence} (moved here by an environment variable)")
+        XCTAssertEqual(evidence.relocated, "{evidence} (set by an environment variable)")
         XCTAssertEqual(
             [evidence.ageJustNow, evidence.ageMinutes, evidence.ageHour, evidence.ageHours,
              evidence.ageYesterday, evidence.ageDays],

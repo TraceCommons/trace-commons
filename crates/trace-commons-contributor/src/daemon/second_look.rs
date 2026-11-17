@@ -42,6 +42,17 @@
 //! must treat `NotYetScrubbed` as undecided and scrub first. An empty reason
 //! list for an unscrubbed session means "no reason known yet", not "fine".
 //!
+//! # On a device with a redaction witness
+//!
+//! When a redaction witness is configured, every session goes through it
+//! (and its privacy model) before it is sent, and its verdict holds a
+//! `high` session for a person (`submit::verdict_allows_unattended`). That
+//! is the stronger check, so [`RedactionWitness::Present`] leaves
+//! [`REASON_NOTHING_MATCHED`] out of [`second_look_reasons`]: it neither
+//! holds an unattended session nor is published as a reason. The other two
+//! reasons, and the `NotYetScrubbed` hold, are the same either way.
+//! Owner decision, 2026-11-05.
+//!
 //! Labels and counts only: nothing in this module keeps trace content.
 
 use serde::{Deserialize, Serialize};
@@ -75,6 +86,36 @@ pub const PATH_FAMILIES: &[&str] = &["local_path"];
 pub const SCRUB_NOT_YET_SCRUBBED: &str = "not-yet-scrubbed";
 /// Wire value of [`Scrub::Scrubbed`].
 pub const SCRUB_SCRUBBED: &str = "scrubbed";
+
+/// Whether a redaction witness checks a session before it is sent.
+///
+/// The hold reads it off the envelope about to be sent (`Present` only for
+/// a witnessed envelope); the published fields read it off the device's
+/// configuration. Anything unclear is `Absent`, which keeps every reason:
+/// this fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionWitness {
+    /// A witness checks the bytes before they are sent.
+    Present,
+    /// No witness, or not known to be one: the local scrub is the only check.
+    Absent,
+}
+
+impl RedactionWitness {
+    /// `Present` when `present`, else `Absent`.
+    pub fn from_present(present: bool) -> Self {
+        if present {
+            RedactionWitness::Present
+        } else {
+            RedactionWitness::Absent
+        }
+    }
+
+    /// `Present` only for a readable config that names a witness.
+    pub fn of_config(cfg: Option<&crate::config::ContributorConfig>) -> Self {
+        Self::from_present(cfg.is_some_and(|cfg| cfg.witness.is_some()))
+    }
+}
 
 /// What one scrubbed build of a session says. Counts only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +205,8 @@ impl Scrub {
 /// no reason is known.
 ///
 /// - `Scrubbed` with `content_marks == 0` yields [`REASON_NOTHING_MATCHED`]
-///   (path removals alone are not a match).
+///   (path removals alone are not a match), unless `witness` is
+///   [`RedactionWitness::Present`].
 /// - `Scrubbed` with `unsure_spans > 0` or `unsure_unreadable` yields
 ///   [`REASON_LOOKS_UNSURE`].
 /// - `subagents_dropped > 0` yields [`REASON_TRIMMED_TO_FIT`], scrubbed or
@@ -176,10 +218,14 @@ impl Scrub {
 /// that would be sent; a caller that would otherwise let the session move on
 /// its own (the Scrub check's Automatic mode) must scrub it first and ask
 /// again.
-pub fn second_look_reasons(scrub: Scrub, subagents_dropped: u32) -> Vec<&'static str> {
+pub fn second_look_reasons(
+    scrub: Scrub,
+    subagents_dropped: u32,
+    witness: RedactionWitness,
+) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if let Scrub::Scrubbed(counts) = scrub {
-        if counts.content_marks == 0 {
+        if counts.content_marks == 0 && witness == RedactionWitness::Absent {
             reasons.push(REASON_NOTHING_MATCHED);
         }
         if counts.unsure_spans > 0 || counts.unsure_unreadable {
@@ -201,7 +247,12 @@ pub fn second_look_reasons(scrub: Scrub, subagents_dropped: u32) -> Vec<&'static
 ///
 /// One writer, so `entry_value` and the preview summaries cannot publish the
 /// state under two spellings.
-pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_dropped: u32) {
+pub fn insert_fields(
+    value: &mut serde_json::Value,
+    scrub: Scrub,
+    subagents_dropped: u32,
+    witness: RedactionWitness,
+) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
@@ -217,7 +268,7 @@ pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_drop
             serde_json::Value::from(counts.unsure_spans),
         );
     }
-    let reasons = second_look_reasons(scrub, subagents_dropped);
+    let reasons = second_look_reasons(scrub, subagents_dropped, witness);
     // Total, never `filter_map`: a reason with no sentence still gets a
     // line, so `second_look_lines[i]` is always `second_look[i]`'s.
     let lines: Vec<&'static str> = reasons
@@ -261,7 +312,8 @@ pub const REASON_SCRUB_CHECK_MANUAL: &str = "scrub-check-manual";
 /// go.
 ///
 /// - Manual: always held, whatever the scrub says.
-/// - Automatic: held when [`second_look_reasons`] names any reason, **and
+/// - Automatic: held when [`second_look_reasons`] names any reason under
+///   `witness` (so not for nothing matched on a witnessed envelope), **and
 ///   held when `scrub` is [`Scrub::NotYetScrubbed`]**. An empty reason list
 ///   is an all-clear only for a scrubbed session; a caller that has not
 ///   scrubbed yet gets a hold, never a pass.
@@ -273,12 +325,13 @@ pub fn unattended_hold(
     check: super::settings::ScrubCheck,
     scrub: Scrub,
     subagents_dropped: u32,
+    witness: RedactionWitness,
 ) -> Option<&'static str> {
     match check {
         super::settings::ScrubCheck::Manual => Some(REASON_SCRUB_CHECK_MANUAL),
         super::settings::ScrubCheck::Automatic => {
             if scrub == Scrub::NotYetScrubbed
-                || !second_look_reasons(scrub, subagents_dropped).is_empty()
+                || !second_look_reasons(scrub, subagents_dropped, witness).is_empty()
             {
                 Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
             } else {
@@ -293,12 +346,15 @@ mod tests {
     use super::*;
     use crate::daemon::settings::ScrubCheck;
 
+    const NONE: RedactionWitness = RedactionWitness::Absent;
+    const WITNESS: RedactionWitness = RedactionWitness::Present;
+
     #[test]
     fn manual_holds_everything_whatever_the_scrub_says() {
         for scrub in [Scrub::NotYetScrubbed, counts(0, 0, 0), counts(7, 7, 0)] {
             for dropped in [0, 2] {
                 assert_eq!(
-                    unattended_hold(ScrubCheck::Manual, scrub, dropped),
+                    unattended_hold(ScrubCheck::Manual, scrub, dropped, NONE),
                     Some(REASON_SCRUB_CHECK_MANUAL)
                 );
             }
@@ -309,17 +365,17 @@ mod tests {
     fn automatic_holds_what_is_worth_a_second_look_and_passes_a_clean_scrub() {
         let auto = ScrubCheck::Automatic;
         assert_eq!(
-            unattended_hold(auto, counts(0, 0, 0), 0),
+            unattended_hold(auto, counts(0, 0, 0), 0, NONE),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
             "nothing matched"
         );
         assert_eq!(
-            unattended_hold(auto, counts(3, 0, 0), 0),
+            unattended_hold(auto, counts(3, 0, 0), 0, NONE),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
             "nothing matched: only paths were removed"
         );
         assert_eq!(
-            unattended_hold(auto, counts(4, 4, 1), 0),
+            unattended_hold(auto, counts(4, 4, 1), 0, NONE),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
             "looks unsure"
         );
@@ -332,27 +388,135 @@ mod tests {
                     unsure_spans: 0,
                     unsure_unreadable: true,
                 }),
-                0
+                0,
+                NONE
             ),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
             "an unreadable body looks unsure"
         );
         assert_eq!(
-            unattended_hold(auto, counts(4, 4, 0), 1),
+            unattended_hold(auto, counts(4, 4, 0), 1, NONE),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
             "trimmed to fit"
         );
-        assert_eq!(unattended_hold(auto, counts(4, 4, 0), 0), None);
+        assert_eq!(unattended_hold(auto, counts(4, 4, 0), 0, NONE), None);
     }
 
     /// No reasons for a session nobody scrubbed means nobody has looked,
     /// not that it is fine.
     #[test]
     fn automatic_never_passes_a_session_nobody_has_scrubbed() {
-        assert!(second_look_reasons(Scrub::NotYetScrubbed, 0).is_empty());
+        assert!(second_look_reasons(Scrub::NotYetScrubbed, 0, NONE).is_empty());
         assert_eq!(
-            unattended_hold(ScrubCheck::Automatic, Scrub::NotYetScrubbed, 0),
+            unattended_hold(ScrubCheck::Automatic, Scrub::NotYetScrubbed, 0, NONE),
             Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+    }
+
+    /// On a witnessed envelope, nothing matched no longer holds: the witness
+    /// is the stronger check, and its verdict gate still applies.
+    #[test]
+    fn a_witnessed_session_where_nothing_matched_goes_unattended() {
+        let auto = ScrubCheck::Automatic;
+        assert_eq!(unattended_hold(auto, counts(0, 0, 0), 0, WITNESS), None);
+        assert_eq!(unattended_hold(auto, counts(3, 0, 0), 0, WITNESS), None);
+        assert_eq!(
+            unattended_hold(auto, counts(0, 0, 0), 0, NONE),
+            Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
+            "without a witness nothing matched still holds"
+        );
+    }
+
+    /// Looks unsure and trimmed to fit hold in every configuration, and so
+    /// does a session nobody has scrubbed. Manual holds everything.
+    #[test]
+    fn a_witness_changes_only_nothing_matched() {
+        let auto = ScrubCheck::Automatic;
+        let unreadable = Scrub::Scrubbed(ScrubCounts {
+            marks: 0,
+            content_marks: 0,
+            unsure_spans: 0,
+            unsure_unreadable: true,
+        });
+        for witness in [NONE, WITNESS] {
+            for (scrub, dropped) in [
+                (counts(0, 0, 1), 0),
+                (counts(4, 4, 1), 0),
+                (unreadable, 0),
+                (counts(0, 0, 0), 1),
+                (counts(4, 4, 0), 2),
+                (Scrub::NotYetScrubbed, 0),
+            ] {
+                assert_eq!(
+                    unattended_hold(auto, scrub, dropped, witness),
+                    Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
+                    "{scrub:?} dropped={dropped} witness={witness:?}"
+                );
+                assert_eq!(
+                    unattended_hold(ScrubCheck::Manual, scrub, dropped, witness),
+                    Some(REASON_SCRUB_CHECK_MANUAL)
+                );
+            }
+        }
+        assert_eq!(
+            second_look_reasons(counts(0, 0, 2), 1, WITNESS),
+            vec![REASON_LOOKS_UNSURE, REASON_TRIMMED_TO_FIT]
+        );
+    }
+
+    /// Only a config that names a witness is one; an unreadable config is
+    /// treated as none, which keeps every reason.
+    #[test]
+    fn only_a_config_naming_a_witness_counts_as_one() {
+        assert_eq!(RedactionWitness::of_config(None), NONE);
+        let mut json = serde_json::json!({
+            "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "upload",
+            "tenant_id": "tenant",
+            "instance_id": "",
+            "user_subject": "device",
+            "device_key_id": "device",
+            "consent_scopes": ["debugging_evaluation"],
+        });
+        let plain: crate::config::ContributorConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(RedactionWitness::of_config(Some(&plain)), NONE);
+        json["witness"] = serde_json::json!({
+            "url": "https://witness.example",
+            "signing_address": format!("0x{}", "ab".repeat(20)),
+            "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+            "admission_evidence": false,
+        });
+        let witnessed: crate::config::ContributorConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(RedactionWitness::of_config(Some(&witnessed)), WITNESS);
+    }
+
+    /// The published reasons follow the same rule, and the lines stay
+    /// index-for-index with them.
+    #[test]
+    fn a_witness_device_does_not_publish_nothing_matched() {
+        let mut value = serde_json::json!({});
+        insert_fields(&mut value, counts(0, 0, 0), 0, WITNESS);
+        assert_eq!(value["second_look"], serde_json::json!([]));
+        assert_eq!(value["second_look_lines"], serde_json::json!([]));
+        assert_eq!(
+            value["content_marks"], 0,
+            "the count itself is still published"
+        );
+
+        let mut both = serde_json::json!({});
+        insert_fields(&mut both, counts(0, 0, 1), 1, WITNESS);
+        assert_eq!(
+            both["second_look"],
+            serde_json::json!([REASON_LOOKS_UNSURE, REASON_TRIMMED_TO_FIT])
+        );
+        assert_eq!(
+            both["second_look_lines"],
+            serde_json::json!([
+                crate::preview_copy::second_look_line(REASON_LOOKS_UNSURE).unwrap(),
+                crate::preview_copy::second_look_line(REASON_TRIMMED_TO_FIT).unwrap(),
+            ])
         );
     }
 
@@ -374,10 +538,10 @@ mod tests {
     #[test]
     fn zero_marks_is_nothing_matched() {
         assert_eq!(
-            second_look_reasons(counts(0, 0, 0), 0),
+            second_look_reasons(counts(0, 0, 0), 0, NONE),
             vec![REASON_NOTHING_MATCHED]
         );
-        assert!(second_look_reasons(counts(7, 7, 0), 0).is_empty());
+        assert!(second_look_reasons(counts(7, 7, 0), 0, NONE).is_empty());
     }
 
     #[test]
@@ -386,7 +550,7 @@ mod tests {
         assert_eq!(only_paths.marks, 12, "paths still show as marks");
         assert_eq!(only_paths.content_marks, 0);
         assert_eq!(
-            second_look_reasons(Scrub::Scrubbed(only_paths), 0),
+            second_look_reasons(Scrub::Scrubbed(only_paths), 0, NONE),
             vec![REASON_NOTHING_MATCHED]
         );
         let with_email = ScrubCounts::of(
@@ -394,13 +558,13 @@ mod tests {
             CLEAN_BODY,
         );
         assert_eq!(with_email.content_marks, 1);
-        assert!(second_look_reasons(Scrub::Scrubbed(with_email), 0).is_empty());
+        assert!(second_look_reasons(Scrub::Scrubbed(with_email), 0, NONE).is_empty());
     }
 
     #[test]
     fn an_unsure_span_or_an_unreadable_body_is_looks_unsure() {
         assert_eq!(
-            second_look_reasons(counts(3, 3, 1), 0),
+            second_look_reasons(counts(3, 3, 1), 0, NONE),
             vec![REASON_LOOKS_UNSURE]
         );
         let key = ScrubCounts::of(
@@ -409,13 +573,13 @@ mod tests {
         );
         assert_eq!(key.unsure_spans, 1);
         assert_eq!(
-            second_look_reasons(Scrub::Scrubbed(key), 0),
+            second_look_reasons(Scrub::Scrubbed(key), 0, NONE),
             vec![REASON_LOOKS_UNSURE]
         );
         let unreadable = ScrubCounts::of(&map(&[("private_email", 1)]), "[\"unterminated");
         assert!(unreadable.unsure_unreadable);
         assert_eq!(
-            second_look_reasons(Scrub::Scrubbed(unreadable), 0),
+            second_look_reasons(Scrub::Scrubbed(unreadable), 0, NONE),
             vec![REASON_LOOKS_UNSURE]
         );
     }
@@ -423,15 +587,15 @@ mod tests {
     #[test]
     fn a_trimmed_session_is_trimmed_to_fit_scrubbed_or_not() {
         assert_eq!(
-            second_look_reasons(counts(3, 3, 0), 1),
+            second_look_reasons(counts(3, 3, 0), 1, NONE),
             vec![REASON_TRIMMED_TO_FIT]
         );
         assert_eq!(
-            second_look_reasons(Scrub::NotYetScrubbed, 2),
+            second_look_reasons(Scrub::NotYetScrubbed, 2, NONE),
             vec![REASON_TRIMMED_TO_FIT]
         );
         assert_eq!(
-            second_look_reasons(counts(0, 0, 2), 1),
+            second_look_reasons(counts(0, 0, 2), 1, NONE),
             SECOND_LOOK_REASONS.to_vec(),
             "every reason, in the published order"
         );
@@ -439,10 +603,10 @@ mod tests {
 
     #[test]
     fn not_yet_scrubbed_is_never_reported_as_zero_marks() {
-        assert!(second_look_reasons(Scrub::NotYetScrubbed, 0).is_empty());
+        assert!(second_look_reasons(Scrub::NotYetScrubbed, 0, NONE).is_empty());
 
         let mut unscrubbed = serde_json::json!({});
-        insert_fields(&mut unscrubbed, Scrub::NotYetScrubbed, 0);
+        insert_fields(&mut unscrubbed, Scrub::NotYetScrubbed, 0, NONE);
         assert_eq!(unscrubbed["scrub"], SCRUB_NOT_YET_SCRUBBED);
         for key in ["marks", "content_marks", "unsure_spans"] {
             assert!(
@@ -452,7 +616,7 @@ mod tests {
         }
 
         let mut clean = serde_json::json!({});
-        insert_fields(&mut clean, counts(0, 0, 0), 0);
+        insert_fields(&mut clean, counts(0, 0, 0), 0, NONE);
         assert_eq!(clean["scrub"], SCRUB_SCRUBBED);
         assert_eq!(clean["marks"], 0);
         assert_eq!(clean["second_look"][0], REASON_NOTHING_MATCHED);
@@ -467,7 +631,7 @@ mod tests {
         use crate::preview_copy::second_look_line;
 
         let mut everything = serde_json::json!({});
-        insert_fields(&mut everything, counts(0, 0, 2), 1);
+        insert_fields(&mut everything, counts(0, 0, 2), 1, NONE);
         assert_eq!(
             everything["second_look"],
             serde_json::json!(SECOND_LOOK_REASONS)
@@ -487,7 +651,7 @@ mod tests {
         // An all-clear scrub has no reasons, and so no lines either -- never
         // a placeholder sentence for a condition that is not present.
         let mut clean = serde_json::json!({});
-        insert_fields(&mut clean, counts(7, 7, 0), 0);
+        insert_fields(&mut clean, counts(7, 7, 0), 0, NONE);
         assert!(clean["second_look"].as_array().unwrap().is_empty());
         assert!(clean["second_look_lines"].as_array().unwrap().is_empty());
     }
@@ -506,7 +670,7 @@ mod tests {
             );
         }
         for (content, unsure, dropped) in [(0, 0, 0), (0, 2, 1), (3, 0, 0), (3, 1, 2)] {
-            for reason in second_look_reasons(counts(content, content, unsure), dropped) {
+            for reason in second_look_reasons(counts(content, content, unsure), dropped, NONE) {
                 assert!(SECOND_LOOK_REASONS.contains(&reason), "{reason}");
             }
         }

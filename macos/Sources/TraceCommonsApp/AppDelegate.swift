@@ -30,17 +30,32 @@ import TCShellCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var compute: ComputeModel?
-    /// Read at quit time for one sentence, and for nothing else.
-    ///
-    /// With the listener inside this process, quitting stops answering
-    /// model calls as well as stopping the watcher, and the confirmation's
-    /// existing sentence does not cover that. The extra sentence is the
-    /// Rust's, not this file's -- the rest of that dialog is Swift-authored
-    /// and this line deliberately is not.
+    /// Read at quit time for one fact: whether quitting stops Private AI.
     var model: AppModel?
     private let quitCoordinator = QuitCoordinator()
+    private let terminationSignal = TerminationSignal()
+    /// Set by SIGTERM just before it asks to terminate, and consumed by the
+    /// next `applicationShouldTerminate`. Whoever sent the signal has
+    /// already decided, so there is no one to ask.
+    private var quitRequestedBySignal = false
     private var openedForInitialActivation = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // SIGTERM takes the same path as Quit, minus the confirmation:
+        // compute stop, then willTerminate's daemon stop. See
+        // `TerminationSignal`.
+        terminationSignal.install { [weak self] in
+            self?.quitRequestedBySignal = true
+            NSApp.terminate(nil)
+        }
+
+        // The launch's open-application event is current here (not yet in
+        // willFinishLaunching): a login-item launch says so in it, and
+        // stays in the menu bar (`LaunchRouting.launchKind`).
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        LaunchRouting.launchedAsLoginItem = LaunchRouting.isLoginItemLaunch(
+            eventClass: event?.eventClass, eventID: event?.eventID,
+            propData: event?.paramDescriptor(forKeyword: LaunchRouting.keyAEPropDataCode)?.enumCodeValue)
+
         // Explicit rather than inherited. Removing LSUIElement already makes
         // this the default, but the default is invisible in the source: a
         // reader of this file cannot see the plist, and the app's shape is
@@ -67,22 +82,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Every quit path, funnelled through the one confirmation.
     ///
-    /// The alert is not decoration. This app *is* the daemon -- the watcher
-    /// runs in-process -- so quitting it stops the thing the contributor
-    /// installed it for, which is not what "close the window" means anywhere
-    /// else on this platform.
+    /// It asks only when quitting would stop compute or Private AI, in one
+    /// sentence saying which; any other quit proceeds at once (owner,
+    /// 2026-11-12). The watcher stopping is not a reason to ask.
+    ///
+    /// A quit asked for by SIGTERM skips the confirmation and nothing else:
+    /// a compute stop that does not confirm still keeps the app running.
     ///
     /// Confirmation is synchronous; compute stop runs on its background queue.
     /// Every pending request gets a reply, including the outer deadline, which
     /// keeps the app running if worker shutdown has not returned safe evidence.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let bySignal = quitRequestedBySignal
+        quitRequestedBySignal = false
         let confirmed =
-            quitCoordinator.isStopping
+            bySignal
+            || quitCoordinator.isStopping
             || QuitConfirmation.granted(
-                prompt: model?.quitPrompt
-                    ?? QuitPrompt.decode(fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()),
-                computeDetail: compute?.copy?.quitDetail,
-                privateInferenceDetail: model?.privateInferenceQuitDetail
+                stopsCompute: QuitPrompt.stopsCompute(compute?.snapshot),
+                stopsPrivateAI: model?.privateInferenceQuitStops ?? false
             )
         let decision = quitCoordinator.request(confirmed: confirmed, deadlineSeconds: 17, stop: { [weak self] in
             guard let compute = self?.compute else { return true }
@@ -167,31 +185,27 @@ final class PendingInvite: ObservableObject {
 
 /// The quit confirmation, shared by every path that can terminate the app.
 enum QuitConfirmation {
-    /// Shows the alert and answers whether to proceed.
+    /// Answers whether to proceed, asking first only when quitting would
+    /// stop something live.
     ///
-    /// The heading, the body and both buttons are the core's
-    /// (`quit_copy::quit_prompt`), chosen for whether this process hosts the
-    /// watcher or is attached to one: the hosting sentence this alert used to
-    /// hard-code is false for an attached app, whose watcher keeps sending.
-    /// Without a prompt the quit is not confirmed, because it is not
-    /// confirmable before the true sentence for this process is shown.
+    /// The heading, the one-sentence body and both buttons are the core's
+    /// (`quit_copy::quit_prompt`). A prompt that cannot be read while
+    /// something is live refuses the quit.
     @MainActor
-    static func granted(
-        prompt: QuitPrompt?,
-        computeDetail: String? = nil,
-        privateInferenceDetail: String? = nil
-    ) -> Bool {
-        guard let prompt else { return false }
+    static func granted(stopsCompute: Bool, stopsPrivateAI: Bool) -> Bool {
+        let prompt: QuitPrompt
+        switch QuitPrompt.decision(
+            stopsCompute: stopsCompute, stopsPrivateAI: stopsPrivateAI,
+            promptJSON: TCCoreCopy.quitReasonPromptJSON
+        ) {
+        case .quitNow: return true
+        case .refuse: return false
+        case .ask(let asked): prompt = asked
+        }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = prompt.title
         alert.informativeText = prompt.body
-        if let computeDetail { alert.informativeText += "\n\n" + computeDetail }
-        // Appended only when the switch is on. A contributor who never
-        // turned it on should not be warned about losing it.
-        if let privateInferenceDetail {
-            alert.informativeText += "\n\n" + privateInferenceDetail
-        }
         alert.addButton(withTitle: prompt.confirm)
         alert.addButton(withTitle: prompt.cancel)
         return alert.runModal() == .alertFirstButtonReturn

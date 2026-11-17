@@ -124,12 +124,24 @@ struct NotificationsSection: View {
             // From Watching (D16): how often the digest may notify, and
             // whether this app or the daemon draws notifications. Read only,
             // from the daemon's settings.
+            // Both lines were cut by the owner 2026-11-04 (Settings copy
+            // pass 2, P235, P236, P244): the digest switch's own help says
+            // the interval. An empty line draws nothing, and with neither
+            // there is no rule either.
             if let settings = model.daemonSettings {
-                GlassHairline()
-                Text(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))
-                    .glassType(GlassTokens.TypeScale.body)
-                SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere,
-                                 isOn: !settings.localNotifications)
+                let interval = SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600)
+                let renderedHere = SettingsLegacyWords.notificationsRenderedHere
+                if !interval.isEmpty || !renderedHere.isEmpty {
+                    GlassHairline()
+                }
+                if !interval.isEmpty {
+                    Text(interval)
+                        .glassType(GlassTokens.TypeScale.body)
+                }
+                if !renderedHere.isEmpty {
+                    SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere,
+                                     isOn: !settings.localNotifications)
+                }
             }
         }
     }

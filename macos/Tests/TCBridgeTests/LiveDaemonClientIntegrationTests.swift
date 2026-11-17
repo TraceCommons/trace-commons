@@ -36,6 +36,9 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
     private let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
 
     private func startDaemon() throws -> TCDaemon {
+        // The daemon reads the published terms on its first tick; a test
+        // build reads none instead (debug-only, `terms.rs`).
+        setenv("TRACE_COMMONS_TERMS_DOCUMENT", "none", 1)
         // Short enough for the daemon's Unix socket path on macOS.
         let directory = URL(fileURLWithPath: "/private/tmp/tc-k1-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

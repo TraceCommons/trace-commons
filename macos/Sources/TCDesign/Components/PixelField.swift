@@ -2,7 +2,8 @@ import SwiftUI
 
 /// A pixelated, dithered grid of light that grows from a card's bottom
 /// trailing corner toward its top leading one (owner, 2026-11-02: tried on
-/// the Private AI tab's getting-started card).
+/// the Private AI tab's getting-started card), or, as `.waves`, swells along
+/// its bottom edge (Ron, 2026-11-05: Home's card, the same grid told apart).
 ///
 /// Square cells on a fixed pitch with a one-point gap, so it reads as a
 /// grid. Which cells are lit is an ordered dither (a 4x4 Bayer matrix) of a
@@ -16,7 +17,16 @@ import SwiftUI
 /// its window cannot be seen (`GlassAnimationTimeline`), and stands still
 /// under Reduce Motion. Every frame is a function of the time alone.
 public struct GlassPixelField: View {
+    /// The shape the light takes on the grid.
+    public enum Pattern: Sendable {
+        /// Strongest in the bottom trailing corner, a ripple running out of it.
+        case corner
+        /// Swells rolling along the bottom edge, gone toward the leading side.
+        case waves
+    }
+
     private let palette: [GlassRGBA]
+    private let pattern: Pattern
     private let maxOpacity: Double
     private let cell: CGFloat
     private let reach: CGSize
@@ -26,10 +36,11 @@ public struct GlassPixelField: View {
     /// brightest cell; `cell` the grid's pitch; `reach` how far across and
     /// up the card the field reaches, as a fraction of its width and height.
     public init(
-        palette: [GlassRGBA], maxOpacity: Double = 0.34, cell: CGFloat = 6,
+        palette: [GlassRGBA], pattern: Pattern = .corner, maxOpacity: Double = 0.34, cell: CGFloat = 6,
         reach: CGSize = CGSize(width: 0.62, height: 1.05)
     ) {
         self.palette = palette
+        self.pattern = pattern
         self.maxOpacity = maxOpacity
         self.cell = cell
         self.reach = reach
@@ -45,7 +56,7 @@ public struct GlassPixelField: View {
                 Self.draw(
                     in: &context, size: size,
                     time: reduceMotion ? 0 : date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3600),
-                    palette: palette, maxOpacity: maxOpacity, cell: cell, reach: reach)
+                    palette: palette, pattern: pattern, maxOpacity: maxOpacity, cell: cell, reach: reach)
             }
         }
         .allowsHitTesting(false)
@@ -81,6 +92,21 @@ public struct GlassPixelField: View {
         return smooth * (0.72 + 0.28 * ripple)
     }
 
+    /// The light at a point of the `.waves` pattern, 0 to 1: nothing above
+    /// two rolling swells, rising with depth below them, and faded out toward
+    /// the leading side so it stays clear of a card's text.
+    static func waveLevel(x: CGFloat, y: CGFloat, size: CGSize, time: Double) -> Double {
+        guard size.width > 0, size.height > 0 else { return 0 }
+        let u = Double(x / size.width)
+        let v = Double(y / size.height)
+        let across = min(max((u - 0.34) / 0.5, 0), 1)
+        let fade = across * across * (3 - 2 * across)
+        let surface = 0.6 + 0.13 * sin(u * 7 - time * 0.9) + 0.06 * sin(u * 15 + time * 0.55)
+        let depth = v - surface
+        guard depth > 0 else { return 0 }
+        return fade * (0.3 + 0.7 * min(depth / 0.3, 1))
+    }
+
     /// Which of `count` colours a cell takes at `time`: a slow drift across
     /// the grid, so neighbouring cells share a colour and the colours move.
     static func shade(column: Int, row: Int, time: Double, count: Int) -> Int {
@@ -95,7 +121,7 @@ public struct GlassPixelField: View {
     /// is a handful of fills however many cells are lit.
     static func draw(
         in context: inout GraphicsContext, size: CGSize, time: Double, palette: [GlassRGBA],
-        maxOpacity: Double, cell: CGFloat, reach: CGSize
+        pattern: Pattern = .corner, maxOpacity: Double, cell: CGFloat, reach: CGSize
     ) {
         guard !palette.isEmpty, cell >= 2, size.width > 0, size.height > 0 else { return }
         let columns = Int((size.width / cell).rounded(.up))
@@ -109,8 +135,14 @@ public struct GlassPixelField: View {
             let y = size.height - CGFloat(rows - row) * cell
             for column in 0..<columns {
                 let x = size.width - CGFloat(columns - column) * cell
-                let distance = Self.distance(x: x + cell / 2, y: y + cell / 2, size: size, reach: reach)
-                let level = Self.level(distance: distance, time: time)
+                let level: Double
+                switch pattern {
+                case .corner:
+                    let distance = Self.distance(x: x + cell / 2, y: y + cell / 2, size: size, reach: reach)
+                    level = Self.level(distance: distance, time: time)
+                case .waves:
+                    level = Self.waveLevel(x: x + cell / 2, y: y + cell / 2, size: size, time: time)
+                }
                 guard level > Self.threshold(column: column, row: row) else { continue }
                 let colour = Self.shade(column: column, row: row, time: time, count: palette.count)
                 let bright = level > 0.5 ? 1 : 0

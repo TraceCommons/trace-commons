@@ -48,6 +48,13 @@ public class MonitorShellCopyTests
     /// core tomorrow.
     /// </summary>
     [Theory]
+    // The words are "Pause" and "Resume" since 2026-11-04 (Settings copy pass 2,
+    // P82, P83); the quoted forms catch a typed literal without matching
+    // identifiers such as MenuIdResume.
+    [InlineData("TraceCommons.App/MainWindow.xaml", "\"Pause\"")]
+    [InlineData("TraceCommons.App/MainWindow.xaml", "\"Resume\"")]
+    [InlineData("TraceCommons.App/TrayIcon.cs", "\"Pause\"")]
+    [InlineData("TraceCommons.App/TrayIcon.cs", "\"Resume\"")]
     [InlineData("TraceCommons.App/MainWindow.xaml", "Pause watcher")]
     [InlineData("TraceCommons.App/MainWindow.xaml", "Resume watcher")]
     [InlineData("TraceCommons.App/TrayIcon.cs", "Pause watcher")]

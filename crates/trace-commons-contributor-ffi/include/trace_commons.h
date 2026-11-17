@@ -347,6 +347,8 @@ char*       tc_settings_ranges_json(void);
  * string; free it with tc_string_free. NULL only on a caught panic.
  */
 char*       tc_build_channel_json(void);
+/* Immutable feature profile; free with tc_string_free. */
+char*       tc_feature_profile_json(void);
 
 /* The command-line tool's state for the app at bundle_path, as a JSON
  * object:
@@ -1401,13 +1403,39 @@ char*       tc_near_ai_balance_limit_line(int32_t present, int64_t nanos, uint8_
  * line at all. A zero is NOT that: an account that has spent nothing renders
  * "$0.00", which is true.
  *
+ * remaining_present is whether the same reading's remaining_nanos is
+ * non-null. Beside a remaining figure Spent rounds UP to the cent, so Limit,
+ * Spent and what is left add up; with none it is floored like every other
+ * amount. A spend above zero and under a cent is "less than $0.01" either
+ * way.
+ *
  * The figure is the WHOLE ACCOUNT, not this computer -- the payload's
  * balance_what says so, and it belongs beside this sentence.
  *
  * Returns an owned string; free it with tc_string_free. NULL only on a caught
  * panic.
  */
-char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_t scale);
+char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_t scale,
+                                          int32_t remaining_present);
+
+/* A credit figure as every shell draws it: tenths rounded half away from
+ * zero, whole figures whole ("48"), one decimal otherwise ("12.5"), "<0.1"
+ * above zero and under 0.05, a comma between thousands ("1,234.5"), and a
+ * dash for a value that is not finite. A shell with no figure draws its own dash and does not
+ * call this.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_credit_figure(double value);
+
+/* A count as every shell draws it beside a credit figure: a comma between
+ * thousands ("1,234").
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_count_figure(uint64_t count);
 
 /* How long ago THIS COMPUTER asked, assembled.
  *
@@ -2160,6 +2188,19 @@ char*       tc_onboarding_copy(void);
  */
 char*       tc_first_run_copy_json(void);
 
+/* The published Terms of Service, fetched from the Trace Commons site
+ * (terms::fetch_published_blocking): {"document": <TermsDocument>,
+ * "content_sha256": "<64 lowercase hex of the exact bytes served>"}. HTTPS to
+ * the document's own host only, no redirects, no credential. Needs no daemon
+ * and no state directory. Blocks up to the fetch timeouts: call it off the UI
+ * thread. Returns an OWNED string; free with tc_string_free. On failure
+ * returns NULL and, when err is non-NULL, sets *err to an OWNED label (free
+ * with tc_string_free): terms-unavailable, terms-host-refused,
+ * terms-too-large, terms-malformed, terms-schema-unknown,
+ * terms-version-invalid, terms-empty, terms-link-refused, or panic.
+ */
+char*       tc_terms_document_json(char** err);
+
 /* The first run's Traces line under the count, worded by the core
  * (first_run_copy::traces_estimate_line). `request` is a JSON object:
  * {"traces": <found>, "earns_credit": <bool>}, each optional; older shells'
@@ -2453,6 +2494,10 @@ uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void
  * freeing ctx. Clear or note the prior tc_last_error value first so a
  * leftover error is not mistaken for this one.
  */
+/* Attached handles also disable cloned reader sinks and drain active callbacks;
+ * calling from an attached callback is refused with the same context label.
+ * A refused attached unsubscribe still stops delivery to ctx, but ctx must stay
+ * valid until a retry from a plain thread succeeds. */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.
@@ -2779,13 +2824,13 @@ char*       tc_sent_traces_training_copy_json(void);
  */
 char*       tc_automatic_contribution_copy_json(const char* config_dir);
 
-/* The quit prompt true for the process holding handle (quit_copy::
- * quit_prompt): {role, title, body, confirm, cancel}. The role is read off
- * the handle: hosting for a daemon run in this process, attached for one
- * another process runs, unavailable for NULL, a handle that is not live, or
- * a stopped daemon. NULL only on a caught panic.
+/* The quit prompt for what quitting would stop (quit_copy::quit_prompt):
+ * {title, body, confirm, cancel}, body one sentence. stops_compute and
+ * stops_private_ai are boolean (0/nonzero). A shell quits without asking
+ * when both are 0 and does not call this; called that way it returns NULL.
+ * Otherwise NULL only on a caught panic, which refuses the quit.
  */
-char*       tc_quit_prompt_json(const tc_handle* handle);
+char*       tc_quit_reason_prompt_json(int32_t stops_compute, int32_t stops_private_ai);
 
 /* The withdrawal confirmation for a trace whose reach this machine cannot
  * know (withdraw::confirmation_prompt_unknown), paragraphs separated by a

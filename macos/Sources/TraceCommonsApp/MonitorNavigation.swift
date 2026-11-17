@@ -154,17 +154,60 @@ enum LaunchRouting {
         pending ?? .home(.overview)
     }
 
-    /// What the launch's own request opens (R-44). A launch is uniform
-    /// (`AppDelegate`: a login launch cannot be told from any other), so
-    /// it is quiet: an onboarded install opens nothing, and the menu-bar
-    /// item and the Dock are the way in. First run opens, activated, while
-    /// onboarding is required; the Monitor opens, without taking focus,
-    /// over a daemon that refused to start, so a watcher that is not
-    /// running is not silent. Until a running daemon's status has
-    /// answered, the launch waits: a failed read is retried by the next
-    /// status event, and is not taken as "onboarding required" for an
-    /// install that may have finished it long ago.
-    enum LaunchOpening: Equatable { case wait, nothing, firstRun, monitor }
+    /// What the launch's own request opens (R-44). A quiet launch (at
+    /// login, `open -g`, or one the person has already left) opens nothing
+    /// for an onboarded install, and the menu-bar item and the Dock are the
+    /// way in. A launch the person started and is still looking at (Finder,
+    /// the Dock, Spotlight, `open`) opens the Monitor in front
+    /// (`focusedMonitor`), so a cold launch never leaves them with only a
+    /// menu-bar item. First run opens, activated, while onboarding is
+    /// required; the Monitor opens, without taking focus, over a daemon
+    /// that refused to start, so a watcher that is not running is not
+    /// silent. Until a running daemon's status has answered, the launch
+    /// waits: a failed read is retried by the next status event, and is not
+    /// taken as "onboarding required" for an install that may have finished
+    /// it long ago.
+    enum LaunchOpening: Equatable { case wait, nothing, firstRun, monitor, focusedMonitor }
+
+    /// Who started this launch, as far as macOS lets the app tell.
+    enum LaunchKind: Equatable {
+        /// The person started it and the app is frontmost.
+        case foreground
+        /// A login item, `open -g`, or a launch the person switched away
+        /// from before the core answered: stay in the menu bar.
+        case quiet
+        /// The CLI's `--background-launch`: no window at all, first run's
+        /// included.
+        case background
+    }
+
+    /// The launch's kind. The CLI's argument wins; a login-item launch is
+    /// quiet even if macOS brings it forward; otherwise the launch is the
+    /// person's when the app is active.
+    static func launchKind(arguments: [String], launchedAsLoginItem: Bool, active: Bool) -> LaunchKind {
+        if isBackgroundLaunch(arguments) { return .background }
+        if launchedAsLoginItem { return .quiet }
+        return active ? .foreground : .quiet
+    }
+
+    /// Whether this process was started as a login item, read once by
+    /// `AppDelegate` from the launch's Apple event.
+    @MainActor static var launchedAsLoginItem = false
+
+    /// Whether the launch's open-application Apple event says macOS started
+    /// the app as a login item (`keyAELaunchedAsLogInItem` in its
+    /// `keyAEPropData`). Takes the event's codes so it is testable without
+    /// a real event.
+    static func isLoginItemLaunch(eventClass: UInt32?, eventID: UInt32?, propData: UInt32?) -> Bool {
+        eventClass == kCoreEventClassCode && eventID == kAEOpenApplicationCode && propData == keyAELaunchedAsLogInItemCode
+    }
+
+    /// The four-character codes `isLoginItemLaunch` compares, spelled here
+    /// so this file needs no Carbon import: 'aevt', 'oapp', 'prdt', 'lgit'.
+    static let kCoreEventClassCode: UInt32 = 0x6165_7674
+    static let kAEOpenApplicationCode: UInt32 = 0x6F61_7070
+    static let keyAEPropDataCode: UInt32 = 0x7072_6474
+    static let keyAELaunchedAsLogInItemCode: UInt32 = 0x6C67_6974
 
     /// The argument `near-ai login` launches the app with
     /// (`BACKGROUND_LAUNCH_ARG` in near_ai_login.rs).
@@ -175,18 +218,19 @@ enum LaunchRouting {
         arguments.dropFirst().contains(backgroundLaunchArgument)
     }
 
-    /// A `background` launch opens nothing at all: the CLI started the app
+    /// A `.background` launch opens nothing at all: the CLI started the app
     /// to answer its sign-in (`near_ai_login::hand_off_to_app`), and a
     /// window, first run's included, would take the person out of the
     /// terminal they are working in.
     static func launchOpening(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool,
-                              background: Bool = false) -> LaunchOpening {
-        if background { return .nothing }
+                              kind: LaunchKind = .quiet) -> LaunchOpening {
+        if kind == .background { return .nothing }
         return switch startup {
         case .starting: .wait
         case .refused: .monitor
         case .needsRoots: .firstRun
-        case .running: !statusAnswered ? .wait : requiresOnboarding ? .firstRun : .nothing
+        case .running:
+            !statusAnswered ? .wait : requiresOnboarding ? .firstRun : kind == .foreground ? .focusedMonitor : .nothing
         }
     }
 

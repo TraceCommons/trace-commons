@@ -64,6 +64,9 @@
             <TextBlock Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap"
                        Text="You decide what gets contributed. Nothing is sent unless you say so." />
             <Button Content="Get started" HorizontalAlignment="Right" Click="OnGetStarted" />
+            <HyperlinkButton Content="{x:Bind ViewModel.AgentConfigurationAction}"
+                             Visibility="{x:Bind ViewModel.HasAgentConfiguration}"
+                             HorizontalAlignment="Right" Click="OnAgentConfiguration" />
         </StackPanel>
 
         <!-- 2. Connect -->

@@ -1,0 +1,53 @@
+name: Delete a cargo cache family's older lockfile generations
+description: >-
+  After a job saves its cargo cache on main, deletes the same job's entries
+  saved under an older Cargo.lock hash. Run it right after the job's
+  actions/cache/save@v5 step, with that cache's primary key. On any other
+  event it only lists what it would delete. The job needs
+  `permissions: actions: write` (and `contents: read` for its checkout).
+#
+# Why this exists. Every cached job here keys on `hashFiles('**/Cargo.lock')`,
+# so a lockfile change starts a new generation of every cache while the old
+# generation stays until GitHub's LRU evicts it. Measured on PR run
+# 42696037795, the repository held two generations (keys ending `495f8f75...`
+# and `012845a2...`), about 14.8 GiB against the 10 GB per-repository limit;
+# the evictor then removes whatever was least recently used, which is as
+# likely to be a current key as a stale one (the trim action's header has
+# the history). Nothing restores a stale generation once main has saved the
+# new one: restore-keys fall back to the newest entry for the prefix.
+#
+# What it deletes, all of which must hold (prune.py `select`, with a
+# self-test that runs on every non-main run):
+#   - the key has this cache's prefix followed directly by a 64-hex
+#     lockfile hash, so another family sharing a prefix string is safe;
+#   - it is not the key this job just saved or restored, and that key is
+#     present in the list (otherwise nothing is deleted this time);
+#   - it was created before this workflow run started. Main runs are never
+#     cancelled, so an older-lockfile run can finish after a newer one has
+#     saved; this rule keeps it from deleting the newer generation.
+#   - it is on refs/heads/main, the only ref that saves.
+inputs:
+  key:
+    description: The cache's primary key, e.g. `steps.cargo-cache.outputs.cache-primary-key`.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        KEY: ${{ inputs.key }}
+        MODE: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'delete' || 'dry-run' }}
+      # An API failure (a rate limit, an outage) only warns: housekeeping
+      # must never fail a required check. A failing self-test does fail,
+      # because only an edit to prune.py can cause one.
+      run: |
+        set -euo pipefail
+        if [ "$MODE" = delete ]; then
+          python3 "$GITHUB_ACTION_PATH/prune.py" --key "$KEY" \
+            || echo "::warning title=cargo cache prune::pruning failed; nothing more was deleted"
+        else
+          python3 "$GITHUB_ACTION_PATH/prune.py" --self-test
+          python3 "$GITHUB_ACTION_PATH/prune.py" --key "$KEY" --dry-run \
+            || echo "::warning title=cargo cache prune::dry run failed"
+        fi

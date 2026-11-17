@@ -112,7 +112,7 @@ pub(crate) async fn private_ai_balance(
         "state_line": trace_commons_contributor::private_inference_copy::balance_state_line(state),
         "remaining_line": trace_commons_contributor::private_inference_copy::balance_remaining_line(optional_i64("remaining_nanos"), scale),
         "limit_line": trace_commons_contributor::private_inference_copy::balance_limit_line(optional_i64("spend_limit_nanos"), scale),
-        "spent_line": trace_commons_contributor::private_inference_copy::balance_spent_line(optional_i64("total_spent_nanos"), scale),
+        "spent_line": trace_commons_contributor::private_inference_copy::balance_spent_line(optional_i64("total_spent_nanos"), optional_i64("remaining_nanos"), scale),
     });
     Ok(value)
 }

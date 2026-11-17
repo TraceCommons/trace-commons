@@ -88,10 +88,14 @@ struct CredentialSection: View {
             } else {
                 GlassSectionRule(copy.credentialTitle)
             }
-            Text(copy.credentialWhat)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // Cut by the owner 2026-11-04 (Settings copy pass 2, P10): an
+            // empty line draws nothing.
+            if !copy.credentialWhat.isEmpty {
+                Text(copy.credentialWhat)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // What is true, painted from the shared tone -- never from
             // whether this shell happens to be holding an attempt. The dot
             // means nothing alone; the core's sentence beside it does.
@@ -135,6 +139,7 @@ struct CredentialSection: View {
             Button(label) { run(action) }
                 .buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))
                 .disabled(model.credentialBusy)
+                .helpIfAny(action == .obtain ? copy.signInTooltip : "")
         }
     }
 

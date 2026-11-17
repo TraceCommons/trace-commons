@@ -304,7 +304,7 @@ async fn account_policy_period(
                 "SELECT floor(extract(epoch FROM clock_timestamp()) / ($1::bigint)::numeric)::bigint,
                         ($1::bigint - mod(floor(extract(epoch FROM clock_timestamp()))::bigint, $1::bigint))::bigint",
                 &[seconds],
-            ).await.map_err(DatabaseError::Postgres)?;
+            ).await?;
             let bucket: i64 = row.get(0);
             let delay: i64 = row.get(1);
             Ok((format!("fixed:{seconds}:{bucket}"), Some(delay)))

@@ -148,7 +148,9 @@ struct MonitorNotices: View {
             items += privateAIItems
         case .homeHistory:
             items += historyOffers
-        case .home, .insights:
+        case .home:
+            items += termsHoldItems
+        case .insights:
             break
         }
         items += actionItems
@@ -348,6 +350,7 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "arming-offer:" + offer.projectId) {
                 ArmingOfferPopover(
                     offer: offer, eyebrow: traces.words?.optionalAutomation,
+                    step: model.armingOfferStep,
                     closeLabel: closeWord, onClose: close("arming-offer:" + offer.projectId),
                     onArm: { model.acceptArmingOffer(offer) },
                     onDecline: { model.declineArmingOffer(offer) })
@@ -539,6 +542,29 @@ struct MonitorNotices: View {
         return items
     }
 
+    // MARK: Home
+
+    /// New Terms of Service are owed (spec section 5): uploads are held
+    /// until the person accepts. No X and no Not now, as the gate hold's
+    /// notice: it goes only when the hold does. Its one button raises the
+    /// terms sheet (`TermsHoldPresenter`).
+    private var termsHoldItems: [GlassPopoverItem] {
+        guard let hold = model.termsHold else { return [] }
+        return [
+            GlassPopoverItem(id: TermsHoldSurface.noticeID) {
+                GlassPopoverNotice(title: hold.title) {
+                    GlassNoticeMark(systemImage: "doc.text", tint: GlassStatus.ask.color)
+                } summary: {
+                    Text(hold.body)
+                } details: { EmptyView() } actions: {
+                    Button(hold.review) { model.reviewNewTerms() }
+                        .buttonStyle(GlassButtonStyle(.primary))
+                        .lineLimit(1)
+                }
+            }
+        ]
+    }
+
     /// The undos: a keep, a folder's Submit all, a trace's Contribute, and
     /// the approval the app model holds, each while it can still be taken
     /// back. Dismiss is the X: it closes the card and the contribution
@@ -572,12 +598,15 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "folder-undo:" + folder.projectId) {
                 GlassPopoverNotice(
                     title: InspectorPrompts.title(folder.label, toast: folder.toast, words: words),
-                    tag: words.undo.approvalSaved, tagTone: .on,
+                    tag: folder.toast.offerUndo ? words.undo.approvalSaved : nil, tagTone: .on,
                     closeLabel: closeWord, onClose: { traces.dismissContributedFolder() }
                 ) {
-                    GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                    GlassNoticeMark(systemImage: folder.toast.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: folder.toast.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
                 } summary: {
-                    UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
+                    UndoDetail(
+                        toast: folder.toast, label: folder.label, at: folder.at, words: words,
+                        redactionBegun: folder.redactionBegun)
                 } details: { EmptyView() } actions: {
                     if folder.toast.offerUndo {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -594,13 +623,16 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "undo:" + contributed.entryId) {
                 GlassPopoverNotice(
                     title: InspectorPrompts.title(contributed.label, toast: contributed.toast, words: words),
-                    tag: words.undo.approvalSaved, tagTone: .on,
+                    tag: contributed.toast.offerUndo ? words.undo.approvalSaved : nil, tagTone: .on,
                     closeLabel: closeWord, onClose: { traces.dismissContributed() },
                     refusal: Self.refusal(traces, entryId: contributed.entryId)
                 ) {
-                    GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                    GlassNoticeMark(systemImage: contributed.toast.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: contributed.toast.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
                 } summary: {
-                    UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
+                    UndoDetail(
+                        toast: contributed.toast, label: contributed.label, at: contributed.at, words: words,
+                        redactionBegun: contributed.redactionBegun)
                 } details: { EmptyView() } actions: {
                     if contributed.toast.offerUndo {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -625,12 +657,14 @@ struct MonitorNotices: View {
         let words = traces.words
         return GlassPopoverItem(id: "approval-undo:" + undo.entryIDs.joined(separator: ",")) {
             GlassPopoverNotice(
-                title: undo.toastLine, tag: words?.undo.approvalSaved, tagTone: .on,
+                title: undo.toastLine, tag: undo.offerUndo ? words?.undo.approvalSaved : nil, tagTone: .on,
                 closeLabel: undo.offerUndo ? QueueLegacyWords.closeNoticeStillSends : QueueLegacyWords.closeNotice,
                 onClose: { model.dismissUndo() }
             ) {
-                GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                GlassNoticeMark(systemImage: undo.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: undo.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
             } summary: {
+                if let redactionBegun = undo.redactionBegun { Text(redactionBegun) }
                 if undo.offerUndo {
                     Text(QueueLegacyWords.undoWillSend)
                     Text(QueueLegacyWords.approvedAgo(undo.heldSeconds)).monospacedDigit()
@@ -743,7 +777,7 @@ struct MonitorNotices: View {
                 .disabled(model.privateInferenceBusy)
             })
         }
-        if let snapshot = model.managedSnapshot, !snapshot.nearAiSignedIn {
+        if let snapshot = model.managedSnapshot, !ManagedSessionsSection.showsSignedIn(snapshot) {
             items.append(GlassPopoverItem(id: "near-ai-sign-in") {
                 GlassPopoverNotice(
                     title: model.managedText("near_ai"), closeLabel: closeWord, onClose: close("near-ai-sign-in")
@@ -817,18 +851,21 @@ private struct NoticeLines: View {
 
 /// The offer to stop being asked about one project, as a popover notice
 /// (`ArmingOfferGlassCard`'s words and order): the evidence under the
-/// question, what arming does behind Details, and the confirm, which opens
-/// a whole-window confirmation with the core's body before anything is
-/// armed. Arming is a grant, so nothing is drawn without the core's words.
+/// question, what arming does behind Details, and the confirm, which arms
+/// at once with no confirmation box (owner, 2026-11-11). Nothing is drawn
+/// without the core's words.
 private struct ArmingOfferPopover: View {
     let offer: ArmingOffer
     /// The core's "OPTIONAL AUTOMATION"; nil draws no tag.
     let eyebrow: String?
+    /// Where Enable is (`ArmingOfferMotion`): the mark turns to a check
+    /// once the project is armed.
+    let step: ArmingOfferStep?
     let closeLabel: String
     let onClose: () -> Void
     let onArm: () -> Void
     let onDecline: () -> Void
-    @State private var confirming = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var copy: ProjectArmingCopy? {
         ProjectArmingCopy.decode(fromJSON: TCCoreCopy.armingOfferCopyJSON(
@@ -841,30 +878,20 @@ private struct ArmingOfferPopover: View {
                 title: copy.question, tag: eyebrow, tagTone: .neutral,
                 detailsLabel: MonitorWords.noticeDetails, closeLabel: closeLabel, onClose: onClose
             ) {
-                GlassNoticeMark(systemImage: "bolt", tint: GlassColor.accentText)
+                GlassNoticeMark(systemImage: ArmingOfferMotion.symbol(step), tint: ArmingOfferMotion.tint(step))
+                    .symbolEffect(.bounce, value: step == .armed)
+                    .overlay { ArmedPulse(armed: step == .armed, tint: ArmingOfferMotion.tint(step)) }
+                    .animation(ArmingOfferMotion.markChange(reduceMotion: reduceMotion), value: step)
             } summary: {
                 Text(copy.evidence)
             } details: {
                 Text(copy.body)
             } actions: {
-                Button(copy.confirm) { confirming = true }
+                Button(copy.confirm, action: onArm)
                     .buttonStyle(GlassButtonStyle(.primary))
+                    .disabled(ArmingOfferMotion.enableLocked(step))
                 Button(copy.decline, action: onDecline)
                     .buttonStyle(GlassButtonStyle(.link))
-            }
-            // Declining here closes the confirmation only; the offer stays
-            // until it is answered on the card.
-            .glassModal(isPresented: $confirming) {
-                GlassConfirmation(
-                    title: copy.question, message: copy.body,
-                    actions: [
-                        .cancel(copy.decline) { confirming = false },
-                        GlassModalAction(copy.confirm, isDefault: true) {
-                            confirming = false
-                            onArm()
-                        },
-                    ],
-                    onCancel: { confirming = false })
             }
         }
     }

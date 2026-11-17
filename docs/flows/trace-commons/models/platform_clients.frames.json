@@ -1,0 +1,179 @@
+[
+  {
+    "label": "platform_starting",
+    "title": "Connecting the platform shell",
+    "body": "Windows constructs its own FFI daemon. GTK may attach before checking new-host roots. Tauri can start embedded or attach, and supervises recovery. Status and completion markers are separate from enrollment.",
+    "controls": [
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_roots",
+    "title": "Choose source access before hosting",
+    "body": "Windows and GTK show a separate roots surface before starting a new watcher. An attached GTK daemon already has its own startup policy. Tauri includes roots inside its twelve-step first run.",
+    "controls": [
+      "Declare sources",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_local",
+    "title": "GTK local Insights",
+    "body": "Ordinary GTK launch opens local Insights without resolving contributor state or starting a daemon. Opening the contributor surface starts the separate daemon connection flow.",
+    "controls": [
+      "Open contributor",
+      "Close"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_first_run",
+    "title": "Platform first-run progress",
+    "body": "Windows and GTK use Welcome, Connect, Consent, optional Scan, Watch and Done. Tauri uses twelve steps, including explicit path choice, inference, two disclosures, grant and projects. The first field preserves every stage; this panel merges them only for rendering.",
+    "controls": [
+      "Continue",
+      "Back",
+      "Enroll",
+      "Choose scopes",
+      "Decide later",
+      "Automatic",
+      "Ask each time",
+      "Grant",
+      "Close setup",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_settings",
+    "title": "Platform settings",
+    "body": "Settings is a pane on Windows, a stack page on GTK and a route in Tauri. Saving can answer after navigation. Set up again represents confirmed unenrollment; Tauri automatic setup revisits consent without unenrolling.",
+    "controls": [
+      "Navigate",
+      "Save settings",
+      "Check update",
+      "Apply update",
+      "Set up again",
+      "Automatic contribution setup",
+      "Change account",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_workspace",
+    "title": "Platform navigation",
+    "body": "Windows and GTK expose their native screen sets. Tauri additionally routes Compute and Profile, defaults to Insights, filters hidden missions and renders unknown paths. Each page value remains explicit in model state.",
+    "controls": [
+      "Navigate",
+      "Sign in to withdraw",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_change",
+    "title": "Native account login change",
+    "body": "Windows and GTK display the shared daemon ceremony for current proof, new login and confirmation. Windows captures a request generation; GTK reread callbacks can update retained state after its window closes. Browser transport and account authority belong to the shared daemon boundary.",
+    "controls": [
+      "Continue",
+      "Close account change",
+      "Navigate",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_auth",
+    "title": "Tauri browser account session",
+    "body": "Withdrawal sign-in invokes the separate native account-auth callback. The browser URL may be reopened once while authorized. A valid callback is followed by an independent session reread; enrollment is a different fact.",
+    "controls": [
+      "Navigate",
+      "Open sign-in page again",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_update",
+    "title": "Platform update ownership",
+    "body": "Windows drains uploads and disposes its hosted daemon before MSIX handoff; a refusal can leave the shell without a daemon. GTK portal installation leaves the current process on old bytes until it closes and is reopened. Tauri provides Homebrew or installer guidance with no updater feed.",
+    "controls": [
+      "Navigate",
+      "Apply update",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_hidden",
+    "title": "Windows window hidden to tray",
+    "body": "A reachable tray keeps the Windows process and hosted watcher alive after window close. Reopening and quitting remain separate actions.",
+    "controls": [
+      "Open",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_quit",
+    "title": "Platform quit confirmation",
+    "body": "Windows without a tray confirms quit. GTK attached mode can close only the UI or also request external watcher shutdown. Tauri native close asks React to confirm before native exit. Hosted-daemon exit and external-daemon lifetime remain separate.",
+    "controls": [
+      "Cancel",
+      "Confirm quit",
+      "Stop watcher too"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_offline",
+    "title": "Platform connection did not answer",
+    "body": "Requests and subscriptions have independent failure states. Tauri retries attached connections; GTK reports an absent attached daemon without inventing an automatic reconnection loop. A read retry is separate from process startup.",
+    "controls": [
+      "Navigate",
+      "Retry read",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_refused",
+    "title": "Windows cannot own the daemon",
+    "body": "The native Windows FFI startup has no attach fallback. A second owner is reported in the existing shell; its navigation remains a presentation surface while daemon commands are unavailable.",
+    "controls": [
+      "Navigate",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_not_found",
+    "title": "Tauri unknown route",
+    "body": "An unknown React path renders NotFound. Native Windows and GTK navigation do not acquire this router behavior.",
+    "controls": [
+      "Navigate",
+      "Close",
+      "Quit"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "platform_stopped",
+    "title": "Platform process stopped",
+    "body": "An external watcher can remain alive after the shell exits. A new launch reuses durable roots and setup facts and clears in-flight shell operations. This internal panel does not assert OS cleanup or installer success.",
+    "controls": [
+      "Launch"
+    ],
+    "kind": "server"
+  }
+]

@@ -258,10 +258,14 @@ fn render(
             // the one being reported, and colouring it would make the pair
             // read as good news and bad news rather than as one ledger.
             for (label, value, muted) in [
-                ("Recorded", format!("{:.1}", rollup.credit_final), false),
+                (
+                    "Recorded",
+                    copy::credit_figure(f64::from(rollup.credit_final)),
+                    false,
+                ),
                 (
                     "Still being scored",
-                    format!("{:.1}", rollup.credit_pending),
+                    copy::credit_figure(f64::from(rollup.credit_pending)),
                     true,
                 ),
             ] {
@@ -561,7 +565,9 @@ fn stat_card(glyph: Glyph, label: &str, count: u32) -> gtk::Box {
     head.append(&caption);
     card.append(&head);
     let figure = gtk::Label::builder()
-        .label(format!("{count}"))
+        // The core's grouping ("1,234"), the same comma as the credit
+        // figures on this page.
+        .label(copy::count_figure(u64::from(count)))
         .xalign(0.0)
         .build();
     figure.add_css_class("tc-figure");
@@ -578,7 +584,7 @@ fn held_group(quarantined: u32) -> gtk::Expander {
     let heading = gtk::Label::new(Some(&format!(
         "{} \u{2014} {} {}",
         copy::QUARANTINE_HEADING,
-        quarantined,
+        copy::count_figure(u64::from(quarantined)),
         if quarantined == 1 { "trace" } else { "traces" }
     )));
     heading.add_css_class("tc-card-title");
@@ -873,10 +879,14 @@ fn withdraw(app: &Rc<App>, submission_id: &str) {
 /// what the action achieved.
 fn credit_line(record: &HistoryRecord) -> Option<String> {
     match (record.credit_points_final, record.credit_points_pending) {
-        (Some(final_points), _) => Some(format!("credit {final_points:.1}")),
-        (None, pending) if pending > 0.0 => {
-            Some(format!("credit {pending:.1}, still being scored"))
-        }
+        (Some(final_points), _) => Some(format!(
+            "credit {}",
+            copy::credit_figure(f64::from(final_points))
+        )),
+        (None, pending) if pending > 0.0 => Some(format!(
+            "credit {}, still being scored",
+            copy::credit_figure(f64::from(pending))
+        )),
         _ => None,
     }
 }
@@ -1528,7 +1538,19 @@ mod tests {
         };
         assert_eq!(
             credit_line(&record).as_deref(),
-            Some("credit 3.0, still being scored")
+            Some("credit 3, still being scored")
+        );
+        // The core's rule, as every shell draws it: half away from zero,
+        // and a sliver is "<0.1", never a zero.
+        record.credit_points_pending = 4.25;
+        assert_eq!(
+            credit_line(&record).as_deref(),
+            Some("credit 4.3, still being scored")
+        );
+        record.credit_points_pending = 0.04;
+        assert_eq!(
+            credit_line(&record).as_deref(),
+            Some("credit <0.1, still being scored")
         );
         record.credit_points_pending = 0.0;
         assert_eq!(credit_line(&record), None);

@@ -42,6 +42,7 @@ struct MenuBarGlassPanel: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             topRow
             privateAI
+            termsHoldRow
             nudgeRow
             settlementRow
             graph
@@ -145,7 +146,8 @@ struct MenuBarGlassPanel: View {
             }
             GlassBarGraph(
                 MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),
-                scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)
+                scaleFloor: 5, compact: true, paused: model.status.paused || model.status.termsHold,
+                hovered: $hovered)
                 .frame(height: EdgeRailGraph.height)
         }
     }
@@ -158,6 +160,30 @@ struct MenuBarGlassPanel: View {
     private var glance: some View {
         if let glance = MenuPanelData.glanceToDraw(store.glance, stale: store.stale) {
             InsightsGlanceCard(glance: glance) { open(.inference) }
+        }
+    }
+
+    // MARK: The terms hold row
+
+    /// New Terms of Service are owed: uploads are held until the person
+    /// accepts (spec section 5). Above the nudge row; opens the window on
+    /// Home with the terms sheet up.
+    @ViewBuilder
+    private var termsHoldRow: some View {
+        if let hold = model.termsHold {
+            Button {
+                model.reviewNewTermsFromMenu()
+            } label: {
+                HStack {
+                    Text(hold.menuRow)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                }
+            }
+            .buttonStyle(GlassMenuRowStyle())
+            .padding(.vertical, -GlassTokens.Space.s2)
         }
     }
 
@@ -619,29 +645,26 @@ extension NSHostingView: HostingWindowSizing {}
 
 /// The menu-bar item in the glass system: the NEAR AI mark and the last 24
 /// hours as paired up-and-down bars (`GlassMenuBarStrip`), with the
-/// decisions-owed badge. Trace bars grey while paused.
+/// decisions-owed badge. Trace bars grey while paused; no bars until this
+/// Mac has a few days of trace data (`MenuPanelStore.stripShowsGraph`).
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
     @Environment(\.displayScale) private var displayScale
+    /// The last strip drawn, reused while what it draws is unchanged. The
+    /// body runs on every model publish; the bitmap is drawn only when its
+    /// inputs change.
+    @State private var cache = MenuBarStripImageCache()
 
     var body: some View {
         let available = model.startup == .running && !store.stale
-        // The strip draws the columns, so it is unavailable when either read
-        // behind them did not answer, never the last bars as current.
-        let condition = MenuPanelStatus.condition(
-            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-            paused: model.status.paused, available: model.startup == .running,
-            stale: store.stale || !store.columnsCurrent)
-        let badge = MenuPanelStatus.badge(model.decisionsOwed)
+        let inputs = MenuBarStripInputs.of(model: model, store: store, scale: displayScale)
         // The mark's words, only while the strip draws the mark: the badge
         // and condition come from a different read than the nudge, and a
         // ring or halo the strip hid is never spoken or shown as a tooltip.
         let words = MenuPanelStatus.markWords(
-            store.status?.nudge, available: available, badge: badge, condition: condition)
-        Image(nsImage: rendered(
-            condition: condition, badge: badge,
-            mark: MenuPanelStatus.mark(store.status?.nudge, available: available)))
+            store.status?.nudge, available: available, badge: inputs.badge, condition: inputs.condition)
+        Image(nsImage: cache.image(for: inputs, render: Self.rendered))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(MenuPanelStatus.markAccessibility(
                 base: MenuBarStatus.accessibilityLabel(
@@ -668,24 +691,71 @@ struct MenuBarStripLabel: View {
     /// The condition, badge and nudge mark are the ones `body` speaks, so
     /// the drawn mark and its words never disagree.
     @MainActor
-    private func rendered(
-        condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark
-    ) -> NSImage {
-        let traces = store.stripTraces
-        let privateAI = store.stripPrivateAI
+    static func rendered(_ inputs: MenuBarStripInputs) -> NSImage {
         func render(_ scheme: ColorScheme) -> NSImage {
             let renderer = ImageRenderer(content: GlassMenuBarStrip(
-                traces: traces,
-                privateAI: privateAI,
-                condition: condition,
-                badge: badge,
-                mark: mark)
+                traces: inputs.traces,
+                privateAI: inputs.privateAI,
+                condition: inputs.condition,
+                badge: inputs.badge,
+                mark: inputs.mark,
+                graph: inputs.graph)
                 .padding(.trailing, GlassMenuBarStrip.haloReach)
                 .environment(\.colorScheme, scheme))
-            renderer.scale = displayScale
+            renderer.scale = inputs.scale
             return renderer.nsImage ?? NSImage()
         }
         return MenuBarItemImage.adaptive(dark: render(.dark), light: render(.light))
+    }
+}
+
+/// Everything the menu-bar strip draws. Equal inputs draw the same bitmap.
+/// The clock can change both the day columns and whether the enrollment
+/// has reached the graph's age threshold; either invalidates the bitmap.
+struct MenuBarStripInputs: Equatable {
+    let traces: [GlassDayColumn]
+    let privateAI: [GlassDayColumn]?
+    let condition: GlassMenuBarStrip.Condition
+    let badge: Int?
+    let mark: GlassMenuBarStrip.Mark
+    let scale: CGFloat
+    /// Whether the graph is drawn: only after a few days of trace data.
+    let graph: Bool
+
+    @MainActor
+    static func of(model: AppModel, store: MenuPanelStore, scale: CGFloat) -> MenuBarStripInputs {
+        let available = model.startup == .running && !store.stale
+        // The strip draws the columns, so it is unavailable when either read
+        // behind them did not answer, never the last bars as current.
+        let condition = MenuPanelStatus.condition(
+            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+            paused: model.status.paused, available: model.startup == .running,
+            stale: store.stale || !store.columnsCurrent,
+            // A failed read has answered: that is unknown, not loading.
+            statusAnswered: model.status.answered || model.statusReadFailed)
+        return MenuBarStripInputs(
+            traces: store.stripTraces,
+            privateAI: store.stripPrivateAI,
+            condition: condition,
+            badge: MenuPanelStatus.badge(model.decisionsOwed),
+            mark: MenuPanelStatus.mark(store.status?.nudge, available: available),
+            scale: scale,
+            graph: store.stripShowsGraph)
+    }
+}
+
+/// The last strip drawn and what it was drawn from.
+@MainActor
+final class MenuBarStripImageCache {
+    private var last: (inputs: MenuBarStripInputs, image: NSImage)?
+
+    /// The image for `inputs`: the last one when they are unchanged, so the
+    /// status item keeps the same image, else a new one from `render`.
+    func image(for inputs: MenuBarStripInputs, render: (MenuBarStripInputs) -> NSImage) -> NSImage {
+        if let last, last.inputs == inputs { return last.image }
+        let image = render(inputs)
+        last = (inputs, image)
+        return image
     }
 }
 
@@ -725,13 +795,18 @@ enum MenuPanelStatus {
 
     /// What the strip says, in `MenuBarStatus.state`'s spirit: a daemon
     /// that is not running, or data that could not be read, is
-    /// unavailable; trouble or an unknown count needs attention; then
-    /// paused; then live. Never live unless everything is.
+    /// unavailable; before the first status reply it is loading, since a
+    /// count not yet asked for is not an unknown one; trouble or an
+    /// unknown count needs attention; then paused; then live. Never live
+    /// unless everything is.
     static func condition(
-        decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool, stale: Bool
+        decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool, stale: Bool,
+        statusAnswered: Bool = true
     ) -> GlassMenuBarStrip.Condition {
         guard available, !stale else { return .unavailable }
-        if unhealthy || decisionsOwed == nil { return .attention }
+        if unhealthy { return .attention }
+        if !statusAnswered { return .loading }
+        if decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
     }
 

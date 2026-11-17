@@ -27,6 +27,7 @@ struct GlassSettingsContent: View {
             case .publicProfile: PublicProfileSection()
             case .changes: ChangesSection()
             case .privateAI: PrivateAISection()
+            case .savedAccounts: SavedAccountsSection()
             case .general: GeneralSection()
             case .startup: StartupSection()
             case .notifications: NotificationsSection()

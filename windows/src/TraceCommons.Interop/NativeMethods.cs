@@ -337,6 +337,21 @@ internal static class NativeMethods
     internal static extern IntPtr tc_account_change_copy_json();
 
     /// <summary>
+    /// The health banner's words for <paramref name="label"/>
+    /// (<c>health_copy::health_copy_for_label</c>), as an owned JSON object
+    /// with <c>title</c>, <c>detail</c>, <c>action</c>, <c>action_kind</c>
+    /// and <c>severity</c>. <paramref name="reachable"/> is the caller's own
+    /// liveness fact; 0 asks for the core-down banner. Free it the way
+    /// <see cref="TakeOwnedString"/> does. NULL for nothing to show and on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_health_copy_json(
+        int reachable,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label,
+        long maxQueueEntries);
+
+    /// <summary>
     /// The project-ignore confirmation's words for one project and its
     /// waiting count (<c>project_copy::ignore_project_copy</c>), as an owned
     /// JSON object with <c>title</c>, <c>body</c>, <c>button</c> and
@@ -620,11 +635,29 @@ internal static class NativeMethods
     /// <summary>
     /// What the WHOLE ACCOUNT has spent, as a finished sentence, or the empty
     /// string. A zero is not that: an account that has spent nothing renders
-    /// $0.00, which is true.
+    /// $0.00, which is true. <c>remainingPresent</c> is whether the same
+    /// reading's remaining figure is non-null: beside one Spent rounds up to
+    /// the cent so the row adds up, and without one it is floored.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_near_ai_balance_spent_line(
-        int present, long nanos, byte scale);
+        int present, long nanos, byte scale, int remainingPresent);
+
+    /// <summary>
+    /// A credit figure as every shell draws it: tenths rounded half away from
+    /// zero, whole figures whole, "&lt;0.1" for a sliver, a comma between
+    /// thousands, a dash for a value that is not finite. Owned string; free
+    /// with <see cref="tc_string_free"/>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_credit_figure(double value);
+
+    /// <summary>
+    /// A count beside a credit figure: a comma between thousands ("1,234").
+    /// Owned string; free with <see cref="tc_string_free"/>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_count_figure(ulong count);
 
     /// <summary>
     /// How long ago THIS COMPUTER asked, assembled.
@@ -1174,6 +1207,9 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_onboarding_copy();
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_first_run_copy_json();
+
     // Owned JSON strings; release with tc_string_free.
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_managed_tools_json();
@@ -1208,16 +1244,12 @@ internal static class NativeMethods
     internal static extern IntPtr tc_decisions_owed_text(long decisionsOwed);
 
     /// <summary>
-    /// The quit prompt true for the process holding <paramref name="handle"/>
-    /// (<c>quit_copy::quit_prompt</c>), as an owned JSON object
-    /// <c>{role, title, body, confirm, cancel}</c>. The role is read off the
-    /// handle: <c>hosting</c> for a daemon run in this process,
-    /// <c>attached</c> for one another process runs, <c>unavailable</c> for
-    /// NULL, a handle that is not live, or a stopped daemon. NULL only on a
-    /// caught panic.
+    /// The quit prompt naming what quitting stops (quit_copy::quit_prompt):
+    /// {title, body, confirm, cancel}. NULL when both flags are 0 (no
+    /// prompt; callers do not ask then) or on a caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr tc_quit_prompt_json(IntPtr handle);
+    internal static extern IntPtr tc_quit_reason_prompt_json(int stopsCompute, int stopsPrivateAI);
 
     /// <summary>
     /// The sentence for a <c>TC_WITNESS_STATE_*</c> value, as an owned char*.

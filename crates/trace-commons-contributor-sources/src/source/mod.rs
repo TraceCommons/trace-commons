@@ -140,9 +140,43 @@ pub(crate) fn read_dir_for_discovery(path: &Path) -> anyhow::Result<Option<std::
     }
 }
 
+/// Whether this build points every conventional-root fallback away from the
+/// machine. True only in this crate's own unit tests and under the test-only
+/// `test-credential-store` feature, which only test dev-dependencies enable
+/// (see this crate's manifest).
+const TEST_ISOLATED_HOME: bool = cfg!(any(test, feature = "test-credential-store"));
+
+/// The home directory every conventional root, the undeclared Claude Code and
+/// Codex fallback included, and `discovery::probe_this_machine` resolve
+/// against: the real one in a shipped build.
+///
+/// In a test build it is [`test_home_dir`] instead, so a test that forgets
+/// to declare its sources reads an empty folder rather than the developer's
+/// real `~/.claude` and `~/.codex`.
 #[doc(hidden)]
 pub fn home_dir() -> PathBuf {
+    if TEST_ISOLATED_HOME {
+        return test_home_dir();
+    }
     dirs::home_dir().unwrap_or_default()
+}
+
+/// The home directory of a test build: a per-process folder under the
+/// system temporary directory that nothing creates, so every conventional
+/// root below it is absent and discovery finds nothing.
+#[doc(hidden)]
+pub fn test_home_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("trace-commons-test-home-{}", std::process::id()))
+}
+
+/// The environment conventional roots read (`XDG_DATA_HOME`, a tool's own
+/// home variable): the process's in a shipped build, none in a test build,
+/// for the same reason as [`home_dir`].
+pub(crate) fn machine_env(key: &str) -> Option<String> {
+    if TEST_ISOLATED_HOME {
+        return None;
+    }
+    std::env::var(key).ok()
 }
 
 /// Resolves a source's `conventional_root` against this machine's real home
@@ -155,7 +189,7 @@ pub fn home_dir() -> PathBuf {
 pub(crate) fn conventional_root_on_this_machine(
     conventional_root: fn(&Path, fn(&str) -> Option<String>) -> PathBuf,
 ) -> PathBuf {
-    conventional_root(&home_dir(), |key| std::env::var(key).ok())
+    conventional_root(&home_dir(), machine_env)
 }
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
@@ -753,8 +787,7 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
         name: SOURCE_OPENCODE,
         // Discovery offers this location; old undeclared desktop settings stay off.
         conventional_root: Some(|| {
-            opencode_db::conventional_root(&home_dir(), |key| std::env::var(key).ok())
-                .join("opencode.db")
+            opencode_db::conventional_root(&home_dir(), machine_env).join("opencode.db")
         }),
         build: |path| Box::new(opencode::OpenCodeSource::new(path)),
         undeclared: Undeclared::Nothing,

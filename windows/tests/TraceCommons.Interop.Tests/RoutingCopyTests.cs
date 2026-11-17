@@ -124,8 +124,18 @@ public class RoutingCopyTests
         Assert.NotEmpty(exported);
         Assert.Equal(exported, declared);
 
+        // Owner cut these two lines 2026-11-04 (Settings copy pass 2, P117, P105).
+        // The core still sends them, as "", and a shell draws no line. They
+        // are the only words allowed to be empty.
+        Assert.Equal(string.Empty, copy.ToolsHeading);
+        Assert.Equal(string.Empty, copy.AppliesAtOnce);
         foreach (var property in strings)
         {
+            if (property.Name is nameof(RoutingCopy.ToolsHeading) or nameof(RoutingCopy.AppliesAtOnce))
+            {
+                continue;
+            }
+
             string? value = (string?)property.GetValue(copy);
             Assert.False(string.IsNullOrEmpty(value), $"{property.Name} arrived empty");
         }

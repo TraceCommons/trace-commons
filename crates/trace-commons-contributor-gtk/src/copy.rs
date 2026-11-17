@@ -13,8 +13,6 @@
 //!   time.
 //! * **Never name the mechanism.** "Privacy filter", "claim", "ingest",
 //!   "canary" are internal words.
-//! * **Always state the data consequence.** "Nothing was sent unscanned",
-//!   "your queue is safe", "nothing has been lost".
 
 /// The app's name, re-exported from its one definition.
 ///
@@ -561,7 +559,11 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 // The status words are the core's (`history_copy::STATUS_LABELS`), the
 // table every shell reads; the tallies and headings here reuse them.
 pub use trace_commons_contributor::history_copy::IN_THE_COMMONS as HISTORY_IN_THE_COMMONS;
+// Every credit figure on History, the core's rule (half away from zero,
+// whole is whole, "<0.1" for a sliver), so this shell reads 4.3 where the
+// others do.
 pub use trace_commons_contributor::history_copy::WAITING_TO_BE_SCORED as HISTORY_WAITING_TO_BE_SCORED;
+pub use trace_commons_contributor::history_copy::{count_figure, credit_figure};
 
 /// §5.3's section heading over the record rows.
 pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
@@ -1071,23 +1073,9 @@ pub const ARMING_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 
 // --- Quitting ----------------------------------------------------------
 
-// Which body is shown is decided at runtime by whether this process hosts
-// the watcher or is attached to one -- getting it wrong is a lie about
-// whether the machine is still watching. Both sentences are shared with the
-// other shells through `trace_commons_contributor::quit_copy`.
-//
-// COPY-MIGRATED-BEGIN
-pub use trace_commons_contributor::quit_copy::{QUIT_ATTACHED_BODY, QUIT_HOSTING_BODY};
-// COPY-MIGRATED-END
-
-pub const QUIT_ATTACHED_CONFIRM: &str = "Quit";
-/// GTK talks to an attached watcher over the raw control socket, which
-/// carries `shutdown`, so this shell can offer to stop it. A shell attached
-/// through `AttachedDaemon` cannot.
-pub const QUIT_ATTACHED_ALSO_STOP: &str = "Quit and stop watching";
-
-pub const QUIT_HOSTING_CANCEL: &str = "Cancel";
-pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
+// Quitting asks only when it would stop Private AI, in the core's one
+// sentence (`trace_commons_contributor::quit_copy`), shared with the other
+// shells.
 
 // --- Notifications -----------------------------------------------------
 
@@ -1223,25 +1211,14 @@ pub fn health_sentence(label: &str) -> &'static str {
         "opencode-export-version-unsupported" => {
             trace_commons_contributor::source_copy::OPENCODE_VERSION_DETAIL
         }
-        "not-logged-in" => {
-            "Not connected. Traces are being queued, but nothing can be sent until you \
-             reconnect. Nothing has been lost."
-        }
-        "pii-filter-unavailable" => {
-            "The extra privacy scan isn't reachable. Your traces are waiting rather than going \
-             out unscanned. Retrying automatically."
-        }
-        "privacy-filter-canary-failed" => {
-            "The privacy scan failed its own self-test, so nothing is being sent through it. \
-             This is deliberate -- a scan we can't verify doesn't get used."
-        }
+        "not-logged-in" => "Not connected.",
+        "pii-filter-unavailable" => "Waiting on the privacy scan.",
+        "privacy-filter-canary-failed" => "Privacy scan failed its self-test.",
         "near-ai-notice-not-acknowledged" => {
             "One thing to confirm. You chose the extra privacy scan, which sends message text to \
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
-        "claim-mint-failed" | "ingest-unreachable" => {
-            "Can't reach the server right now. Your queue is safe; it'll retry on its own."
-        }
+        "claim-mint-failed" | "ingest-unreachable" => "Can't reach the upload server.",
         "queue-full" => {
             concat!(
                 app_name!(),
@@ -1252,7 +1229,7 @@ pub fn health_sentence(label: &str) -> &'static str {
         // An unrecognized label is still a real condition. Say the true
         // thing that holds for every blocking label rather than inventing a
         // mechanism name for it.
-        _ => "Something is holding contributions up. Your queue is safe; nothing has been lost.",
+        _ => "Contributions on hold.",
     }
 }
 
@@ -2458,10 +2435,9 @@ mod tests {
 
     #[test]
     fn the_roots_copy_says_what_leaving_one_blank_actually_does() {
-        // The rule is "always state the data consequence". A screen that
-        // said only "answer both" would leave the contributor thinking a
-        // blank means "skip that one", which is the fail-open this whole
-        // slice removes.
+        // A screen that said only "answer both" would leave the
+        // contributor thinking a blank means "skip that one", which is the
+        // fail-open this whole slice removes.
         assert!(ROOTS_BOTH.contains("falls back"));
         assert!(ROOTS_BODY.contains("will not watch anything until you say"));
     }
@@ -3101,11 +3077,21 @@ mod tests {
     fn the_ignore_confirmation_always_names_the_way_back() {
         for n in [0usize, 1, 7] {
             let body = ignore_project_body(n);
-            assert!(body.contains("undo this in Settings"), "n={n}: {body}");
-            assert!(
-                body.contains("Nothing already submitted is affected."),
-                "n={n}"
-            );
+            // Owner dropped "undo this in Settings" from the body for n > 0
+            // 2026-11-04 (Settings copy pass 2, P121); its way back is now
+            // IGNORE_PROJECT_BODY_TOOLTIP.
+            if n == 0 {
+                assert!(body.contains("undo this in Settings"), "n={n}: {body}");
+                assert!(
+                    body.contains("Nothing already submitted is affected."),
+                    "n={n}"
+                );
+            } else {
+                assert!(
+                    body.contains("Traces already sent aren't affected."),
+                    "n={n}: {body}"
+                );
+            }
         }
     }
 

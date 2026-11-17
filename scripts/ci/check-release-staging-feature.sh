@@ -58,6 +58,7 @@ BUILD_FILES=(
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   macos/scripts/info-plist.sh                 # reads the bundle channel (spec 4.1)
+  macos/scripts/info-plist-strings.sh         # the bundle's display name, from the channel
   macos/scripts/channel.sh                    # loads the bundle channel file
   macos/channels/production.env               # the production bundle channel
   windows/scripts/make-msix.ps1
@@ -622,6 +623,9 @@ self_test() {
 
   local file
   for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "${STAGING_FILES[@]}" \
+    scripts/feature-flags/profile.py crates/trace-commons-contributor/feature-flags/registry.json \
+    crates/trace-commons-contributor/feature-flags/profiles/production.json crates/trace-commons-contributor/feature-flags/profiles/staging.json \
+    crates/trace-commons-contributor/feature-flags/profiles/testing.json \
     "$repo"/.github/workflows/*.yml "$repo"/.github/workflows/*.yaml \
     "$repo"/.github/actions/*/action.yml; do
     [[ "$file" == *'*'* ]] && continue

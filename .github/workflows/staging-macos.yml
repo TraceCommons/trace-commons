@@ -71,6 +71,11 @@ name: staging-macos
 on:
   workflow_dispatch:
     inputs:
+      feature_profile:
+        description: Feature environment (both use staging services)
+        type: choice
+        options: [staging, testing]
+        default: staging
       version:
         description: New staging release version (for example 0.21.0)
         type: string
@@ -218,6 +223,7 @@ jobs:
       feed_url: ${{ steps.loc.outputs.feed_url }}
       gs_base: ${{ steps.loc.outputs.gs_base }}
     env:
+      TC_FEATURE_PROFILE: ${{ inputs.feature_profile || 'staging' }}
       SHA: ${{ needs.preflight.outputs.sha }}
       SHORT_VERSION: ${{ needs.preflight.outputs.short }}
       BUILD_VERSION: ${{ needs.preflight.outputs.build }}
@@ -429,6 +435,7 @@ jobs:
     permissions:
       contents: read
     env:
+      TC_FEATURE_PROFILE: ${{ inputs.feature_profile || 'staging' }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -548,6 +555,7 @@ jobs:
       # A pre-release, never latest: the production cask and update manifest
       # read only full releases, and nothing here touches either.
       - name: Create the GitHub pre-release
+        if: inputs.feature_profile != 'testing'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

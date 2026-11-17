@@ -170,8 +170,10 @@ struct SessionWithdrawalAction: View {
         }
     }
 
+    /// Never on a previous account's row: the current account cannot
+    /// withdraw it, and the daemon refuses it.
     private var isWithdrawable: Bool {
-        ContributionStatusPresentation.offersWithdraw(currentStatus)
+        !record.previousAccount && ContributionStatusPresentation.offersWithdraw(currentStatus)
     }
 
     private func shouldOfferRetry(_ result: AppModel.WithdrawalResult) -> Bool {

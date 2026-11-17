@@ -1,0 +1,17 @@
+{
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/server_lifecycle.qnt",
+    "--inductive-invariant",
+    "P10 and P11",
+    "--verbosity",
+    "2"
+  ],
+  "cwd": "/private/tmp/tc-quint-proof-checks",
+  "modelSha256": "4dbf6f293ab5da0d096ba67950fb67fd2102f3c7188affa8660efad8e94afe29",
+  "log": "/private/tmp/tc-quint-proof-checks/server_lifecycle-P10 and P11-inductive.log",
+  "logSha256": "7a9203c01437612e1a3ac3176d7e58834cd42092eb30647bbecca7299199dcbd",
+  "exit": 1,
+  "seconds": 10.98
+}

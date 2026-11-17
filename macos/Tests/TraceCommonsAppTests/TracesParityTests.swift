@@ -392,17 +392,14 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(prompts.components(separatedBy: ".keyboardShortcut(.defaultAction)").count, 2)
         XCTAssertFalse(offers.contains(".keyboardShortcut(.defaultAction)"))
         // The arming card draws nothing without the core's words, and its
-        // confirm only opens the confirmation; arming is the dialog's.
+        // confirm arms at once: no confirmation box (owner, 2026-11-11).
         let armingCard = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
         let armingBody = try XCTUnwrap(offers.range(
             of: "    var body: some View {\n", range: armingCard.upperBound..<offers.endIndex))
         XCTAssertTrue(offers[armingBody.upperBound...].hasPrefix("        if let copy {\n"))
-        XCTAssertTrue(offers.contains("Button(copy.confirm) { confirming = true }"))
-        // A whole-window glass confirmation (Ron's GlassModal), in the
-        // core's words.
-        XCTAssertTrue(offers.contains(".glassModal(isPresented: $confirming)"))
-        XCTAssertTrue(offers.contains("title: copy.question, message: copy.body,"))
-        XCTAssertEqual(offers.components(separatedBy: "onArm()").count - 1, 1, "only the confirmation arms")
+        XCTAssertTrue(offers.contains("Button(copy.confirm, action: onArm)"))
+        XCTAssertFalse(offers.contains(".glassModal(isPresented: $confirming)"))
+        XCTAssertEqual(offers.components(separatedBy: "onArm").count - 1, 2, "declared once, armed by the confirm")
         // No control without words: an absent core word falls back to an
         // existing one, never to an empty title.
         for text in [prompts, offers, host] {

@@ -161,16 +161,62 @@ pub const REFERRAL_RESOLVER_ASSUME_SQL: &str =
     "SET LOCAL ROLE trace_referral_resolver; SET LOCAL statement_timeout = '2s'";
 
 impl PgBackend {
-    /// Whether this connection's login can assume `trace_referral_resolver`.
+    /// Whether this connection can safely assume the narrow referral resolver.
     /// V142 grants the role to no one; the operator grants it to the ingest
-    /// login (docs/operator/referral-resolver-role.md). `false` only for a
-    /// refused `SET ROLE` (insufficient privilege); any other failure is an
-    /// error.
+    /// login (docs/operator/referral-resolver-role.md). Inherited resolver
+    /// policy access, unsafe runtime ownership/bypass, or wider resolver
+    /// grants fail closed as well as a refused SET ROLE. Database errors
+    /// remain errors rather than being reported as a missing grant.
     pub async fn referral_resolver_assumable(&self) -> Result<bool, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
+        let runtime =
+            super::postgres::trace_corpus_rls_catalog_diagnostics(&*tx, &["trace_referral_codes"])
+                .await?;
+        if !runtime.tables_isolated() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let assumable = match tx.batch_execute(REFERRAL_RESOLVER_ASSUME_SQL).await {
-            Ok(()) => true,
+            Ok(()) => tx
+                .query_one(
+                    "SELECT
+                        NOT EXISTS (
+                            SELECT 1 FROM pg_roles WHERE rolname = current_user
+                              AND (rolcanlogin OR rolsuper OR rolbypassrls)
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM pg_class c
+                            JOIN pg_namespace n ON n.oid = c.relnamespace
+                            WHERE n.nspname = current_schema()
+                              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                              AND (
+                                  has_table_privilege(current_user, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+                                  OR has_any_column_privilege(current_user, c.oid, 'INSERT, UPDATE, REFERENCES')
+                                  OR EXISTS (
+                                      SELECT 1 FROM pg_attribute a
+                                      WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                                        AND has_column_privilege(current_user, c.oid, a.attnum, 'SELECT')
+                                        AND NOT (
+                                            c.relname = 'trace_referral_codes'
+                                            AND a.attname IN ('tenant_id', 'account_id', 'code_index',
+                                                'disabled_at', 'suspended_at', 'voided_at')
+                                        )
+                                  )
+                              )
+                        )
+                        AND (
+                            SELECT count(*) = 6 FROM pg_attribute a
+                            WHERE a.attrelid = 'trace_referral_codes'::regclass
+                              AND a.attnum > 0 AND NOT a.attisdropped
+                              AND a.attname IN ('tenant_id', 'account_id', 'code_index',
+                                  'disabled_at', 'suspended_at', 'voided_at')
+                              AND has_column_privilege(current_user, a.attrelid, a.attnum, 'SELECT')
+                        ) AS safe_resolver",
+                    &[],
+                )
+                .await?
+                .get("safe_resolver"),
             Err(error) if error.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) => false,
             Err(error) => return Err(error.into()),
         };

@@ -19,6 +19,10 @@ futures = { version = "0.3", optional = true }
 hex = "0.4"
 regex = "1"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# Ed25519 verification of the signed witness accepted-measurements list
+# (`witness_accepted_list`). Already in every graph that builds a client:
+# trace-commons-attestation, the contributor and the server depend on it.
+ring = "0.17"
 rust_decimal = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,6 +39,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "pr
 wiremock = "0.6"
 
 [features]
+# `dep:tiktoken-rs` is no longer used by this backend (it windows by request
+# body), but stays in the feature so the separate GTK and Tauri lockfiles,
+# which reach this crate only through the contributor, do not change. Drop it
+# together with a refresh of those lockfiles and the flatpak vendor manifest.
 near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing", "dep:tiktoken-rs"]
 # Loopback classifier backend. No tokenizer and no concurrent streams: the
 # local model has a real 128k context, so a field goes up in one request.
@@ -46,3 +54,10 @@ self-hosted-privacy-filter = ["dep:reqwest", "dep:tracing", "dep:tiktoken-rs", "
 [[test]]
 name = "it"
 path = "tests/it.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

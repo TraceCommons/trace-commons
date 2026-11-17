@@ -2,7 +2,7 @@
 name = "trace-commons-contributor-insights"
 # Released in lockstep with trace-commons-contributor, which re-exports this
 # crate's `insights` module at its old path.
-version = "0.23.0"
+version = "1.0.8"
 edition.workspace = true
 rust-version.workspace = true
 # MIT OR Apache-2.0, like the contributor that embeds it. This crate must
@@ -59,3 +59,10 @@ windows-sys = { version = "0.61", features = [
 # for the week-rollup DST tests.
 chrono-tz = "0.10"
 tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

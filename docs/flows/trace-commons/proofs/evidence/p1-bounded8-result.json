@@ -1,0 +1,23 @@
+{
+  "property": "P1",
+  "cwd": "/private/tmp/tc-quint-client-supplemental/P1-bounded8",
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/client_consent.qnt",
+    "--main",
+    "client_consent",
+    "--invariant",
+    "P1",
+    "--verbosity",
+    "3",
+    "--max-steps",
+    "8",
+    "--server-endpoint",
+    "localhost:8834"
+  ],
+  "modelSha256": "1f00f4582914a737e9f178403d32c557509ab62a9b7d8f6af76b7e4f20b3a045",
+  "exitCode": null,
+  "seconds": 90.04916733299615,
+  "timedOut": true
+}

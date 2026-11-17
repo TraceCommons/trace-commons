@@ -537,26 +537,32 @@ impl BundleJournal {
             }
         }
         let expiry_line = match earliest_expiry {
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P298).
             Some(expiry) if expiry <= now => {
-                "A capture lease has expired. Recreate its review before submitting.".to_string()
+                "A capture lease expired. Recreate its review before submitting.".to_string()
             }
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P294).
             Some(expiry) => format!(
-                "The earliest confirmed capture lease expires in {} hours.",
+                "Next lease expires in {} hours.",
                 expiry.saturating_sub(now).div_ceil(3600)
             ),
-            None if reviews > 0 => {
-                "Capture lease expiry has not been confirmed by the owning proxy.".to_string()
-            }
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P281).
+            None if reviews > 0 => "Lease expiry unconfirmed.".to_string(),
             None => String::new(),
         };
         // `cleanup_label` and `discard_label` are buttons. Approved 2026-10-08 (button rule).
         // `discard_title` keeps the discard confirmation's full title.
+        // `state_line`: Approved by the owner 2026-11-04 (Settings copy pass 2, P288).
+        // `scope_note` and `cleanup_tooltip` (the Clean up button's tooltip): Approved by the owner 2026-11-04 (Settings copy pass 2, P279).
+        // `discard_confirmation`: Approved by the owner 2026-11-04 (Settings copy pass 2, P272).
+        // `failure_line`: Approved by the owner 2026-11-04 (Settings copy pass 2, P291).
         let value = serde_json::json!({"lease_expires_at_unix":earliest_expiry,"renewal_failures":renewal_failures,"retained_bytes":bytes,"cleanup_pending":pending,"unsubmitted_reviews":reviews,"oldest_pending_seconds":if pending>0 {now.saturating_sub(oldest)} else {0},
-            "state_line":format!("{bytes} bytes of local review data. {pending} capture releases pending. {reviews} unsubmitted reviews. {renewal_failures} lease renewals need retry. {expiry_line}"),
-            "scope_note":"Local cleanup preserves original agent files and server contributions. Withdraw a contribution separately to stop server use.",
+            "state_line":format!("{bytes} bytes, {reviews} unsubmitted reviews, {pending} releases pending, {renewal_failures} renewals to retry. {expiry_line}"),
+            "scope_note":"Cleanup keeps your agent files and sent contributions.",
+            "cleanup_tooltip":"To stop the server using a contribution, withdraw it.",
             "cleanup_label":"Clean up","discard_label":"Discard reviews","discard_title":"Discard unsubmitted token reviews",
-            "discard_confirmation":"Discard unsubmitted token reviews? Their local approval data will be removed and their capture leases released. Original agent files and submitted contributions are preserved.",
-            "cancel_label":"Cancel","confirm_label":"Discard reviews","failure_line":"Cleanup could not complete. Undo approval before discarding an approved review, then try again."});
+            "discard_confirmation":"Their approvals are deleted. Agent files and sent contributions stay.",
+            "cancel_label":"Cancel","confirm_label":"Discard reviews","failure_line":"Can't clean up an approved review. Undo its approval first."});
         let mut cached = cache.lock().expect("status cache");
         if cached.len() >= 16 {
             cached.clear();

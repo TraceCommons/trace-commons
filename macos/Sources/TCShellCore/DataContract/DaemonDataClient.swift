@@ -263,6 +263,13 @@ public protocol DaemonDataClient: Sendable {
     /// (`nil`). An older daemon refuses it as `unknown_method`.
     func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted
 
+    /// Local Skills inventory, usage and cached publisher catalog.
+    func skillDefinition(skillID: String) async throws -> DaemonData.SkillDefinition
+    func skillEvidence(sessionRef: String) async throws -> DaemonData.SkillEvidence
+    func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot
+    /// Persist a publisher follow and return the confirmed snapshot.
+    func setSkillsFollow(publisherID: String, followed: Bool) async throws -> DaemonData.SkillsSnapshot
+
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
     func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage
@@ -336,6 +343,21 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    public func skillDefinition(skillID: String) async throws -> DaemonData.SkillDefinition {
+        throw DaemonDataError.notAvailableYet(method: "insights_skills")
+    }
+    public func skillEvidence(sessionRef: String) async throws -> DaemonData.SkillEvidence {
+        throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
+    }
+
+    public func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot {
+        throw DaemonDataError.notAvailableYet(method: "insights_skills")
+    }
+
+    public func setSkillsFollow(publisherID: String, followed: Bool) async throws -> DaemonData.SkillsSnapshot {
+        throw DaemonDataError.notAvailableYet(method: "insights_skills_follow")
+    }
+
     /// Clients that predate Benchmarks have none to read.
     public func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks {
         throw DaemonDataError.notAvailableYet(method: "insights_benchmarks")

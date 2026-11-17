@@ -56,13 +56,15 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let kept: String
     public let recentActivity: String
     public let flagged: String
-    /// Raises the main window from the menu bar ("Open Near.ai").
+    /// Raises the main window from the menu bar ("Open Near AI Gateway").
     public let openApp: String
     /// The popover's manual update check (owner, 2026-10-29); `nil` from a
     /// core that predates it.
     public let checkForUpdates: String?
     public let manageRules: String
     public let settings: String
+    /// The app menu's About item.
+    public let aboutApp: String
     /// The Settings modal's title, subtitle, section list name and close
     /// button (Ron's #1146 `SettingsModal`, #1241 Task 10).
     public let settingsTitle: String
@@ -183,6 +185,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case manageRules = "manage_rules"
         case settings
         case settingsTitle = "settings_title"
+        case aboutApp = "about_app"
         case settingsSubtitle = "settings_subtitle"
         case settingsSections = "settings_sections"
         case close
@@ -226,6 +229,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
 
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = [
+        "about_app",
         "computer",
         "commons",
         "waiting",

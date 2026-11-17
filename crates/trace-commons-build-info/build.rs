@@ -10,6 +10,8 @@
 //! not move when a deploy does, so reporting it as identity would be worse than
 //! reporting nothing.
 
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};

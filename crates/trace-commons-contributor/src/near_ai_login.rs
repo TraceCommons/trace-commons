@@ -456,7 +456,11 @@ const DAEMON_POLL: Duration = Duration::from_millis(500);
 /// How long it waits for that daemon before saying so.
 const DAEMON_WAIT: Duration = Duration::from_secs(30);
 /// No app around this CLI to hand the sign-in to.
-pub(crate) const OPEN_APP: &str = "Open the Near.ai app, then run this command again.";
+pub(crate) const OPEN_APP: &str = concat!(
+    "Open the ",
+    crate::app_name!(),
+    " app, then run this command again."
+);
 
 /// Who answers `login`'s daemon methods.
 #[derive(Debug, PartialEq, Eq)]
@@ -558,11 +562,25 @@ fn forwarded_state_dir<'a>(store_dir: &'a Path, default: Option<&Path>) -> Optio
     (default != Some(store_dir)).then_some(store_dir)
 }
 
-/// The app's name as Finder shows it: "Near.ai", "Near.ai Staging".
+/// The app's name as Finder shows it. The bundle keeps a former name on
+/// disk ("Near.ai.app", "Near.ai Staging.app") and macOS shows its
+/// localized display name instead, so a stem that starts with the current
+/// or a former app name has that part replaced with [`crate::brand::APP_NAME`]:
+/// "Near.ai Staging" reads "Near AI Gateway Staging". Any other stem, such
+/// as a copy the person renamed, is shown as it is.
 fn app_name(app: &Path) -> String {
-    app.file_stem()
+    let Some(stem) = app
+        .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Near.ai".to_string())
+    else {
+        return crate::brand::APP_NAME.to_string();
+    };
+    std::iter::once(crate::brand::APP_NAME)
+        .chain(crate::brand::FORMER_APP_NAMES.iter().copied())
+        .find_map(|name| stem.strip_prefix(name))
+        .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+        .map(|rest| format!("{}{rest}", crate::brand::APP_NAME))
+        .unwrap_or(stem)
 }
 
 /// `open` arguments that start the app without bringing it forward (`-g`)
@@ -1025,12 +1043,12 @@ mod tests {
         assert_eq!(loopback_port(URL), Some(49152));
         assert_eq!(
             loopback_port(
-                "https://cloud-api.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
+                "https://cloud-platform.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
             ),
             Some(40001)
         );
         assert_eq!(
-            loopback_port("https://cloud-api.near.ai/v1/auth/github"),
+            loopback_port("https://cloud-platform.near.ai/v1/auth/github"),
             None
         );
         assert_eq!(loopback_port("http://localhost:40001/x"), None);
@@ -1732,23 +1750,45 @@ mod app_handoff_tests {
         assert!(slept < DAEMON_WAIT + DAEMON_POLL * 2, "waited {slept:?}");
     }
 
+    /// The bundle keeps its former filename; the messages use the name
+    /// Finder shows. A copy the person renamed keeps its own name.
+    #[test]
+    fn the_app_is_named_as_finder_shows_it() {
+        for (path, name) in [
+            ("/Applications/Near.ai.app", "Near AI Gateway"),
+            (
+                "/Applications/Near.ai Staging.app",
+                "Near AI Gateway Staging",
+            ),
+            ("/Applications/Near AI Gateway.app", "Near AI Gateway"),
+            (
+                "/Applications/Near AI Gateway Staging.app",
+                "Near AI Gateway Staging",
+            ),
+            ("/Users/me/Near.aiX.app", "Near.aiX"),
+            ("/Users/me/My Copy.app", "My Copy"),
+        ] {
+            assert_eq!(app_name(Path::new(path)), name, "{path}");
+        }
+    }
+
     #[test]
     fn the_messages_name_the_app() {
         assert_eq!(
             launching_line(&app()),
-            "Starting Near.ai Staging in the background to sign in."
+            "Starting Near AI Gateway Staging in the background to sign in."
         );
         assert_eq!(
             setup_line(&app()),
-            "Finish setting up in Near.ai Staging, which is now open. Sign-in is part of setup."
+            "Finish setting up in Near AI Gateway Staging, which is now open. Sign-in is part of setup."
         );
         assert_eq!(
             not_answering_line(&app()),
-            "Near.ai Staging is open, but its background service isn't answering. Open Near.ai Staging to see why."
+            "Near AI Gateway Staging is open, but its background service isn't answering. Open Near AI Gateway Staging to see why."
         );
         assert_eq!(
             no_daemon_line(&app()),
-            "Near.ai Staging started, but its background service didn't. Open Near.ai Staging to see why."
+            "Near AI Gateway Staging started, but its background service didn't. Open Near AI Gateway Staging to see why."
         );
     }
 }

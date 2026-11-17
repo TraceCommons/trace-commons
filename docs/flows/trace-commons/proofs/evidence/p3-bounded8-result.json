@@ -1,0 +1,23 @@
+{
+  "property": "P3",
+  "cwd": "/private/tmp/tc-quint-client-supplemental/P3-bounded8",
+  "command": [
+    "quint",
+    "verify",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/models/client_contribution.qnt",
+    "--main",
+    "client_contribution",
+    "--invariant",
+    "P3",
+    "--verbosity",
+    "3",
+    "--max-steps",
+    "8",
+    "--server-endpoint",
+    "localhost:8836"
+  ],
+  "modelSha256": "78c90dc380275ccc0e78ba5e1d6afe4fb0fe513e7e8ce5e6fe35a4b2210b2a6d",
+  "exitCode": null,
+  "seconds": 90.06601920904359,
+  "timedOut": true
+}

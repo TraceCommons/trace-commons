@@ -9,6 +9,10 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var comparisonsModel: InsightsComparisonsModel
     @State private var benchmarksModel: InsightsBenchmarksModel
+    @State private var skillsModel: InsightsSkillsModel
+    /// The authoritative AppModel feature snapshot, passed by the window.
+    /// Missing/older-daemon decisions default off at the caller boundary.
+    private let isSkillsEnabled: Bool
     /// Home's figures, for Overview's credit tile; `nil` hides the tile.
     private let home: HomeStore?
     @State private var fallbackSubscriptionModel: SubscriptionUsageModel
@@ -33,6 +37,7 @@ struct InsightsView: View {
     /// The get-started card's one action: Traces, on its folder list.
     /// `nil` draws no link.
     private let openTraces: (() -> Void)?
+    private let openSkillsSettings: (() -> Void)?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -46,7 +51,10 @@ struct InsightsView: View {
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
-                    openTraces: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil,
+                    openSkillsSettings: (() -> Void)? = nil,
+                    skills: InsightsSkillsModel? = nil,
+                    isSkillsEnabled: Bool = false) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -89,7 +97,15 @@ struct InsightsView: View {
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
                   inspector: inspector,
                   home: home,
-                  payoutStreams: payoutStreams, openTraces: openTraces)
+                  payoutStreams: payoutStreams, openTraces: openTraces, openSkillsSettings: openSkillsSettings,
+                  skills: skills ?? InsightsSkillsModel(
+                    reader: daemon.map { client in { @Sendable refresh in try await client.insightsSkills(refresh: refresh) } },
+                    writer: daemon.map { client in { @Sendable publisher, followed in
+                        try await client.setSkillsFollow(publisherID: publisher, followed: followed)
+                    } },
+                    definitionReader: daemon.map { client in { @Sendable id in try await client.skillDefinition(skillID: id) } },
+                    evidenceReader: daemon.map { client in { @Sendable reference in try await client.skillEvidence(sessionRef: reference) } },
+                    copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -107,9 +123,14 @@ struct InsightsView: View {
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
-                    openTraces: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil,
+                    openSkillsSettings: (() -> Void)? = nil,
+                    skills: InsightsSkillsModel? = nil,
+                    isSkillsEnabled: Bool = false) {
+        self.isSkillsEnabled = isSkillsEnabled
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
+        self.openSkillsSettings = openSkillsSettings
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -117,6 +138,7 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
         _benchmarksModel = State(initialValue: benchmarks ?? InsightsBenchmarksModel(reader: nil))
+        _skillsModel = State(initialValue: skills ?? InsightsSkillsModel(copy: storeCopy ?? [:]))
         self.home = home
         self.sharedSubscriptionModel = subscriptionModel
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
@@ -136,15 +158,27 @@ struct InsightsView: View {
         earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
     }
 
-    /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
-    /// (product owner, 2026-10-29).
+    /// Older/missing snapshots show only the established Insights tabs.
     nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+
+    nonisolated static func enabledShownTabs(isSkillsEnabled: Bool) -> [InsightsTab] {
+        isSkillsEnabled ? shownTabs + [.skills] : shownTabs
+    }
+
+    private var visibleTab: InsightsTab {
+        tab == .skills && !isSkillsEnabled ? .overview : tab
+    }
+
+    private var tabSelection: Binding<InsightsTab> {
+        Binding(get: { visibleTab }, set: { tab = $0 })
+    }
 
     /// Home's credit tile, the same figure and word as Home's.
     private var creditTile: (value: String, detail: String)? {
         guard let home, home.rollup != nil || home.credit != nil else { return nil }
         return HomeFormat.creditTile(final: home.rollup?.creditFinal, pending: home.rollup?.creditPending,
-                                     accepted: home.rollup?.allTime?.accepted, credit: home.credit)
+                                     accepted: home.rollup?.allTime?.accepted,
+                                     submitted: home.rollup?.allTime?.submitted, credit: home.credit)
     }
 
     /// Whether the week's first answers are in: the daemon's week (or no
@@ -167,9 +201,10 @@ struct InsightsView: View {
 
     /// Whether the tab on screen draws the get-started card and the sample.
     private var showsSample: Bool {
-        switch tab {
+        switch visibleTab {
         case .overview, .patterns: weekEmpty
         case .benchmarks: benchmarksEmpty
+        case .skills: false
         }
     }
 
@@ -202,14 +237,15 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Overview, Breakdown and Benchmarks (product owner,
             // 2026-10-29). Breakdown's details are the inspector's.
-            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
-                GlassSegment(model.text($0.copyKey), value: $0)
+            GlassSegmentedTabs(model.text("title"), selection: tabSelection,
+                               segments: Self.enabledShownTabs(isSkillsEnabled: isSkillsEnabled).map {
+                GlassSegment($0 == .skills ? skillsModel.text("skills_title") : model.text($0.copyKey), value: $0)
             })
             // A failed copy or snapshot read, on every tab.
             if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
-            switch tab {
+            switch visibleTab {
             case .overview where showsSample:
                 if let sample {
                     InsightsOverviewTab(
@@ -257,6 +293,8 @@ struct InsightsView: View {
                                     overview: overviewModel, inspector: inspector)
             case .benchmarks:
                 InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
+            case .skills:
+                InsightsSkillsTab(model: skillsModel, reviewSettings: openSkillsSettings)
             }
         }
         .onAppear { model.open() }
@@ -264,14 +302,17 @@ struct InsightsView: View {
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
         // Breakdown's details are the inspector's while Breakdown is shown.
-        .onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        .onChange(of: visibleTab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        .onChange(of: isSkillsEnabled, initial: true) { _, enabled in
+            if !enabled, tab == .skills { tab = .overview }
+        }
         // The sample is built only when it is first needed, and while it
         // shows, Insights asks again each minute, so the card and the
         // sample go as soon as the first trace is counted.
         .onChange(of: showsSample, initial: true) { _, shows in
             if shows, sample == nil { sample = InsightsSampleModels() }
             // The inspector reads the sample's days while the sample shows.
-            showBreakdownDetail(tab)
+            showBreakdownDetail(visibleTab)
         }
         .task(id: showsSample) {
             guard showsSample else { return }
@@ -358,10 +399,10 @@ struct InsightsView: View {
     }
 }
 
-/// The Insights window's tabs: Overview, Breakdown (`patterns`) and
-/// Benchmarks.
+/// The Insights window's tabs: Overview, Breakdown (`patterns`),
+/// Benchmarks and Skills.
 enum InsightsTab: Hashable {
-    case overview, patterns, benchmarks
+    case overview, patterns, benchmarks, skills
 
     /// The copy key of the tab's name.
     var copyKey: String {
@@ -369,6 +410,7 @@ enum InsightsTab: Hashable {
         case .overview: "analytics_tab_overview"
         case .patterns: "analytics_tab_patterns"
         case .benchmarks: "analytics_tab_benchmarks"
+        case .skills: "analytics_tab_skills"
         }
     }
 }

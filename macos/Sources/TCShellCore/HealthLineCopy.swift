@@ -31,15 +31,16 @@ public struct HealthLineCopy: Decodable, Equatable, Sendable {
         case actionKind = "action_kind"
     }
 
-    /// Decode the payload, or nil if it will not parse or a sentence is
-    /// empty. Nil is never a healthy daemon: callers fall back to the core's
-    /// on-hold line.
+    /// Decode the payload, or nil if it will not parse, the title is empty,
+    /// or an action is named with no words. The detail may be empty: a
+    /// banner can be its title alone (owner, 2026-11-12). Nil is never a
+    /// healthy daemon: callers fall back to the core's on-hold line.
     public static func decode(fromJSON json: String?) -> HealthLineCopy? {
         guard let data = json?.data(using: .utf8),
             let copy = try? JSONDecoder().decode(HealthLineCopy.self, from: data)
         else {
             return nil
         }
-        return copy.title.isEmpty || copy.detail.isEmpty || copy.action?.isEmpty == true ? nil : copy
+        return copy.title.isEmpty || copy.action?.isEmpty == true ? nil : copy
     }
 }

@@ -676,10 +676,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public event Action<DaemonSettingsSnapshot?>? PrivateInferenceSettingsChanged;
 
-    /// <summary>
-    /// Whether the switch is on, for the one sentence the quit confirmation
-    /// gains while it is: quitting this app stops the listener with it.
-    /// </summary>
+    /// <summary>Whether the switch is on.</summary>
     public bool PrivateInferenceOn => _privateInferenceOn;
 
     public void ReportPrivateInferenceWriteFailure() =>
@@ -690,9 +687,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (Notice == _privateInferenceCopy?.WriteUnconfirmed) Notice = string.Empty;
     }
 
-    /// <summary>The quit confirmation's extra line, or null.</summary>
-    public string? PrivateInferenceQuitDetail =>
-        PrivateInferenceSurface.QuitDetail(_privateInferenceOn, _privateInferenceState, _privateInferenceCopy);
+    /// <summary>Whether quitting would stop Private AI answering model calls.</summary>
+    public bool PrivateInferenceQuitStops =>
+        PrivateInferenceSurface.QuitStops(_privateInferenceOn, _privateInferenceState);
 
     /// <summary>
     /// Takes what the daemon last reported about the switch and the answer.
@@ -731,7 +728,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(CertificateHeldTitle));
             Raise(nameof(CertificateHeldLine));
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
-            Raise(nameof(PrivateInferenceQuitDetail));
+            Raise(nameof(PrivateInferenceQuitStops));
             Raise(nameof(PrivateInferenceIsWorking));
             Raise(nameof(PrivateInferenceNeedsAttention));
             PrivateInferenceSettingsChanged?.Invoke(settings);
@@ -751,7 +748,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _privateInferenceOn = on;
         Raise(nameof(HasPrivateInferenceOffer));
         Raise(nameof(PrivateInferenceOn));
-        Raise(nameof(PrivateInferenceQuitDetail));
+        Raise(nameof(PrivateInferenceQuitStops));
     }
 
     // Approved sessions held because the privacy witness is busy. Drawn from
@@ -801,11 +798,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // HistoryViewModel records: x:Bind is strongly typed and performs no
     // implicit ToString for TextBlock.Text, so an int bound straight to a
     // figure is a compile error on Windows and nowhere else.
+    // The core's Contributed figure (accepted plus waiting to be scored),
+    // the one every shell shows under this word; `Submitted` alone is only
+    // the waiting part of it. A dash from a daemon that did not send it.
     public string ContributedCountText =>
-        _rollup.Week.Submitted.ToString(CultureInfo.CurrentCulture);
+        _rollup.Week.Contributed is { } contributed ? HistoryCopy.CountFigure(contributed) : "\u2014";
 
-    public string HeldCountText =>
-        _rollup.Week.Quarantined.ToString(CultureInfo.CurrentCulture);
+    public string HeldCountText => HistoryCopy.CountFigure(_rollup.Week.Quarantined);
 
     /// <summary>
     /// In the commons: all time, not this week.
@@ -817,8 +816,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// a contributor looks for evidence that their work went somewhere. The
     /// Linux shell takes all_time here and says the same thing.
     /// </remarks>
-    public string InTheCommonsCountText =>
-        _rollup.AllTime.Accepted.ToString(CultureInfo.CurrentCulture);
+    public string InTheCommonsCountText => HistoryCopy.CountFigure(_rollup.AllTime.Accepted);
 
     /// <summary>
     /// A short, human-readable status line. Fixed labels only -- everything
@@ -996,7 +994,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // No hold, or one that had already expired by the time the
                 // response arrived. Saying so is the honest option; a button
                 // that would be refused is not.
-                Notice = ApprovedNoUndo;
+                Notice = decision.Hold?.Toast.Line
+                    ?? PreviewDecision.ApprovalUnconfirmedMessage;
                 break;
 
             case PreviewOutcome.Failed:
@@ -1215,11 +1214,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ApprovalHold? hold = ApprovalHold.Parse(response);
         if (hold is null)
         {
-            // A malformed result and a bad_params refusal look identical here
-            // on purpose: neither carries counts to build a toast from, and
-            // an unrecognised entry_id or project_id must read as a refusal,
-            // never as "0 sessions sent" dressed up as success.
-            Notice = "That couldn't be sent just now. Nothing has been sent.";
+            // An explicit refusal and an unreadable answer are different:
+            // the latter cannot establish whether approval took effect.
+            Notice = response.IsError
+                ? "That couldn't be sent just now. Nothing has been sent."
+                : PreviewDecision.ApprovalUnconfirmedMessage;
             return;
         }
 

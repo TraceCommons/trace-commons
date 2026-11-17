@@ -120,7 +120,10 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertTrue(traces.contains(needle), "the Traces notices lack \(needle)")
         }
         let privateAI = try member("    private var privateAIItems: [GlassPopoverItem] {")
-        for needle in ["model.showsPrivateInferenceOffer", "!snapshot.nearAiSignedIn", "model.managedText(\"sign_in_needed\")"] {
+        // Signed out of NEAR AI, unless a Debug build's review switch draws
+        // the tab signed in (`ManagedSessionsSection.showsSignedIn`).
+        for needle in ["model.showsPrivateInferenceOffer", "!ManagedSessionsSection.showsSignedIn(snapshot)",
+                       "model.managedText(\"sign_in_needed\")"] {
             XCTAssertTrue(privateAI.contains(needle), "the Private AI notices lack \(needle)")
         }
         XCTAssertFalse(traces.contains("model.showsPrivateInferenceOffer"), "Traces offers Private AI again")
@@ -421,10 +424,32 @@ final class TracesInspectorHostTests: XCTestCase {
                        "Button(dismissWord) { store.dismissContributedFolder() }"] {
             XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
         }
-        XCTAssertFalse(prompts.contains("offerUndo ? store.words?.undo.approvalSaved : nil"))
-        XCTAssertFalse(prompts.contains("offerUndo ? words.undo.approvalSaved : nil"))
-        XCTAssertEqual(prompts.components(separatedBy: "eyebrow: words.undo.approvalSaved").count - 1, 2)
-        XCTAssertTrue(prompts.contains("eyebrow: store.words?.undo.approvalSaved"))
+        XCTAssertTrue(prompts.contains("undo.offerUndo ? store.words?.undo.approvalSaved : nil"))
+        XCTAssertTrue(prompts.contains("contributed.toast.offerUndo ? words.undo.approvalSaved : nil"))
+        XCTAssertTrue(prompts.contains("folder.toast.offerUndo ? words.undo.approvalSaved : nil"))
+        XCTAssertFalse(prompts.contains("Text(words.undo.mayHaveStarted)"))
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        for prefix in ["folder.toast", "contributed.toast", "undo"] {
+            XCTAssertTrue(notices.contains("\(prefix).offerUndo ?"), prefix)
+        }
+    }
+
+    func test_zeroApprovalGroupExplainsHeldReviewAndRenders() async throws {
+        let entered = expectation(description: "group approval")
+        let transport = ApproveGate(entered: entered, approval: #"{"approved":0,"flagged":0,"redactions":{},"skipped":[],"hold_secs":10,"excluded_held":3}"#)
+        transport.open()
+        let traces = TracesStore(client: LiveDaemonClient(transport: transport))
+        await traces.load()
+        let folder = try XCTUnwrap(traces.tree.allFolders.first { traces.mayContributeFolder($0) && !$0.sessions.isEmpty })
+        await traces.contributeFolder(folder, verdict: nil)
+        await fulfillment(of: [entered], timeout: 2)
+        let result = try XCTUnwrap(traces.lastContributedFolder)
+        XCTAssertFalse(result.toast.offerUndo)
+        XCTAssertEqual(result.toast.line, "Nothing approved. 3 traces need individual review.")
+        let view = MonitorNotices(place: .traces, traces: traces, home: HomeStore(client: nil), closed: .constant([]))
+            .environmentObject(AppModel())
+        let png = try await InsightsGetStartedRenderTests.render(AnyView(view), width: 760, height: 400) { true }
+        try png.write(to: URL(fileURLWithPath: "/tmp/approval-banner-zero.png"))
     }
 
     /// The old offers bar's name is gone: the prompts above the tree are
@@ -478,8 +503,12 @@ private final class FrameDaemon: DaemonCalling {
 private final class ApproveGate: DaemonTransport, @unchecked Sendable {
     private let entered: XCTestExpectation
     private let gate = DispatchSemaphore(value: 0)
+    private let approval: String?
 
-    init(entered: XCTestExpectation) { self.entered = entered }
+    init(entered: XCTestExpectation, approval: String? = nil) {
+        self.entered = entered
+        self.approval = approval
+    }
 
     func open() { gate.signal() }
 
@@ -487,6 +516,7 @@ private final class ApproveGate: DaemonTransport, @unchecked Sendable {
         if method == "approve", paramsJSON.contains("project_id") {
             entered.fulfill()
             gate.wait()
+            if let approval { return #"{"id":0,"result":\#(approval)}"# }
         }
         return SampleDaemonData.reply(method, in: .normalDay).map { #"{"id":0,"result":\#($0)}"# }
             ?? #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#

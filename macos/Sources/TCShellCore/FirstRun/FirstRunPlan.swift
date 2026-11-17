@@ -102,8 +102,8 @@ public enum NearAILoginOutcome: Equatable, Sendable {
 
 /// Where the first run commits answers to the daemon.
 public enum CommitPoint: Equatable, Sendable {
-    /// Customize on Tools: the daemon starts with the tools ticked so far,
-    /// or takes the changed ones, so it can name the repos found in their
+    /// Customize on Uses: the daemon starts with the tools ticked, or takes
+    /// the changed ones, so it can name the repos found in their
     /// traces. Nothing else is sent, and the step does not move.
     case declareRoots
     /// Continue on Tools: what `declareRoots` sends, then the next step.
@@ -161,18 +161,6 @@ public enum FirstRunPlan {
         return calls
     }
 
-    /// Private AI only: the enrollment's completion marker, after telling
-    /// the daemon to watch nothing if it still watches anything (an earlier
-    /// Customize started it with tools ticked). No consent scopes, no Ask
-    /// or grant, no folder rule, no past session and no Private AI switch:
-    /// nothing is consented to, queued or sent. Without an enrollment, or
-    /// with anything still watched, nothing at all (fail closed;
-    /// `canContinue` keeps Start off for both).
-    private static func privateAIOnlyStart(_ state: FirstRunState) -> [FirstRunCall] {
-        guard state.holdsEnrolment, !state.watchesAnything else { return [] }
-        return roots(state) + [.markComplete]
-    }
-
     /// The declarations in `current` that differ from `started`, as a sorted
     /// `set_settings` object, or nil when nothing changed.
     ///
@@ -225,7 +213,6 @@ public enum FirstRunPlan {
     /// daemon is logged in. Join does not offer watch only then, and
     /// `canContinue` keeps Start off for it.
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
-        if state.privateAIOnly { return privateAIOnlyStart(state) }
         let watchOnly = state.account == .watchOnly
         if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }

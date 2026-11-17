@@ -257,13 +257,104 @@ pub const REASON_METADATA_KEY_COLLISION: &str = "metadata-key-collision";
 #[error("trace-redaction-failed")]
 pub(crate) struct TransientRedactionFailure;
 
+/// The refusal label for a trace whose redaction panicked. Kept apart from
+/// `redaction-failed` because a panic is a defect in this build rather than
+/// anything about the trace: the queue records the version it happened on
+/// and offers the trace again on a newer one (`Queue::
+/// reoffer_panicked_refusals`). Shells have no words for it yet and show
+/// their generic "could not be prepared".
+pub const REASON_REDACTION_PANICKED: &str = "redaction-panicked";
+
+/// A panic inside the redaction pipeline, caught. Typed so a caller can tell
+/// it from a failed scan or a pipeline refusal without matching on text.
+#[derive(Debug, thiserror::Error)]
+#[error("redaction-panicked")]
+pub(crate) struct RedactionPanicked;
+
+/// Polls a future and turns a panic inside it into `Err(())`.
+///
+/// A panic while redacting one trace must cost that trace alone. The
+/// daemon's periodic passes run in one loop; a panic unwinding out of a pass
+/// used to end every later pass (watch, upload, expiry) until the app was
+/// relaunched, and the first pass after the relaunch met the same trace.
+/// The daemon's pass supervisor (`daemon::pass_supervisor`) now restarts the
+/// loop after a panic, using this same wrapper through
+/// [`catch_unwind_future`], but a panic caught here still costs one trace
+/// rather than a backoff for every pass.
+///
+/// Each caller states why asserting unwind safety is sound for what it
+/// wraps.
+pub(crate) struct CatchUnwind<F: std::future::Future> {
+    inner: std::pin::Pin<Box<F>>,
+}
+
+/// Wrap `future` so a panic while polling it resolves to `Err(())` instead
+/// of unwinding into the caller. Never reads the panic payload, which can
+/// carry trace content or a path. The caller asserts unwind safety: it must
+/// not keep using state the panicking frames could have left half-updated.
+pub(crate) fn catch_unwind_future<F: std::future::Future>(future: F) -> CatchUnwind<F> {
+    CatchUnwind {
+        inner: Box::pin(future),
+    }
+}
+
+impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
+    type Output = std::result::Result<F::Output, ()>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // Unwind safety is the caller's assertion; see the type's doc.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.as_mut().poll(cx)
+        })) {
+            Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    }
+}
+
+/// Run a synchronous redaction step, returning `None` if it panicked. The
+/// same reasoning as [`CatchUnwind`]: a panic on one trace's text must not
+/// unwind into the daemon's pass loop. Callers treat `None` as the step
+/// failing closed for that trace, never as an empty result.
+///
+/// Only for closures that read shared state and return an owned result, so
+/// nothing is left half-updated by the unwind. The redactor is shared state
+/// with one lock in it: the NEAR AI privacy filter's `window_cache`, a
+/// `std::sync::Mutex` that a panic while it is held poisons. Both of its lock
+/// sites recover a poisoned lock with `into_inner`, so a caught panic does not
+/// turn into every later trace failing. A new `std::sync::Mutex` in the
+/// redactor locked with `.lock().unwrap()` would break that, and this
+/// justification with it.
+pub(crate) fn guard_panic<R>(step: impl FnOnce() -> R) -> Option<R> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)).ok()
+}
+
 /// Run `raw` through `redactor`, mapping any failure to a label-only error
 /// (never trace content).
+///
+/// A panic inside the pipeline is a failure: no envelope, and
+/// [`RedactionPanicked`], never the transient error, because a panic on the
+/// same input recurs and retrying it in this build would only meet it again.
 pub async fn redact_to_envelope(
     redactor: &DeterministicTraceRedactor,
     raw: RawTraceContribution,
 ) -> Result<TraceContributionEnvelope> {
-    redactor.redact_trace(raw).await.map_err(|error| {
+    // The frames this unwinds hold the owned raw contribution, dropped with
+    // the future, and a shared `&DeterministicTraceRedactor`. The redactor's
+    // one piece of interior mutability is the NEAR AI filter's
+    // `window_cache` mutex, which a panic while it is held poisons; both of
+    // its lock sites recover with `into_inner`, so later traces still
+    // redact. That, and nothing else here being left half-updated, is what
+    // makes asserting unwind safety sound. See `guard_panic`.
+    let redacted = catch_unwind_future(redactor.redact_trace(raw)).await;
+    let Ok(redacted) = redacted else {
+        return Err(anyhow::Error::new(RedactionPanicked));
+    };
+    redacted.map_err(|error| {
         // Matched on the pipeline's own label, so this cannot widen: any
         // reason but this exact one still collapses to the generic label
         // that every caller has always seen.
@@ -312,7 +403,8 @@ pub fn envelope_has_residual_secret(
 ) -> Result<bool> {
     let json = serde_json::to_string(envelope)
         .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
-    let (_out, report) = redactor.redact_text(&json);
+    let (_out, report) = guard_panic(|| redactor.redact_text(&json))
+        .ok_or_else(|| anyhow::Error::new(RedactionPanicked))?;
     Ok(report.blocked_secret_detected)
 }
 
@@ -1182,6 +1274,67 @@ mod tests {
 
     use super::*;
     use crate::source::{TraceSource, claude_code::ClaudeCodeSource};
+
+    /// A privacy-filter backend that panics on every call, standing in for
+    /// any panic inside the redaction pipeline (the 0.23.0 detector panic
+    /// was one).
+    struct PanickingFilter;
+
+    #[async_trait::async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for PanickingFilter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> std::result::Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            TraceContributionError,
+        > {
+            panic!("redaction backend panicked");
+        }
+    }
+
+    fn panicking_redactor() -> DeterministicTraceRedactor {
+        build_deterministic_preview_redactor(None)
+            .with_privacy_filter(Arc::new(PanickingFilter), PrivacyFilterBackendTag::NearAi)
+    }
+
+    /// A panic while redacting one trace is that trace's refusal, typed as
+    /// a panic and with no envelope, and does not unwind into the caller:
+    /// the daemon's pass loop is one task, and a panic escaping here ended
+    /// every later pass until the app was relaunched.
+    #[tokio::test]
+    async fn a_panic_while_redacting_is_a_label_only_failure() {
+        let raw = build_raw_contribution(&fixture_transcript(), &test_config(), Utc::now());
+        let error = redact_to_envelope(&panicking_redactor(), raw)
+            .await
+            .expect_err("a panicking redactor must not produce an envelope");
+        assert_eq!(error.to_string(), REASON_REDACTION_PANICKED);
+        assert!(error.downcast_ref::<RedactionPanicked>().is_some());
+        assert!(error.downcast_ref::<TransientRedactionFailure>().is_none());
+    }
+
+    #[test]
+    fn guard_panic_turns_a_panic_into_none_and_passes_a_result_through() {
+        assert_eq!(guard_panic(|| 7), Some(7));
+        assert_eq!(guard_panic(|| -> u8 { panic!("detector panicked") }), None);
+    }
+
+    /// Through the shared local-redaction seam: refused (never retried as
+    /// transient) under its own label, not the generic `redaction-failed`,
+    /// so the queue can offer it again on a newer build.
+    #[tokio::test]
+    async fn a_panic_while_redacting_refuses_through_the_local_seam() {
+        let raw = build_raw_contribution(&fixture_transcript(), &test_config(), Utc::now());
+        let label = crate::submit::checked_local_redaction(
+            &panicking_redactor(),
+            raw,
+            true,
+            MAX_ENVELOPE_BYTES,
+        )
+        .await
+        .expect_err("a panicking redactor must not produce an envelope");
+        assert_eq!(label, REASON_REDACTION_PANICKED);
+    }
 
     fn fixture_transcript() -> crate::source::SessionTranscript {
         let root =

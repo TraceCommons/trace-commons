@@ -1,0 +1,110 @@
+[
+  {
+    "label": "interfaces-idle",
+    "title": "Service family boundaries",
+    "body": "This model is explicitly coarse. Route-specific policy and credential checks enter as environment evidence; accepted handler work and returned responses are separate from any domain effect.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "interface-authorizing",
+    "title": "Request at service boundary",
+    "body": "The request carries resolved actor, tenant, family, key and validation evidence. Public source offers bypass tenant/account authority; protected families require their own boundary evidence.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "interface-running",
+    "title": "Accepted coarse operation",
+    "body": "Legacy gate/export, replay, benchmark, ranker, active learning, utility/vector, grants, rewards/missions, account services, analytics and drills retain named family results. Their algorithms are not modeled here.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "interface-returned",
+    "title": "Service result returned",
+    "body": "A read result or domain response has returned. Coarse effects, durable token-bundle receipts and client delivery are separate state; response loss can follow a committed effect.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "interface-refused",
+    "title": "Service boundary refused or failed",
+    "body": "Feature/control gaps, auth/policy validation, load, storage or external failures are explicit inputs. A coarse refusal is not a claim about every route\u2019s exact HTTP status or retry semantics.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "token-staging",
+    "title": "Token bundle stages",
+    "body": "Manifest staging, ready attachments, normal submission acceptance and the durable bundle receipt are separate milestones. Post-submit rescrub or store failure can prevent the bundle receipt.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "community-snapshot",
+    "title": "Community publication snapshot",
+    "body": "Profile publication and withdrawal are separate from snapshot recomputation. Roster reads recheck analytics controls; newly enabled analytics may require recomputing an older snapshot.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "witness-running",
+    "title": "Unauthenticated witness request",
+    "body": "The separate witness service observes two bounded request identities. Work requests consume finite permits; nonce-bound attestation is outside that work limit. Validation outcomes are abstract evidence.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "witness-returned",
+    "title": "Witness evidence returned",
+    "body": "The service returns a nonce-bound quote or a certificate after applicable validation. This model does not prove signatures, enclave identity, redaction quality or inference attestation cryptography.",
+    "controls": [
+      "YouCreateAnAccessGrant",
+      "YouRevokeAnAccessGrant",
+      "YouPublishYourCommunityProfile",
+      "YouWithdrawYourCommunityProfile"
+    ],
+    "kind": "server"
+  }
+]

@@ -89,6 +89,10 @@
 // (`include/trace_commons.h`) and the Swift/C# callers that bind to it
 // verbatim, not Rust naming conventions.
 #![allow(non_camel_case_types)]
+// Dedicated C ABI boundary crate (`extern "C"` exports and pointer marshaling);
+// crate-level `unsafe_code = "deny"` and `unsafe_op_in_unsafe_fn = "forbid"`
+// govern the package while allowing the C ABI implementation here.
+#![allow(unsafe_code)]
 
 mod insights;
 pub use insights::{tc_insights_call, tc_insights_copy_json};
@@ -841,6 +845,15 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
     })
 }
 
+/// Immutable feature build identity; no networking or disk access. Free with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_feature_profile_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let identity = trace_commons_contributor::feature_flags::build_profile_identity()?;
+        Ok(to_owned_cstring(&serde_json::to_string(&identity)?))
+    })
+}
+
 /// The command-line tool's state for the app at `bundle_path`
 /// (`cli_tool::probe`): the link this build's channel installs in
 /// `/usr/local/bin`, what is there now, and the AppleScript that changes it.
@@ -1589,6 +1602,9 @@ pub unsafe extern "C" fn tc_preview_unsure_spans_json(
     // Every error below is a fixed, content-free label, as in
     // `tc_preview_turns_json`.
     let outcome = guard_forwarding(|| {
+        if !err.is_null() {
+            unsafe { *err = std::ptr::null_mut() };
+        }
         if handle.is_null() {
             anyhow::bail!("null-handle");
         }
@@ -1751,9 +1767,10 @@ pub unsafe extern "C" fn tc_subscribe_with_accepts(
     cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
     ctx: *mut c_void,
 ) -> u64 {
-    let accepts = if accepts_json.is_null() {
-        None
-    } else {
+    let parsed_accepts = guard(|| {
+        if accepts_json.is_null() {
+            return Ok(Some(None));
+        }
         let parsed = unsafe { CStr::from_ptr(accepts_json) }
             .to_str()
             .ok()
@@ -1763,12 +1780,20 @@ pub unsafe extern "C" fn tc_subscribe_with_accepts(
         // and would otherwise leave the caller a live token with no events.
         match parsed {
             Some(value @ serde_json::Value::Array(_)) if ipc::subscribe_accepts_valid(&value) => {
-                Some(value)
+                Ok(Some(Some(value)))
             }
             _ => {
                 set_last_error(ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID);
-                return 0;
+                Ok(None)
             }
+        }
+    });
+    let accepts = match parsed_accepts {
+        Ok(Some(accepts)) => accepts,
+        Ok(None) => return 0,
+        Err(e) => {
+            set_last_error(&e);
+            return 0;
         }
     };
     unsafe { subscribe_inner(handle, accepts, cb, ctx) }
@@ -1965,12 +1990,13 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     }
     {
         // Attached handles keep no task per token -- there is one socket and
-        // one sink -- so unsubscribing is dropping that sink. Done before the
-        // runtime-context refusal below, which guards a join this path does
-        // not perform.
+        // one sink. Disable cloned readers and drain any callback before the
+        // host can free ctx; removing only the slot is not a callback barrier.
         let handle_ref = unsafe { &*handle };
         if let Some(attached) = attached_of(handle_ref) {
-            attached.clear_sink();
+            if !attached.clear_sink_and_wait() {
+                set_last_error("unsubscribe-refused-inside-runtime-context");
+            }
             return;
         }
     }
@@ -2342,11 +2368,23 @@ pub unsafe extern "C" fn tc_preview_search(
     needle: *const c_char,
     matches_json: *mut *mut c_char,
 ) -> i32 {
-    if !preview.is_null() && !preview_pointer_is_live(preview) {
-        if !matches_json.is_null() {
-            unsafe { *matches_json = std::ptr::null_mut() };
+    if !preview.is_null() {
+        match guard(|| Ok(preview_pointer_is_live(preview))) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = guard(|| {
+                    if !matches_json.is_null() {
+                        unsafe { *matches_json = std::ptr::null_mut() };
+                    }
+                    Ok(())
+                });
+                return -1;
+            }
+            Err(e) => {
+                set_last_error(&e);
+                return -1;
+            }
         }
-        return -1;
     }
     let outcome = guard(|| {
         if preview.is_null() {
@@ -4997,6 +5035,11 @@ pub extern "C" fn tc_near_ai_balance_limit_line(
 /// no line at all. A zero is NOT that: an account that has spent nothing
 /// renders "$0.00", which is true.
 ///
+/// `remaining_present` is whether the same reading's `remaining_nanos` is
+/// non-null. Beside a remaining figure Spent rounds UP to the cent, so
+/// Limit, Spent and what is left add up; with none it is floored like every
+/// other amount. See `private_inference_copy::balance_spent_line`.
+///
 /// The figure is the WHOLE ACCOUNT, not this computer -- the payload's
 /// `balance_what` says so, and it belongs beside this sentence.
 ///
@@ -5007,11 +5050,48 @@ pub extern "C" fn tc_near_ai_balance_spent_line(
     present: i32,
     nanos: i64,
     scale: u8,
+    remaining_present: i32,
 ) -> *mut c_char {
     guarded_string_no_err(|| {
         let nanos = (present != 0).then_some(nanos);
+        // Only whether there is one decides the rounding, not its value.
+        let remaining = (remaining_present != 0).then_some(0);
         Ok(to_owned_cstring(
-            &trace_commons_contributor::private_inference_copy::balance_spent_line(nanos, scale),
+            &trace_commons_contributor::private_inference_copy::balance_spent_line(
+                nanos, remaining, scale,
+            ),
+        ))
+    })
+}
+
+/// A credit figure as every shell draws it, from
+/// `history_copy::credit_figure`: tenths rounded half away from zero, whole
+/// figures whole ("48"), one decimal otherwise ("12.5"), "<0.1" above zero
+/// and under 0.05, a comma between thousands ("1,234.5"), and a dash for a
+/// value that is not finite. Pass the wire's figure; a shell with no figure draws its own
+/// dash and does not call this.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credit_figure(value: f64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::history_copy::credit_figure(value),
+        ))
+    })
+}
+
+/// A count as every shell draws it beside a credit figure, from
+/// `history_copy::count_figure`: a comma between thousands ("1,234").
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_count_figure(count: u64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::history_copy::count_figure(count),
         ))
     })
 }
@@ -5791,6 +5871,89 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
     })
 }
 
+/// The published Terms of Service (`terms::fetch_published_blocking`), as
+/// one owned JSON object:
+///
+/// ```json
+/// {"document": {"schema_version":"trace_commons.terms.v1","version":"...",
+///               "effective":"...","in_effect":false,"title":"...",
+///               "blocks":[...]},
+///  "content_sha256": "<64 lowercase hex>"}
+/// ```
+///
+/// `content_sha256` is the SHA-256 of the exact bytes the site served, the
+/// value a shell hands back with the version when the person accepts. The
+/// fetch is HTTPS-only to the document's own host, follows no redirect and
+/// sends no credential. It needs no daemon and no state directory, so the
+/// first run can call it before either exists. It blocks for up to the
+/// fetch's timeouts: call it off the UI thread. It runs on its own thread
+/// and runtime, so calling it from inside a tokio runtime is safe.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. On failure
+/// returns NULL and, when `err` is non-null, sets `*err` to an owned label
+/// (free it with [`tc_string_free`]): `terms-unavailable`,
+/// `terms-host-refused`, `terms-too-large`, a document refusal
+/// (`terms-malformed`, `terms-schema-unknown`, `terms-version-invalid`,
+/// `terms-empty`, `terms-link-refused`), or `panic`.
+///
+/// # Safety
+/// `err` must be NULL or point to a writable `char*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_terms_document_json(err: *mut *mut c_char) -> *mut c_char {
+    guarded_string(err, || {
+        // Its own thread, so a caller already inside a tokio runtime does
+        // not make the blocking fetch's runtime panic.
+        let fetched = std::thread::spawn(fetch_terms_document)
+            .join()
+            .unwrap_or(Err(TERMS_FETCH_PANICKED));
+        match fetched {
+            Ok(fetched) => {
+                let json = serde_json::json!({
+                    "document": fetched.document,
+                    "content_sha256": fetched.content_sha256,
+                });
+                Ok(to_owned_cstring(&serde_json::to_string(&json)?))
+            }
+            Err(label) => Ok(witness_fail(label, err)),
+        }
+    })
+}
+
+const TERMS_FETCH_PANICKED: &str = "panic";
+
+#[cfg(not(test))]
+fn fetch_terms_document() -> Result<trace_commons_contributor::terms::FetchedTerms, &'static str> {
+    trace_commons_contributor::terms::fetch_published_blocking()
+}
+
+/// Under test the fetch never reaches the live site: it reads the outcome a
+/// test set with [`terms_fetch_seam::set`], and is `terms-unavailable` when
+/// none was set.
+#[cfg(test)]
+fn fetch_terms_document() -> Result<trace_commons_contributor::terms::FetchedTerms, &'static str> {
+    terms_fetch_seam::take()
+}
+
+#[cfg(test)]
+mod terms_fetch_seam {
+    use std::sync::Mutex;
+    use trace_commons_contributor::terms::{FetchedTerms, TERMS_UNAVAILABLE};
+
+    static OUTCOME: Mutex<Option<Result<FetchedTerms, &'static str>>> = Mutex::new(None);
+
+    pub(super) fn set(outcome: Result<FetchedTerms, &'static str>) {
+        *OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    }
+
+    pub(super) fn take() -> Result<FetchedTerms, &'static str> {
+        OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or(Err(TERMS_UNAVAILABLE))
+    }
+}
+
 /// The first run's Traces line under the count
 /// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
 /// `traces` (the traces found) and `earns_credit`, each optional; an older
@@ -6433,44 +6596,30 @@ pub unsafe extern "C" fn tc_automatic_contribution_copy_json(
     })
 }
 
-/// The quit prompt that is true for the process holding `handle`
-/// (`quit_copy::quit_prompt`), as a JSON object
-/// `{role, title, body, confirm, cancel}`.
+/// The quit prompt for what quitting would stop (`quit_copy::quit_prompt`),
+/// as a JSON object `{title, body, confirm, cancel}`.
 ///
-/// The role is read off the handle, not asked of the shell: a handle that
-/// runs the daemon in this process is `hosting` (quitting stops the
-/// watcher), one attached to a daemon another process runs is `attached`
-/// (the watcher keeps running, and keeps sending), and a NULL handle, one
-/// that is not live (recorded as `invalid-handle-pointer` via
-/// `tc_last_error`), or one whose daemon has stopped is `unavailable`.
+/// `stops_compute` and `stops_private_ai` are boolean (0/nonzero): a compute
+/// worker is still running, and `tc_private_inference_quit_needs_notice`
+/// answered 1. A shell quits without asking when both are false and does
+/// not call this; called that way it returns NULL. Otherwise NULL only on a
+/// caught panic, which a shell treats as a refused quit, never as "no
+/// prompt".
 ///
-/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
-/// on a caught panic.
-///
-/// # Safety
-/// `handle`, if non-null, must be a `tc_handle*` from `tc_daemon_start*` or
-/// `tc_daemon_attach` that has not been passed to `tc_handle_free`.
+/// Returns an owned JSON string; free it with [`tc_string_free`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tc_quit_prompt_json(handle: *const tc_handle) -> *mut c_char {
+pub extern "C" fn tc_quit_reason_prompt_json(
+    stops_compute: i32,
+    stops_private_ai: i32,
+) -> *mut c_char {
     guarded_string_no_err(|| {
-        use trace_commons_contributor::quit_copy::{QuitRole, quit_prompt};
-        // A pointer that is not a live handle records
-        // `invalid-handle-pointer` and is answered as no watcher, which is
-        // then the true prompt: nothing this process holds is watching.
-        let role = if handle.is_null() || !handle_pointer_is_live(handle) {
-            QuitRole::Unavailable
-        } else {
-            let handle = unsafe { &*handle };
-            match attached_of(handle) {
-                Some(attached) if !attached.is_closed() => QuitRole::Attached,
-                Some(_) => QuitRole::Unavailable,
-                None if shared_of(handle).is_some() => QuitRole::Hosting,
-                None => QuitRole::Unavailable,
-            }
-        };
-        Ok(to_owned_cstring(&serde_json::to_string(&quit_prompt(
-            role,
-        ))?))
+        match trace_commons_contributor::quit_copy::quit_prompt(
+            stops_compute != 0,
+            stops_private_ai != 0,
+        ) {
+            Some(prompt) => Ok(to_owned_cstring(&serde_json::to_string(&prompt)?)),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
 }
 
@@ -6967,7 +7116,12 @@ pub unsafe extern "C" fn tc_second_look_line_text(reason: *const c_char) -> *mut
 /// otherwise. Reads nothing and writes nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_credential_store_self_check() -> i32 {
-    trace_commons_contributor::daemon::credential_store_self_check()
+    guard(|| Ok(trace_commons_contributor::daemon::credential_store_self_check())).unwrap_or_else(
+        |e| {
+            set_last_error(&e);
+            2
+        },
+    )
 }
 
 #[cfg(test)]
@@ -7519,5 +7673,66 @@ mod bounded_teardown_tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod terms_document_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use trace_commons_contributor::terms::{FetchedTerms, TERMS_UNAVAILABLE};
+    use trace_commons_protocol::terms::TermsDocument;
+
+    /// The fetch seam is one process-wide slot; these tests take turns on it.
+    static SEAM: Mutex<()> = Mutex::new(());
+
+    fn owned_text(pointer: *mut c_char) -> String {
+        assert!(!pointer.is_null());
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .expect("owned text is UTF-8")
+            .to_string();
+        unsafe { tc_string_free(pointer) };
+        text
+    }
+
+    #[test]
+    fn terms_document_json_tolerates_a_null_err_pointer() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        terms_fetch_seam::set(Err(TERMS_UNAVAILABLE));
+        let out = unsafe { tc_terms_document_json(std::ptr::null_mut()) };
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn terms_document_json_sets_an_owned_label() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        terms_fetch_seam::set(Err(TERMS_UNAVAILABLE));
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tc_terms_document_json(&mut err) };
+        assert!(out.is_null());
+        assert_eq!(owned_text(err), TERMS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn terms_document_json_carries_the_document_and_its_hash() {
+        let _turn = SEAM.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = include_bytes!("../../trace-commons-protocol/tests/fixtures/terms-v1.json");
+        let document = TermsDocument::parse(bytes).expect("fixture parses");
+        let hash = "a".repeat(64);
+        terms_fetch_seam::set(Ok(FetchedTerms {
+            document: document.clone(),
+            content_sha256: hash.clone(),
+        }));
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tc_terms_document_json(&mut err) };
+        assert!(err.is_null());
+        let value: serde_json::Value = serde_json::from_str(&owned_text(out)).unwrap();
+        assert_eq!(value["content_sha256"], hash.as_str());
+        assert_eq!(value["document"]["version"], "2026-08-22-draft");
+        assert_eq!(value["document"]["in_effect"], false);
+        let round_trip = TermsDocument::parse(value["document"].to_string().as_bytes())
+            .expect("the document crosses the boundary intact");
+        assert_eq!(round_trip, document);
     }
 }

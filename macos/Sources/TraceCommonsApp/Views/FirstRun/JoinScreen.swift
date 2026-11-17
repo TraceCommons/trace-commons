@@ -52,10 +52,9 @@ enum JoinScreenLayout {
 
     /// "Start sharing": Join is the last step and has no Skip (owner,
     /// 2026-10-12: sign-in required). It stays off until a NEAR AI account
-    /// is signed in (`canStart`). Private AI only shares nothing, so its
-    /// Start reads Welcome's "Get started" instead.
+    /// is signed in (`canStart`).
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        state.privateAIOnly ? copy.welcome.start : copy.uses.start
+        copy.uses.start
     }
 
     /// Back while a commit runs on Join: nil (withdrawn) except during the
@@ -102,24 +101,15 @@ enum JoinScreenLayout {
         _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
         isCommitting: Bool
     ) -> Bool {
-        // Private AI only consents to nothing: no required use and no
-        // sharing words to wait on, only the account and nothing watched.
-        if state.privateAIOnly {
-            return canForward(state) && !isCommitting
-                && FirstRunNavigation.canContinue(readyToStart(state), candidates: [], requiredScope: nil)
-        }
-        return canForward(state)
+        canForward(state)
             && UsesScreenLayout.canStart(
                 readyToStart(state), uses: uses, requiredScope: requiredScope, grant: grant, isCommitting: isCommitting)
     }
 
     /// The state Start commits (`readyToStart`), with the required use
-    /// among its scopes when sharing, as Uses' locked box showed. Private AI
-    /// only consents to nothing, so it gets none.
+    /// among its scopes, as Uses' locked box showed.
     static func startState(_ state: FirstRunState, required: ConsentScope?) -> FirstRunState {
-        let ready = readyToStart(state)
-        guard !ready.privateAIOnly else { return ready }
-        return UsesScreenLayout.includingRequired(ready, required: required)
+        UsesScreenLayout.includingRequired(readyToStart(state), required: required)
     }
 
     static func canAutomaticallyStart(

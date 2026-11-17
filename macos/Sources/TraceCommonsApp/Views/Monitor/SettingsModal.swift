@@ -51,7 +51,7 @@ struct SettingsModal: View {
             columns
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(GlassTokens.Color.paneOpaque.color)
+        .background(GlassTokens.Color.settingsGround.color)
         .environment(\.glassPaneIsContent, true)
         .focusSection()
         .onExitCommand(perform: onClose)
@@ -122,7 +122,12 @@ struct SettingsModal: View {
                 .accessibilityLabel(words?.settingsSections ?? "")
                 rule(.vertical)
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    // Not lazy: `scrollTo` lands by the height of what is
+                    // drawn, and a lazy stack guesses the sections it has
+                    // not drawn, so a jump to a far section stopped short
+                    // in an earlier one. Each section keeps its own lists
+                    // lazy.
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(Self.sections) { item in
                             VStack(alignment: .leading, spacing: 0) {
                                 if item != .payouts || payoutsShown,

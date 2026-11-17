@@ -65,35 +65,16 @@ enum UsesScreenLayout {
         return on == 0 ? .none : .some
     }
 
-    /// The two buttons above the optional uses (owner, 2026-10-27), of
-    /// equal weight so neither is the suggested answer. The uses start
-    /// unticked (R7); only the person's press of one, or of a box, changes
-    /// them.
-    enum Bulk: CaseIterable {
-        /// Every optional data use on. The handle grants no data use and
-        /// is not among them (`optionalScopes`).
-        case allowAll
-        /// Every optional data use off; the required use stays.
-        case onlyRequired
-
-        func title(_ uses: FirstRunCopy.Uses) -> String {
-            switch self {
-            case .allowAll: return uses.allowAll
-            case .onlyRequired: return uses.onlyRequired
-            }
-        }
-    }
-
-    /// The state after the person presses `bulk`. Nothing but the optional
-    /// data uses changes.
-    static func pressing(_ bulk: Bulk, _ state: FirstRunState, optional: [ConsentScope]) -> FirstRunState {
-        var pressed = state
-        let names = Set(optional.map(\.name))
-        switch bulk {
-        case .allowAll: pressed.scopes.formUnion(names)
-        case .onlyRequired: pressed.scopes.subtract(names)
-        }
-        return pressed
+    /// Whether the person has chosen anything here: an optional data use
+    /// ticked, a Sharing choice picked, or under Customize a folder's rule or
+    /// a past trace. The required use is always included and is nobody's
+    /// choice, so it does not count. The primary action reads Skip until
+    /// then, Continue after (Ron, 2026-11-05).
+    static func hasSelection(_ state: FirstRunState, options: [ConsentScope]) -> Bool {
+        state.sharingChosen
+            || optionalScopes(options).contains { state.scopes.contains($0.name) }
+            || !state.rules.isEmpty
+            || state.pastSelections.values.contains { !$0.isEmpty }
     }
 
     /// The Sharing radios' selection: none until the person picks one
@@ -140,10 +121,7 @@ enum UsesScreenLayout {
     /// Automatic, on an account that can choose it, goes through both
     /// disclosures; Private AI turned on otherwise goes through the witness
     /// disclosure (spec rule 10); everything else commits directly.
-    /// Private AI only shares nothing and sends no Private AI switch
-    /// (`FirstRunPlan`), so it has nothing to disclose and always commits.
     static func startRoute(_ state: FirstRunState) -> StartRoute {
-        if state.privateAIOnly { return .commit }
         if SharingDisclosureFlow.isNeeded(for: state) { return .disclose }
         if SharingDisclosureFlow.isWitnessOnlyNeeded(for: state) { return .discloseWitness }
         return .commit
@@ -192,7 +170,10 @@ enum UsesScreenLayout {
     private static func split(path: SharingPath, grant: AutomaticGrantCopy) -> (line: String, detail: String)? {
         switch path {
         case .askMe:
-            guard let line = grant.pathAskFirstTitle, !line.isEmpty, let detail = grant.pathAskFirstDetail,
+            // Ask's first line was cut by the owner 2026-11-04 (Settings
+            // copy pass 2, P125): an empty title is present, not missing;
+            // the radio then has no sub-line and the detail stays.
+            guard let line = grant.pathAskFirstTitle, let detail = grant.pathAskFirstDetail,
                 !detail.isEmpty
             else { return nil }
             return (line, detail)
@@ -220,7 +201,7 @@ enum UsesScreenLayout {
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
             guard let modeTitle = modes?.label(for: mode) else { return nil }
             let title = path == .askMe ? (uses.askEachTime ?? modeTitle) : modeTitle
-            var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }
+            var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }.filter { !$0.isEmpty }
             if path == .automatic, let scope = uses.automaticScope { lines = [scope] }
             if path == .automatic, !FirstRunNavigation.canChooseAutomatic(state) {
                 lines.append(uses.automaticAfterSignIn)
@@ -615,8 +596,9 @@ struct UsesFlow: View {
 // MARK: - The screen
 
 /// Uses: how traces may be used and how they are shared, under the flow
-/// from This Mac through the review gate to the commons. Continue moves on;
-/// what is chosen here is sent at Start sharing, on Join.
+/// from This Mac through the review gate to the commons. Skip, or Continue
+/// once something is chosen, moves on; what is chosen here is sent at Start
+/// sharing, on Join.
 struct UsesScreen: View {
     @EnvironmentObject private var model: AppModel
     let copy: FirstRunCopy
@@ -627,6 +609,9 @@ struct UsesScreen: View {
     @State private var grant: AutomaticGrantCopy?
     @State private var grantRead = false
     @State private var flowSince = Date()
+    @StateObject private var repos = CustomizeRepos()
+    /// Customize open: the per-repo rules take the card's place.
+    @State private var customizing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -637,22 +622,38 @@ struct UsesScreen: View {
             state: $runner.state,
             isCommitting: runner.isCommitting,
             footer: FirstRunFooter(
-                title: copy.frame.continueButton,
+                title: UsesScreenLayout.hasSelection(runner.state, options: options)
+                    ? copy.frame.continueButton : copy.join.skip,
                 isEnabled: FirstRunNavigation.canContinue(runner.state, candidates: [], requiredScope: required?.name),
-                action: { runner.state = FirstRunNavigation.next(runner.state) })
+                link: customizing ? nil : FirstRunFooter.Link(
+                    title: copy.frame.customSetupInstead,
+                    isEnabled: ToolsScreenLayout.customizeEnabled(
+                        state: runner.state, open: false, scanned: true, isCommitting: runner.isCommitting),
+                    action: openCustomize),
+                backInStep: customizing ? { customizing = false } : nil,
+                action: { runner.state = FirstRunNavigation.next(runner.state) }),
+            open: customizing
         ) {
             UsesFlow(copy: copy, state: runner.state, watched: ToolsScreenLayout.watchedKinds(runner.state), since: flowSince)
         } title: {
             FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
         } content: {
-            ScrollView {
-                list(options: options, required: required)
-                    .frame(maxWidth: 460, alignment: .leading)
-                    .firstRunCard()
-                    .frame(maxWidth: .infinity)
+            if customizing {
+                CustomizeRepoCard(
+                    copy: copy, runner: runner, repos: repos,
+                    kinds: ToolsScreenLayout.watchedKinds(runner.state))
+                    .transition(.opacity)
+            } else {
+                ScrollView {
+                    list(options: options, required: required)
+                        .frame(maxWidth: 460, alignment: .leading)
+                        .firstRunCard()
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(maxWidth: 520)
+                .scrollBounceBehavior(.basedOnSize)
+                .transition(.opacity)
             }
-            .frame(maxWidth: 520)
-            .scrollBounceBehavior(.basedOnSize)
         }
         // The required use is in the state as soon as it is known, so the
         // state matches its ticked box; Start includes it again regardless.
@@ -676,26 +677,13 @@ struct UsesScreen: View {
             // credit." under Train coding models says it, and Traces notes
             // when it is off.
             if !optional.isEmpty {
-                HStack(spacing: GlassTokens.Space.s3) {
-                    // One style and one width for both: neither is the
-                    // suggested answer.
-                    ForEach(UsesScreenLayout.Bulk.allCases, id: \.self) { bulk in
-                        Button {
-                            runner.state = UsesScreenLayout.pressing(bulk, runner.state, optional: optional)
-                        } label: {
-                            Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(GlassButtonStyle(.secondary))
-                    }
-                }
-                .padding(.top, GlassTokens.Space.s3)
                 ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses)) { option in
                     scopeRow(option)
                 }
             }
             // The required use, one line under the choices (owner,
-            // 2026-10-28): every box above is a real choice, so Only
-            // required leaves them all empty. Its scope is behind the "i".
+            // 2026-10-28): every box above is a real choice. Its scope is
+            // behind the "i".
             if let required {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
                     Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))
@@ -748,12 +736,13 @@ struct UsesScreen: View {
             Toggle(isOn: scope(option.name)) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    // The use that earns credit says so, in the required
-                    // use's inline style, no louder.
+                    // The use that earns credit says so, as an amber
+                    // heads-up with its icon (product owner, 2026-11-05;
+                    // it was the required use's green inline style).
                     if option.name == copy.uses.creditScope {
-                        Text(copy.uses.creditRequired)
-                            .glassType(GlassTokens.TypeScale.mono)
-                            .foregroundStyle(GlassTokens.Color.statusOnText.color)
+                        Label(copy.uses.creditRequired, systemImage: "exclamationmark.circle.fill")
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassTokens.Color.statusAskText.color)
                     }
                 }
             }
@@ -769,9 +758,9 @@ struct UsesScreen: View {
         GlassInfoButton(UsesScreenLayout.moreAbout(title, uses: copy.uses), text: text)
     }
 
-    /// One optional scope's box. Each starts unticked; the person's toggle,
-    /// or their press of Allow all, is the only thing that ticks one. The required
-    /// one is always included (`includeRequired`).
+    /// One optional scope's box. Each starts unticked; the person's toggle
+    /// is the only thing that ticks one. The required one is always included
+    /// (`includeRequired`).
     private func scope(_ name: String) -> Binding<Bool> {
         Binding(
             get: { runner.state.scopes.contains(name) },
@@ -782,6 +771,12 @@ struct UsesScreen: View {
                     runner.state.scopes.remove(name)
                 }
             })
+    }
+
+    /// Customize takes the card's place until Back closes it.
+    private func openCustomize() {
+        customizing = true
+        Task { await repos.load(runner: runner, source: model) }
     }
 
     /// Put the required use in the state, once it is known.

@@ -58,6 +58,8 @@ struct FlowMapView: View {
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
+    /// The spinner drawn while the first read is out.
+    static let loadingSpinner: CGFloat = 20
 
     /// The run the map draws: none under Reduce Motion, where the map
     /// stays still and only the card says what is happening.
@@ -152,6 +154,13 @@ struct FlowMapView: View {
                 switch phase {
                 case .active(let location): pointer = location
                 case .ended: pointer = nil
+                }
+            }
+            // Before the first reply the tree is empty only because it is
+            // unread: a spinner says so, rather than a map with no folders.
+            .overlay {
+                if state == .loading {
+                    GlassSpinner(size: Self.loadingSpinner, standalone: true)
                 }
             }
             // The map's foot, fixed whatever its zoom or focus (owner,

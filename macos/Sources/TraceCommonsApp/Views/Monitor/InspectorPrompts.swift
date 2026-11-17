@@ -51,6 +51,7 @@ struct InspectorPrompts: View {
                 ArmingOfferGlassCard(
                     offer: offer,
                     eyebrow: store.words?.optionalAutomation,
+                    step: model.armingOfferStep,
                     onArm: { model.acceptArmingOffer(offer) },
                     onDecline: { model.declineArmingOffer(offer) }
                 )
@@ -73,11 +74,14 @@ struct InspectorPrompts: View {
     }
 
     /// Ron's `UndoBar` over the approval the app model holds: the core's
-    /// "APPROVAL SAVED", always, over the core's toast for it, then how long ago. No
+    /// "APPROVAL SAVED" for positive approvals, over the core's toast, then how long ago. No
     /// timer removes it, and no countdown is drawn: the deadline is the
     /// daemon's next upload sweep, which nothing here can observe.
     private func approvalUndo(_ undo: AppModel.Undo) -> some View {
-        UndoBarCard(eyebrow: store.words?.undo.approvalSaved, title: undo.toastLine) {
+        UndoBarCard(eyebrow: undo.offerUndo ? store.words?.undo.approvalSaved : nil, title: undo.toastLine) {
+            if let redactionBegun = undo.redactionBegun {
+                Text(redactionBegun).fixedSize(horizontal: false, vertical: true)
+            }
             if undo.offerUndo {
                 Text(QueueLegacyWords.undoWillSend)
                     .fixedSize(horizontal: false, vertical: true)
@@ -108,8 +112,10 @@ struct InspectorPrompts: View {
     private var storeUndo: some View {
         if let contributed = store.lastContributed, let words = store.words {
             let busy = store.acting.contains(contributed.entryId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(contributed.label, toast: contributed.toast, words: words)) {
-                UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
+            UndoBarCard(eyebrow: contributed.toast.offerUndo ? words.undo.approvalSaved : nil, title: Self.title(contributed.label, toast: contributed.toast, words: words)) {
+                UndoDetail(
+                    toast: contributed.toast, label: contributed.label, at: contributed.at, words: words,
+                    redactionBegun: contributed.redactionBegun)
             } actions: {
                 if contributed.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -128,8 +134,10 @@ struct InspectorPrompts: View {
         }
         if let folder = store.lastContributedFolder, let words = store.words {
             let busy = store.writing.contains(folder.projectId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(folder.label, toast: folder.toast, words: words)) {
-                UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
+            UndoBarCard(eyebrow: folder.toast.offerUndo ? words.undo.approvalSaved : nil, title: Self.title(folder.label, toast: folder.toast, words: words)) {
+                UndoDetail(
+                    toast: folder.toast, label: folder.label, at: folder.at, words: words,
+                    redactionBegun: folder.redactionBegun)
             } actions: {
                 if folder.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -170,15 +178,19 @@ struct UndoDetail: View {
     let label: String?
     let at: Date
     let words: MonitorTracesCopy
+    /// "Data redaction has begun.", on this run's first Submit that went to
+    /// the privacy witness (`RedactionBegunNotice`).
+    var redactionBegun: String? = nil
 
     var body: some View {
+        if let redactionBegun {
+            Text(redactionBegun).fixedSize(horizontal: false, vertical: true)
+        }
         if toast.offerUndo {
             TimelineView(.periodic(from: at, by: 1)) { context in
                 Text(QueueLegacyWords.approvedAgo(max(0, Int(context.date.timeIntervalSince(at)))))
                     .monospacedDigit()
             }
-        } else {
-            Text(words.undo.mayHaveStarted)
         }
         if InspectorPrompts.title(label, toast: toast, words: words) != toast.line {
             Text(toast.line).fixedSize(horizontal: false, vertical: true)

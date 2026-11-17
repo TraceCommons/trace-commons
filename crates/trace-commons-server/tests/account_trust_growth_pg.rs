@@ -1113,6 +1113,10 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
         .unwrap();
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.mode, "shadow");
+    assert!(
+        summary.rejections.is_some(),
+        "a shadow run reports its rejection counts"
+    );
     assert!(summary.tier_distribution.get(&1).copied().unwrap_or(0) >= 1);
     let rows = admin
         .query(
@@ -2518,5 +2522,1771 @@ async fn legacy_only_retained_sources_get_strict_lifecycle_and_reviewer_exclusio
         admin.execute("UPDATE trace_account_principals SET unlinked_at=NULL WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&parent]).await.unwrap();
         admin.execute("UPDATE device_keys SET revoked_at=clock_timestamp() WHERE tenant_id=$1 AND device_key_id=$2", &[&tenant,&device]).await.unwrap();
         assert_eq!(units().await, (0, 1));
+    }
+}
+
+/// The versioned pipeline's SettledNoveltyUtility leg writes its credit as
+/// `novelty_utility`, never `accepted`, so the ledger acceptance source sees
+/// nothing. `acceptance_source: "status"` counts the server's acceptance of
+/// the submission instead, and the passed, first-in-cluster gate earns the
+/// unit through the real recorder and evaluation inputs.
+#[tokio::test]
+async fn status_acceptance_source_earns_a_unit_for_a_novelty_utility_only_submission() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_status_source_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let (submission, trace) =
+        seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+    seed_credit(
+        admin,
+        &tenant,
+        submission,
+        trace,
+        "novelty_utility",
+        "pipeline",
+        "pipeline_worker",
+        accepted_at,
+    )
+    .await;
+    let gate = seed_clustered_decision(
+        admin,
+        &tenant,
+        submission,
+        Some(Uuid::new_v4()),
+        accepted_at,
+    )
+    .await;
+
+    let candidates = worker
+        .list_account_trust_fact_candidates(&trust, 100)
+        .await
+        .unwrap();
+    assert!(
+        !candidates.contains(&TrustFactSource::AcceptedSubmission(submission)),
+        "no ledger acceptance without an accepted credit event"
+    );
+    assert!(candidates.contains(&TrustFactSource::AcceptedSubmissionStatus(submission)));
+    assert!(candidates.contains(&TrustFactSource::GateEvaluation(gate)));
+    for source in candidates {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        worker
+            .record_account_trust_fact(
+                &trust,
+                TrustFactSource::AcceptedSubmissionStatus(submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted),
+        "a novelty_utility credit event is not an accepted event, so the approver check never fires"
+    );
+    assert_eq!(
+        worker
+            .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::EvaluatedPassed)
+    );
+
+    let status_policy = |source: Option<&str>| {
+        let mut json = serde_json::json!({
+            "version": "growth-status-source-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "evaluator_versions": ["gate-v1"],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        if let Some(source) = source {
+            json["growth"]["acceptance_source"] = source.into();
+        }
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-status-source-test-v1"],
+        )
+        .unwrap()
+    };
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let status = trace_commons_server::account_trust_rule::evaluate(
+        &status_policy(Some("status")),
+        &inputs,
+        now,
+    );
+    assert_eq!((status.units, status.active_weeks, status.tier), (1, 1, 1));
+    assert!(status.age_seconds > 0);
+    for ledger in [status_policy(None), status_policy(Some("ledger"))] {
+        let e = trace_commons_server::account_trust_rule::evaluate(&ledger, &inputs, now);
+        assert_eq!(
+            (e.units, e.age_seconds, e.tier),
+            (0, 0, 0),
+            "the ledger default ignores status acceptance"
+        );
+    }
+    let (applied, _) = worker
+        .evaluate_and_record_applied_account_trust(&trust, &status_policy(Some("status")))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.units, 1);
+}
+
+/// A versioned-pipeline run for `submission` whose Review approved it
+/// (approved_revision_id set), the state the Review commit leaves beside the
+/// submission's move to `accepted` (V155's first leg).
+async fn seed_approved_pipeline_run(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    submission: Uuid,
+    trace: Uuid,
+) -> Uuid {
+    let hash = |seed: Uuid| format!("sha256:{}", seed.simple().to_string().repeat(2));
+    let source_ref = Uuid::new_v4();
+    let approved_ref = Uuid::new_v4();
+    for object_ref in [source_ref, approved_ref] {
+        admin
+            .execute(
+                "INSERT INTO trace_object_refs(tenant_id,submission_id,object_ref_id,artifact_kind,
+                    object_store,object_key,content_sha256,encryption_key_ref,size_bytes)
+                 VALUES($1,$2,$3,'submitted_envelope','seed-store',$4,$5,'seed-key-ref',0)",
+                &[
+                    &tenant,
+                    &submission,
+                    &object_ref,
+                    &format!("seed/{object_ref}"),
+                    &hash(object_ref),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    let run = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs(tenant_id,run_id,submission_id,trace_id,bundle_id,
+                request_idempotency_key,request_content_hash,source_object_ref_id,
+                next_phase,state,admission_decision,privacy_pass_required,
+                approved_revision_id,approved_object_ref_id,approved_content_hash)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settle','pending','admit',FALSE,$9,$10,$11)",
+            &[
+                &tenant,
+                &run,
+                &submission,
+                &trace,
+                &hash(Uuid::new_v4()),
+                &hash(Uuid::new_v4()),
+                &hash(source_ref),
+                &source_ref,
+                &Uuid::new_v4(),
+                &approved_ref,
+                &hash(approved_ref),
+            ],
+        )
+        .await
+        .unwrap();
+    run
+}
+
+/// V155: a PipelineScore Settle writes its `accepted` credit event as
+/// `pipeline_worker` with no review_decision row. That is server acceptance
+/// when the pipeline itself accepted the submission (an approved run, or its
+/// own `pipeline_settle` gate decision), so both the stored
+/// accepted_submission outcome and the read-time status outcome are
+/// `accepted`. The role string alone is not enough, and a non-pipeline
+/// actor with no approval row still fails closed as approver-unknown, even
+/// on a pipeline-approved submission.
+#[tokio::test]
+async fn pipeline_acceptance_is_server_acceptance_only_with_pipeline_evidence() {
+    use trace_commons_server::versioned_pipeline_credit::PIPELINE_CREDIT_ACTOR_ROLE;
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_accept_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Evidence {
+        ApprovedRun,
+        SettleGateDecision,
+        None,
+    }
+    // (credit actor role, pipeline evidence, expected outcome)
+    let cases = [
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::ApprovedRun,
+            TrustFactOutcome::Accepted,
+        ),
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::SettleGateDecision,
+            TrustFactOutcome::Accepted,
+        ),
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::None,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        (
+            "reviewer",
+            Evidence::ApprovedRun,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        (
+            "reviewer",
+            Evidence::SettleGateDecision,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        ("system", Evidence::None, TrustFactOutcome::Accepted),
+    ];
+    let mut expected = Vec::new();
+    for (role, evidence, outcome) in cases {
+        let (submission, trace) =
+            seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+        // Evidence lands before the credit event, as Review commits before
+        // Settle writes credit.
+        match evidence {
+            Evidence::ApprovedRun => {
+                seed_approved_pipeline_run(admin, &tenant, submission, trace).await;
+            }
+            Evidence::SettleGateDecision => {
+                let decision =
+                    seed_gate_decision(admin, &tenant, submission, true, accepted_at).await;
+                admin
+                    .execute(
+                        "UPDATE trace_gate_decisions SET source='pipeline_settle',pipeline_run_id=$3
+                          WHERE tenant_id=$1 AND decision_id=$2",
+                        &[&tenant, &decision, &Uuid::new_v4()],
+                    )
+                    .await
+                    .unwrap();
+            }
+            Evidence::None => {}
+        }
+        seed_credit(
+            admin,
+            &tenant,
+            submission,
+            trace,
+            "accepted",
+            "pipeline",
+            role,
+            accepted_at,
+        )
+        .await;
+        for source in [
+            TrustFactSource::AcceptedSubmission(submission),
+            TrustFactSource::AcceptedSubmissionStatus(submission),
+        ] {
+            assert_eq!(
+                worker
+                    .record_account_trust_fact(&trust, source)
+                    .await
+                    .unwrap(),
+                Some(outcome),
+                "{source:?} with credit actor {role} and evidence {evidence:?}"
+            );
+        }
+        expected.push((submission, role, evidence, outcome));
+    }
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    for (submission, role, evidence, outcome) in expected {
+        for kind in ["accepted_submission", "accepted_submission_status"] {
+            let fact = inputs
+                .iter()
+                .find(|f| f.source_kind == kind && f.submission_id == submission)
+                .unwrap_or_else(|| panic!("{kind} input for actor {role}, evidence {evidence:?}"));
+            assert_eq!(
+                fact.outcome,
+                outcome.as_str(),
+                "{kind} input with credit actor {role} and evidence {evidence:?}"
+            );
+        }
+    }
+}
+
+/// A `pipeline_settle` gate decision surfaces through the evaluation inputs
+/// with `evaluator_version = 'pipeline:' || bundle_id`, the string the
+/// versioned pipeline's Settle writes, and a policy that lists exactly that
+/// label counts it. Another bundle's label does not.
+#[tokio::test]
+async fn a_pipeline_settle_decision_surfaces_with_its_pipeline_evaluator_label() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_evaluator_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let submission =
+        seed_qualified(admin, &tenant, &owner, Some(Uuid::new_v4()), accepted_at).await;
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    assert!(trace_commons_server::versioned_pipeline::is_bundle_id(
+        &bundle_id
+    ));
+    let label = format!("pipeline:{bundle_id}");
+    let run = Uuid::new_v4();
+    // V156: a pipeline row passes on the pipeline's own credit, so the run
+    // credits the submission, as Settle does before it writes the row.
+    let trace: Uuid = admin
+        .query_one(
+            "SELECT trace_id FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &submission],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    seed_pipeline_credit(admin, &tenant, submission, trace, run, "1.5", accepted_at).await;
+    let gate: Uuid = admin
+        .query_one(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle', pipeline_run_id=$3, gate_policy_version=$4
+              WHERE tenant_id=$1 AND submission_id=$2
+              RETURNING decision_id",
+            &[&tenant, &submission, &run, &label],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    for source in worker
+        .list_account_trust_fact_candidates(&trust, 100)
+        .await
+        .unwrap()
+    {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let fact = inputs
+        .iter()
+        .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+        .expect("the pipeline_settle gate fact is an input");
+    assert_eq!(fact.outcome, "evaluated_passed");
+    assert_eq!(fact.evaluator_version.as_deref(), Some(label.as_str()));
+
+    let policy = |evaluator: &str| {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-evaluator-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "evaluator_versions": ["gate-v1-unused", evaluator],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-evaluator-test-v1"],
+        )
+        .expect("a pipeline evaluator label parses")
+    };
+    let now = Utc::now();
+    let listed = trace_commons_server::account_trust_rule::evaluate(&policy(&label), &inputs, now);
+    assert_eq!((listed.units, listed.tier), (1, 1));
+    let other = format!(
+        "pipeline:sha256:{}",
+        Uuid::new_v4().simple().to_string().repeat(2)
+    );
+    let unlisted =
+        trace_commons_server::account_trust_rule::evaluate(&policy(&other), &inputs, now);
+    assert_eq!(
+        (unlisted.units, unlisted.tier),
+        (0, 0),
+        "another bundle's label does not count this decision"
+    );
+}
+
+/// The ledger row a versioned-pipeline Settle leg writes for `run`: the
+/// Trace Credit instrument, the SettledNoveltyUtility event type and actor
+/// role, and V94's pipeline shape (run, Score outcome and instrument all
+/// set).
+async fn seed_pipeline_credit(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    submission: Uuid,
+    trace: Uuid,
+    run: Uuid,
+    points_delta: &str,
+    occurred_at: DateTime<Utc>,
+) -> Uuid {
+    let event = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                credit_account_ref,event_type,points_delta,reason,actor_principal_ref,actor_role,
+                settlement_state,occurred_at,pipeline_run_id,score_outcome_id,instrument_id)
+             VALUES($1,$2,$3,$4,'fixture','novelty_utility',$5,'fixture','pipeline',
+                    $6,'pending',$7,$8,$9,$10)",
+            &[
+                &tenant,
+                &event,
+                &submission,
+                &trace,
+                &points_delta,
+                &trace_commons_server::versioned_pipeline_credit::PIPELINE_CREDIT_ACTOR_ROLE,
+                &occurred_at,
+                &run,
+                &Uuid::new_v4(),
+                &trace_commons_gate_api::pipeline::TRACE_CREDIT_INSTRUMENT_ID,
+            ],
+        )
+        .await
+        .unwrap();
+    event
+}
+
+/// V156 (owner decision O3): a `pipeline_settle` gate decision passes when
+/// the pipeline accepted and credited the submission -- a positive Trace
+/// Credit ledger row for its run and no duplicate withholding -- whatever its
+/// perplexity/novelty booleans. A pipeline row that credited nothing, or
+/// whose credit was withheld as a duplicate, fails even with both booleans
+/// TRUE. A legacy row keeps perplexity AND novelty, credit or not. The
+/// recorder stores the same outcome the inputs re-derive; a fact stored
+/// under V137's conjunction reads as passed once credited; and a later
+/// duplicate withholding invalidates the account's evaluation and fails the
+/// fact.
+#[tokio::test]
+async fn a_pipeline_gate_fact_passes_on_pipeline_credit_not_the_conjunction() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_credit_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let label = format!("pipeline:{bundle_id}");
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Case {
+        /// Credited, both booleans FALSE: passes.
+        CreditedGateFailing,
+        /// Both booleans TRUE, credit withheld as a duplicate, no ledger row.
+        DuplicateWithheld,
+        /// Both booleans TRUE, a zero ledger row, no withholding.
+        ZeroCredit,
+        /// A legacy row whose booleans fail, with a positive pipeline-shaped
+        /// credit for an unrelated run: still the conjunction.
+        LegacyGateFailing,
+    }
+    // A pipeline row (case, perplexity/novelty, points, withheld reason).
+    let cases = [
+        (
+            Case::CreditedGateFailing,
+            false,
+            Some("2.25"),
+            None,
+            TrustFactOutcome::EvaluatedPassed,
+        ),
+        (
+            Case::DuplicateWithheld,
+            true,
+            None,
+            Some(trace_commons_server::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL),
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+        (
+            Case::ZeroCredit,
+            true,
+            Some("0"),
+            None,
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+        (
+            Case::LegacyGateFailing,
+            false,
+            Some("3"),
+            None,
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+    ];
+    let mut gates = Vec::new();
+    for (case, passed, points, withheld, expected) in cases {
+        let (submission, trace) =
+            seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+        let run = Uuid::new_v4();
+        if let Some(points) = points {
+            seed_pipeline_credit(admin, &tenant, submission, trace, run, points, accepted_at).await;
+        }
+        let gate = seed_clustered_decision(
+            admin,
+            &tenant,
+            submission,
+            Some(Uuid::new_v4()),
+            accepted_at,
+        )
+        .await;
+        if case == Case::LegacyGateFailing {
+            admin
+                .execute(
+                    "UPDATE trace_gate_decisions SET perplexity_passed=$3,novelty_passed=$3
+                      WHERE tenant_id=$1 AND decision_id=$2",
+                    &[&tenant, &gate, &passed],
+                )
+                .await
+                .unwrap();
+        } else {
+            admin
+                .execute(
+                    "UPDATE trace_gate_decisions
+                        SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                            perplexity_passed=$5,novelty_passed=$5,credit_withheld_reason=$6
+                      WHERE tenant_id=$1 AND decision_id=$2",
+                    &[&tenant, &gate, &run, &label, &passed, &withheld],
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            worker
+                .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+                .await
+                .unwrap(),
+            Some(expected),
+            "{case:?}: the recorder stores the pipeline credit verdict"
+        );
+        assert_eq!(
+            worker
+                .record_account_trust_fact(
+                    &trust,
+                    TrustFactSource::AcceptedSubmissionStatus(submission)
+                )
+                .await
+                .unwrap(),
+            Some(TrustFactOutcome::Accepted),
+            "{case:?}: server acceptance"
+        );
+        gates.push((case, gate, expected));
+    }
+
+    // A fact recorded before V156 holds V137's conjunction. Stand one in
+    // directly: a credited, gate-failing pipeline row stored as failed.
+    let (stale_submission, stale_trace) =
+        seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+    let stale_run = Uuid::new_v4();
+    seed_pipeline_credit(
+        admin,
+        &tenant,
+        stale_submission,
+        stale_trace,
+        stale_run,
+        "0.000001",
+        accepted_at,
+    )
+    .await;
+    let stale_gate = seed_clustered_decision(
+        admin,
+        &tenant,
+        stale_submission,
+        Some(Uuid::new_v4()),
+        accepted_at,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                    perplexity_passed=FALSE,novelty_passed=FALSE
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &stale_gate, &stale_run, &label],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,
+                submission_id,outcome,evaluator_version,occurred_at)
+             VALUES($1,$2,'gate_evaluation',$3,$4,'evaluated_failed',$5,$6)",
+            &[
+                &tenant,
+                &account,
+                &stale_gate,
+                &stale_submission,
+                &label,
+                &accepted_at,
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .record_account_trust_fact(
+                &trust,
+                TrustFactSource::AcceptedSubmissionStatus(stale_submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted)
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let outcome_of = |inputs: &[trace_commons_server::account_trust_rule::EvaluationFact],
+                      gate: Uuid| {
+        inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+            .map(|f| f.outcome.clone())
+            .expect("the gate fact is an input")
+    };
+    for (case, gate, expected) in &gates {
+        assert_eq!(
+            outcome_of(&inputs, *gate),
+            expected.as_str(),
+            "{case:?}: the inputs re-derive what the recorder stored"
+        );
+    }
+    assert_eq!(
+        outcome_of(&inputs, stale_gate),
+        "evaluated_passed",
+        "a pipeline fact stored under the conjunction reads from its credit"
+    );
+
+    let policy = || {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-credit-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "acceptance_source": "status",
+                "evaluator_versions": ["gate-v1", label],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-credit-test-v1"],
+        )
+        .unwrap()
+    };
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now());
+    assert_eq!(
+        evaluation.units, 2,
+        "only the two credited pipeline submissions earn a unit; the duplicate, the \
+         zero-credit run and the failing legacy row do not"
+    );
+
+    // A later duplicate withholding on the credited row invalidates the
+    // account's evaluation and fails the fact.
+    let (applied, _) = worker
+        .evaluate_and_record_applied_account_trust(&trust, &policy())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.units, 2);
+    let generation = || async {
+        admin
+            .query_one(
+                "SELECT generation FROM trace_account_trust_frontiers
+                  WHERE tenant_id=$1 AND account_id=$2",
+                &[&tenant, &account],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    let before = generation().await;
+    let credited = gates
+        .iter()
+        .find(|(case, _, _)| *case == Case::CreditedGateFailing)
+        .map(|(_, gate, _)| *gate)
+        .unwrap();
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions SET credit_withheld_reason=$3
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[
+                &tenant,
+                &credited,
+                &trace_commons_server::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        generation().await > before,
+        "a credit_withheld_reason change bumps the account's generation"
+    );
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(outcome_of(&inputs, credited), "evaluated_failed");
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now());
+    assert_eq!(evaluation.units, 1);
+
+    // The predicate is private to its guard: the worker reaches it only
+    // through the recorder and the evaluation inputs.
+    let raw = worker
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        raw.query_one(
+            "SELECT trace_account_trust_pipeline_gate_credited('tenant',NULL)",
+            &[]
+        )
+        .await
+        .unwrap_err()
+        .code()
+        .map(|code| code.code()),
+        Some("42501"),
+        "the worker cannot call the pipeline credit helper directly"
+    );
+}
+
+/// A pipeline-settled, credited, accepted submission in the shape Settle
+/// writes it before the dedup stamp: `source='pipeline_settle'`, the
+/// pipeline's evaluator label, both booleans FALSE, and all four dedup
+/// columns NULL. Returns `(submission, gate decision)`.
+async fn seed_unstamped_pipeline_decision(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    owner: &str,
+    label: &str,
+    withheld: Option<&str>,
+    at_time: DateTime<Utc>,
+) -> (Uuid, Uuid) {
+    let (submission, trace) = seed_submission(admin, tenant, owner, "accepted", at_time).await;
+    let run = Uuid::new_v4();
+    if withheld.is_none() {
+        seed_pipeline_credit(admin, tenant, submission, trace, run, "1.5", at_time).await;
+    }
+    let gate = seed_gate_decision(admin, tenant, submission, false, at_time).await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                    perplexity_passed=FALSE,novelty_passed=FALSE,credit_withheld_reason=$5,
+                    credit_quality_micros=900000,credit_quality_calibration_version=3
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate, &run, &label, &withheld],
+        )
+        .await
+        .unwrap();
+    (submission, gate)
+}
+
+/// Owner decision O4, end to end below Settle: a pipeline row with no
+/// dedup stamp earns no unit (no cluster reads as not first, and a NULL
+/// stamp as the legacy one); the shared inline stamp the pipeline's Settle
+/// calls (`dedup_inline::record_inline_dedup`, `OnlyIfUnset`) writes all
+/// four columns under the active algorithm's stamp, after which the same
+/// account earns a unit under a policy that lists the pipeline label and
+/// that stamp. A second stamp leaves the row's cluster as it was.
+#[tokio::test]
+async fn an_inline_dedup_stamp_lets_a_pipeline_only_account_earn_a_unit() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_dedup_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let label = format!("pipeline:{bundle_id}");
+    let (submission, gate) =
+        seed_unstamped_pipeline_decision(admin, &tenant, &owner, &label, None, accepted_at).await;
+    for source in [
+        TrustFactSource::GateEvaluation(gate),
+        TrustFactSource::AcceptedSubmissionStatus(submission),
+    ] {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    let active_stamp = trace_commons_server::trace_gate_service::dedup_signal_version_for(
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
+    );
+    assert_eq!(active_stamp, "events.v1+fnv1a-3shingle-set.v2");
+    let policy = || {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-dedup-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "acceptance_source": "status",
+                "evaluator_versions": [label],
+                "dedup_signal_versions": [active_stamp],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-dedup-test-v1"],
+        )
+        .unwrap()
+    };
+    let gate_fact = |inputs: &[trace_commons_server::account_trust_rule::EvaluationFact]| {
+        inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+            .cloned()
+            .expect("the gate fact is an input")
+    };
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(gate_fact(&inputs).outcome, "evaluated_passed");
+    assert_eq!(gate_fact(&inputs).first_in_cluster, Some(false));
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now()).units,
+        0,
+        "an unstamped pipeline row earns nothing"
+    );
+
+    // A random simhash far from every other fixture: a new cluster.
+    let simhash = i64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
+    let outcome = trace_commons_server::dedup_inline::record_inline_dedup(
+        &fx.admin_db,
+        &tenant,
+        gate,
+        simhash,
+        &active_stamp,
+        trace_commons_server::dedup_inline::InlineDedupWrite::OnlyIfUnset,
+    )
+    .await;
+    let trace_commons_server::dedup_inline::InlineDedupOutcome::Written {
+        dedup_cluster_id,
+        dedup_cluster_size,
+        dedup_signal_version,
+    } = outcome
+    else {
+        panic!("the first stamp writes: {outcome:?}");
+    };
+    assert_eq!(dedup_cluster_size, 1);
+    assert_eq!(dedup_signal_version, active_stamp);
+    let stored = admin
+        .query_one(
+            "SELECT dedup_simhash,dedup_cluster_id,dedup_cluster_size,dedup_signal_version
+               FROM trace_gate_decisions WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, Option<i64>>(0), Some(simhash));
+    assert_eq!(stored.get::<_, Option<Uuid>>(1), Some(dedup_cluster_id));
+    assert_eq!(stored.get::<_, Option<i32>>(2), Some(1));
+    assert_eq!(
+        stored.get::<_, Option<String>>(3).as_deref(),
+        Some(active_stamp.as_str())
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(gate_fact(&inputs).first_in_cluster, Some(true));
+    assert_eq!(
+        gate_fact(&inputs).dedup_signal_version.as_deref(),
+        Some(active_stamp.as_str())
+    );
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now()).units,
+        1,
+        "the stamped pipeline row earns its unit"
+    );
+
+    // Settle can be offered again; the guarded stamp never moves the row.
+    let again = trace_commons_server::dedup_inline::record_inline_dedup(
+        &fx.admin_db,
+        &tenant,
+        gate,
+        simhash ^ 1,
+        &active_stamp,
+        trace_commons_server::dedup_inline::InlineDedupWrite::OnlyIfUnset,
+    )
+    .await;
+    assert_eq!(
+        again,
+        trace_commons_server::dedup_inline::InlineDedupOutcome::AlreadySet
+    );
+    let kept = admin
+        .query_one(
+            "SELECT dedup_simhash,dedup_cluster_id FROM trace_gate_decisions
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.get::<_, Option<i64>>(0), Some(simhash));
+    assert_eq!(kept.get::<_, Option<Uuid>>(1), Some(dedup_cluster_id));
+}
+
+/// Owner decision O4: a submission the pipeline refused as a duplicate
+/// (`credit_withheld_reason` a duplicate label) is never first in its
+/// cluster, even when it is the only member of a cluster of its own. A
+/// non-duplicate pipeline row alone in its own cluster stays first.
+#[tokio::test]
+async fn a_pipeline_duplicate_verdict_is_never_first_in_its_cluster() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_duplicate_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let label = format!(
+        "pipeline:sha256:{}",
+        Uuid::new_v4().simple().to_string().repeat(2)
+    );
+    let mut gates = Vec::new();
+    for withheld in [
+        None,
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL),
+    ] {
+        let (submission, gate) =
+            seed_unstamped_pipeline_decision(admin, &tenant, &owner, &label, withheld, accepted_at)
+                .await;
+        // Each alone in a cluster of its own.
+        admin
+            .execute(
+                "UPDATE trace_gate_decisions SET dedup_cluster_id=$3,dedup_signal_version=$4
+                  WHERE tenant_id=$1 AND decision_id=$2",
+                &[&tenant, &gate, &Uuid::new_v4(), &DEDUP_V2],
+            )
+            .await
+            .unwrap();
+        worker
+            .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+            .await
+            .unwrap();
+        gates.push((withheld, submission, gate));
+    }
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    for (withheld, _, gate) in &gates {
+        let fact = inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == *gate)
+            .expect("the gate fact is an input");
+        assert_eq!(
+            fact.first_in_cluster,
+            Some(withheld.is_none()),
+            "{withheld:?}: a duplicate verdict is never first; a credited row alone in its cluster is"
+        );
+    }
+}
+
+/// A V157 fixture: a legacy tenant, its live invite-onboarded device, a live
+/// V81 tenant link from `account` to it, and the link's claim record for that
+/// device (V148), naming `proven` as the device's signed-upload principal.
+struct LegacyLink {
+    link: Uuid,
+    legacy_tenant: String,
+    device: String,
+    proven: String,
+}
+
+fn hex64() -> String {
+    Uuid::new_v4().simple().to_string().repeat(2)
+}
+
+async fn seed_legacy_link(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: Uuid,
+) -> LegacyLink {
+    let legacy_tenant = format!("tenant-{}", hex64());
+    let device = format!("sha256:{}", hex64());
+    let invite = format!("sha256:{}", hex64());
+    let proven = format!("principal_sha256:{}", hex64());
+    let link = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin)
+             VALUES($1,$2,'fixture-key',$3,'invite')",
+            &[&device, &legacy_tenant, &invite],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_links(link_id,tenant_id,account_id,legacy_tenant_id,
+                device_key_id,invite_subject_hash,nonce,issued_at,device_signature,linked_at,
+                server_kid,server_signature)
+             VALUES($1,$2,$3,$4,$5,$6,$7,1,'fixture-signature',1,'fixture-kid','fixture-signature')",
+            &[&link, &tenant, &account, &legacy_tenant, &device, &invite, &hex64()],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_link_claimed_principals(tenant_id,legacy_link_hash,device_key_id,principal_ref)
+             VALUES($1,trace_legacy_link_hash($2),$3,$4)",
+            &[&legacy_tenant, &link, &device, &proven],
+        )
+        .await
+        .unwrap();
+    LegacyLink {
+        link,
+        legacy_tenant,
+        device,
+        proven,
+    }
+}
+
+async fn carried_rows(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: Uuid,
+) -> Vec<(Uuid, DateTime<Utc>)> {
+    admin
+        .query(
+            "SELECT link_id, first_contribution_at FROM trace_account_trust_carried_age
+              WHERE tenant_id=$1 AND account_id=$2 ORDER BY link_id",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+async fn trust_generation(admin: &deadpool_postgres::Object, tenant: &str, account: Uuid) -> i64 {
+    admin
+        .query_one(
+            "SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+fn carried_age_policy() -> trace_commons_server::account_trust_rule::GrowthPolicy {
+    let json = serde_json::json!({
+        "version": "growth-carried-age-test-v1",
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "fixed", "seconds": 86400},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 3650 * 86400,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 300,
+            "acceptance_source": "status",
+            "carried_age": true,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": [DEDUP_V2],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 1, "active_weeks": 1, "age_seconds": 86400, "multiplier": 2}
+            ]
+        }
+    });
+    trace_commons_server::account_trust_rule::parse_growth_policy(
+        &json.to_string(),
+        &["growth-carried-age-test-v1"],
+    )
+    .unwrap()
+}
+
+/// V157 (owner decision O6): a live, non-pooled, device-proven tenant link
+/// carries the legacy tenant's first accepted contribution as account age.
+/// Only an accepted, unwithdrawn, unrevoked submission under a principal the
+/// link's claim recorded counts. A carry write moves the generation, an
+/// unchanged refresh does not, the inputs surface it as a carried row the
+/// rule reads for age only, and revoking the link removes it in the
+/// revoking transaction and moves the generation again.
+#[tokio::test]
+async fn a_proven_legacy_link_carries_age_until_it_is_revoked() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(&fx, "tc_carried_age_worker", "trace_account_trust_worker").await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    assert!(worker.tiered_account_trust_runtime_ready().await.unwrap());
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let legacy = seed_legacy_link(admin, &tenant, account).await;
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    // Earlier rows that must not carry: another principal's acceptance, a
+    // withdrawn one, a revoked one and a not-yet-accepted one, all under or
+    // around the proven principal.
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &principal(),
+        "accepted",
+        now - day * 90,
+    )
+    .await;
+    let (withdrawn, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 80,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET withdrawn_at=now() WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &withdrawn],
+        )
+        .await
+        .unwrap();
+    let (revoked, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 70,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET revoked_at=now() WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &revoked],
+        )
+        .await
+        .unwrap();
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "received",
+        now - day * 60,
+    )
+    .await;
+    // The first that counts, and a later one that does not change it.
+    let (first, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 40,
+    )
+    .await;
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 10,
+    )
+    .await;
+    let first_at: DateTime<Utc> = admin
+        .query_one(
+            "SELECT COALESCE(reviewed_at,received_at) FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &first],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let before = trust_generation(admin, &tenant, account).await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        carried_rows(admin, &tenant, account).await,
+        vec![(legacy.link, first_at)]
+    );
+    let carried = trust_generation(admin, &tenant, account).await;
+    assert!(
+        carried > before,
+        "a new carry invalidates prior evaluations"
+    );
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        trust_generation(admin, &tenant, account).await,
+        carried,
+        "an unchanged refresh writes nothing"
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let carried_inputs: Vec<_> = inputs
+        .iter()
+        .filter(|f| {
+            f.source_kind == trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND
+        })
+        .collect();
+    assert_eq!(carried_inputs.len(), 1);
+    assert_eq!(carried_inputs[0].source_id, legacy.link);
+    assert_eq!(
+        carried_inputs[0].outcome,
+        trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_OUTCOME
+    );
+    assert_eq!(carried_inputs[0].occurred_at, first_at);
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&carried_age_policy(), &inputs, now);
+    assert_eq!(evaluation.age_seconds, (now - first_at).num_seconds());
+    assert_eq!(
+        (evaluation.units, evaluation.tier),
+        (0, 0),
+        "age only, never a unit"
+    );
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&shadow_policy(), &inputs, now)
+            .age_seconds,
+        0,
+        "a policy without carried_age ignores the carry"
+    );
+
+    // The worker pass refreshes too, and reports counts only.
+    let pass = trace_commons_server::account_trust_growth::record_account_trust_facts(
+        worker.as_ref(),
+        Some(10_000),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pass.carried_age_failed, 0);
+    assert!(pass.carried_age_accounts >= 1);
+    assert_eq!(trust_generation(admin, &tenant, account).await, carried);
+
+    // Revocation removes the carry in its own transaction.
+    admin
+        .execute(
+            "UPDATE trace_legacy_invite_links SET revoked_at=now() WHERE link_id=$1",
+            &[&legacy.link],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+    let revoked_generation = trust_generation(admin, &tenant, account).await;
+    assert!(
+        revoked_generation > carried,
+        "revocation invalidates the carried evaluation"
+    );
+    assert!(
+        worker
+            .account_trust_evaluation_inputs(&trust)
+            .await
+            .unwrap()
+            .iter()
+            .all(|f| f.source_kind
+                != trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND)
+    );
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        trust_generation(admin, &tenant, account).await,
+        revoked_generation
+    );
+}
+
+/// V157: nothing carries from a pooled tenant, through a revoked proving
+/// device, to an account that holds no link, or under another tenant's
+/// context; marking a tenant pooled and deleting a link each remove a live
+/// carry and move the generation.
+#[tokio::test]
+async fn pooled_unproven_and_unlinked_identities_carry_no_age() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_carried_age_refusal_worker",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    // Pooling a carried tenant removes the carry.
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let pooled = seed_legacy_link(admin, &tenant, account).await;
+    seed_submission(
+        admin,
+        &pooled.legacy_tenant,
+        &pooled.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    let carried = trust_generation(admin, &tenant, account).await;
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_pooled_tenants(tenant_id,reason_label) VALUES($1,'shared event invite')",
+            &[&pooled.legacy_tenant],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+    assert!(trust_generation(admin, &tenant, account).await > carried);
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // A revoked proving device proves nothing.
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let unproven = seed_legacy_link(admin, &tenant, account).await;
+    seed_submission(
+        admin,
+        &unproven.legacy_tenant,
+        &unproven.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE device_keys SET revoked_at=now() WHERE tenant_id=$1 AND device_key_id=$2",
+            &[&unproven.legacy_tenant, &unproven.device],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+
+    // A second account in the same tenant, without a link of its own,
+    // carries nothing from the first account's legacy tenant.
+    let tenant = anchored_tenant();
+    let owner = seed_account(admin, &tenant, &[&principal()]).await;
+    let other = seed_account(admin, &tenant, &[&principal()]).await;
+    let other_trust = find(&worker, &tenant, other).await;
+    let owned = seed_legacy_link(admin, &tenant, owner).await;
+    seed_submission(
+        admin,
+        &owned.legacy_tenant,
+        &owned.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&other_trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(carried_rows(admin, &tenant, other).await.is_empty());
+
+    // Under another tenant's context the refresh is refused.
+    let mut raw = fx
+        .admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = raw.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&anchored_tenant()],
+    )
+    .await
+    .unwrap();
+    let refused = tx
+        .query_one(
+            "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+            &[&tenant, &owner],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.as_db_error().map(|e| e.message()),
+        Some("account_trust_carry_refused")
+    );
+    drop(tx);
+
+    // Deleting a link cascades to its carry and moves the generation.
+    let owner_trust = find(&worker, &tenant, owner).await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&owner_trust)
+            .await
+            .unwrap(),
+        1
+    );
+    let carried = trust_generation(admin, &tenant, owner).await;
+    admin
+        .execute(
+            "DELETE FROM trace_legacy_invite_links WHERE link_id=$1",
+            &[&owned.link],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, owner).await.is_empty());
+    assert!(trust_generation(admin, &tenant, owner).await > carried);
+}
+
+/// Waits until `pid` is blocked on an advisory lock. Counts polls, not wall
+/// time, and fails the test if the backend never gets there.
+async fn wait_for_advisory_wait(observer: &deadpool_postgres::Object, pid: i32) {
+    for _ in 0..2_000 {
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                  WHERE pid=$1 AND wait_event_type='Lock' AND wait_event='advisory')",
+                &[&pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting {
+            return;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("backend {pid} never waited on the tenant link's advisory lock");
+}
+
+/// Review of V157: a revocation or pooling that runs while a refresh holds
+/// the tenant link's lock must still remove the carry the refresh commits,
+/// and move the generation for it. The removal triggers take the same lock
+/// before they delete, so they wait for the refresh and then see its row.
+/// Without that, the revocation deletes nothing (the carry is uncommitted),
+/// the refresh commits a carry for a revoked link, and the generation does
+/// not move; with a carry already present, the two deadlock instead.
+#[tokio::test]
+async fn a_removal_racing_a_refresh_waits_for_it_and_removes_its_carry() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let pool = fx.admin_db.raw_pool_for_tests_and_diagnostics();
+    let observer = pool.get().await.unwrap();
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    for (phase, existing_carry) in [
+        ("revocation", false),
+        ("revocation", true),
+        ("pooled", false),
+        ("pooled", true),
+    ] {
+        let tenant = anchored_tenant();
+        let account = seed_account(admin, &tenant, &[&principal()]).await;
+        let legacy = seed_legacy_link(admin, &tenant, account).await;
+        seed_submission(
+            admin,
+            &legacy.legacy_tenant,
+            &legacy.proven,
+            "accepted",
+            now - day * 30,
+        )
+        .await;
+        if existing_carry {
+            // A carry from an earlier pass, which the racing refresh's
+            // upsert locks again.
+            let mut conn = pool.get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+            let held: i32 = tx
+                .query_one(
+                    "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+                    &[&tenant, &account],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(held, 1);
+            tx.commit().await.unwrap();
+            assert_eq!(carried_rows(admin, &tenant, account).await.len(), 1);
+        }
+        let before = trust_generation(admin, &tenant, account).await;
+
+        // The refresh's transaction takes the tenant link's lock first, as
+        // the refresh does on its way to the link.
+        let mut refresh_conn = pool.get().await.unwrap();
+        let refresh = refresh_conn.transaction().await.unwrap();
+        refresh
+            .execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        refresh
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                &[&legacy.legacy_tenant],
+            )
+            .await
+            .unwrap();
+
+        // The removal starts and waits on that lock.
+        let removal_conn = pool.get().await.unwrap();
+        let removal_pid: i32 = removal_conn
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let link = legacy.link;
+        let legacy_tenant = legacy.legacy_tenant.clone();
+        let removal = tokio::spawn(async move {
+            if phase == "revocation" {
+                removal_conn
+                    .execute(
+                        "UPDATE trace_legacy_invite_links SET revoked_at=now() WHERE link_id=$1",
+                        &[&link],
+                    )
+                    .await
+            } else {
+                removal_conn
+                    .execute(
+                        "INSERT INTO trace_legacy_invite_pooled_tenants(tenant_id,reason_label)
+                         VALUES($1,'shared event invite')",
+                        &[&legacy_tenant],
+                    )
+                    .await
+            }
+        });
+        wait_for_advisory_wait(&observer, removal_pid).await;
+
+        // The refresh still sees the link live and the tenant unpooled
+        // (neither change has committed) and writes its carry.
+        let carried: i32 = refresh
+            .query_one(
+                "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+                &[&tenant, &account],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{phase} (existing carry {existing_carry}): refresh: {e}"))
+            .get(0);
+        assert_eq!(carried, 1, "{phase}: the refresh carries the live link");
+        refresh.commit().await.unwrap();
+        removal
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{phase} (existing carry {existing_carry}): removal: {e}"));
+
+        assert!(
+            carried_rows(admin, &tenant, account).await.is_empty(),
+            "{phase} (existing carry {existing_carry}): no carry survives the removal"
+        );
+        // A new carry moves the generation once and its removal once more;
+        // an existing, unchanged carry is not rewritten, so only its
+        // removal moves it.
+        let expected = if existing_carry {
+            before + 1
+        } else {
+            before + 2
+        };
+        assert_eq!(
+            trust_generation(admin, &tenant, account).await,
+            expected,
+            "{phase} (existing carry {existing_carry}): the removal moves the generation"
+        );
     }
 }

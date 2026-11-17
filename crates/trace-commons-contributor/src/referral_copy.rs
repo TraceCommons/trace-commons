@@ -48,10 +48,10 @@ pub const REFERRAL_COPIED: &str = "Copied";
 pub const REFERRAL_DISABLE_BUTTON: &str = "Turn off";
 /// DRAFT, NEEDS APPROVAL. The turn-off button's accessibility name.
 pub const REFERRAL_DISABLE_ACCESSIBILITY_NAME: &str = "Turn off code {code}";
-/// DRAFT, NEEDS APPROVAL. Beside the codes: what turning one off does and
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P69). Beside the codes: what turning one off does and
 /// does not do (rule 3), shown while a code can be turned off.
 pub const REFERRAL_DISABLE_SCOPE: &str =
-    "A code you turn off takes no new people. People who already joined with it still count.";
+    "A code you turn off takes no new people. Earlier joins still count.";
 /// DRAFT, NEEDS APPROVAL. A code's state, when it is not live.
 pub const REFERRAL_STATE_DISABLED: &str = "Off";
 /// DRAFT, NEEDS APPROVAL. A code the abuse check paused.
@@ -89,9 +89,9 @@ pub const REFERRAL_APPLY_ACCESSIBILITY_NAME: &str = "Apply referral code";
 /// `apply_until`.
 pub const REFERRAL_ENTER_SCOPE: &str =
     "You can enter one code until {date}. It can't be changed after.";
-/// DRAFT, NEEDS APPROVAL. The account's state once a code is applied: a
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P68). The account's state once a code is applied: a
 /// status, which never says whose code.
-pub const REFERRAL_APPLIED_STATUS: &str = "A referral code is applied to your account.";
+pub const REFERRAL_APPLIED_STATUS: &str = "Referral code applied.";
 /// DRAFT, NEEDS APPROVAL. The commons refused the code
 /// (`referral_not_applied`, whatever the reason).
 pub const REFERRAL_NOT_APPLIED: &str = "That code couldn't be applied.";
@@ -101,8 +101,8 @@ pub const REFERRAL_INVALID_CODE: &str = "That isn't a referral code.";
 /// DRAFT, NEEDS APPROVAL. The field on the NEAR AI sign-in step, which is
 /// optional.
 pub const REFERRAL_SIGN_UP_LABEL: &str = "Referral code (optional)";
-/// DRAFT, NEEDS APPROVAL. Any other refusal of a create, turn off or apply.
-pub const REFERRAL_FAILED: &str = "Nothing changed. Try again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P70). Any other refusal of a create, turn off or apply.
+pub const REFERRAL_FAILED: &str = "Nothing changed.";
 /// DRAFT, NEEDS APPROVAL. In place of the section when this device holds
 /// no usable account session, as the payout section says it
 /// (`PAYOUT_LINK_SESSION_ENDED`).
@@ -263,8 +263,9 @@ mod tests {
         );
         for (name, docs) in &declared {
             assert!(
-                docs.contains("DRAFT, NEEDS APPROVAL"),
-                "{name} is not marked for owner review"
+                docs.contains("DRAFT, NEEDS APPROVAL")
+                    || docs.contains("Approved by the owner 2026-11-04 (Settings copy pass 2"),
+                "{name} is not marked for owner review or approved"
             );
         }
     }

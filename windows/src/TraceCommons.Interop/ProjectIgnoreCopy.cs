@@ -7,7 +7,7 @@ namespace TraceCommons.Interop;
 /// </summary>
 public static class ProjectIgnoreCopy
 {
-    public const string ButtonLabel = "Ignore project";
+    public const string ButtonLabel = "Never";
 
     /// <summary>
     /// Word for word what GTK and macOS put on the same button:
@@ -19,6 +19,13 @@ public static class ProjectIgnoreCopy
     public const string Tooltip =
         "Stops this project being offered and clears what it has waiting. "
         + "Anything already submitted is unaffected, and you can undo this in Settings.";
+
+    /// <summary>
+    /// The Never button's help text in the ignore confirmation
+    /// (<c>project_copy::IGNORE_PROJECT_BODY_TOOLTIP</c>, P121).
+    /// </summary>
+    public const string NeverButtonTooltip =
+        "Setting it back to Ask can offer the removed traces again.";
 
     /// <summary>
     /// The core's title (<c>project_copy::ignore_project_title</c>), read
@@ -57,9 +64,10 @@ public static class ProjectIgnoreCopy
         {
             return $"Stops this project being offered. {tail}";
         }
+        // Owner changed this 2026-11-04 (Settings copy pass 2, P121): the way
+        // back moved to the Never button's tooltip (NeverButtonTooltip).
         var noun = pendingCount == 1 ? "trace" : "traces";
-        return $"This removes {pendingCount} waiting {noun} and stops this project "
-             + $"being offered. {tail}";
+        return $"This removes {pendingCount} waiting {noun}. Traces already sent aren't affected.";
     }
 
     /// <summary>

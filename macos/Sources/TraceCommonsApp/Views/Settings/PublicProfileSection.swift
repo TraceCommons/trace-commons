@@ -70,10 +70,14 @@ struct PublicProfileSection: View {
                     GlassNotice(tone: outcomeTone) { Text(sentence) }
                 }
             }
-            Text(PublicProfileCopy.footnote)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // Cut by the owner 2026-11-04 (Settings copy pass 2, P142): an
+            // empty footnote draws nothing.
+            if !PublicProfileCopy.footnote.isEmpty {
+                Text(PublicProfileCopy.footnote)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             profileCopyDefects
         }
         .glassModal(isPresented: $showingGoPublic) {
@@ -258,10 +262,14 @@ struct GoPublicSheet: View {
         if case .refused(let label) = model.profileOutcome {
             GlassNotice(tone: .outside) { Text(PublicProfileCopy.failureSentence(label)) }
         }
-        Text(PublicProfileCopy.goPublicFootnote)
-            .glassType(GlassTokens.TypeScale.caption)
-            .foregroundStyle(GlassColor.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+        // Cut by the owner 2026-11-04 (Settings copy pass 2, P144): an
+        // empty footnote draws nothing.
+        if !PublicProfileCopy.goPublicFootnote.isEmpty {
+            Text(PublicProfileCopy.goPublicFootnote)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var outcomeIsSettled: Bool {

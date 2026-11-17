@@ -1,0 +1,68 @@
+{
+  "method": "Reviewed induction: original init establishes domain+strength, arbitrary domain+strength is closed under full original step, implies selected predicates, and is nonempty",
+  "models": [
+    {
+      "model": "client_consent",
+      "harness": "client_consent_induction.qnt",
+      "module": "client_consent_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "strengthened"
+    },
+    {
+      "model": "client_contribution",
+      "harness": "client_contribution_induction.qnt",
+      "module": "client_contribution_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "strengthened"
+    },
+    {
+      "model": "client_learning",
+      "harness": "client_learning_p13_induction.qnt",
+      "module": "client_learning_p13_induction",
+      "originalInit": "init",
+      "originalStep": "step",
+      "arbitraryInit": "arbitrary",
+      "inductive": "strengthened"
+    },
+    {
+      "model": "server_receipt",
+      "harness": "server_receipt_induction.qnt",
+      "module": "server_receipt_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "Inductive"
+    },
+    {
+      "model": "server_pipeline",
+      "harness": "server_pipeline_induction.qnt",
+      "module": "server_pipeline_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "Inductive"
+    },
+    {
+      "model": "server_settlement",
+      "harness": "server_settlement_induction.qnt",
+      "module": "server_settlement_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "InductionTarget"
+    },
+    {
+      "model": "server_lifecycle",
+      "harness": "server_lifecycle_induction.qnt",
+      "module": "server_lifecycle_induction",
+      "originalInit": "originalInit",
+      "originalStep": "originalStep",
+      "arbitraryInit": "arbitraryInit",
+      "inductive": "InductionTarget"
+    }
+  ]
+}

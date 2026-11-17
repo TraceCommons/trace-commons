@@ -1,0 +1,19 @@
+[package]
+name = "ironwire_usage"
+description = "Session blocks, burn rate and projections, measured from the local ledger"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["NEAR AI <support@near.ai>"]
+repository.workspace = true
+publish = false
+
+[dependencies]
+ironwire_ledger.workspace = true
+
+chrono.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -20,7 +20,9 @@ enum TracesHealth {
 
         init(title: String, detail: String?, tone: GlassStatus, index: Int = 0, condition: String? = nil) {
             self.title = title
-            self.detail = detail
+            // A title-only line comes from the core with an empty detail;
+            // drawing it would leave a blank line under the title.
+            self.detail = detail?.isEmpty == true ? nil : detail
             self.tone = tone
             self.condition = condition
             id = "\(index)-\(title)"

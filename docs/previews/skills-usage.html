@@ -1,0 +1,72 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Skills usage — layout preview</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#181a21;color:#f4f5fa;font:15px -apple-system,BlinkMacSystemFont,Arial,sans-serif}main{max-width:1040px;margin:auto;padding:32px}header,.toolbar,.heading{display:flex;align-items:center;justify-content:space-between;gap:16px}h1{font-size:27px;margin:0}h2{font-size:18px;margin:0}p{line-height:1.55}.muted,small{color:#aeb4c5}.sample{font-size:12px;color:#e5c477;border:1px solid #695d36;padding:6px 10px;border-radius:20px}.tabs{display:flex;margin:25px 0;background:#22252f;padding:4px;border-radius:18px}.tabs span{flex:1;text-align:center;padding:11px;border-radius:15px;font-weight:600}.tabs .active{background:#85bfff;color:#102239}.toolbar{margin:26px 0;flex-wrap:wrap}button,select{font:inherit;color:inherit;background:#292d39;border:1px solid #454b5c;border-radius:9px;padding:8px 12px;cursor:pointer}button[aria-pressed=true]{background:#85bfff;color:#102239;border-color:#85bfff}button:focus-visible,select:focus-visible{outline:3px solid #b9d9ff;outline-offset:3px}.group{display:flex;gap:5px}.card{background:#242833;border:1px solid #363d4b;border-radius:18px;padding:22px;margin:16px 0}.summary{font-size:32px;font-weight:650;margin:14px 0 0;letter-spacing:-1px}.chart{height:180px;display:flex;gap:5px;align-items:end;border-bottom:1px solid #4c5364;margin:20px 0 8px}.column{flex:1;background:#85bfff;border-radius:4px 4px 0 0;min-width:2px;position:relative}.column:hover{background:#b8dbff}.axis{display:flex;justify-content:space-between;font-size:12px;color:#aeb4c5}.layout{display:grid;grid-template-columns:1.25fr 1fr;gap:18px}.ranking{margin-top:20px;display:grid;gap:8px}.rank{padding:12px;text-align:left;background:transparent;border:1px solid transparent;border-radius:10px;width:100%}.rank:hover,.rank.selected{background:#303848;border-color:#698db5}.rankline{display:flex;justify-content:space-between;gap:16px;margin-bottom:9px}.track{height:8px;background:#3c4351;border-radius:8px}.fill{height:8px;background:#85bfff;border-radius:8px}.detail-label{font-size:11px;text-transform:uppercase;letter-spacing:1.3px;color:#98bce6;margin-bottom:10px}.stats{display:flex;gap:30px;margin:22px 0}.stats strong{display:block;font-size:24px}.evidence{padding:12px 0;border-top:1px solid #414856}.note{font-size:12px;color:#aeb4c5}.legend{display:flex;gap:8px;align-items:center;font-size:12px;color:#b8c1d1}.dot{width:8px;height:8px;background:#85bfff;border-radius:50%}footer{margin-top:22px;color:#aeb4c5;font-size:12px}@media(max-width:760px){main{padding:20px}.layout{grid-template-columns:1fr}.toolbar{align-items:start}.chart{gap:3px}.card{padding:16px}}
+
+/* Mirrors InsightsGlass + GlassTokens: body 13, heading 13/600,
+   caption 11, chartSurface #0d1124, chartSeries1 #0091fd. */
+:root{--plot:#0d1124;--series:#0091fd;--grid:rgba(255,255,255,.10);--secondary:#c9c9d0}
+body{background:#2e303b;color:#f5f5f7;font-size:13px;line-height:1.38}
+main{max-width:940px;padding:24px}h1{font-size:15px;font-weight:600}h2{font-size:13px;font-weight:600}
+small,.muted,.note,.axis,.legend{color:var(--secondary)}small,.note,.axis{font-size:11px;line-height:16px}
+.sample{font-size:10px;padding:4px 8px}.tabs{margin:20px 0;background:rgba(0,0,0,.28);border-radius:18px}.tabs span{padding:9px;font-size:13px}.tabs .active{background:#80baff;color:#152336}
+.toolbar{margin:16px 0}button,select{font-size:12px;padding:6px 10px;border-color:rgba(255,255,255,.14);background:rgba(255,255,255,.055)}button[aria-pressed=true]{background:#80baff;border-color:transparent}
+.card{background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:14px;margin:24px 0;box-shadow:inset 0 1px rgba(255,255,255,.10)}
+.summary{font-size:22px;font-weight:700;letter-spacing:-.22px;margin:12px 0 0;font-variant-numeric:tabular-nums}
+.chart{display:block;position:relative;height:120px!important;border:0;border-radius:8px;background:var(--plot);margin:12px 0 4px;overflow:hidden;padding:8px}
+.plot-body{position:absolute;left:35px;right:10px;top:10px;bottom:8px;display:flex;align-items:end;background:repeating-linear-gradient(to top,var(--grid) 0,var(--grid) 1px,transparent 1px,transparent 50%)}
+.column{flex:1;height:100%!important;display:flex;align-items:end;justify-content:center;background:transparent;border-radius:0;min-width:0}
+.column:hover{background:rgba(255,255,255,.08)}.bar{width:56%;background:var(--series);border-radius:0;min-width:1px}.column:hover .bar{background:#49b1ff}
+.y-axis{position:absolute;inset:8px auto 7px 5px;width:25px;display:flex;flex-direction:column;justify-content:space-between;text-align:right;font-size:10px;color:var(--secondary);font-variant-numeric:tabular-nums}
+.axis{padding-left:35px;padding-right:10px;font-size:10px}.legend{font-size:11px}.dot,.fill{background:var(--series)}.layout{gap:24px;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.ranking{margin-top:12px;gap:4px}.rank{padding:10px 8px;border-radius:8px}.rank.selected{background:rgba(0,145,253,.12);border-color:rgba(0,145,253,.4)}.rank:hover{background:rgba(255,255,255,.05)}.rankline{margin-bottom:6px}.rankline span{overflow-wrap:anywhere}.rankline strong{font-variant-numeric:tabular-nums}.track{height:6px;background:var(--plot)}.fill{height:6px;border-radius:2px}.detail-label{font-size:10px;letter-spacing:.8px;color:var(--secondary)}.stats{gap:24px;margin:16px 0}.stats strong{font-size:22px;font-variant-numeric:tabular-nums}.evidence{padding:8px 0;border-color:rgba(255,255,255,.12)}footer{font-size:11px;margin-top:24px;line-height:16px}
+@media(max-width:740px){.layout{grid-template-columns:1fr}main{padding:16px}}
+
+
+.removal-list{list-style:none;padding:0;margin:12px 0 0}.removal-row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:12px 0;border-top:1px solid rgba(255,255,255,.12)}.removal-name{font-weight:600}.removal-path{display:block;margin-top:4px;font-size:11px;color:var(--secondary);overflow-wrap:anywhere}.removal-status{font-size:11px;color:var(--secondary);text-align:right;flex-shrink:0}.unknown-row{opacity:.8}@media(max-width:560px){.removal-row{display:block}.removal-status{display:block;text-align:left;margin-top:5px}}
+</style>
+<main><header><div><small>Insights / Skills</small><h1 style="margin-top:8px">Usage</h1></div><span class="sample">Sample data</span></header>
+<nav class="tabs" aria-label="Skills sections"><span>Index</span><span class="active">Usage</span><span>Catalog</span><span>Following</span></nav>
+<div class="toolbar"><div class="group" aria-label="Time window"><button data-days="7">7 days</button><button data-days="30" aria-pressed="true">30 days</button><button data-days="90">90 days</button></div></div>
+<div class="layout"><section class="card" style="margin:0"><div class="heading"><h2>Most-used skills</h2></div><div id="ranking" class="ranking"></div></section>
+<section class="card" style="margin:0" aria-labelledby="removal-title"><div class="heading"><h2 id="removal-title">Removal candidates</h2><small id="removal-period"></small></div><ul id="removal-list" class="removal-list"></ul><p id="removal-empty" class="note" hidden>No unused skills found.</p></section></div>
+<section class="card" aria-live="polite"><h2 id="skillName"></h2><p id="agent" class="muted"></p><div class="stats"><div><strong id="skillCount"></strong><small id="skillMetric"></small></div></div><div id="detailChart" class="chart" style="height:100px" role="img"></div><div class="axis"><span id="detailStart"></span><span>Today</span></div><h2 style="margin-top:24px">Sessions</h2><div class="evidence">Reviewing a change <small>· sample</small></div><div class="evidence">Debugging a test failure <small>· sample</small></div></section>
+</main>
+<script>
+const names=['systematic-debugging','requesting-code-review','test-driven-development','verification-before-completion','using-git-worktrees'];
+const agents=['Codex','Claude Code','Claude Code','Codex','Codex'];
+// Illustrative installed skills, independent of the chart population/metric.
+const installedSamples=[
+ {name:'release-notes',agent:'Codex',location:'~/.codex/skills/release-notes',lastObservedDays:48,coverage:true},
+ {name:'migration-helper',agent:'Claude Code',location:'~/.claude/skills/migration-helper',lastObservedDays:12,coverage:true},
+ {name:'legacy-deploy',agent:'Codex',location:'~/.agents/skills/legacy-deploy',lastObservedDays:null,coverage:true},
+ {name:'design-review',agent:'Claude Code',location:'~/.claude/skills/design-review',lastObservedDays:null,coverage:false}
+];
+function drawRemovalCandidates(){
+ const list=document.getElementById('removal-list');list.replaceChildren();
+ document.getElementById('removal-period').textContent=`No use found · ${days} days · all sessions`;
+ for(const skill of installedSamples){
+  if(!skill.coverage)continue;
+  if(skill.coverage&&skill.lastObservedDays!==null&&skill.lastObservedDays<days)continue;
+  const row=document.createElement('li');row.className='removal-row'+(skill.coverage?'':' unknown-row');
+  const identity=document.createElement('div'),name=document.createElement('span');name.className='removal-name';name.textContent=skill.name;
+  const path=document.createElement('span');path.className='removal-path';path.textContent=skill.agent+' · '+skill.location;
+  identity.append(name,path);const status=document.createElement('span');status.className='removal-status';status.textContent='';row.append(identity,status);list.append(row);
+ }
+ document.getElementById('removal-empty').hidden=list.children.length!==0;
+}
+let days=30,selected=0;
+function series(i){return Array.from({length:days},(_,d)=>{const n=((d*13+i*7)%17);const active=n>3&&d%8!==0;const base=active?Math.max(1,Math.floor((n+3)/(i+2))):0;return base+Math.floor(base/2)})}
+function values(i,m='invocations'){return series(i).map((n,d)=>m==='loads'?n*2+(n?1:0):m==='sessions'?Math.min(n,2):n)}
+function sum(a){return a.reduce((a,b)=>a+b,0)}
+function label(){return 'Uses'}
+function bars(el,data,description){
+ const max=Math.max(1,...data)*1.1;el.replaceChildren();
+ const axis=document.createElement('div');axis.className='y-axis';
+ [Math.ceil(max),Math.round(max/2),0].forEach(n=>{const tick=document.createElement('span');tick.textContent=n;axis.append(tick)});
+ const plot=document.createElement('div');plot.className='plot-body';
+ data.forEach((n,i)=>{const column=document.createElement('div');column.className='column';column.title=`${days-i-1} days ago: ${n}`;const bar=document.createElement('div');bar.className='bar';bar.style.height=(n/max*100)+'%';column.append(bar);plot.append(column)});
+ el.append(axis,plot);el.setAttribute('aria-label',description+'. Daily counts: '+data.join(', '))
+}
+function draw(){drawRemovalCandidates();document.querySelectorAll('[data-days]').forEach(b=>b.setAttribute('aria-pressed',Number(b.dataset.days)===days));const rows=names.map((name,i)=>({name,i,count:sum(values(i))})).sort((a,b)=>b.count-a.count);const start=`${days} days ago`;document.getElementById('ranking').replaceChildren();rows.forEach(r=>{const b=document.createElement('button');b.className='rank'+(r.i===selected?' selected':'');b.setAttribute('aria-pressed',r.i===selected);const line=document.createElement('div');line.className='rankline';const title=document.createElement('span');title.textContent=r.name;const count=document.createElement('strong');count.textContent=r.count;line.append(title,count);const track=document.createElement('div');track.className='track';const fill=document.createElement('div');fill.className='fill';fill.style.width=(r.count/Math.max(1,rows[0].count)*100)+'%';track.append(fill);b.append(line,track);b.onclick=()=>{selected=r.i;draw()};document.getElementById('ranking').append(b)});document.getElementById('skillName').textContent=names[selected];document.getElementById('agent').textContent=agents[selected];document.getElementById('skillCount').textContent=sum(values(selected));document.getElementById('skillMetric').textContent=label();document.getElementById('detailStart').textContent=start;bars(document.getElementById('detailChart'),values(selected),names[selected]+' '+label());}
+document.querySelectorAll('[data-days]').forEach(b=>b.onclick=()=>{days=Number(b.dataset.days);draw()});draw();
+</script></html>

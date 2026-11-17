@@ -39,14 +39,14 @@ final class ComputeModel {
     /// directory the daemon does, so a bundle that disagrees with the dylib,
     /// or names no channel, refuses here with the startup sentence and opens
     /// nothing (staging design, 4.3).
-    func start(plistChannel: String?) async {
+    func start(plistChannel: String?, featureProfileAgrees: Bool = BuildChannelGate.featureProfileAgrees) async {
         let channel: BuildChannel
-        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        switch BuildChannelGate.verdict(plistChannel: plistChannel, featureProfileAgrees: featureProfileAgrees) {
         case .agreed(let agreed):
             channel = agreed
-        case .refused(let sentence):
+        case .refused(let label, let sentence):
             snapshot = nil
-            failureLabel = "channel-mismatch"
+            failureLabel = label
             refusalSentence = sentence
             return
         }

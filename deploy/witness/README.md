@@ -96,15 +96,29 @@ calls. That is a much larger attack surface than the witness's own code, and it
 is the largest single reduction available to a future revision of this
 deployment.
 
-## The two routes are unauthenticated. That is deliberate, and it has a cost.
+## Stable hostname
 
-The witness serves exactly two routes, both unauthenticated, neither
-rate-limited by source, and without TLS of their own:
+The `witness.tracecommons.ai` ingress terminates TLS inside this CVM through a digest-pinned sidecar. Its public custom-SNI route is currently failing and is not ready for client discovery. The original direct Phala URL remains available. See [the hostname runbook](../../docs/operator/witness-custom-domain.md) for measurements, DNS, verification, the routing blocker and client-transition limits.
 
-- `POST /v1/witness` — raw transcript in, redacted artifact plus certificate out.
+## The routes are unauthenticated. That is deliberate, and it has a cost.
+
+The witness serves these routes, all unauthenticated, none rate-limited by
+source, and without TLS of their own:
+
+- `POST /v1/witness/jobs` — raw session in, `202 {job_id, poll_after_secs,
+  queue_position, instance_id}` out, at once. `GET /v1/witness/jobs/{job_id}`
+  polls for the redacted artifact plus certificate; `DELETE` cancels. Both
+  carry the job's fetch secret in `x-trace-witness-fetch-secret`; the submit
+  carried its SHA-256. See "Jobs and sealed results" below.
+- `POST /v1/witness/admission` and `POST /v1/witness/token-bundle` — the
+  admission-evidence and token-bundle reviews, still single long requests.
 - `GET /v1/attestation?nonce=<64 hex chars>` — a nonce-bound quote and the
   signing address, so a contributor can verify the enclave *before* sending
   anything.
+
+**`POST /v1/witness` is retired** (owner decision, 2026-11-05) and answers
+`404`. A contributor app that predates the job routes cannot use a witness
+running this version: ship the polling client first, or with it.
 
 They are unauthenticated on purpose: authenticating at the witness would give
 the witness an identity to correlate against content, which is the one thing
@@ -112,7 +126,8 @@ the design is trying not to hand it.
 
 **State the consequence rather than assuming it is understood:**
 
-- `/v1/witness` is **unauthenticated compute over a 64 MiB body**, and that
+- `/v1/witness/jobs` is **unauthenticated compute over a request body of up to
+  `TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES`** (16 MiB since 2026-11-13), and that
   compute is a redaction pass over the whole of it. Anyone who can reach the
   route can spend the CVM's cores. In `full-pipeline` mode they can also spend
   your classifier's capacity, and if that classifier is a metered external
@@ -123,23 +138,60 @@ the design is trying not to hand it.
   fresh TDX quote over a report body of their choosing in the nonce half. The
   quote proves what it says, and nothing about a caller.
 
-A deployment is expected to put something in front of it. `gateway_enabled` is
-on, so dstack-gateway terminates TLS — that is the TLS answer and not the abuse
-answer.
+A deployment puts TLS in front of the witness HTTP listener. For the stable
+custom hostname, the gateway passes TLS through to the ingress sidecar inside
+the CVM. For the legacy direct Phala URL, dstack-gateway terminates TLS.
+Neither path supplies application-level abuse controls.
 
 **Part of the abuse answer is now in this directory, and part of it still is
 not.** Be precise about which is which.
 
-*What is configured here.* `POST /v1/witness` is bounded in two ways, both set
+*What is configured here.* A witness job (and each admission or token-bundle
+request) is bounded in two ways, both set
 in the measured compose and therefore part of the enclave's identity — a
 contributor who pins the measurement can verify that a bound exists and what it
 is:
 
 | Variable | Ships as | What it bounds |
 |---|---|---|
-| `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `4` | How many witness requests run at once. Over it, the witness answers `503` with `witness_saturated` and a `Retry-After`, immediately. It does not queue. |
+| `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `16` | How many witness jobs (and admission / token-bundle requests) run at once. A submit past it, or one the jobs ahead would make miss its deadline at the recent pace, is answered `503` with `witness_saturated` and a `Retry-After`, immediately. |
 | `TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS` | `1` when max is greater than 1; otherwise `0` | Keeps this many of the global slots available when cooperating automatic clients mark witness POSTs with `x-trace-witness-workload: background`. The background budget is max minus reserved. An explicit `0` restores the shared pool; a value at or above max is refused at startup. |
-| `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `300` | How long one request may take. Over it, `504` with `witness_request_timed_out`, and the slot is released. |
+| `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `540` | How long one job may take from acceptance, waiting included. Over it, the job's result is `504` with `witness_request_timed_out`, and the slot is released. |
+| `TRACE_COMMONS_WITNESS_RESULTS_DIR` | `/var/lib/trace-commons-witness/results` | Where finished job results are sealed. Must be writable at startup or the witness does not start. On the `witness-results` volume. |
+| `TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS` | `256` | Finished, unfetched results kept at once. A full store answers busy at submit. |
+| `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | sealed at deploy time, `20971520` since 2026-11-13 | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 5 GiB at 20 MiB. Its value is not measured (owner, 2026-11-13); the measured binary refuses zero or anything above its compiled ceiling of 40 MiB (10 GiB of disk at 256 results). See `build-app-compose.sh`. |
+| `TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES` | sealed at deploy time, `16777216` since 2026-11-13 | The largest request body. Raised from a measured 1 MiB that refused traces with a 4 MiB median. Its value is not measured (owner, 2026-11-13); the measured binary refuses to start with zero or above its compiled ceiling of 32 MiB (the largest witness request the client sends), so that ceiling is the verifiable bound. Too high costs availability (memory), not privacy. |
+| `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
+
+A trace whose classifier requests cannot fit one review is refused up
+front, before any request is made and without waiting in the classify
+queue: `422 {"error":"witness_trace_too_large_for_review",
+"windows_needed":N,"windows_allowed":M}`. `N` is the distinct classifier
+windows its text needs that are not already cached, counted as the NEAR AI
+adapter windows them; `M` is 80% of the paced request slots in the classify
+budget, `floor(budget / pace interval) * 0.8`, rounded down. The budget is
+the 540 s request timeout less a 20 s margin; the pace is
+`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`, the sealed value injected at
+deploy time, not a compose default. At 100 a minute (600 ms), production's
+sealed pace since 2026-11-12, that is `floor(866 * 0.8) = 692`; at 30 a
+minute, 208. With no pace configured there is no up-front refusal, and with
+`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` above 1 the adapter cannot count
+requests, so the check is skipped silently. A budget shorter than one paced
+interval would allow 0, so the witness refuses to start that way. Not a
+`413`, which stays the request-bytes bound. Clients treat it as final for
+that session until a newer client build offers it again (the limit depends
+on the witness's pace and budget, not only on the trace).
+
+A job whose prose classifier stayed unavailable through the adapter's
+retries (transport errors, timeouts, 5xx, rate limits), or whose classify
+budget ran out before a classifier call could start (possible while waiting
+in the classify queue, with no classifier call counted in
+`/v1/diagnostics`), finishes as
+`503 {"error":"witness_classifier_unavailable"}` with `Retry-After: 60`,
+apart from `witness_redaction_failed`, which stays the answer for a pass
+that refused the trace. Both refuse and certify nothing; clients read both
+as the witness being unavailable and retry the session on their own
+backoff. A malformed classifier answer is never applied or cached.
 
 The saturation response is exactly `503 {"error":"witness_saturated"}` with
 `Retry-After: 30` seconds and no certificate or signature. The witness does
@@ -162,6 +214,38 @@ concurrency bound needs no identity.
 and does one enclave round trip, and it is what a contributor uses to pin this
 witness before trusting it; making it unavailable under load on the other route
 would make the enclave unpinnable exactly when someone is attacking it.
+
+### Jobs and sealed results
+
+Spec: `docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md`.
+
+- **Raw sessions are held in memory only**, from the submit until the job's
+  handler returns. They are never written, sealed or not.
+- **Finished results are sealed to disk** under AES-256-GCM, one file per job
+  named by `sha256(job_id)`. The key is
+  `HKDF-SHA256(GetKey(path = "trace-commons-witness-results-v1"), info =
+  measurement)`. `GetKey` alone derives from the app id, so the measurement
+  is mixed in: a redeploy with a new measurement cannot open the previous
+  image's results, deletes them at startup, and clients resubmit.
+- **A result is served once** and deleted, or deleted unfetched after 24
+  hours. Results survive a restart; jobs in progress do not (the client
+  resubmits).
+- **Fail closed.** No results key, or a results directory the witness cannot
+  write: it does not start. A seal failure drops the result (the job reads as
+  gone). A file that does not open is deleted and reads as gone.
+- **Who may fetch.** The id is 128 random bits; the fetch secret is what
+  authorises a poll or a cancel. Every miss -- unknown id, wrong secret,
+  fetched, expired, unreadable -- is the same `404 witness_job_gone`.
+- **Instance-addressed polling.** The witness reads its instance id from the
+  guest agent's `Info` at boot (logged as `instance_addressed`), and names it
+  in the `202`. The client polls `<instance_id>-8088.<gateway domain>`, which
+  the gateway routes to that instance. Without an instance id the client
+  polls the app URL, which is right for a single instance.
+- **Disk.** The CVM's data disk size is not recorded in this README. The
+  worst case at the shipped values is 1 GiB; confirm the disk before raising
+  them.
+- Job ids and secrets are never logged. Logs are label-only (`witness job
+  accepted`, `finished`, `cancelled`, `expired`).
 
 *What is still the deploying operator's, and is not configured here.* A
 **per-source rate limit at an edge** — the thing that stops a single caller
@@ -227,7 +311,7 @@ against what this directory generates:
 |---|---|---|
 | `public_logs` | `false` | **`true`** |
 | `public_sysinfo` | `false` | **`true`** |
-| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
+| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY, TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
 | `pre_launch_script` | `""` | **~17 KB of Phala boot script** |
 | `kms_enabled`, `local_key_provider_enabled`, `gateway_enabled`, `public_tcbinfo`, `no_instance_id` | as written | as written |
 
@@ -446,8 +530,11 @@ which application id it was launched under.
 
 ### The configuration is measured, and that is the point
 
-Every setting the witness reads is set in `docker-compose.yml`. `allowed_envs`
-in the manifest is empty, so nothing is injectable at runtime.
+Every setting the witness reads is set in `docker-compose.yml`, except the two
+names in `allowed_envs`: the classifier key and the classify pace
+(`TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`, owner 2026-11-12). Their names
+are measured and their values are injected encrypted at deploy time. Neither
+can change what is redacted or where text goes; see `build-app-compose.sh`.
 
 That means the redaction mode, the body bound, the bind address and the log
 level are all inside MRCONFIGID. **An operator cannot quietly downgrade a
@@ -681,7 +768,8 @@ is inside the trust boundary of every transcript this witness sees. The
 deterministic pass runs first, so credentials and local paths are masked in
 what goes out; prose PII is not.
 
-The API key is the one value in `allowed_envs` — injected encrypted at deploy
+The API key is one of the two values in `allowed_envs` (the other is the
+classify pace, below) — injected encrypted at deploy
 time rather than written into the measured compose, because this repository is
 public and the manifest is committed. The destination and the model stay
 measured, so an injected key can change which account is billed and cannot
@@ -689,6 +777,90 @@ change where a transcript goes. See `build-app-compose.sh` for the argument in
 full, and make it again before adding a second name to that list.
 
 Changing the mode changes the measurement. See "The configuration is measured".
+
+### The classifier key, and the startup check
+
+The key goes in as `TRACE_NEAR_AI_PRIVACY_API_KEY`, through Phala's sealed
+(encrypted) environment at deploy time, beside the classify pace.
+
+The pace goes in the same way, as `TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE`:
+classify requests a minute, retries included (NEAR AI's limit for the key was
+30 on 2026-11-12). It is required; the witness does not start without it. To
+follow a new limit, change the sealed value and restart the CVM. Like a
+key-only update, whether that leaves `MRCONFIGID` where it was has not been
+checked against Phala: read the measurement back after the change.
+The variable's name is measured; its value is not and must never appear in a
+file in this repository. The sealed value is not part of the compose
+hash, but whether a key-only update leaves `MRCONFIGID` where it was has not
+been checked against Phala. Read the measurement back after any deploy, as
+"The configuration is measured" says.
+
+With `full-pipeline` against `near-ai`, the witness makes **one tiny
+synthetic classify request at startup**, before it binds its listener. The
+text is a fixed sentence (`CLASSIFIER_STARTUP_CHECK_TEXT` in
+`src/bin/trace-commons-witness.rs`) that identifies no one. Its outcomes:
+
+- **401 or 403**: the endpoint refused the key. The witness logs
+  `classifier_startup_check="auth_401_403"` and **exits without serving**.
+  A witness that booted with a refused key would refuse every request after
+  its retries; that is how the 2026-11-05 outage looked from outside.
+- **Any other failure** (timeout, transport, 5xx, 402/429): the witness logs
+  `classifier_startup_check="failed"` with the failure kinds, then starts.
+  These recover on their own, and each request refuses for itself while
+  they last. With a down endpoint, the check's retries can delay startup by
+  up to a minute.
+- **Success**: `classifier_startup_check="ok"`.
+
+All three lines are label-only. After a deploy, confirm the check passed from
+`GET /v1/diagnostics` (below): `classifier.outcomes.ok` is at least 1 and
+`auth_401_403` is 0. The CVM's logs may not be readable.
+
+### `GET /v1/diagnostics`
+
+A label-only view of what this witness is doing. It is unauthenticated, like
+`/v1/attestation`, and outside the request-slot bound, so it still answers
+when the witness is saturated. It serves:
+
+- **Identity:** the build line (version, commit, build time), the witness
+  measurement, signing address and redaction pipeline alias. All of these
+  are already public through `/v1/attestation` or every certificate.
+- **Uptime.**
+- **Request slots:** `max_concurrent`, `in_use`, completed by status class,
+  `saturated_refusals`, `timed_out`; with the classify queue, also
+  `classify_queue_waiting`, `classify_queue_mean_turn_ms` and
+  `prefetch_replay_misses` (texts a contribution's replay classified because
+  its record pass never saw them -- a classified tool name can change its
+  payload's text; a count only), `oversized_refusals` (traces refused up
+  front as too large to review) and `oversized_windows_needed` (those
+  refusals by how many classifier requests the trace needed: `le_1500`,
+  `le_3000`, `le_6000`, `gt_6000`; counts only).
+- **NEAR AI classifier** (`classifier`, `null` for any other backend):
+  - requests by outcome since start, every retry counted: `ok`, `timeout`,
+    `transport`, `auth_401_403`, `quota_402_429`, `server_5xx`,
+    `too_large_413`, `other_4xx`, `body_shape`;
+  - `body_shapes`: the `body_shape` count split by which check the 200
+    answer failed, every retry counted: `parse_error` (the body arrived and
+    was not the expected JSON), `empty_data`, `entry_count_mismatch` (a
+    batch answered with the wrong number of entries), `span_text_mismatch`
+    (a span's text is not the input at its offsets, or is missing),
+    `span_out_of_range`. They sum to `outcomes.body_shape`. A malformed
+    answer is never applied or cached;
+  - `spans_reanchored`: spans whose offsets disagreed with their text and
+    were moved onto the one place in the window that text occurs, in
+    answers then accepted (no extra request). Not counted in
+    `span_text_mismatch`, which counts only answers that could not be
+    corrected;
+  - requests on the wire now;
+  - p50/p90/p99/max latency of the last 256 successful requests in each
+    body-size bucket.
+
+It never carries text, request or trace identifiers, keys, classifier
+hostnames, peer addresses or per-request records. A test pins the exact
+field set, so adding a field means changing that test.
+
+```bash
+curl -s https://<app_id>-8088.<gateway domain>/v1/diagnostics | python3 -m json.tool
+```
 
 ---
 
@@ -1213,6 +1385,22 @@ A malformed nonce is rejected rather than padded — `parse_hex` accepts exactly
 64 bare hex characters, no `0x` prefix — so a `400` here is usually your nonce,
 not the witness.
 
+Then check the witness's own load and reachability. Once a build with
+`GET /v1/diagnostics` is deployed (witness-diagnostics-v1), run the witness
+health check, which prints `WitnessHealthOK` or
+`WitnessHealthFailure:<labels>` and exits 0 or 1. A build without the route
+fails it as `unreachable:http_4xx`, deliberately: an unobservable witness is
+not a healthy one.
+
+```sh
+TRACE_COMMONS_WITNESS_MONITOR_URL="https://<witness-host>/v1/diagnostics" \
+  python3 scripts/operator/witness_monitor.py check
+```
+
+Run it as the last step of every witness deploy and record its one output line
+with the deploy evidence. The standing one-minute poll is described in
+[`docs/operator/witness-monitor.md`](../../docs/operator/witness-monitor.md).
+
 ---
 
 ## The deployment that exists
@@ -1249,7 +1437,7 @@ against the manifest hash above, none of them should be.
 
 Stated plainly so nobody reads the rest as tested. **Revised 2026-09-06**: the
 first four items below said this had never run on a real CVM. It has — see
-"The production deployment, as of 2026-09-06" above, whose every value was read
+"The production deployment, as of 2026-11-05" above, whose every value was read
 back from the running instance. Those items are struck and replaced rather than
 deleted, because what they were wrong about is worth knowing.
 
@@ -1285,6 +1473,14 @@ deleted, because what they were wrong about is worth knowing.
 
 Still unverified:
 
+- **Submit-then-poll has not run on a CVM.** Three things it depends on are
+  read from dstack v0.5.9 source, not exercised against a live agent: `Info`
+  (`/v0/Info`, then `/Info`) answering `instance_id` as hex; `GetKey` at a
+  second path (`trace-commons-witness-results-v1`); and the `witness-results`
+  named volume taking its ownership from the image's directory so the
+  `witness` user can write it. The last two fail closed: the witness does
+  not start, which is an outage to fix, never a plaintext fallback. A
+  missing instance id only turns instance-addressed polling off.
 - **The container-user / socket-permission question is open** — see First boot.
 - **The image has never been reproduced**, by anyone, on any second machine.
 - **The attested-inference path has not completed end to end.** The witness is
@@ -1308,7 +1504,7 @@ Still unverified:
 - `docs/operator/pii-backstop.md` — the backstop this certificate does **not**
   replace.
 
-## The production deployment, as of 2026-09-06
+## The production deployment, as of 2026-11-05
 
 Read back from the running instance, not from what we asked for. Every value
 below came from `phala cvms get --json` or from a live certificate.
@@ -1322,14 +1518,38 @@ what was current when it was written.
 |---|---|
 | CVM | `8b8e6543-9743-41fc-ac05-a6b414888d5e` (upgraded, not recreated) |
 | App | `f1654b0beac2ac2afae4235ee3d907096cd8f3de` |
-| Image | `ghcr.io/tracecommons/trace-commons-witness@sha256:75af1945502ebcd88b597993695549553fb011d0ff578aff357657f7e78e2d5c` |
+| Image | `ghcr.io/tracecommons/trace-commons-witness@sha256:af99d33f29d2fc9401062f0b3c3ff8bd3304c6fe76d9b8871460e1f6b9e65546` |
 | Mode | `full-pipeline` (NEAR AI classifier) |
 | Signing address | `0x655a17fcf6d0b9069e1b1dd07a7f5535d0c76798` |
-| Instance `compose_hash` | `612d996cd7197803ca6deefbddb50ba3d09d32ec91174065e5f5df035fc1ebf8` |
-| Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:01612d996cd7197803ca6deefbddb50ba3d09d32ec91174065e5f5df035fc1ebf8000000000000000000000000000000` |
-| Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1` |
+| Instance `compose_hash` | `2c35c88d975ebe3685b2087304a665b56630a112c81eca9227b07afea460c1b8` |
+| Measurement | `mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:012c35c88d975ebe3685b2087304a665b56630a112c81eca9227b07afea460c1b8000000000000000000000000000000` |
+| Policy version | `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2` |
 | `public_logs` / `public_sysinfo` / `public_tcbinfo` | `false` / `false` / `true` |
-| `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY"]` |
+| `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY", "TRACE_NEAR_AI_PRIVACY_MAX_REQUESTS_PER_MINUTE"]` |
+
+The stable hostname, in-CVM ingress, certificate identity and DNS routing are
+recorded in [the hostname runbook](../../docs/operator/witness-custom-domain.md).
+The witness image above was built by workflow run `42035550298` from commit
+`6abd2d127`. The older `a692cad` provenance comment inside the measured compose
+was retained verbatim from the preceding deployment; it does not describe the
+current image. Use this verified build record and digest. Correct that historical
+comment with the next measured configuration rollout.
+
+**The v1 policy version covers two classifier rules; v2 starts with the
+polling witness.** Certificates labelled `...privacy-filter-near-ai-v1` from
+the first witness deployed with #1977 (planned 2026-11-05) onward were
+produced with the classify skip rule: short identifier-shaped keys and
+structural tokens are not sent to the NEAR AI classifier (see section 2 of
+`docs/superpowers/specs/2026-11-05-witness-scaling-design.md`). Earlier v1
+certificates classified every string; tell those two apart by the
+certificate's issue time against the deployment date recorded here. The
+label stayed v1 because 0.24.4 and older apps accept only the v1 string.
+
+The submit-then-poll witness (#1982 and its follow-up) signs
+`...privacy-filter-near-ai-v2`, which names the skip rule. Apps from the
+polling release onward accept both v1 and v2, and that release must ship
+before, or with, this witness: an older app refuses a v2 certificate as an
+unknown pipeline (and cannot reach the job routes anyway).
 
 **The signing address survived the upgrade**, which is the proof this was an
 upgrade rather than a recreation: the KMS re-derived the same key from the

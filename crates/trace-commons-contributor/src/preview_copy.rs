@@ -134,8 +134,51 @@ pub const MONITOR_CORE_UNREACHABLE: &str =
 
 /// What the Traces tab says when a request the
 /// core answered failed (a refused write, or a reply this build could not
-/// read).
-pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through. Try again.";
+/// read). The Retry control sits beside it, so it names no action.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P1).
+pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through.";
+
+/// What the Traces tab says, where Submit or a preview was asked for, when
+/// the trace has to go through the privacy check before it can be sent
+/// (`witness-review-required`). Opening the trace is where that check is
+/// started. Approved by the owner 2026-11-05 (#1959) until the witness
+/// moves to submission (docs/superpowers/specs/2026-11-05-witness-at-submission-design.md).
+pub const MONITOR_NEEDS_PRIVACY_CHECK: &str = "Needs a privacy check first. Open it to start one.";
+
+/// What the Traces tab says when the privacy check did not answer in time
+/// or could not be reached (`witness_timeout`, `witness_unreachable`,
+/// `preview-timed-out`). Nothing was sent. The owner's approved wording
+/// (2026-11-05), the same line the witness-at-submission spec uses.
+pub const MONITOR_PRIVACY_CHECK_NO_ANSWER: &str = "Privacy check timed out. Try again later.";
+
+/// The only feedback a person gets about the privacy witness's work (owner,
+/// 2026-11-05): said once per run of the app, on the first trace the person
+/// submits themselves that goes to the witness (`approve`'s
+/// `witness_review`). Never for a background or Automatic-folder
+/// submission, and never again in the same run. No queue position, no
+/// per-trace progress, no completion message. Shown in the submit's undo
+/// card, the existing status surface after a Submit.
+pub const REDACTION_BEGUN: &str = "Data redaction has begun.";
+
+/// The Traces tab's line for one preview or Submit failure label, or
+/// `None` for a label with no line of its own (the caller says
+/// [`MONITOR_REQUEST_FAILED`]).
+///
+/// The one mapping: the macOS shell reads the same fields through
+/// `MonitorTracesCopy.failureLine(forLabel:)`, which must agree with this
+/// (`the_failure_lines_follow_their_labels`).
+#[must_use]
+pub fn monitor_failure_line(label: &str) -> Option<&'static str> {
+    match label {
+        crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED => Some(MONITOR_NEEDS_PRIVACY_CHECK),
+        crate::daemon::preview::REASON_PREVIEW_TIMED_OUT
+        | "witness_timeout"
+        | "witness_unreachable"
+        | "witness_classifier_unavailable"
+        | "witness_redaction_failed" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
+        _ => None,
+    }
+}
 
 /// Every fixed word of the monitor's Traces tab. The row labels are single
 /// words; `keep` and `undo_keep` are Customize's (K5) so the two surfaces
@@ -182,6 +225,10 @@ pub struct MonitorTracesCopy {
     pub core_unreachable: &'static str,
     /// A request failed; see [`MONITOR_REQUEST_FAILED`].
     pub request_failed: &'static str,
+    /// See [`MONITOR_NEEDS_PRIVACY_CHECK`]. DRAFT.
+    pub needs_privacy_check: &'static str,
+    /// See [`MONITOR_PRIVACY_CHECK_NO_ANSWER`]. DRAFT.
+    pub privacy_check_no_answer: &'static str,
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Apart from [`Self::dismiss`],
     /// native's "Not this one", which this does not replace.
@@ -475,7 +522,11 @@ pub struct MonitorUndoCopy {
     pub unavailable: &'static str,
     pub within: &'static str,
     pub may_have_started: &'static str,
+    pub held_for_review_one: &'static str,
+    pub held_for_review: &'static str,
     pub undoing: &'static str,
+    /// See [`REDACTION_BEGUN`].
+    pub redaction_begun: &'static str,
 }
 
 /// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
@@ -564,6 +615,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         undo_keep: customize.undo_keep,
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
+        needs_privacy_check: MONITOR_NEEDS_PRIVACY_CHECK,
+        privacy_check_no_answer: MONITOR_PRIVACY_CHECK_NO_ANSWER,
         dismiss_action: "Dismiss",
         dismiss_all: "Dismiss all",
         optional_automation: "OPTIONAL AUTOMATION",
@@ -607,8 +660,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             session_trimmed: "trimmed to fit",
             session_waiting: "waiting",
             folder_mark: "dir",
-            unresolved_bucket_note: "These traces cannot be contributed automatically. \
-                You'll always be asked.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P128).
+            unresolved_bucket_note: "You'll always be asked about these traces.",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 trace waiting",
@@ -722,7 +775,10 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             unavailable: "Undo unavailable",
             within: "Undo within {seconds}s before upload starts.",
             may_have_started: "Upload may already have started.",
+            held_for_review_one: "1 trace needs individual review.",
+            held_for_review: "{count} traces need individual review.",
             undoing: "Undoing\u{2026}",
+            redaction_begun: REDACTION_BEGUN,
         },
     }
 }
@@ -851,6 +907,10 @@ pub struct MonitorScreensCopy {
     /// with the ellipsis of a command that opens a window. Approved by the
     /// owner on 2026-10-29.
     pub check_for_updates: &'static str,
+    /// The app menu's About item, which opens the app's own About window
+    /// with a Copy button for the version (owner, 2026-11-09). The macOS
+    /// convention, "About" and the app's name. DRAFT, NEEDS APPROVAL.
+    pub about_app: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -1293,7 +1353,6 @@ pub struct MonitorShellCopy {
     /// naming what it re-reads, so the repeated "Refresh" buttons are told
     /// apart (copy-guide rule 5). DRAFT, NEEDS APPROVAL (2026-11-04).
     pub settings_refresh_desktop: &'static str,
-    pub settings_refresh_discovery: &'static str,
     pub settings_refresh_uses: &'static str,
     /// Startup's updates card's eyebrow. It was spelled in the macOS shell
     /// (copy-guide rule 8). General's words stay the shell's: General never
@@ -1302,8 +1361,6 @@ pub struct MonitorShellCopy {
     pub consent_eyebrow: &'static str,
     pub desktop_eyebrow: &'static str,
     pub desktop_title: &'static str,
-    pub discovery_eyebrow: &'static str,
-    pub discovery_title: &'static str,
     /// The Watching section's watcher card (#1146 `settings-page.tsx`):
     /// its eyebrow and title, the chip for each state, and what pausing
     /// does. The buttons are `pause_watcher` and `resume_watcher`.
@@ -1381,17 +1438,24 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_action: &'static str,
     /// The hero's three steps, left to right, each a title over one line
     /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
-    /// spend on Private AI. Each title and its line read as one short
-    /// sentence ("Earn credit / for each trace"). The first two lines are
-    /// the owner's words (2026-11-02: "Traces from tools", "For each
-    /// trace"); the titles and "With your credit" are DRAFT, NEEDS
-    /// APPROVAL (2026-11-02 rewrite).
+    /// spend on Private AI. Each line says what happens in its step, in a
+    /// sentence or two (Ron, 2026-11-09: the earlier "Traces from tools",
+    /// "For each trace" and "With your credit" were too short). The three
+    /// lines were approved by Ron on 2026-11-09, the earn line reworded the
+    /// same day to say "final" rather than "pending", which no Home word
+    /// says bare (D6); the titles are DRAFT, NEEDS APPROVAL (2026-11-02
+    /// rewrite).
     pub traces_hero_step_contribute: &'static str,
     pub traces_hero_step_contribute_detail: &'static str,
     pub traces_hero_step_earn: &'static str,
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
+    /// Under the Traces hero while Train coding models is off (product
+    /// owner, 2026-11-05): `NO_CREDIT_REMINDER` from `consent_copy`, and
+    /// its one click to Settings.
+    pub no_credit_body: &'static str,
+    pub no_credit_open_settings: &'static str,
     /// Home's Credit earned tile: the account's whole total under this
     /// Mac's figure, `{amount}` the commons' lifetime points (product
     /// owner, 2026-10-29: show the account-wide total, and leave the change
@@ -1511,6 +1575,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flagged: SECOND_LOOK_HEADING,
         open_app: concat!("Open ", crate::app_name!()),
         check_for_updates: "Check for Updates\u{2026}",
+        about_app: concat!("About ", crate::app_name!()),
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
@@ -1607,13 +1672,16 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             history_empty: "No submissions recorded on this device yet.",
             history_filter_empty: "No submissions match this filter.",
             open: "Open",
-            pause_watcher: "Pause watcher",
-            resume_watcher: "Resume watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P82).
+            pause_watcher: "Pause",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P83).
+            resume_watcher: "Resume",
             pause_hour: "1 hour",
             pause_morning: "Until morning",
             pause_until_resumed: "Until resumed",
             start_at_login: concat!("Start ", crate::app_name!(), " at login"),
-            projects_empty: "No projects seen yet. Traces appear here after discovery.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P124).
+            projects_empty: "No projects yet.",
             changes_heading: "Change log",
             tab_home: "Home",
             tab_inference: "Private AI",
@@ -1623,19 +1691,20 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             settings_refresh: "Refresh",
             // DRAFT, NEEDS APPROVAL (2026-11-04).
             settings_refresh_desktop: "Refresh system integrations",
-            settings_refresh_discovery: "Refresh trace discovery",
             settings_refresh_uses: "Refresh data uses",
             updates_eyebrow: "Updates",
-            consent_eyebrow: "Consent",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P140).
+            consent_eyebrow: "",
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
-            discovery_eyebrow: "Watcher",
-            discovery_title: "Trace discovery",
-            watcher_eyebrow: "Background service",
-            watcher_title: "Contribution watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P79).
+            watcher_eyebrow: "",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P85).
+            watcher_title: "Watcher",
             watcher_watching: "Watching",
             watcher_paused: "Paused",
-            watcher_caption: "Pausing stops contribution processing. It does not delete queued traces or change consent.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P78).
+            watcher_caption: "Pausing stops contribution. Queued traces and consent are unchanged.",
             connection_ready: "Ready",
             connection_local_only: "Local only",
             notice_details: "Details",
@@ -1709,7 +1778,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             kept_here: "{count} kept on this Mac",
             style_title: "Traces map",
             style_toggle: "Rocket mode",
-            style_caption: "Only changes how the map looks. Contributions fly to the library (space station) by rocket animation.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P231).
+            style_caption: "Changes only how the map looks.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1734,11 +1804,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_title: "Your traces earn Private AI credit",
             traces_hero_action: "Start earning",
             traces_hero_step_contribute: "Contribute",
-            traces_hero_step_contribute_detail: "Traces from tools",
+            traces_hero_step_contribute_detail: "Share traces from your coding tools. Keys, emails and file paths are removed before they're sent.",
             traces_hero_step_earn: "Earn credit",
-            traces_hero_step_earn_detail: "For each trace",
+            traces_hero_step_earn_detail: "Each accepted trace earns credit. It becomes final once it settles.",
             traces_hero_step_use: "Use Private AI",
-            traces_hero_step_use_detail: "With your credit",
+            traces_hero_step_use_detail: "Spend your credit on Claude Code, Codex or OpenCode sessions through Private AI.",
+            no_credit_body: crate::consent_copy::NO_CREDIT_REMINDER,
+            no_credit_open_settings: "Open Settings",
             credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
@@ -1749,8 +1821,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_action: "Review drafts",
             insights_action: "See insights",
             promotions_title: "Home",
-            promotions_toggle: "Show promotions on Home",
-            promotions_caption: "News from NEAR AI, such as a new model. A promotion you close comes back only when it changes.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P234).
+            promotions_toggle: "Show promotions",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P232).
+            promotions_caption: "News from NEAR AI, such as a new model.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1793,7 +1867,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI and your traces.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P233).
+            setting_caption: "Point at the screen's right edge to glance at Home, Private AI and traces.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
             open_app: concat!("Open ", crate::app_name!()),
@@ -1812,7 +1887,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             not_installed: "Not installed",
             installed: "Installed: {path}",
             stale: "Link out of date: {path}",
-            foreign: "{path} already exists and wasn't installed by this app.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P250).
+            foreign: "Another file is already at {path}.",
             install: "Install",
             uninstall: "Uninstall",
             update_link: "Update link",
@@ -1857,10 +1933,36 @@ mod tests {
         out
     }
 
+    /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy
+    /// pass 2, P140, P79): each is empty, and the only words allowed
+    /// to be.
+    const OWNER_CUT_KEYS: [&str; 2] = ["/shell/consent_eyebrow", "/shell/watcher_eyebrow"];
+
+    /// Whether `key` (a path from [`words_of`] over the whole screens
+    /// table) is one of [`OWNER_CUT_KEYS`]; asserts that it is empty if so.
+    fn owner_cut(key: &str, word: &str) -> bool {
+        let cut = OWNER_CUT_KEYS.contains(&key);
+        if cut {
+            // Owner dropped this eyebrow 2026-11-04 (Settings copy pass 2).
+            assert!(word.is_empty(), "{key} was cut but says {word:?}");
+        }
+        cut
+    }
+
+    #[test]
+    fn the_owner_cut_eyebrows_are_empty() {
+        let shell = monitor_screens_copy().shell;
+        assert_eq!(shell.consent_eyebrow, "");
+        assert_eq!(shell.watcher_eyebrow, "");
+    }
+
     #[test]
     fn the_monitor_screens_copy_is_whole_and_shares_the_traces_lines() {
         let copy = monitor_screens_copy();
         for (key, word) in words_of(&copy) {
+            if owner_cut(&key, &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         let traces = monitor_traces_copy();
@@ -1917,6 +2019,44 @@ mod tests {
     }
 
     #[test]
+    fn the_failure_lines_follow_their_labels() {
+        let copy = monitor_traces_copy();
+        assert_eq!(
+            monitor_failure_line(crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED),
+            Some(copy.needs_privacy_check)
+        );
+        for label in [
+            crate::daemon::preview::REASON_PREVIEW_TIMED_OUT,
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
+        ] {
+            assert_eq!(
+                monitor_failure_line(label),
+                Some(copy.privacy_check_no_answer)
+            );
+        }
+        for label in [
+            "preview-failed",
+            "not-pending",
+            "",
+            "witness_quote_unverified",
+        ] {
+            assert_eq!(monitor_failure_line(label), None, "{label}");
+        }
+        // The copy rules: short, and none of the words a person is never
+        // shown. (The commons' own name is checked across every source by
+        // `tests/no_commons_name_in_copy.rs`.)
+        for line in [copy.needs_privacy_check, copy.privacy_check_no_answer] {
+            assert!(line.chars().count() <= 60, "{line}");
+            for banned in ["daemon", "passkey", "witness"] {
+                assert!(!line.contains(banned), "{line} says {banned}");
+            }
+        }
+    }
+
+    #[test]
     fn the_monitor_traces_copy_is_whole_and_shares_customize_words() {
         let copy = monitor_traces_copy();
         for (key, word) in words_of(&copy) {
@@ -1936,7 +2076,10 @@ mod tests {
         let mut words = words_of(&monitor_traces_copy());
         words.extend(words_of(&monitor_screens_copy()));
         for (key, word) in &words {
-            assert!(!word.trim().is_empty(), "{key} is empty");
+            assert!(
+                owner_cut(key, word) || !word.trim().is_empty(),
+                "{key} is empty"
+            );
             assert!(!word.contains("Share automatically"), "{key}: {word}");
         }
         for table in [
@@ -2047,6 +2190,9 @@ mod tests {
         let screens = monitor_screens_copy();
         let shell = &screens.shell;
         for (key, word) in words_of(shell) {
+            if owner_cut(&format!("/shell{key}"), &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         assert_eq!(screens.view, "View options");
@@ -2320,5 +2466,19 @@ mod tests {
         assert_eq!(scrub_state_line(Some(1)), "Scrubbed \u{00b7} 1 mark");
         assert_eq!(scrub_state_line(None), NOT_YET_SCRUBBED);
         assert_ne!(scrub_state_line(None), scrub_state_line(Some(0)));
+    }
+
+    /// The owner's words, exactly, in the shared table every shell reads,
+    /// and none of the names a contributor-facing line may not carry.
+    #[test]
+    fn the_redaction_begun_line_is_the_owners_and_names_nothing_internal() {
+        assert_eq!(REDACTION_BEGUN, "Data redaction has begun.");
+        assert_eq!(monitor_traces_copy().undo.redaction_begun, REDACTION_BEGUN);
+        let lowered = REDACTION_BEGUN.to_ascii_lowercase();
+        // The commons' own name is guarded crate-wide by
+        // `tests/no_commons_name_in_copy.rs`.
+        for banned in ["daemon", "passkey", "witness"] {
+            assert!(!lowered.contains(banned), "{banned}");
+        }
     }
 }

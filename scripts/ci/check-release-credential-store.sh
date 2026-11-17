@@ -150,11 +150,12 @@ check() {
         {
           line = $0; gsub(/[[:space:]]/, "", line)
           if (file ~ /trace-commons-contributor\/Cargo.toml$/) {
-            if (section == "[features]" && line == feature "=[\"trace-commons-contributor-insights/" feature "\",\"trace-commons-contributor-platform/" feature "\"]") next
+            if (section == "[features]" && line == feature "=[\"trace-commons-contributor-insights/" feature "\",\"trace-commons-contributor-platform/" feature "\",\"trace-commons-contributor-sources/" feature "\"]") next
             if (section ~ /dev-dependencies\]$/ && line ~ /^trace-commons-contributor=\{path="\."/) next
           }
           if (file ~ /trace-commons-contributor-insights\/Cargo.toml$/ && section == "[features]" && line == feature "=[\"trace-commons-contributor-platform/" feature "\"]") next
           if (file ~ /trace-commons-contributor-platform\/Cargo.toml$/ && section == "[features]" && line == feature "=[]") next
+          if (file ~ /trace-commons-contributor-sources\/Cargo.toml$/ && section == "[features]" && line == feature "=[]") next
           printf "line %d in %s enables the test-only feature outside the self dev-dependency: %s\n", NR, section, $0
         }' "$file"
     )

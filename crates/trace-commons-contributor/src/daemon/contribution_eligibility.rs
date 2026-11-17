@@ -129,12 +129,40 @@ pub fn writeback_for(reason_label: &str) -> Option<Verdict> {
 
 /// Whether the eligibility question applies to this contributor at all.
 ///
-/// **One rule, two callers, deliberately.** `entry_value` decides from this
-/// whether the wire carries an `eligibility` field, and `handle_approve`
-/// decides from this whether a group-level approve filters. If those could
-/// disagree, a shell would be shown seven sendable rows and told three were
-/// sent, with nothing in the response explaining the other four -- which is
-/// the defect this surface exists to remove, wearing a different hat.
+/// **One rule for every caller, deliberately.** `entry_value` decides from
+/// this whether the wire carries an `eligibility` field, `handle_approve`
+/// and the project rows whether a group filters, and the past-session picker
+/// what an include leaves out. If those could disagree, a shell would be
+/// shown seven sendable rows and told three were sent, with nothing in the
+/// response explaining the other four.
+///
+/// Two facts: the signup flag ([`evidence_flag`]), and what ingest last
+/// said about account admission (`daemon::account_admission`). An ingest
+/// that admits by account admits a session without a Private AI call,
+/// debiting the account's allowance instead, so for such a contributor no
+/// session is "cannot be sent" for want of one. A spent allowance is still
+/// admission by account: the sends wait for the period, they are not
+/// refused for want of a call. Anything short of that answer -- none yet,
+/// `legacy_evidence`, a refusal since -- keeps the question, because then
+/// ingest does need per-session evidence.
+///
+/// Read when a surface renders, never stored, so rows recorded before the
+/// answer arrived follow it, and follow it back if ingest reverts.
+#[must_use]
+pub fn applies(
+    cfg: Option<&crate::config::ContributorConfig>,
+    admission: super::automatic_gate::AccountAdmission,
+) -> bool {
+    evidence_flag(cfg)
+        && !matches!(
+            admission,
+            super::automatic_gate::AccountAdmission::Advertised
+                | super::automatic_gate::AccountAdmission::AllowanceSpent
+        )
+}
+
+/// The signup flag alone: whether this contributor was admitted on evidence
+/// rather than an invite. Use [`applies`] to decide what a surface shows.
 ///
 /// A config that could not be read answers `false`: the wire suppresses the
 /// field in that case, so a queue the daemon declined to describe is one it

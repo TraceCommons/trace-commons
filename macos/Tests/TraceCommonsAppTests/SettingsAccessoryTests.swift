@@ -4,11 +4,11 @@ import XCTest
 @testable import TraceCommonsApp
 
 final class SettingsAccessoryTests: XCTestCase {
-    /// Discovery's refresh is its own named control beside the heading.
-    /// An unlabeled accessory closure used to bind to the card's optional
-    /// action instead, discarding the refresh view and making the card a button.
+    /// Watching has no Refresh control (owner, 2026-11-04): the Trace
+    /// discovery card and its button, which only re-read settings and read
+    /// as a rescan, are gone.
     @MainActor
-    func testWatchingExposesTheRefreshAccessoryAsAButton() async throws {
+    func testWatchingHasNoRefreshButton() async throws {
         _ = NSApplication.shared
         let previous = NSApp.value(forKey: "accessibilityEnhancedUserInterface")
         NSApp.setValue(true, forKey: "accessibilityEnhancedUserInterface")
@@ -33,11 +33,9 @@ final class SettingsAccessoryTests: XCTestCase {
             return [node] + children.flatMap(nodes)
         }
         let refreshButtons = nodes(hosting).filter {
-            ($0.accessibilityRole?() ?? nil) == .button
-                && ($0.accessibilityLabel?() ?? nil) == SettingsLegacyWords.refreshDiscovery
+            let label = ($0.accessibilityLabel?() ?? nil) ?? ""
+            return ($0.accessibilityRole?() ?? nil) == .button && label.localizedCaseInsensitiveContains("refresh")
         }
-        // Named by what it re-reads, apart from Startup's and Uses' (rule 5).
-        XCTAssertNotEqual(SettingsLegacyWords.refreshDiscovery, SettingsLegacyWords.refresh)
-        XCTAssertEqual(refreshButtons.count, 1, "Discovery must expose its Refresh button beside the heading")
+        XCTAssertEqual(refreshButtons.count, 0, "Watching must not expose a Refresh button")
     }
 }

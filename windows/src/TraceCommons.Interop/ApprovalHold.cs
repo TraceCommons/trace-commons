@@ -31,6 +31,7 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed class ApprovalHold
 {
+    [JsonRequired]
     [JsonPropertyName("approved")]
     public ulong Approved { get; set; }
 
@@ -98,14 +99,17 @@ public sealed class ApprovalHold
 
     /// <summary>
     /// Parses an approve result. A payload that cannot be read yields null,
-    /// which the caller treats exactly as it treats a null
-    /// <see cref="HoldUntil"/>: the approval stands, no undo is offered.
-    /// Inventing a deadline would be worse than admitting there is none.
+    /// which callers report as a refusal. An unreadable response cannot
+    /// establish that anything was approved.
     /// </summary>
     public static ApprovalHold? Parse(DaemonResponse response)
     {
         ArgumentNullException.ThrowIfNull(response);
-        return response.ResultAs<ApprovalHold>();
+        ApprovalHold? hold = response.ResultAs<ApprovalHold>();
+        return hold is not null && hold.Redactions is not null && hold.Skipped is not null
+            && hold.Skipped.All(skip => skip is not null)
+            ? hold
+            : null;
     }
 
     /// <summary>The hold deadline, or null when there is no offerable undo.</summary>
@@ -135,7 +139,7 @@ public sealed class ApprovalHold
     }
 
     /// <summary>Whether an undo may still be offered at <paramref name="now"/>.</summary>
-    public bool IsLive(DateTimeOffset now) => RemainingSeconds(now) > 0;
+    public bool IsLive(DateTimeOffset now) => Approved > 0 && RemainingSeconds(now) > 0;
 
     /// <summary>
     /// Whether this response is the correction-credential refusal.

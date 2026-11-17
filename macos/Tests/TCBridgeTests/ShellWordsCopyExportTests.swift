@@ -26,6 +26,7 @@ final class ShellWordsCopyExportTests: XCTestCase {
             ("withdrawal", copy.withdrawal), ("public_profile", copy.publicProfile), ("queue", copy.queue),
             ("history", copy.history), ("scrubbing", copy.scrubbing), ("settings", copy.settings),
             ("paused_notice", copy.pausedNotice),
+            ("projects_manager", copy.projectsManager),
         ]
         for (name, decoded) in tables {
             let nested = try XCTUnwrap(object[name] as? [String: Any], name)
@@ -43,12 +44,40 @@ final class ShellWordsCopyExportTests: XCTestCase {
         XCTAssertNotNil(copy.settings.auditActions["armed-auto-upload"])
     }
 
+    /// Settings > Projects' Manage sheet words arrive, and a bulk Never
+    /// is titled through the one Never confirmation's words.
+    func testTheProjectsManagerWordsDecode() throws {
+        let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
+        let words = copy.projectsManager
+        XCTAssertEqual(words.manage, "Manage\u{2026}")
+        XCTAssertEqual(ShellWordsCopy.fill(words.changedSome, ["count": "3", "total": "5"]), "3 of 5 changed.")
+        XCTAssertEqual(
+            ShellWordsCopy.fill(words.bulkMenuAccessibility, ["count": "4"]), "Set 4 selected projects")
+        XCTAssertNotEqual(words.searchPrompt, words.search)
+        XCTAssertEqual(ShellWordsCopy.fill(words.selected, ["count": "2"]), "2 selected")
+        let many = ShellWordsCopy.fill(words.projectsCount, ["count": "3"])
+        let ignore = try XCTUnwrap(ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(project: many, pending: 4)))
+        XCTAssertEqual(ignore.title, "Set 3 projects to Never?")
+    }
+
     /// The Traces tab's resume notice says Settings' own paused sentence.
     func testThePausedNoticeReusesTheSettingsSentence() throws {
         let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
         XCTAssertEqual(copy.pausedNotice.body, copy.settings.pausedNothingSent)
         XCTAssertEqual(copy.pausedNotice.resume, "Resume")
         XCTAssertEqual(copy.pausedNotice.notNow, "Not now")
+    }
+
+    /// The lines the owner cut 2026-11-04 (Settings copy pass 2) arrive ""
+    /// and still decode; every other string stays non-empty.
+    func testTheOwnerCutLinesDecodeEmpty() throws {
+        let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
+        XCTAssertEqual(copy.publicProfile.footnote, "")
+        XCTAssertEqual(copy.publicProfile.goPublicFootnote, "")
+        XCTAssertEqual(copy.settings.atMostOneNotification, "")
+        XCTAssertEqual(copy.settings.atMostOneNotificationOne, "")
+        XCTAssertEqual(copy.settings.notificationsRenderedHere, "")
+        XCTAssertEqual(copy.settings.projectModeFailed, "Couldn't change this folder's setting.")
     }
 
     /// A table with an empty string is refused whole.

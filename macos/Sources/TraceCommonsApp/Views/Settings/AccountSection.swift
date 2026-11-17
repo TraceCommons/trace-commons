@@ -56,7 +56,7 @@ struct AccountSection: View {
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.statusRead != .answered {
-                    SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
+                    SettingsReadNotice(model.statusRead, retry: { model.refreshStatus() })
                 } else if !model.status.loggedIn {
                     Text(SettingsLegacyWords.queuedNothingSent)
                         .glassType(GlassTokens.TypeScale.caption)
@@ -70,7 +70,7 @@ struct AccountSection: View {
                     if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {
                         Button(signIn) { Task { await model.signInToAccount() } }
                             .buttonStyle(GlassButtonStyle(.primary, small: true))
-                            .disabled(model.accountSigningIn)
+                            .disabled(model.accountSigningIn && !model.canRetryAccountSignIn)
                             .fixedSize()
                     }
                 }
@@ -247,7 +247,9 @@ struct ContributionAccountCard: View {
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .disabled(inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if let pending = copy.accountContributionPendingCredit {
+                    // Cut by the owner 2026-11-04 (Settings copy pass 2, P8):
+                    // an empty line draws nothing.
+                    if let pending = copy.accountContributionPendingCredit, !pending.isEmpty {
                         Text(pending)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)

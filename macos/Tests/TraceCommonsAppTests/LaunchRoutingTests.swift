@@ -83,7 +83,7 @@ final class LaunchRoutingTests: XCTestCase {
                 for requires in [true, false] {
                     XCTAssertEqual(
                         LaunchRouting.launchOpening(startup: startup, statusAnswered: answered,
-                                                    requiresOnboarding: requires, background: true),
+                                                    requiresOnboarding: requires, kind: .background),
                         .nothing, "\(startup) answered=\(answered) requires=\(requires)")
                 }
             }
@@ -94,6 +94,82 @@ final class LaunchRoutingTests: XCTestCase {
         XCTAssertFalse(LaunchRouting.isBackgroundLaunch(["x", "--background-launch=1"]))
         XCTAssertEqual(LaunchRouting.backgroundLaunchArgument, "--background-launch",
                        "near_ai_login.rs BACKGROUND_LAUNCH_ARG passes this spelling")
+    }
+
+    /// A launch the person started (Finder, the Dock, Spotlight, `open`)
+    /// and is still looking at opens the Monitor in front for an onboarded
+    /// install, so a cold launch never leaves only a menu-bar item (product
+    /// review of 0.24.0, 2026-11-04). Everything else is as on a quiet
+    /// launch: first run while onboarding is required, the refusal quietly,
+    /// and nothing decided before the status answers.
+    func test_aForegroundLaunchOpensTheMonitorInFront() {
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .running, statusAnswered: true, requiresOnboarding: false,
+                                                   kind: .foreground), .focusedMonitor)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .running, statusAnswered: true, requiresOnboarding: true,
+                                                   kind: .foreground), .firstRun)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .needsRoots, statusAnswered: false, requiresOnboarding: true,
+                                                   kind: .foreground), .firstRun)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .refused("locked"), statusAnswered: false,
+                                                   requiresOnboarding: true, kind: .foreground), .monitor)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .starting, statusAnswered: false, requiresOnboarding: false,
+                                                   kind: .foreground), .wait)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .running, statusAnswered: false, requiresOnboarding: false,
+                                                   kind: .foreground), .wait)
+        XCTAssertEqual(LaunchRouting.launchOpening(startup: .running, statusAnswered: true, requiresOnboarding: false,
+                                                   kind: .quiet), .nothing, "a quiet launch stays in the menu bar (R-44)")
+    }
+
+    /// The launch's kind: the CLI's argument first, then a login item
+    /// (quiet even if macOS brings it forward), then whether the app is in
+    /// front (`open -g` and a launch the person left are quiet).
+    func test_theLaunchKind() {
+        let app = "/Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp"
+        for login in [true, false] {
+            for active in [true, false] {
+                XCTAssertEqual(LaunchRouting.launchKind(arguments: [app, "--background-launch"],
+                                                        launchedAsLoginItem: login, active: active),
+                               .background, "login=\(login) active=\(active)")
+            }
+            XCTAssertEqual(LaunchRouting.launchKind(arguments: [app], launchedAsLoginItem: true, active: login), .quiet)
+        }
+        XCTAssertEqual(LaunchRouting.launchKind(arguments: [app], launchedAsLoginItem: false, active: true), .foreground)
+        XCTAssertEqual(LaunchRouting.launchKind(arguments: [app], launchedAsLoginItem: false, active: false), .quiet)
+    }
+
+    /// A login item is told apart by the launch's open-application event
+    /// ('aevt'/'oapp') carrying `keyAELaunchedAsLogInItem` ('lgit') in its
+    /// `keyAEPropData` ('prdt'). Anything else, a missing event included,
+    /// is not a login launch.
+    func test_aLoginItemLaunchIsReadFromTheOpenApplicationEvent() {
+        func code(_ text: String) -> UInt32 { text.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
+        XCTAssertEqual(LaunchRouting.kCoreEventClassCode, code("aevt"))
+        XCTAssertEqual(LaunchRouting.kAEOpenApplicationCode, code("oapp"))
+        XCTAssertEqual(LaunchRouting.keyAEPropDataCode, code("prdt"))
+        XCTAssertEqual(LaunchRouting.keyAELaunchedAsLogInItemCode, code("lgit"))
+        XCTAssertTrue(LaunchRouting.isLoginItemLaunch(eventClass: code("aevt"), eventID: code("oapp"),
+                                                      propData: code("lgit")))
+        XCTAssertFalse(LaunchRouting.isLoginItemLaunch(eventClass: code("aevt"), eventID: code("oapp"), propData: nil),
+                       "a Finder or Dock launch carries no login-item mark")
+        XCTAssertFalse(LaunchRouting.isLoginItemLaunch(eventClass: code("aevt"), eventID: code("odoc"),
+                                                       propData: code("lgit")))
+        XCTAssertFalse(LaunchRouting.isLoginItemLaunch(eventClass: nil, eventID: nil, propData: nil))
+    }
+
+    /// The delegate reads the login-item mark from the launch's own event,
+    /// in didFinishLaunching, where that event is current, and the model's launch opening passes the
+    /// kind through.
+    func test_theLaunchKindIsWired() throws {
+        let delegate = try MonitorNavigationTests.text("AppDelegate.swift")
+        XCTAssertFalse(delegate.contains("func applicationWillFinishLaunching"),
+                       "the open-application event is not current until didFinishLaunching")
+        XCTAssertTrue(delegate.contains("NSAppleEventManager.shared().currentAppleEvent"))
+        XCTAssertTrue(delegate.contains("LaunchRouting.launchedAsLoginItem = LaunchRouting.isLoginItemLaunch("))
+        let model = try MonitorNavigationTests.text("AppModel.swift")
+        XCTAssertTrue(model.contains("""
+                    kind: LaunchRouting.launchKind(
+                        arguments: CommandLine.arguments, launchedAsLoginItem: LaunchRouting.launchedAsLoginItem,
+                        active: NSApplication.shared.isActive))
+        """))
     }
 
     /// M3: a Settings destination (a quit refusal, "Manage rules") opens
