@@ -443,10 +443,18 @@ fn load(provider: &gtk::CssProvider, dark: bool) {
 /// roles first, since the palette refers to them by name, then the palette,
 /// then the rules.
 fn stylesheet(dark: bool) -> String {
-    let (brand, tokens) = if dark {
-        (brand_tokens::DARK_CSS, DARK_TOKENS)
+    let (brand, glass, tokens) = if dark {
+        (
+            brand_tokens::DARK_CSS,
+            brand_tokens::GLASS_DARK_CSS,
+            DARK_TOKENS,
+        )
     } else {
-        (brand_tokens::LIGHT_CSS, LIGHT_TOKENS)
+        (
+            brand_tokens::LIGHT_CSS,
+            brand_tokens::GLASS_LIGHT_CSS,
+            LIGHT_TOKENS,
+        )
     };
     let insights = if dark {
         brand_tokens::INSIGHTS_DARK_CSS
@@ -454,7 +462,7 @@ fn stylesheet(dark: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     format!(
-        "{brand}\n{tokens}\n{}\n{insights}",
+        "{brand}\n{glass}\n{tokens}\n{}\n{insights}",
         include_str!("style.css")
     )
 }

@@ -180,6 +180,7 @@ mod imp {
 
             let pill = gtk::Button::new();
             pill.add_css_class("tc-map-pill");
+            pill.add_css_class("tc-glass-control");
             pill.set_visible(false);
             pill.set_parent(&*obj);
             let weak = obj.downgrade();
@@ -198,6 +199,7 @@ mod imp {
                 .visible(false)
                 .build();
             card.add_css_class("tc-map-card");
+            card.add_css_class("tc-glass-node-card");
             let title = gtk::Label::new(None);
             title.add_css_class("heading");
             title.set_xalign(0.0);

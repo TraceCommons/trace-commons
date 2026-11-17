@@ -28,8 +28,11 @@
 //!   panes reallocate inside the width the window has.
 //! - The first launch seeds the panes from the display's first monitor: a
 //!   Wayland client does not know which monitor its window will open on.
-//! - The toolbar toggles and the gear carry themed symbolic icons until the
-//!   look slice exports the Mac's glyphs.
+//! - The toolbar toggles and the gear carry the Mac's own glyphs
+//!   (`glyph`), exported from its path data, and every pane, the tab strip
+//!   and the toolbar capsule are painted with the glass tiers
+//!   (`brand_tokens::GLASS_*_CSS`): opaque, as the Mac draws them under
+//!   Reduce Transparency.
 //! - Settings' own dialogs and toasts still belong to the main window.
 
 use std::cell::{Cell, RefCell};
@@ -47,7 +50,8 @@ use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
 use super::tabs::{self, Back, Location, MapView, Route, Tab, TracesPage};
 use super::three_pane::ThreePane;
-use super::{demand, graph_model};
+use super::{demand, glyph, graph_model};
+use crate::ui::style::brand_tokens;
 use crate::ui::{App, style};
 
 /// The existing screens the window hosts, and the notices laid over them.
@@ -112,10 +116,11 @@ pub struct Shell {
 
 /// One toolbar toggle. Its name and tip say what pressing it does, so they
 /// are set with its state (`Shell::apply`), not here.
-fn toolbar_toggle(icon: &str) -> gtk::ToggleButton {
+fn toolbar_toggle(glyph_svg: &str) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::new();
-    button.set_icon_name(icon);
+    button.set_child(Some(&glyph::icon(glyph_svg)));
     button.add_css_class("tc-tab");
+    button.add_css_class("tc-toolbar-toggle");
     button.add_css_class("flat");
     button
 }
@@ -133,6 +138,8 @@ fn monitor_width() -> Option<f64> {
 impl Shell {
     pub fn new(window: &adw::ApplicationWindow, pages: Pages<'_>, missions: bool) -> Self {
         let words = monitor_screens_copy();
+        // The ground the panes sit on, seen in the gaps between them.
+        window.add_css_class("tc-glass-window");
 
         // --- The toolbar row, which is the title bar --------------------
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, style::space::S);
@@ -161,16 +168,20 @@ impl Shell {
                 toolbar.append(&controls);
             }
         }
-        let graph_toggle = toolbar_toggle("view-statistics-symbolic");
-        let map_toggle = toolbar_toggle("mark-location-symbolic");
-        let inspector_toggle = toolbar_toggle("sidebar-show-right-symbolic");
+        let graph_toggle = toolbar_toggle(brand_tokens::glyph::GRAPH);
+        let map_toggle = toolbar_toggle(brand_tokens::glyph::MAP);
+        let inspector_toggle = toolbar_toggle(brand_tokens::glyph::INSPECTOR);
         let capsule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        capsule.add_css_class("tc-switcher");
+        capsule.add_css_class("tc-glass-control");
+        capsule.add_css_class("tc-toolbar-capsule");
         capsule.set_valign(gtk::Align::Center);
         for toggle in [&graph_toggle, &map_toggle, &inspector_toggle] {
             capsule.append(toggle);
         }
-        let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
+        let settings_button = gtk::Button::new();
+        settings_button.set_child(Some(&glyph::icon(brand_tokens::glyph::GEAR)));
+        settings_button.add_css_class("tc-toolbar-toggle");
+        settings_button.add_css_class("tc-toolbar-gear");
         settings_button.add_css_class("flat");
         settings_button.add_css_class("circular");
         settings_button.set_valign(gtk::Align::Center);
@@ -190,7 +201,7 @@ impl Shell {
         let inference_dot = gtk::Label::builder().visible(false).build();
         inference_dot.set_valign(gtk::Align::Center);
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        strip.add_css_class("tc-switcher");
+        strip.add_css_class("tc-glass-tabs");
         strip.set_halign(gtk::Align::Start);
         strip.set_margin_start(style::space::M);
         strip.set_margin_end(style::space::M);
@@ -199,7 +210,9 @@ impl Shell {
         let mut tab_buttons: Vec<(Tab, gtk::ToggleButton)> = Vec::new();
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
             let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
-            content.append(&gtk::Label::new(Some(tab.title())));
+            let title = gtk::Label::new(Some(tab.title()));
+            title.add_css_class("tc-type-label");
+            content.append(&title);
             match tab {
                 Tab::Traces => content.append(&traces_badge),
                 Tab::Inference => content.append(&inference_dot),
@@ -305,7 +318,9 @@ impl Shell {
         let graph = GraphFooter::new();
 
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        main.add_css_class("tc-root");
+        main.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        main.set_overflow(gtk::Overflow::Hidden);
         main.append(&handle);
         main.append(&strip);
         main.append(&breadcrumb);
@@ -316,7 +331,9 @@ impl Shell {
         let map = TraceMap::new();
         map.root.set_vexpand(true);
         let map_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        map_pane.add_css_class("tc-root");
+        map_pane.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        map_pane.set_overflow(gtk::Overflow::Hidden);
         map_pane.append(&map.root);
 
         // --- The inspector pane ----------------------------------------
@@ -339,7 +356,9 @@ impl Shell {
         inspector_stack.add_named(&inspector.root, Some("traces"));
         inspector_stack.add_named(&history_scroller, Some("history"));
         let inspector_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        inspector_pane.add_css_class("tc-root");
+        inspector_pane.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        inspector_pane.set_overflow(gtk::Overflow::Hidden);
         inspector_pane.append(&inspector_stack);
 
         let root = ThreePane::new(&main, &map_pane, &inspector_pane);
