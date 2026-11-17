@@ -211,7 +211,9 @@ use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
-use crate::insights::skill_usage::{SKILL_USAGE_VERSION, SkillUsageEvidence, SkillUsageScan};
+use crate::insights::skill_usage::{
+    SKILL_USAGE_VERSION, SkillUsageEvidence, SkillUsageScan, evidence_is_current,
+};
 use crate::insights::slash_goals::{ClaudeGoal, ClaudeGoalScan, GoalStatus, WeekGoal, WeekGoals};
 use crate::insights::task_classifier::{current_task, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
@@ -525,6 +527,16 @@ impl CounterRow {
     /// numbers its rows from `t0` again, so without the tag a reference
     /// answered before would name another session now; with it, the
     /// reference is refused as unknown ([`find_listed`]).
+    /// Whether the kept skill evidence need not be read again: written
+    /// by this scanner, or by an earlier one that would have written the
+    /// same ([`evidence_is_current`]).
+    fn skill_usage_current(&self) -> bool {
+        self.skill_usage_version == SKILL_USAGE_VERSION
+            || self.skill_usage.as_ref().is_some_and(|evidence| {
+                evidence.schema_version == self.skill_usage_version && evidence_is_current(evidence)
+            })
+    }
+
     fn listed_reference(&self, store_tag: u64) -> String {
         format!("{}.{store_tag}", self.reference())
     }
@@ -1965,7 +1977,7 @@ impl CounterPass {
                     && row.event_span_read
                     && row.facts_version == SESSION_FACTS_VERSION
                     && (!skills_enabled()
-                        || (row.skill_usage_version == SKILL_USAGE_VERSION
+                        || (row.skill_usage_current()
                             && row.skill_children_expected == candidate.group_member_count))
                     && !row.awaiting_classification()
                     && (row.streamed
@@ -2128,7 +2140,7 @@ impl CounterPass {
                 stored.row.size_bytes == candidate.size_bytes
                     && stored.row.modified_at == candidate.modified_at
                     && stored.row.facts_version == SESSION_FACTS_VERSION
-                    && (!skills_enabled() || stored.row.skill_usage_version == SKILL_USAGE_VERSION)
+                    && (!skills_enabled() || stored.row.skill_usage_current())
             });
             if unchanged && !spawned_removals.contains(&session) {
                 continue;
@@ -2911,8 +2923,7 @@ impl CounterPass {
                 Some((start, end)) => gaps.mark(agent, start, end, now, &chrono::Local),
                 None => gaps.mark_undated(agent),
             };
-            let Some(evidence) = evidence.filter(|e| e.schema_version == SKILL_USAGE_VERSION)
-            else {
+            let Some(evidence) = evidence.filter(|e| evidence_is_current(e)) else {
                 gap(&mut gaps);
                 match population {
                     "delegated" => delegated_unknown += 1,
@@ -5900,6 +5911,62 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Version 2 called a Claude transcript with no assistant record
+    /// partial. Only kept evidence of that shape is read again; complete
+    /// version-2 evidence is kept as it is and counted.
+    #[test]
+    fn version_two_partial_empty_evidence_is_reread_once_and_the_rest_kept() {
+        let f = Fixture::new();
+        let turnless = f.write(
+            "turnless.jsonl",
+            b"{\"type\":\"user\",\"sessionId\":\"s\",\"timestamp\":\"2026-11-10T11:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n{\"type\":\"system\",\"sessionId\":\"s\",\"subtype\":\"api_error\"}\n",
+        );
+        let mut used = claude_bytes();
+        used.extend_from_slice(b"\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"skill-call\",\"name\":\"Skill\",\"input\":{\"skill\":\"review\"}}]}}\n");
+        let used = f.write("used.jsonl", &used);
+        let candidates = [
+            candidate(SOURCE_CLAUDE_CODE, &turnless),
+            candidate(SOURCE_CLAUDE_CODE, &used),
+        ];
+        assert_eq!(f.run_skills(&candidates).read, 2);
+        let fresh = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(fresh["usage"]["partial"], false, "{fresh}");
+        assert_eq!(fresh["usage"]["sessions_partial"], 0);
+
+        // As a version-2 pass left them.
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        assert_eq!(store.rows.len(), 2);
+        for row in store.rows.values_mut() {
+            let evidence = row.skill_usage.as_mut().unwrap();
+            evidence.schema_version = 2;
+            if evidence.skills.is_empty() {
+                evidence.partial = true;
+            }
+            row.skill_usage_version = 2;
+        }
+        f.pass.save(store).unwrap();
+        let old = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(
+            old["usage"]["skills"][0]["invocations"], 1,
+            "complete v2 evidence counts"
+        );
+        assert_eq!(
+            old["usage"]["sessions_unknown"], 1,
+            "stale until read again"
+        );
+        assert_eq!(old["usage"]["partial"], true);
+
+        assert_eq!(
+            f.run_skills(&candidates).read,
+            1,
+            "only the partial empty row"
+        );
+        assert_eq!(f.run_skills(&candidates).read, 0, "and only once");
+        let healed = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(healed["usage"]["partial"], false, "{healed}");
+        assert_eq!(healed["usage"]["skills"][0]["invocations"], 1);
     }
 
     #[test]

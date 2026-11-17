@@ -27,6 +27,32 @@ final class InsightsSkillsHomeTests: XCTestCase {
     private func project(_ s: DaemonData.SkillsSnapshot) -> InsightsSkillsHome.Snapshot {
         InsightsSkillsHome.make(s, model: InsightsSkillsModel(), now: now, calendar: calendar)
     }
+    func testRankingContextUsesCatalogSourceIdentityAndExplicitUsage() throws {
+        let home = project(snapshot(rows: [try row()]))
+        XCTAssertEqual(home.context.installedSkillIDs, ["upstream"])
+        XCTAssertEqual(home.context.usedSkillIDs, ["upstream"])
+        XCTAssertEqual(home.context.followedPublisherIDs, ["maker"])
+        XCTAssertEqual(home.context.catalogIDsByUsageID["claude_code\u{0}review"], ["upstream"])
+        XCTAssertTrue(project(snapshot(rows: [try row()], analysis: false)).context.usedSkillIDs.isEmpty)
+        let unrelated = DaemonData.InstalledSkill(id: "elsewhere", name: "review", description: "", agent: "claude_code", scope: "global", location: "/other", sha256: contentHash,
+            source: .init(repository: "other/skills", path: "skills/review/SKILL.md"))
+        let other = project(snapshot(rows: [try row()], skills: [unrelated]))
+        XCTAssertTrue(other.context.installedSkillIDs.isEmpty, "Same names never establish catalog identity")
+        XCTAssertTrue(other.context.usedSkillIDs.isEmpty)
+    }
+
+    func testWeakHighVolumeRowsDoNotHideMeaningfulTrendBeforeRanking() throws {
+        func namedRow(_ name: String, previous: Int, current: Int) throws -> DaemonData.SkillsUsageRow {
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(try row(previous: previous, current: current))) as? [String: Any])
+            raw["name"] = name
+            return try JSONDecoder().decode(DaemonData.SkillsUsageRow.self, from: JSONSerialization.data(withJSONObject: raw))
+        }
+        let weak = try (0..<12).map { try namedRow("weak-\($0)", previous: 1000, current: 1010) }
+        let meaningful = try namedRow("meaningful", previous: 2, current: 5)
+        let stories = project(snapshot(rows: weak + [meaningful])).rankedStories(now: now, calendar: calendar)
+        XCTAssertTrue(stories.contains { $0.id == "trend:claude_code\u{0}meaningful" })
+    }
+
     func testUsedUpdatesRequireVerifiedSourceAndCurrentPublisher() throws {
         let update = DaemonData.SkillsUpdate(installedID:"local",status:"update_available",catalogSkillID:"upstream")
         XCTAssertEqual(project(snapshot(rows:[try row()],updates:[update])).updates.map(\.installedID), ["local"])
