@@ -393,7 +393,7 @@ pub mod host_daemon_offer_draft {
     /// The card's title.
     pub const TITLE: &str = "Open sessions from this app";
     /// The card's line.
-    pub const BODY: &str = "The Flatpak app can't open a terminal by itself. Install the Trace Commons command-line tool on this computer and this app will use it to start sessions.";
+    pub const BODY: &str = "The Flatpak app can't open a terminal by itself. Install this app's command-line tool on this computer, and the app will use it to start sessions.";
     /// The button: opens the install instructions in the browser.
     pub const ACTION: &str = "Show install steps";
 }

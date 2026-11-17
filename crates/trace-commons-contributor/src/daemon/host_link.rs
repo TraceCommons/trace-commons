@@ -115,10 +115,12 @@ pub fn route(sandboxed: bool, sock: Option<&Path>, probe: impl Fn(&Path) -> Link
 }
 
 /// Another daemon on this login already holds `watcher.lock`.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct WatcherHeld;
 
 /// A daemon's hold on the runtime directory, for its whole life.
+#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct Claim {
     /// Held, never read: dropping it releases the watcher lock.
@@ -183,6 +185,7 @@ pub(crate) fn claim(
 /// Whether two paths name one directory. Canonical when both resolve, as
 /// given otherwise: the systemd unit names the directory explicitly, and a
 /// trailing slash or a symlinked `~/.config` must not read as a custom one.
+#[cfg(unix)]
 fn same_dir(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,

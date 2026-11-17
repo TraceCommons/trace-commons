@@ -663,8 +663,8 @@ mod roots_tests {
     /// The host link's socket in a scratch runtime directory, and the
     /// state directory a sandboxed window would have.
     fn host_link_fixture(tag: &str) -> (Scratch, Scratch, std::path::PathBuf) {
-        let state = Scratch::new(&format!("{tag}-state"));
-        let run = Scratch::new(&format!("{tag}-run"));
+        let state = Scratch::new(&format!("{tag}s"));
+        let run = Scratch::new(&format!("{tag}r"));
         let sock = run
             .path()
             .join(trace_commons_contributor::daemon::host_link::HOST_LINK_SOCK_FILE);
@@ -682,7 +682,7 @@ mod roots_tests {
     fn in_a_sandbox_a_listening_host_daemon_is_attached_before_anything_else() {
         // Undeclared roots in the sandbox's own state directory: the
         // in-sandbox path would refuse. The host daemon comes first.
-        let (state, _run, sock) = host_link_fixture("host-live");
+        let (state, _run, sock) = host_link_fixture("hl1");
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
             .expect("attached to the host daemon");
@@ -695,7 +695,7 @@ mod roots_tests {
         // The socket file a stopped host daemon leaves. A second daemon in
         // the sandbox would watch the same sessions; the window's existing
         // not-running state reports this instead.
-        let (state, _run, sock) = host_link_fixture("host-down");
+        let (state, _run, sock) = host_link_fixture("hl2");
         drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
         let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
             .expect("attached, not an error that would end the process");
@@ -711,7 +711,7 @@ mod roots_tests {
 
     #[test]
     fn in_a_sandbox_without_a_host_part_the_window_runs_as_today() {
-        let (state, _run, sock) = host_link_fixture("host-absent");
+        let (state, _run, sock) = host_link_fixture("hl3");
         let message = match Backend::open_with(state.path().to_path_buf(), true, Some(sock)) {
             Ok(_) => panic!("no host part: the in-sandbox path refuses undeclared roots"),
             Err(e) => e.to_string(),
@@ -727,7 +727,7 @@ mod roots_tests {
 
     #[test]
     fn outside_a_sandbox_the_host_link_is_ignored() {
-        let (state, _run, sock) = host_link_fixture("host-unsandboxed");
+        let (state, _run, sock) = host_link_fixture("hl4");
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let message = match Backend::open_with(state.path().to_path_buf(), false, Some(sock)) {
             Ok(_) => panic!("outside a sandbox the order is unchanged"),
@@ -739,7 +739,7 @@ mod roots_tests {
     #[test]
     fn calls_attached_over_the_host_link_reach_the_host_daemon() {
         use std::io::{BufRead, BufReader, Write};
-        let (state, _run, sock) = host_link_fixture("host-call");
+        let (state, _run, sock) = host_link_fixture("hl5");
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let backend =
             Backend::open_with(state.path().to_path_buf(), true, Some(sock)).expect("attached");
