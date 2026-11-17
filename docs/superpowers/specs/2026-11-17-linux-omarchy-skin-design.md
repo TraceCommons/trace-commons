@@ -108,7 +108,7 @@ without both the palette is invalid.
 | `tc_surface`, glass card, card-quiet, control, popover, menu, node card | `lighter_background` | mix(bg, fg, 6%) | |
 | `tc_surface2` (inset), glass well | `dark_background` | mix(bg, fg, 10%) | |
 | glass scene (map) | `darker_background` | mix(bg, black, 25%) dark / mix(bg, fg, 8%) light | |
-| control hover / row hover | derived | mix(surface, fg, 10%) / mix(bg, fg, 7%) | |
+| control hover / row hover | derived | mix(surface, fg, 8%) / mix(bg, fg, 6%) | |
 | `tc_ink`, glass ink, toolbar glyph | `foreground` | required | 4.5 on every ground |
 | strong text | `bright_foreground` | foreground | 4.5 on every ground |
 | `tc_muted`, glass secondary ink | derived: mix(fg, bg, 30%) | `light_foreground` is not used: whether it sits closer to or further from the background than `foreground` differs from theme to theme | 4.5 on every ground |
@@ -138,7 +138,14 @@ is kept out, the last valid palette stays). Strong ink is moved the same
 way. Fills are solved jointly against their label: for the accent, each
 label candidate is tried and the one needing the smallest move of the fill
 wins (measured, not assumed from mode). Status fills are moved until
-`on_status` (the background) clears 4.5 on them and they clear 3 on bg.
+`on_status` (the background) clears 4.5 on them and they clear 3 on every
+ground. In light mode the standard sheet labels status fills white; the
+skin labels them `on_status` instead.
+
+Measured on the fixtures: Tokyo Night's accent and status hues already
+clear every floor and are used unchanged; Gruvbox's accent clears its
+ground but not the hovered control (4.1:1) and is lifted a few steps; Rose
+Pine's accent is darkened for text on its light ground.
 
 **Mode.** `mode`, else `theme_type`, else a `light.mode` file, else the
 luminance rule, as upstream. While Omarchy mode is on, libadwaita's
@@ -218,6 +225,22 @@ In `trace_commons_contributor::appearance_copy`:
 - `APPEARANCE_STANDARD`: "Standard"
 - `APPEARANCE_OMARCHY`: "Omarchy"
 - `APPEARANCE_OMARCHY_UNAVAILABLE`: "No Omarchy theme found. Using the standard appearance."
+
+## Where it lives
+
+- `crates/trace-commons-contributor-gtk/src/ui/omarchy.rs`: the pure adapter
+  (parse, aliases, mode, derivation, contrast, path candidates, last-valid
+  retention).
+- `.../src/ui/appearance.rs`: the preference file, state, monitors,
+  debounce, window class, redraw, and the Settings card.
+- `.../src/ui/style.rs`: `omarchy_stylesheet`, `sheet_for`, `reload`, and
+  `Inks` with `style::inks()`.
+- Drawing sites: `ui/mark.rs`, `ui/history.rs` (`Glyph::ink`),
+  `ui/monitor/map.rs` (`Palette::with_inks`), `ui/preview.rs`
+  (redaction tag, `Excerpt::markup_with`).
+- `crates/trace-commons-contributor/src/appearance_copy.rs`: the words.
+- `toml = "0.9"` declared in the GTK crate: already in its tree at that
+  version with default features; `Cargo.lock` gains only the edge.
 
 ## Tests
 
