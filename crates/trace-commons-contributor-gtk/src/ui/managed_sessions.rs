@@ -182,12 +182,18 @@ fn terminal_to_save(ask: Option<&[(String, String)]>, picked: u32) -> Option<Str
 }
 
 /// Where the session opens while the dialog asks: the terminal picked in
-/// it, as the macOS sheet's `destination`; else the daemon's own line.
+/// it, as the macOS sheet's `destination`; else the daemon's own line, which
+/// names herdr while sessions are grouped there.
 fn launch_destination<'a>(
     snapshot: &'a Value,
     ask: Option<&'a [(String, String)]>,
     picked: u32,
 ) -> Option<&'a str> {
+    // Grouped in herdr, the session opens there whatever is picked.
+    let grouped = snapshot["capabilities"]["herdr_grouping"] == true;
+    if grouped {
+        return session_destination(snapshot);
+    }
     ask.and_then(|choices| choices.get(picked as usize))
         .map(|(_, name)| name.as_str())
         .or_else(|| session_destination(snapshot))
@@ -198,6 +204,20 @@ fn scope_text(snapshot: &Value, ask: Option<&[(String, String)]>, picked: u32) -
         "{destination}",
         launch_destination(snapshot, ask, picked).unwrap_or_default(),
     )
+}
+
+/// Keeps the launch line on the dropdown's pick.
+fn follow_pick(
+    dropdown: &gtk::DropDown,
+    line: &gtk::Label,
+    snapshot: &Value,
+    choices: Option<Vec<(String, String)>>,
+) {
+    let snapshot = snapshot.clone();
+    let line = line.clone();
+    dropdown.connect_selected_notify(move |d| {
+        line.set_label(&scope_text(&snapshot, choices.as_deref(), d.selected()));
+    });
 }
 
 /// The "Open sessions in" row: the core's label and a dropdown over the
@@ -588,12 +608,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     ));
     content.append(&scope_line);
     if let Some(dropdown) = &terminal_picker {
-        let snapshot = snapshot.clone();
-        let choices = terminal_choices.clone();
-        let line = scope_line.clone();
-        dropdown.connect_selected_notify(move |d| {
-            line.set_label(&scope_text(&snapshot, choices.as_deref(), d.selected()));
-        });
+        follow_pick(dropdown, &scope_line, snapshot, terminal_choices.clone());
     }
     let a = Rc::clone(app);
     let generations = snapshot["generations"].clone();
@@ -723,6 +738,28 @@ mod tests {
         assert_eq!(launch_destination(&json!({}), None, 0), None);
     }
 
+    /// Owner, 2026-11-03: while sessions are grouped in herdr the line names
+    /// herdr whatever terminal is picked, as the daemon's own line does.
+    #[test]
+    fn the_launch_line_names_herdr_while_grouped() {
+        let mut snapshot = two_terminals(json!(true), json!("konsole"));
+        snapshot["capabilities"]["launch_destination"] = json!("herdr");
+        snapshot["capabilities"]["herdr_grouping"] = json!(true);
+        let (choices, _) = terminal_ask(&snapshot).unwrap();
+        for picked in [0, 1] {
+            assert_eq!(
+                launch_destination(&snapshot, Some(&choices), picked),
+                Some("herdr")
+            );
+        }
+        snapshot["capabilities"]["herdr_grouping"] = json!(false);
+        snapshot["capabilities"]["launch_destination"] = json!("Konsole");
+        assert_eq!(
+            launch_destination(&snapshot, Some(&choices), 0),
+            Some("GNOME Terminal")
+        );
+    }
+
     /// Needs a display: the row draws the core's label over the installed
     /// apps and starts on the current one.
     #[cfg(target_os = "linux")]
@@ -745,6 +782,25 @@ mod tests {
             terminal_to_save(Some(&choices), dropdown.selected()).as_deref(),
             Some("gnome_terminal")
         );
+        // The launch line follows the dropdown, and holds on herdr while
+        // sessions are grouped there.
+        let line = gtk::Label::new(None);
+        follow_pick(&dropdown, &line, &snapshot, Some(choices.clone()));
+        dropdown.set_selected(1);
+        assert_eq!(
+            line.label().as_str(),
+            scope_text(&snapshot, Some(&choices), 1).as_str()
+        );
+        assert!(line.label().contains("Konsole"));
+        dropdown.set_selected(0);
+        assert!(line.label().contains("GNOME Terminal"));
+        let mut grouped = snapshot.clone();
+        grouped["capabilities"]["launch_destination"] = json!("herdr");
+        grouped["capabilities"]["herdr_grouping"] = json!(true);
+        let line = gtk::Label::new(None);
+        follow_pick(&dropdown, &line, &grouped, Some(choices.clone()));
+        dropdown.set_selected(1);
+        assert!(line.label().contains("herdr"));
     }
 
     #[test]
