@@ -132,14 +132,6 @@ impl Fixture {
         self.drive_until(context, || self.app.callbacks.borrow().is_empty());
     }
 
-    fn status_reads(&self) -> usize {
-        self.methods
-            .borrow()
-            .iter()
-            .filter(|method| method.as_str() == "near_ai_credential_status")
-            .count()
-    }
-
     fn assert_unnamed_start(&self, index: usize) {
         let starts = self.starts.borrow();
         assert_eq!(
