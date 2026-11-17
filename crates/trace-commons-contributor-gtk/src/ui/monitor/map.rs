@@ -1245,37 +1245,36 @@ impl Palette {
 
     #[allow(deprecated)]
     pub fn current(widget: &impl IsA<gtk::Widget>) -> Self {
-        use crate::ui::style::brand_tokens::{dark, light};
-        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         let dark_scheme = adw::StyleManager::default().is_dark();
-        let (accent, on, ask, outside) = if dark_scheme {
-            (
-                dark::ACCENT,
-                dark::STATUS_ON,
-                dark::STATUS_ASK,
-                dark::STATUS_OUTSIDE,
-            )
-        } else {
-            (
-                light::ACCENT,
-                light::STATUS_ON,
-                light::STATUS_ASK,
-                light::STATUS_OUTSIDE,
-            )
-        };
         let context = widget.as_ref().style_context();
         let fallback = if dark_scheme {
             gtk::gdk::RGBA::BLACK
         } else {
             gtk::gdk::RGBA::WHITE
         };
+        Self::with_inks(
+            context.color(),
+            context.lookup_color("window_bg_color").unwrap_or(fallback),
+            &crate::ui::style::inks(),
+        )
+    }
+
+    /// The theme's ink and ground, with the accent and status fills from
+    /// `inks`: the generated tokens in the standard look, the Omarchy
+    /// palette's in the skin.
+    pub fn with_inks(
+        ink: gtk::gdk::RGBA,
+        background: gtk::gdk::RGBA,
+        inks: &crate::ui::style::Inks,
+    ) -> Self {
+        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         Self {
-            ink: context.color(),
-            background: context.lookup_color("window_bg_color").unwrap_or(fallback),
-            accent: parse(accent),
-            on: parse(on),
-            ask: parse(ask),
-            outside: parse(outside),
+            ink,
+            background,
+            accent: parse(&inks.accent),
+            on: parse(&inks.status_on),
+            ask: parse(&inks.status_ask),
+            outside: parse(&inks.status_outside),
         }
     }
 
@@ -2227,6 +2226,26 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
+    /// The map's dots take their fills from the inks: the standard tokens,
+    /// exactly as `Palette::fixed` pins them, or the Omarchy palette's.
+    #[test]
+    fn the_map_palette_takes_its_fills_from_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::GRUVBOX};
+        use crate::ui::style::Inks;
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        assert_eq!(
+            super::Palette::with_inks(ink, ground, &Inks::standard(false)),
+            super::Palette::fixed()
+        );
+        let p = omarchy::parse(GRUVBOX, false).unwrap();
+        let skin = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p));
+        let rgba = |c: omarchy::Rgb| gtk::gdk::RGBA::parse(c.hex()).unwrap();
+        assert_eq!(skin.accent, rgba(p.accent));
+        assert_eq!(skin.on, rgba(p.status_on));
+        assert_eq!(skin.ask, rgba(p.status_ask));
+        assert_eq!(skin.outside, rgba(p.status_outside));
+    }
+
     use super::*;
 
     /// The legend's memory item is the shared copy's word for this

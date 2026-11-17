@@ -1864,12 +1864,10 @@ impl Sheet {
 /// hole. See `.tc-redaction` in `style.css` for the full treatment, which
 /// applies where a marker is drawn as a widget rather than as buffer text.
 fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
-    let dark = adw::StyleManager::default().is_dark();
-    let (background, foreground) = if dark {
-        ("#4A3C18", "#F0EBDD")
-    } else {
-        ("#f3e3c0", "#202426")
-    };
+    // The scheme's literals live in `style::Inks` now, beside the Omarchy
+    // skin's, so one place answers for both.
+    let inks = style::inks();
+    let (background, foreground) = (inks.redaction_bg.as_str(), inks.redaction_fg.as_str());
     let tag = buffer
         .create_tag(
             None,
@@ -2335,12 +2333,14 @@ impl Excerpt {
     /// ink, which is what keeps the excerpt readable at both ends of the
     /// scheme.
     fn markup(&self) -> String {
-        let dark = adw::StyleManager::default().is_dark();
-        let (hue, alpha) = if dark {
-            ("#DCAA43", "32%")
-        } else {
-            ("#B9821F", "28%")
-        };
+        self.markup_with(&style::inks())
+    }
+
+    /// [`Self::markup`] with the inks given rather than read from what is
+    /// on screen; `style::Inks::standard` carries the two scheme values
+    /// above.
+    fn markup_with(&self, inks: &style::Inks) -> String {
+        let (hue, alpha) = (&inks.highlight, &inks.highlight_alpha);
         format!(
             "{}<span background=\"{hue}\" bgalpha=\"{alpha}\">{}</span>{}",
             glib::markup_escape_text(&self.text[..self.hit.start]),
@@ -2599,6 +2599,27 @@ mod tests {
         }
     }
     use super::context_around;
+
+    /// The highlighted excerpt is washed in the inks it is given: the
+    /// standard gold, or the Omarchy palette's.
+    #[test]
+    fn the_excerpt_wash_follows_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::TOKYO};
+        use crate::ui::style::Inks;
+        let excerpt = super::Excerpt {
+            text: "a needle here".to_string(),
+            hit: 2..8,
+        };
+        assert!(
+            excerpt
+                .markup_with(&Inks::standard(false))
+                .contains("background=\"#B9821F\" bgalpha=\"28%\"")
+        );
+        let palette = omarchy::parse(TOKYO, false).unwrap();
+        let markup = excerpt.markup_with(&Inks::omarchy(&palette));
+        assert!(markup.contains(&format!("background=\"{}\"", palette.highlight.hex())));
+        assert!(markup.contains(&format!("bgalpha=\"{}\"", omarchy::HIGHLIGHT_ALPHA)));
+    }
 
     #[test]
     fn context_never_splits_a_multibyte_character() {
