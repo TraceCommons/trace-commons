@@ -290,7 +290,7 @@ impl TracesTree {
                 continue;
             }
             node.sessions
-                .sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                .sort_by_key(|a| std::cmp::Reverse(a.started_at));
             drawn.push(node.clone());
             match Self::majority_tool(&node.sessions) {
                 Some(kind) => by_tool.entry(kind).or_default().push(node),
@@ -305,12 +305,12 @@ impl TracesTree {
                     SourceMode::from_wire(kind.source_mode(settings))
                 });
                 let mut nodes = by_tool.remove(&kind).unwrap_or_default();
-                nodes.sort_by(|a, b| b.sessions.len().cmp(&a.sessions.len()));
+                nodes.sort_by_key(|a| std::cmp::Reverse(a.sessions.len()));
                 Self::draws_tool(kind, mode, !nodes.is_empty())
                     .then(|| ToolNode::new(kind, mode, nodes))
             })
             .collect();
-        tools.sort_by(|a, b| b.waiting().cmp(&a.waiting()));
+        tools.sort_by_key(|a| std::cmp::Reverse(a.waiting()));
 
         TracesTree {
             tools,

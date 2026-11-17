@@ -500,8 +500,8 @@ mod tests {
 
     #[test]
     fn the_divider_reaches_into_the_map_but_stays_inside_the_gap() {
-        assert!(DIVIDER_REACH > 0.0);
-        assert!(DIVIDER_REACH < PANE_GAP);
+        const { assert!(DIVIDER_REACH > 0.0) };
+        const { assert!(DIVIDER_REACH < PANE_GAP) };
     }
 
     #[test]
