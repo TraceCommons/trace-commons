@@ -258,6 +258,9 @@ pub struct TracesCopy {
     pub title_bold: &'static str,
     /// Under the count of the watched tools' traces.
     pub on_this_mac: &'static str,
+    /// `on_this_mac` for a shell that does not run on a Mac (owner,
+    /// 2026-11-17).
+    pub on_this_computer: &'static str,
     /// The one line under the count once traces are found. No figure: the
     /// MVP names no amount, in points or dollars (owner, 2026-11-04: "we have
     /// detected some traces that can earn you credit").
@@ -292,6 +295,9 @@ pub struct FoldersCopy {
     pub title_bold: &'static str,
     pub body: &'static str,
     pub loading: &'static str,
+    /// `loading` for a shell that does not run on a Mac: "this Mac" is
+    /// "this computer" (owner, 2026-11-17).
+    pub loading_this_computer: &'static str,
     pub watch: &'static str,
     pub dont_use: &'static str,
     /// `{tool}`: the row's accessible picker label.
@@ -461,6 +467,8 @@ pub struct UsesCopy {
     /// (on Ask; Automatic reads the mode table's word), and where they go.
     /// DRAFT, NEEDS APPROVAL.
     pub this_mac: &'static str,
+    /// `this_mac` for a shell that does not run on a Mac (owner, 2026-11-17).
+    pub this_computer: &'static str,
     pub you_review: &'static str,
     pub the_commons: &'static str,
     /// Under Automatic before sign-in: sign-in is the last step, and the
@@ -616,6 +624,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "app watch?",
             body: "We've found the following tools on your device. Traces work by reading coding-agent transcripts from locations you specify. Select an option from each of the tools below to continue.",
             loading: "Looking for coding tools on this Mac…",
+            loading_this_computer: "Looking for coding tools on this computer…",
             // Approved 2026-10-08 (button rule): the picker's answers.
             watch: "Watch",
             dont_use: "Not used",
@@ -718,6 +727,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
             complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
             this_mac: "This Mac",
+            this_computer: "This computer",
             you_review: "You review",
             the_commons: "The commons",
             automatic_after_sign_in: "Starts when setup finishes after sign-in.",
@@ -729,6 +739,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "What your traces ",
             title_bold: "could earn",
             on_this_mac: "traces on this Mac",
+            on_this_computer: "traces on this computer",
             found_credit: "We have detected some traces that can earn you credit.",
             found_could_credit: "We have detected some traces that could earn you credit.",
             credit_depends: "Final credit depends on how many traces are accepted.",
@@ -1006,6 +1017,24 @@ mod tests {
             json(serde_json::json!({"traces": 10})).as_deref(),
             Some(copy.found_credit)
         );
+    }
+
+    /// The "this computer" captions are the Mac's words with "this Mac"
+    /// replaced (owner, 2026-11-17): for shells that do not run on a Mac.
+    /// The Mac's own words stay as they are.
+    #[test]
+    fn this_computer_captions_are_the_mac_words_for_any_computer() {
+        let copy = first_run_copy();
+        let swap = |mac: &str| mac.replace("this Mac", "this computer").replace("This Mac", "This computer");
+        assert_eq!(copy.uses.this_mac, "This Mac");
+        assert_eq!(copy.uses.this_computer, swap(copy.uses.this_mac));
+        assert_eq!(copy.traces.on_this_mac, "traces on this Mac");
+        assert_eq!(copy.traces.on_this_computer, swap(copy.traces.on_this_mac));
+        assert_eq!(copy.folders.loading, "Looking for coding tools on this Mac…");
+        assert_eq!(copy.folders.loading_this_computer, swap(copy.folders.loading));
+        for computer in [copy.uses.this_computer, copy.traces.on_this_computer, copy.folders.loading_this_computer] {
+            assert!(!computer.contains("Mac"), "{computer}");
+        }
     }
 
     /// Watching only queues picked past sessions on this Mac and sends
