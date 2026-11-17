@@ -319,8 +319,9 @@ In `trace_commons_contributor::appearance_copy`:
 ## Testing on Omarchy (GCP VM)
 
 An Omarchy 4.x VM in the pilot GCP project, hardened like the existing Linux
-test VMs. The checklist is in the PR. Native build only on the VM; the
-Flatpak is checked for the fallback line.
+test VMs. The checklist is in the PR. Native build only on the VM. The VM runs
+were native; the Flatpak shows the fallback line by design (D4) and was not
+run on the VM.
 
 ## Out of scope
 

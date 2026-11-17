@@ -283,13 +283,8 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
     let (highlight, highlight_ink) = match nearest_passing(ink, &washes) {
         Some((solved, _)) => (yellow, solved),
         None => {
-            let moved = nearest_by(yellow, |c| {
-                bases
-                    .iter()
-                    .map(|base| contrast(ink, base.mix(c, HIGHLIGHT_WASH)) / TEXT)
-                    .fold(f64::INFINITY, f64::min)
-            })
-            .ok_or(PaletteError::Unreachable("yellow"))?;
+            let moved =
+                moved_wash(ink, yellow, &bases).ok_or(PaletteError::Unreachable("yellow"))?;
             (moved.0, ink)
         }
     };
@@ -356,6 +351,22 @@ fn nearest_by(colour: Rgb, worst: impl Fn(Rgb) -> f64) -> Option<(Rgb, u32)> {
             .filter(|c| worst(*c) >= 1.0)
             .max_by(|a, b| worst(*a).total_cmp(&worst(*b)))
             .map(|c| (c, step))
+    })
+}
+
+/// The fallback wash colour: the nearest to `yellow` where `ink` clears
+/// [`TEXT`] on the wash over every base and the wash still stands
+/// [`HIGHLIGHT_VISIBLE`] off that base. A colour that fails either is
+/// refused, never returned.
+fn moved_wash(ink: Rgb, yellow: Rgb, bases: &[Rgb]) -> Option<(Rgb, u32)> {
+    nearest_by(yellow, |c| {
+        bases
+            .iter()
+            .map(|base| {
+                let wash = base.mix(c, HIGHLIGHT_WASH);
+                (contrast(ink, wash) / TEXT).min(contrast(wash, *base) / HIGHLIGHT_VISIBLE)
+            })
+            .fold(f64::INFINITY, f64::min)
     })
 }
 
@@ -699,6 +710,24 @@ mod tests {
             }
             assert!(failures.is_empty(), "{failures:#?}");
         }
+    }
+
+    /// The fallback never hands back a wash that vanishes off its ground,
+    /// even where the ink would pass on it.
+    #[test]
+    fn moved_wash_stays_visible_off_its_ground() {
+        let bases = [Rgb::BLACK];
+        let (c, _) = moved_wash(Rgb::WHITE, Rgb::BLACK, &bases).unwrap();
+        let wash = Rgb::BLACK.mix(c, HIGHLIGHT_WASH);
+        assert!(contrast(wash, Rgb::BLACK) >= HIGHLIGHT_VISIBLE);
+        assert!(contrast(Rgb::WHITE, wash) >= TEXT);
+    }
+
+    /// The Pango alpha string and the CSS/contrast fraction are one value.
+    #[test]
+    fn highlight_alpha_and_wash_agree() {
+        let pct: f64 = HIGHLIGHT_ALPHA.trim_end_matches('%').parse().unwrap();
+        assert!((pct / 100.0 - HIGHLIGHT_WASH).abs() < 1e-9);
     }
 
     /// An accent and the foreground are not a button pair by name: the label
