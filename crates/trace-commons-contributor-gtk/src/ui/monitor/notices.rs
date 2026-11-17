@@ -37,11 +37,18 @@
 //!   (`ui::update::banner_for`).
 //! - The four acknowledged safeguards the Mac keeps closed across restarts
 //!   (`MonitorNoticeDismissals`) close for this window only here.
-//! - The cards are a column, not the Mac's peeking stack, and the column
-//!   sits above the tab's content rather than over it, so no heading or
-//!   control of the tab is ever under a card. The column is never taller
-//!   than `pane_layout::NOTICES_MAX_HEIGHT` and scrolls past that, so every
-//!   card's buttons stay reachable; with no card showing it takes no room.
+//! - The stack is laid over the top of the tab's content, as on the Mac
+//!   (`GlassPopoverStack`, owner decision 1 of the 2026-11-16 spec, chosen
+//!   again on 2026-11-17): it pushes nothing down, so the front card covers
+//!   the top of the tab until it is closed. Only the front card is drawn
+//!   whole and up to two cards behind it peek out under it (`stack`). A
+//!   front card with no X (the undo, a consent or account notice, the
+//!   Private AI offer, an update installing) keeps the cards behind it out
+//!   of reach until its own button puts it away, as on the Mac.
+//! - Not ported: the Mac's slide-in and fade (a new card simply replaces
+//!   the front one here), its plates drawn behind the front card at the
+//!   front card's size (here they are slivers under it), and the 4% a
+//!   level the Mac narrows each plate by (here a fixed step).
 
 use super::tabs::Place;
 
@@ -80,16 +87,20 @@ pub enum Close {
 }
 
 impl Notice {
-    /// In the order they are stacked: the undo first, because it is the
-    /// one card with a clock on it.
+    /// In the order they are stacked, the front first, as `MonitorNotices`
+    /// stacks them: what is happening to the traces now (the undo, which
+    /// has a clock on it, then the core's health and the consent notices)
+    /// in front of what waits on an answer (the arming and Private AI
+    /// offers), and those in front of what is about this app or the
+    /// account.
     pub const ALL: [Notice; 7] = [
         Notice::Undo,
-        Notice::Update,
-        Notice::Account,
         Notice::Health,
         Notice::Consent,
-        Notice::PrivateAiOffer,
         Notice::ArmingOffer,
+        Notice::PrivateAiOffer,
+        Notice::Account,
+        Notice::Update,
     ];
 
     pub fn close(self) -> Close {
@@ -108,6 +119,35 @@ pub fn shown(notice: Notice, place: Place) -> bool {
             matches!(place, Place::Traces | Place::History)
         }
         Notice::PrivateAiOffer => place == Place::PrivateAi,
+    }
+}
+
+/// How far each card behind shows past the one in front, in pixels
+/// (`GlassPopoverStack.peek`).
+pub const PEEK: i32 = 8;
+
+/// How many cards behind the front one peek out at most
+/// (`GlassPopoverStack.drawn`, less the front card).
+pub const BEHIND: usize = 2;
+
+/// What the stack draws, given which cards are open, front first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stack {
+    /// The one card drawn whole: the first open one. `None` when none is
+    /// open, and the stack takes no room.
+    pub front: Option<usize>,
+    /// How many cards peek out behind it, at most `BEHIND`.
+    pub behind: usize,
+}
+
+/// The Mac's peeking stack: the front card whole, up to two behind it
+/// peeking out. Closing the front card brings the next one forward.
+pub fn stack(open: &[bool]) -> Stack {
+    let front = open.iter().position(|open| *open);
+    let count = open.iter().filter(|open| **open).count();
+    Stack {
+        front,
+        behind: count.saturating_sub(1).min(BEHIND),
     }
 }
 
@@ -225,6 +265,72 @@ mod tests {
         ] {
             assert_eq!(notice.close(), Close::Own, "{notice:?}");
         }
+    }
+
+    /// The Mac's order: what is happening now in front of what waits on an
+    /// answer, and both in front of what is about this app or the account.
+    #[test]
+    fn the_stack_order_is_the_macs_front_first() {
+        assert_eq!(
+            Notice::ALL,
+            [
+                Notice::Undo,
+                Notice::Health,
+                Notice::Consent,
+                Notice::ArmingOffer,
+                Notice::PrivateAiOffer,
+                Notice::Account,
+                Notice::Update,
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_front_card_is_whole_and_two_at_most_peek_behind_it() {
+        assert_eq!(
+            stack(&[false; 7]),
+            Stack {
+                front: None,
+                behind: 0
+            }
+        );
+        assert_eq!(
+            stack(&[false, false, true, false]),
+            Stack {
+                front: Some(2),
+                behind: 0
+            }
+        );
+        assert_eq!(
+            stack(&[false, true, false, true]),
+            Stack {
+                front: Some(1),
+                behind: 1
+            }
+        );
+        assert_eq!(
+            stack(&[true; 7]),
+            Stack {
+                front: Some(0),
+                behind: BEHIND
+            }
+        );
+        assert_eq!(BEHIND, 2, "the Mac draws three cards");
+        assert_eq!(PEEK, 8, "the Mac's peek");
+    }
+
+    #[test]
+    fn closing_the_front_card_brings_the_next_one_forward() {
+        let mut open = [true, true, true];
+        assert_eq!(stack(&open).front, Some(0));
+        open[0] = false;
+        assert_eq!(
+            stack(&open),
+            Stack {
+                front: Some(1),
+                behind: 1
+            }
+        );
     }
 
     #[test]

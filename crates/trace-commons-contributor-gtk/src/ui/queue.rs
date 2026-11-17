@@ -51,7 +51,7 @@ use super::monitor::inspector;
 pub struct QueueView {
     pub root: gtk::Box,
     /// The three cards that were stacked above the list. They are popover
-    /// notices above the tab now, so the window places them
+    /// notices laid over the tab now, so the window places them
     /// (`monitor::notices`): the undo bar and the arming offer over Traces,
     /// the Private AI offer over Inference. Each wrapper still follows its
     /// card's own visibility, and every `render_*` here still sets exactly
@@ -181,7 +181,7 @@ impl QueueView {
 
         // The undo bar is not in the scrolling column. It was in the page
         // root, above the empty state and the scroller; it is a popover
-        // notice above the tab now (`undo_notice`), for the same reason:
+        // notice laid over the tab now (`undo_notice`), for the same reason:
         //
         // It has to outlive the thing it is undoing. Approving the last
         // waiting session empties the queue, and `render` hides the whole
@@ -766,6 +766,9 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
             },
         );
     });
+    // The words were drawn from scratch: a closed offer whose words
+    // changed comes back (`monitor::Shell::notices_changed`).
+    app.shell.notices_changed();
 }
 
 /// The offer to answer model calls on this computer.
