@@ -170,7 +170,12 @@ else
     ui::style::tests::both_schemes_parse_with_insights_styles \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion \
-    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
+    ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
+    ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
+    ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
+    ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
