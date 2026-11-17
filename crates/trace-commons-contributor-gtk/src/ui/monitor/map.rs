@@ -1314,12 +1314,6 @@ impl Default for TraceMap {
     }
 }
 
-impl Default for TraceMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TraceMap {
     pub fn new() -> Self {
         let words = monitor_screens_copy();
