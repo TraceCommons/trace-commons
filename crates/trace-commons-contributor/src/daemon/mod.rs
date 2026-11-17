@@ -64,6 +64,7 @@ pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
+pub mod host_link;
 pub mod inference_connection;
 pub mod inference_map;
 pub mod insights_analyze;
@@ -268,11 +269,35 @@ pub struct EmbeddedDaemon {
     lock_path: std::path::PathBuf,
     lock: std::fs::File,
     server: tokio::task::JoinHandle<Result<()>>,
+    /// The watcher lock in the runtime directory, and the host-link server
+    /// when this daemon is the host part. See `host_link`.
+    #[cfg(unix)]
+    host_link: Option<HostLinkRuntime>,
     /// The bounded preview pool. Started here rather than inside
     /// `DaemonShared` because each worker holds an `Arc<DaemonShared>`
     /// through its runner, and a pool the shared state owned would keep
     /// that state alive for the life of the process.
     preview_workers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// What `start_embedded` holds for the host link.
+#[cfg(unix)]
+struct HostLinkRuntime {
+    /// Dropped last in `close`: releasing it lets another daemon watch.
+    _claim: host_link::Claim,
+    server: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Stops serving the host link however the daemon ends, including a start
+/// that fails after the claim: a dropped `JoinHandle` alone would leave the
+/// task serving.
+#[cfg(unix)]
+impl Drop for HostLinkRuntime {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+    }
 }
 
 impl EmbeddedDaemon {
@@ -297,6 +322,11 @@ impl EmbeddedDaemon {
             worker.abort();
         }
         let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
+        // The host-link socket file stays: to a sandboxed window it means
+        // "the host part is installed and down", which must not start a
+        // second daemon there (`host_link`).
+        #[cfg(unix)]
+        drop(self.host_link);
         drop(self.lock);
         let _ = std::fs::remove_file(&self.lock_path);
     }
@@ -493,6 +523,13 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // throwaway runtime that path builds, and would die with it.
         shared.adopt_runtime();
         shared.adopt_self();
+        // The watcher lock, taken after `daemon.lock` and inside this block
+        // so a refusal releases both, and before the socket is bound so a
+        // refused start leaves no socket file behind. Linux only: elsewhere
+        // there is no Flatpak and no `XDG_RUNTIME_DIR`.
+        #[cfg(unix)]
+        let host_link = start_host_link(&shared)?;
+
         // The two transports are the same protocol over different plumbing: a
         // unix socket guarded by its 0700 state directory, or a Windows named
         // pipe guarded by its DACL. See `win_pipe` for why the Windows side
@@ -521,17 +558,22 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         #[cfg(windows)]
         let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
 
-        Ok::<_, anyhow::Error>((shared, server, preview_workers))
+        #[cfg(not(unix))]
+        let host_link = ();
+        Ok::<_, anyhow::Error>((shared, server, preview_workers, host_link))
     }
     .await;
 
     match started {
-        Ok((shared, server, preview_workers)) => Ok(EmbeddedDaemon {
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        Ok((shared, server, preview_workers, host_link)) => Ok(EmbeddedDaemon {
             private_inference_shutdown: PrivateInferenceShutdown(Arc::downgrade(&shared)),
             shared,
             lock_path,
             lock,
             server,
+            #[cfg(unix)]
+            host_link,
             preview_workers,
         }),
         Err(e) => {
@@ -544,6 +586,46 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
             Err(e)
         }
     }
+}
+
+/// Claim the runtime directory and, on the host, serve the host link.
+///
+/// Refuses the start with [`StartFailure::AlreadyRunning`] when another
+/// daemon on this login holds the watcher lock -- the Flatpak window hosting
+/// one in its sandbox, or the host part. Everything else that goes wrong
+/// here costs only the host link, never the daemon.
+#[cfg(unix)]
+fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRuntime>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let Ok(platform_default) = crate::config::platform_default_dir() else {
+        return Ok(None);
+    };
+    let claim = match host_link::claim(
+        shared.store.dir(),
+        &platform_default,
+        host_link::runtime_dir(),
+        host_link::runs_sandboxed(),
+    ) {
+        Ok(Some(claim)) => claim,
+        Ok(None) => return Ok(None),
+        Err(host_link::WatcherHeld) => {
+            return Err(anyhow::Error::new(StartFailure::AlreadyRunning));
+        }
+    };
+    let server = match claim.socket.as_deref().map(host_link::bind) {
+        Some(Ok(listener)) => Some(tokio::spawn(host_link::serve(listener, Arc::clone(shared)))),
+        Some(Err(_)) => {
+            tracing::warn!("host link could not be bound");
+            None
+        }
+        None => None,
+    };
+    Ok(Some(HostLinkRuntime {
+        _claim: claim,
+        server,
+    }))
 }
 
 /// Run the periodic watch/upload/digest/history pass to completion -- i.e.,

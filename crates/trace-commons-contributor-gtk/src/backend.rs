@@ -25,8 +25,10 @@ use trace_commons_contributor::daemon::settings::SourceDeclaration;
 /// How the shell reaches the daemon.
 pub enum Backend {
     /// A daemon was already running -- almost always the systemd user unit.
-    /// Every call is one request over the control socket.
-    Attached { store: ConfigStore },
+    /// Every call is one request over `socket`: the state directory's
+    /// control socket, or, from a Flatpak sandbox, the host daemon's host
+    /// link (`daemon::host_link`).
+    Attached { socket: std::path::PathBuf },
     /// Nothing held the lock, so this process took it and runs the loop
     /// itself. Calls are answered in-process.
     Hosting(Box<Hosting>),
@@ -142,9 +144,41 @@ impl Backend {
     /// to a daemon this shell did not start would be a different decision
     /// than the one made here.
     pub fn open(dir: std::path::PathBuf) -> Result<Self> {
+        Self::open_with(
+            dir,
+            daemon::host_link::runs_sandboxed(),
+            daemon::host_link::socket_path(),
+        )
+    }
+
+    /// [`Backend::open`] with the sandbox fact and the host link's path
+    /// given, so the preference order is testable off Linux.
+    ///
+    /// Inside a Flatpak sandbox, a host daemon -- listening, or installed and
+    /// down -- comes first: the sandbox has no network and cannot open a host
+    /// terminal, and a second daemon there would watch the same sessions.
+    /// Without one, the path below runs exactly as outside a sandbox. See
+    /// `docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`.
+    pub fn open_with(
+        dir: std::path::PathBuf,
+        sandboxed: bool,
+        host_socket: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
+        let host = || match daemon::host_link::route(
+            sandboxed,
+            host_socket.as_deref(),
+            daemon::host_link::probe,
+        ) {
+            daemon::host_link::Route::Host(socket) => Some(Backend::Attached { socket }),
+            daemon::host_link::Route::Local => None,
+        };
+        if let Some(attached) = host() {
+            return Ok(attached);
+        }
         let store = ConfigStore::open(dir.clone())?;
+        let local = store.daemon_path(trace_commons_contributor::config::DAEMON_SOCK_FILE);
         if daemon::client::is_running(&store) {
-            return Ok(Backend::Attached { store });
+            return Ok(Backend::Attached { socket: local });
         }
         let settings = daemon::settings::DaemonSettings::load(&store)?;
         if !daemon::settings::roots_declared(&settings) {
@@ -172,10 +206,10 @@ impl Backend {
                 })))
             }
             // Somebody took the lock in between. That is not an error: it is
-            // the other half of the arbitration.
-            Err(_) => Ok(Backend::Attached {
-                store: ConfigStore::open(dir)?,
-            }),
+            // the other half of the arbitration. In a sandbox the somebody
+            // may be the host daemon, which took the watcher lock between
+            // the probe above and this start.
+            Err(_) => Ok(host().unwrap_or(Backend::Attached { socket: local })),
         }
     }
 
@@ -189,8 +223,8 @@ impl Backend {
     /// round trip.
     pub fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let response = match self {
-            Backend::Attached { store } => {
-                match daemon::client::try_call(store, method, &params)? {
+            Backend::Attached { socket } => {
+                match daemon::client::try_call_at(socket, method, &params)? {
                     Some(r) => r,
                     // The daemon was there when we attached and is not now.
                     // A fixed label, and the window's own not-running state
@@ -263,7 +297,7 @@ impl Backend {
     /// `resync_required` requires it to be able to do anyway.
     pub fn events(&self) -> Result<Box<dyn EventStream>> {
         match self {
-            Backend::Attached { store } => Ok(Box::new(SocketEvents::open(store)?)),
+            Backend::Attached { socket } => Ok(Box::new(SocketEvents::open(socket)?)),
             Backend::Hosting(h) => Ok(Box::new(BroadcastEvents {
                 rx: h.shared.events.subscribe(),
             })),
@@ -517,12 +551,10 @@ struct SocketEvents {
 }
 
 impl SocketEvents {
-    fn open(store: &ConfigStore) -> Result<Self> {
+    fn open(socket: &std::path::Path) -> Result<Self> {
         use std::io::Write;
-        use trace_commons_contributor::config::DAEMON_SOCK_FILE;
 
-        let mut stream =
-            std::os::unix::net::UnixStream::connect(store.daemon_path(DAEMON_SOCK_FILE))?;
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
         stream.write_all(b"{\"id\":1,\"method\":\"subscribe\",\"params\":{}}\n")?;
         stream.flush().ok();
         Ok(Self {
@@ -626,6 +658,104 @@ mod roots_tests {
             message, ERR_ROOTS_NOT_DECLARED,
             "the label has to be exactly the one the other two shells route on"
         );
+    }
+
+    /// The host link's socket in a scratch runtime directory, and the
+    /// state directory a sandboxed window would have.
+    fn host_link_fixture(tag: &str) -> (Scratch, Scratch, std::path::PathBuf) {
+        let state = Scratch::new(&format!("{tag}-state"));
+        let run = Scratch::new(&format!("{tag}-run"));
+        let sock = run
+            .path()
+            .join(trace_commons_contributor::daemon::host_link::HOST_LINK_SOCK_FILE);
+        (state, run, sock)
+    }
+
+    fn attached_socket(backend: &Backend) -> &std::path::Path {
+        match backend {
+            Backend::Attached { socket } => socket,
+            Backend::Hosting(_) => panic!("expected to attach, not to host"),
+        }
+    }
+
+    #[test]
+    fn in_a_sandbox_a_listening_host_daemon_is_attached_before_anything_else() {
+        // Undeclared roots in the sandbox's own state directory: the
+        // in-sandbox path would refuse. The host daemon comes first.
+        let (state, _run, sock) = host_link_fixture("host-live");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
+            .expect("attached to the host daemon");
+        assert_eq!(attached_socket(&backend), sock);
+        assert!(!backend.hosts_the_loop());
+    }
+
+    #[test]
+    fn in_a_sandbox_a_stopped_host_daemon_is_attached_not_replaced() {
+        // The socket file a stopped host daemon leaves. A second daemon in
+        // the sandbox would watch the same sessions; the window's existing
+        // not-running state reports this instead.
+        let (state, _run, sock) = host_link_fixture("host-down");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
+            .expect("attached, not an error that would end the process");
+        assert_eq!(attached_socket(&backend), sock);
+        assert_eq!(
+            backend
+                .call("status", serde_json::json!({}))
+                .unwrap_err()
+                .to_string(),
+            "daemon-not-running"
+        );
+    }
+
+    #[test]
+    fn in_a_sandbox_without_a_host_part_the_window_runs_as_today() {
+        let (state, _run, sock) = host_link_fixture("host-absent");
+        let message = match Backend::open_with(state.path().to_path_buf(), true, Some(sock)) {
+            Ok(_) => panic!("no host part: the in-sandbox path refuses undeclared roots"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+
+        let message = match Backend::open_with(state.path().to_path_buf(), true, None) {
+            Ok(_) => panic!("no runtime directory: the in-sandbox path"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn outside_a_sandbox_the_host_link_is_ignored() {
+        let (state, _run, sock) = host_link_fixture("host-unsandboxed");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let message = match Backend::open_with(state.path().to_path_buf(), false, Some(sock)) {
+            Ok(_) => panic!("outside a sandbox the order is unchanged"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn calls_attached_over_the_host_link_reach_the_host_daemon() {
+        use std::io::{BufRead, BufReader, Write};
+        let (state, _run, sock) = host_link_fixture("host-call");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let backend =
+            Backend::open_with(state.path().to_path_buf(), true, Some(sock)).expect("attached");
+        // The probe in `open_with` connected once; answer the next one.
+        let _probe = listener.accept().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            (&stream)
+                .write_all(b"{\"id\":1,\"result\":{\"from\":\"host\"}}\n")
+                .unwrap();
+        });
+        let value = backend.call("status", serde_json::json!({})).unwrap();
+        server.join().unwrap();
+        assert_eq!(value["from"], "host");
     }
 
     #[test]

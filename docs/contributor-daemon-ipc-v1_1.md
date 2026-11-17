@@ -6287,6 +6287,16 @@ with no herdr found, or with herdr not answering within 10 s, is refused with
 cannot trust is refused with `managed-herdr-socket-untrusted`. A herdr older
 than socket protocol 22 is refused with `managed-unsupported-version`.
 
+The managed snapshot's `capabilities.daemon_on_host` (boolean) is `true`
+when the answering daemon runs outside a Flatpak sandbox. A Flatpak window
+attached to the host daemon over the host link
+(`$XDG_RUNTIME_DIR/trace-commons/daemon.sock`, see
+`docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`)
+reads it; a daemon that omits it is treated as `false`. It gates nothing:
+Launch still follows `terminal_launch`, which the daemon computes from its
+own environment. The host link speaks this same contract and version; each
+connection must come from the daemon's own uid (`SO_PEERCRED`).
+
 With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
 within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`
 call fails or gives nothing before the tab is opened with

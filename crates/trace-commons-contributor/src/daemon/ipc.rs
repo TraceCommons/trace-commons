@@ -23112,6 +23112,23 @@ mod tests {
             }
         }
 
+        /// `capabilities.daemon_on_host`: whether the answering daemon is
+        /// the host part, outside any Flatpak sandbox. A sandboxed window
+        /// attached over the host link reads it; absent (an older daemon)
+        /// reads as false. These tests never run in a sandbox.
+        #[test]
+        fn the_managed_snapshot_says_the_daemon_runs_on_the_host() {
+            let s = live();
+            let snapshot = handle_request(&s, &req("managed_snapshot", serde_json::json!({})))
+                .result
+                .expect("snapshot");
+            assert_eq!(
+                snapshot["capabilities"]["daemon_on_host"],
+                !crate::daemon::host_link::runs_sandboxed()
+            );
+            assert_eq!(snapshot["capabilities"]["daemon_on_host"], true);
+        }
+
         /// The managed-session terminal: one of three ids, persisted
         /// through `set_settings`, reported by `get_settings` and the
         /// managed snapshot, and announced as `managed_changed`. Anything

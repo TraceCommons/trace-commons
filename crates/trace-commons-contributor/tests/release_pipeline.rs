@@ -829,11 +829,26 @@ fn flatpak_manifest_has_its_vendored_sources_enabled() {
         !manifest.contains("--filesystem=home"),
         "a blanket home grant defeats the point of shipping this confined"
     );
+    // The third grant is the host link's runtime directory (host-daemon
+    // mode, docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md):
+    // one socket and one lock file, never the host state directory that
+    // holds the device key.
+    assert!(
+        manifest.contains("--filesystem=xdg-run/trace-commons:create"),
+        "the window reaches the host daemon through the host link's runtime \
+         directory and nothing wider"
+    );
+    assert!(
+        !manifest.contains("--filesystem=xdg-config"),
+        "the host state directory holds the device key; the sandbox must not \
+         be granted it to reach the daemon socket"
+    );
     assert_eq!(
         manifest.matches("--filesystem=").count(),
-        2,
-        "the two read-only session roots must be the ONLY filesystem grants; \
-         a third would widen what a transcript-reading app can reach"
+        3,
+        "the two read-only session roots and the host link's runtime \
+         directory must be the ONLY filesystem grants; another would widen \
+         what a transcript-reading app can reach"
     );
 }
 

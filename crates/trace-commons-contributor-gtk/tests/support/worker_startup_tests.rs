@@ -55,7 +55,8 @@ fn readiness_yields_while_backend_is_blocked_and_failure_allows_retry() {
         // source. It exercises readiness and ownership without starting a
         // daemon or accessing the developer's real state.
         Ok(Backend::Attached {
-            store: trace_commons_contributor::config::ConfigStore::open(dir)?,
+            socket: trace_commons_contributor::config::ConfigStore::open(dir)?
+                .daemon_path(trace_commons_contributor::config::DAEMON_SOCK_FILE),
         })
     }));
     let worker = finish(retry.as_mut()).unwrap();
