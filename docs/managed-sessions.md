@@ -108,7 +108,13 @@ tools whose executable availability is not checked.
   `$XDG_RUNTIME_DIR/trace-commons/daemon.sock`, and the host daemon opens
   host terminals as on any Linux install; its snapshot then carries
   `capabilities.daemon_on_host: true`. Without a host daemon the Flatpak runs
-  its own daemon in the sandbox as before, with Launch off. See
+  its own daemon in the sandbox as before, with the unavailable line and a
+  "Set up" button; Launch opens the background-service dialog (install,
+  start or update the host daemon) until "Not now". First setup asks once,
+  before the folders screen, when the service is not running; an ordinary
+  start never does. Installing it while the dialog is open switches the
+  window over to the host daemon by itself, and uninstalling it later sends
+  the window back to its sandboxed daemon. See "No host daemon installed" in
   `docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`;
   not yet run on Linux. Show brings a session's Terminal tab to the front on macOS; a
   session opened in another terminal app cannot be shown.

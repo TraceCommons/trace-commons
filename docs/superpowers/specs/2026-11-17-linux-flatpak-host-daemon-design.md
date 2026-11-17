@@ -173,16 +173,68 @@ the host link speaks `trace_commons.daemon.v1_1` like the primary socket.
 An older host daemon serves no host link at all, so a new window sees case 4
 and runs in the sandbox as today until the host part is updated.
 
-## No host daemon installed
+## No host daemon installed: the background-service dialogs
 
-Launch stays off in the sandbox with the existing "unavailable" line, as
-today. Offering to install the host part is a new notice, and the repo rule
-forbids one without owner approval of both the notice and its words. The
-mechanism is therefore not built into the UI; proposed words are in shared
-copy, marked DRAFT, NEEDS APPROVAL, and not shown anywhere
-(`managed::copy::host_daemon_offer_draft`). The intended action, once approved,
-is to open the documented install command in the person's browser or a
-portal-launched terminal; this change does not run anything on the host.
+Flow and words approved by the owner on 2026-11-17 ("suggested words are
+approved", "yes approved"). They replace the earlier unshown draft offer,
+which is removed.
+
+**One answer for every shell.** `daemon::service::classify` (contributor
+crate) turns four facts into `Running`, `NotInstalled`,
+`InstalledNotRunning` or `TooOld`: the host link's probe
+(Listening/Down/Absent), whether the window runs a daemon in its own process,
+whether the unit's file is installed (systemd's `GetUnitFileState` on the
+session bus; on the host, also the file `daemon install` writes), and
+`hello`'s new `service_level` from a daemon outside the window, compared with
+the shell's `MIN_SERVICE_LEVEL` (absent reads as too old). The daemon reports
+no build version on the wire and none is added. Only the Linux GTK shell draws
+it in this change; the Mac dialog for its rare case is a later follow-up.
+
+**When a dialog shows.** During first setup, as one step before the folders
+screen, only when the service is not running; and when the person presses
+Launch in the Private AI start area of a Flatpak whose daemon is not the host
+daemon. Never on an ordinary start. "Not now" quiets both for the rest of the
+run; the start area then keeps the existing unavailable line and a "Set up"
+button that reopens the dialog. A headless driver run (`--exit-after-realize`,
+`--start-page`, `--onboarding-page`) skips the first-setup step.
+
+**The dialogs.**
+
+- Not installed: the install command with "Copy command" (clipboard only;
+  the app never runs it), "Open install guide", "Not now". While open the
+  window looks again every 2 s. When the unit's file appears it switches
+  over once: stops a daemon it runs itself (`Backend::stop`: shutdown, wait
+  for the pass, close, so the state directory's lock and `watcher.lock` are
+  released), asks systemd to `StartUnit` the fixed unit (no 30 s wait for
+  `RestartSec`), waits up to 20 s for it to answer, and opens again by the
+  usual order, which attaches. Once the service answers, the dialog closes
+  with nothing else shown.
+- Installed but not running: "Start it" does the same switch-over. If the
+  service still does not answer, the dialog shows "It didn't start. To see
+  why, run this in a terminal:" and the status command.
+- Too old: the same install command. Its last step is `systemctl --user
+  restart`, so running it again replaces an older daemon that is running.
+
+**Falling back.** A Flatpak window attached over the host link checks every
+5 s; when the link reads `Absent` (no socket answers, no unit marker: the
+host part was uninstalled, or the login's runtime directory was cleared) it
+quietly reopens, which runs the daemon in the sandbox again, and Private AI
+shows its unavailable line again. If the sandbox cannot start its own daemon
+(no folders declared there) the window stays attached, showing its existing
+not-running state, and does not retry until the link changes.
+
+**The command the dialogs show** (production; a staging build shows the
+staging installer flag, command and unit, from `channel`):
+
+```
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh | sh && "$HOME/.local/bin/near-ai" daemon install && systemctl --user daemon-reload && systemctl --user enable trace-commons-contributor.service && systemctl --user restart trace-commons-contributor.service
+```
+
+`scripts/install.sh` installs only the CLI binaries; it writes no unit and
+enables nothing, so the command adds the documented `daemon install` and the
+`systemctl --user` steps. The status command is `systemctl --user status
+trace-commons-contributor.service`. Both are fixed strings in `channel.rs`,
+never read from settings or IPC.
 
 ## Updating the host daemon
 
@@ -232,17 +284,31 @@ needs them:
   manifest at exactly two filesystem grants as a security assertion. It now
   pins three, naming the new one exactly and refusing any `xdg-config`
   grant. This is a deliberate widening and needs the owner's sign-off.
-- `FLATPAK_SESSION_ROOTS_EXPLANATION` in the GTK crate's `src/copy.rs`
-  ("It asks for access to those folders only.") is no longer exact: the app
-  also gets the runtime directory, which holds no session data. Not edited;
-  approved words.
+- `FLATPAK_SESSION_ROOTS_EXPLANATION` in the GTK crate's `src/copy.rs` now
+  names the private folder (owner-approved 2026-11-17).
+- The host daemon starts with its own state directory: a person who set up
+  the sandbox (folders, sign-in, enrollment) sets up again through the
+  window once it attaches to the host daemon. Nothing migrates.
+- The install command is composed from the documented steps (installer,
+  `daemon install`, `daemon-reload`, `enable`, `restart`); see "No host
+  daemon installed".
 
 ## Residual risks
 
 - At login the runtime directory is empty, so which daemon wins is start
   order: if the window starts and hosts before the systemd unit runs, the
   unit fails on `watcher.lock` and retries until the window quits. The
-  window does not hand over to the host part while it runs.
+  window hands over only through the background-service dialog's
+  switch-over (Launch, "Set up", or first setup), never by itself.
+- Any `watcher.lock` error, not only an unsafe lock, refuses the daemon's
+  start (the FFI's generic `daemon-start-failed`), so a broken runtime
+  directory stops the daemon rather than letting it run unarbitrated. The
+  `open_lock` check-then-open (an `lstat`, then an open without `create`
+  whose `fstat` must match) has a residual race: a FIFO swapped in between
+  the two makes the open for writing wait for a reader, so the start hangs
+  instead of refusing; the checks after the open refuse it only once the
+  open returns. The sandbox can write the directory, so a sandboxed process
+  of the same uid could do this; it gains nothing but a stalled start.
 - A sandboxed daemon arbitrates only when the runtime directory is mounted
   in the sandbox (the manifest grant). An older Flatpak build without the
   grant hosts without taking `watcher.lock`, so a host daemon cannot see it.
