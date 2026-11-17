@@ -7,9 +7,8 @@
 //! closes it alone. Every word is the shared copy's.
 //!
 //! Deliberate platform differences:
-//! - The Mac's Details also hold the tool's memory files and "Memory files
-//!   stay on this Mac."; that word names the Mac, so this card leaves the
-//!   memory line out until the shared copy has one for this computer.
+//! - The memory line in Details says "Memory files stay on this computer."
+//!   (`memory_stays_computer`) where the Mac's says "this Mac".
 //! - The coin carries the tool's initials, not its logo (the look slice),
 //!   and a batch from several tools carries none.
 //! - The cards are a short column, newest nearest the legend, not the
@@ -95,11 +94,33 @@ pub fn card(
 
     if let Some(note) = note {
         let details = gtk::Expander::new(Some(screens.shell.notice_details));
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        // The tool's memory files, and that they stay on this computer,
+        // above the note, for one tool's trace (`TraceTransferCard`).
+        if let Some((files, stays)) = transfers::card_memory(transfer, &words) {
+            let memory = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            memory.add_css_class("tc-map-transfer-memory");
+            if let Some(files) = files {
+                let names = gtk::Label::new(Some(files));
+                names.add_css_class("monospace");
+                names.set_xalign(0.0);
+                names.set_wrap(true);
+                memory.append(&names);
+            }
+            let line = gtk::Label::new(Some(stays));
+            line.add_css_class("caption");
+            line.add_css_class("dim-label");
+            line.set_xalign(0.0);
+            line.set_wrap(true);
+            memory.append(&line);
+            body.append(&memory);
+        }
         let text = gtk::Label::new(Some(&note));
         text.set_wrap(true);
         text.set_xalign(0.0);
         text.add_css_class("dim-label");
-        details.set_child(Some(&text));
+        body.append(&text);
+        details.set_child(Some(&body));
         card.append(&details);
     }
     card

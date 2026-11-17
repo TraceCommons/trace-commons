@@ -489,6 +489,14 @@ row:selected {
   font-weight: 700;
 }
 
+/* The tool's memory files and that they stay on this computer, in the
+   card's Details: a well, as the Mac's `TraceTransferCard` draws it. */
+.tc-map-transfer-memory {
+  background-color: @tc_surface_inset;
+  border-radius: 9px;
+  padding: 4px 8px;
+}
+
 /* What is happening to the trace. */
 .tc-map-transfer-tag {
   padding: 1px 8px;
