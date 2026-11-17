@@ -195,17 +195,19 @@ pub fn refresh(app: &Rc<App>) {
 /// whole (`monitor::map_scene::Contributions`).
 pub const HISTORY_LIMIT: usize = 50;
 
-/// Draws History with a community standing whose figures are as wide as
-/// they get, so a fit test covers the Community panel.
+/// Draws History with a community standing at the widest the types allow
+/// (a `u32` rank and count), plus a credit past nine digits, so a fit test
+/// covers the Community panel. The figures ellipsize, so no value widens the
+/// pane.
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 pub(crate) fn show_community_for_test(app: &Rc<App>) {
     let value = serde_json::json!({
         "community": {
-            "rank": 1234,
-            "novelty_credit": 12_345_678.0,
+            "rank": u32::MAX,
+            "novelty_credit": 123_456_789_012.0,
             "window_label": "30d",
-            "accepted_in_window": 12345,
+            "accepted_in_window": u32::MAX,
             "accept_rate": 0.98,
             "profile_url": "https://tracecommons.example/u/someone",
         }
@@ -1259,7 +1261,16 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
                 .build();
             caption.add_css_class("tc-brand-label");
             cell.append(&caption);
-            let figure = gtk::Label::builder().label(value).xalign(0.0).build();
+            // One line that gives way to an ellipsis rather than widening the
+            // pane (the Mac's cell is `lineLimit(1)`); the whole figure stays
+            // in the tooltip. A rank and a count are `u32` and the credit is
+            // unbounded, so no layout is wide enough for every value.
+            let figure = gtk::Label::builder()
+                .label(value)
+                .xalign(0.0)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .tooltip_text(value)
+                .build();
             figure.add_css_class("tc-brand-figure");
             cell.append(&figure);
             row.append(&cell);
