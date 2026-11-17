@@ -8,7 +8,7 @@
 //! is recorded beside the code that makes it.
 //!
 //! The pure rules (`pane_layout`, `tabs`, `demand`, `graph_model`,
-//! `notices`, `prefs`, `traces_tree`, `map_scene`) build no widget and are tested without a display.
+//! `notices`, `prefs`, `traces_tree`, `map_scene`, `transfers`) build no widget and are tested without a display.
 //! `three_pane`, `graph_footer`, `inspector`, `map` and `shell` are the
 //! widgets.
 
@@ -25,5 +25,6 @@ pub mod shell;
 pub mod tabs;
 pub mod three_pane;
 pub mod traces_tree;
+pub mod transfers;
 
 pub use shell::{Pages, Shell};
