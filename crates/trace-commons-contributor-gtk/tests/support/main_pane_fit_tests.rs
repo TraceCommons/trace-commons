@@ -129,7 +129,7 @@ fn every_hosted_screen_fits_the_440_main_pane() {
     settle(&context);
     check("a folder's sessions");
 
-    // Every notice card, shown over its tab, fits beside its X.
+    // Every notice card, shown over its tab, fits with its X inside it.
     for slot in &shell.notice_slots {
         if let Some(frame) = slot.card.parent() {
             assert!(
@@ -140,11 +140,12 @@ fn every_hosted_screen_fits_the_440_main_pane() {
             );
         }
     }
-    // And the whole main pane at the least.
+    // And the whole main pane at the least: the column the overlay the
+    // notices are laid over sits in.
     let main = shell
         .content_scroller()
-        .ancestor(gtk::Box::static_type())
-        .and_then(|column| column.parent())
+        .ancestor(gtk::Overlay::static_type())
+        .and_then(|overlay| overlay.parent())
         .expect("the main pane");
     assert!(
         least(&main) <= pane,
