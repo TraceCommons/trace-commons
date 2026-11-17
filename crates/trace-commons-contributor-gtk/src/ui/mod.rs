@@ -21,6 +21,7 @@ mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod monitor;
+pub mod omarchy;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
