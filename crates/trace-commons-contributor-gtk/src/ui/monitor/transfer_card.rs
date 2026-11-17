@@ -76,7 +76,7 @@ pub fn card(
     let eyebrow = gtk::Label::new(Some(
         &transfers::card_eyebrow(transfer, &words).to_uppercase(),
     ));
-    eyebrow.add_css_class("caption-heading");
+    eyebrow.add_css_class("caption");
     eyebrow.add_css_class("dim-label");
     summary.append(&eyebrow);
     if !transfer.mixed_folders {

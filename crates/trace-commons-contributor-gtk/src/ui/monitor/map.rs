@@ -21,9 +21,11 @@
 //! while something moves: at 30 frames a second for the dashes, 60 while a
 //! run plays, and not at all under reduced motion (`gtk-enable-animations`
 //! off), where the map draws no run and no moving dash and only the cards
-//! at its foot say what is happening. The nodes, their names and the pad
-//! are a still layer, kept as a render node and drawn again only when what
-//! it is drawn from changes (`StillKey`), as the Mac keys its still layer.
+//! at its foot say what is happening. The nodes, their names and the pad,
+//! and at rest the pile and the rocket on the pad too, are a still layer,
+//! kept as a render node and drawn again only when what it is drawn from
+//! changes (`StillKey`), as the Mac keys its still layer: at rest a tick
+//! redraws only the arcs.
 //!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
@@ -98,6 +100,10 @@ pub struct StillKey {
     pub fit: MapGeometry,
     pub selection: Option<String>,
     pub palette: Palette,
+    /// At rest, whether the pile is open: the pile, its words and the
+    /// rocket on the pad are then part of the layer. `None` during a run,
+    /// when they move and are drawn frame by frame.
+    pub resting: Option<bool>,
 }
 
 impl StillKey {
@@ -108,11 +114,13 @@ impl StillKey {
         fit: &MapGeometry,
         selection: Option<&str>,
         palette: &Palette,
+        resting: Option<bool>,
     ) -> bool {
         self.scene == *scene
             && self.fit == *fit
             && self.selection.as_deref() == selection
             && self.palette == *palette
+            && self.resting == resting
     }
 }
 
@@ -378,47 +386,14 @@ mod imp {
             drop(cr);
             // The nodes, their names and the pad: drawn again only when
             // what they are drawn from changes.
-            self.append_still(snapshot, &scene, &fit, &palette, &bounds);
-            // What moves, under the pile: the run, or the rocket at rest.
             let motion = self.motion();
-            let (order, open) = self.pile(&scene);
-            let cr = snapshot.append_cairo(&bounds);
-            let dock = motion
-                .as_ref()
-                .and_then(|(run, t)| map_transfers::draw(&cr, &scene, run, *t, &fit, &palette));
-            if motion.as_ref().map(|(run, _)| run.action()) != Some(Action::Contribute) {
-                map_transfers::resting_rocket(&cr, &scene, &fit, &palette);
-            }
-            if let Some(stack) = scene.stack.as_ref() {
-                let grown: Vec<String> = motion
-                    .as_ref()
-                    .map(|(run, t)| run.orbits(*t).into_iter().map(|(id, _)| id).collect())
-                    .unwrap_or_default();
-                let glow = motion
-                    .as_ref()
-                    .map(|(run, _)| map_transfers::glow(Some(run.action()), &palette));
-                draw_pile(
-                    &cr,
-                    &scene,
-                    stack,
-                    &order,
-                    &grown,
-                    glow.as_ref(),
-                    &fit,
-                    &palette,
-                    open,
-                );
-            }
-            drop(cr);
-            self.draw_pile_words(snapshot, &scene, &order, open, &fit, &palette);
+            // At rest the pile, its words and the rocket on the pad are
+            // still too, so they join the still layer; during a run they
+            // move and are drawn on every frame.
+            let resting = motion.is_none().then(|| self.pile_open.get());
+            self.append_still(snapshot, &scene, &fit, &palette, &bounds, resting);
             if let Some((run, t)) = motion.as_ref() {
-                // The light round a coin's rim, over the coins.
-                if let Some(stack) = scene.stack.as_ref() {
-                    let cr = snapshot.append_cairo(&bounds);
-                    map_transfers::rim_lights(&cr, stack, run, *t, &fit, &palette);
-                    drop(cr);
-                }
-                self.draw_run_words(snapshot, &scene, run, *t, dock, &fit, &palette);
+                self.draw_moving(snapshot, &scene, run, *t, &fit, &palette, &bounds);
             }
             for child in self.children() {
                 obj.snapshot_child(&child, snapshot);
@@ -589,13 +564,14 @@ mod imp {
             fit: &MapGeometry,
             palette: &Palette,
             bounds: &gtk::graphene::Rect,
+            resting: Option<bool>,
         ) {
             let selection = self.selection();
             let kept = self
                 .still
                 .borrow()
                 .as_ref()
-                .filter(|(key, _)| key.is(scene, fit, selection.as_deref(), palette))
+                .filter(|(key, _)| key.is(scene, fit, selection.as_deref(), palette, resting))
                 .map(|(_, node)| node.clone());
             let node = kept.or_else(|| {
                 let still = gtk::Snapshot::new();
@@ -606,12 +582,35 @@ mod imp {
                 }
                 drop(cr);
                 self.draw_node_words(&still, scene, fit, palette);
+                if let Some(open) = resting {
+                    // The rocket on the pad, then the pile over it.
+                    let cr = still.append_cairo(bounds);
+                    map_transfers::resting_rocket(&cr, scene, fit, palette);
+                    if let Some(stack) = scene.stack.as_ref() {
+                        draw_pile(
+                            &cr,
+                            scene,
+                            stack,
+                            &stack.tools,
+                            &[],
+                            None,
+                            fit,
+                            palette,
+                            open,
+                        );
+                    }
+                    drop(cr);
+                    if let Some(stack) = scene.stack.as_ref() {
+                        self.draw_pile_words(&still, scene, &stack.tools, open, fit, palette);
+                    }
+                }
                 let node = still.to_node()?;
                 let key = StillKey {
                     scene: scene.clone(),
                     fit: *fit,
                     selection: selection.clone(),
                     palette: palette.clone(),
+                    resting,
                 };
                 self.still.replace(Some((key, node.clone())));
                 Some(node)
@@ -619,6 +618,53 @@ mod imp {
             if let Some(node) = node {
                 snapshot.append_node(&node);
             }
+        }
+
+        /// What moves during a run, over the still layer and frame by frame:
+        /// the traces, the rocket, the pile in the run's order with its
+        /// grown coin, the rim light, and the run's words.
+        #[allow(clippy::too_many_arguments)]
+        fn draw_moving(
+            &self,
+            snapshot: &gtk::Snapshot,
+            scene: &Scene,
+            run: &Run,
+            t: f64,
+            fit: &MapGeometry,
+            palette: &Palette,
+            bounds: &gtk::graphene::Rect,
+        ) {
+            let (order, open) = self.pile(scene);
+            let cr = snapshot.append_cairo(bounds);
+            let dock = map_transfers::draw(&cr, scene, run, t, fit, palette);
+            // Between contributions the rocket stands on the pad.
+            if run.action() != Action::Contribute {
+                map_transfers::resting_rocket(&cr, scene, fit, palette);
+            }
+            if let Some(stack) = scene.stack.as_ref() {
+                let grown: Vec<String> = run.orbits(t).into_iter().map(|(id, _)| id).collect();
+                let glow = map_transfers::glow(Some(run.action()), palette);
+                draw_pile(
+                    &cr,
+                    scene,
+                    stack,
+                    &order,
+                    &grown,
+                    Some(&glow),
+                    fit,
+                    palette,
+                    open,
+                );
+            }
+            drop(cr);
+            self.draw_pile_words(snapshot, scene, &order, open, fit, palette);
+            // The light round a coin's rim, over the coins.
+            if let Some(stack) = scene.stack.as_ref() {
+                let cr = snapshot.append_cairo(bounds);
+                map_transfers::rim_lights(&cr, stack, run, t, fit, palette);
+                drop(cr);
+            }
+            self.draw_run_words(snapshot, scene, run, t, dock, fit, palette);
         }
 
         /// The run's words: the line under the pad while a contribution's
@@ -2294,8 +2340,17 @@ mod tests {
             fit,
             selection: None,
             palette: palette.clone(),
+            resting: Some(false),
         };
-        assert!(key.is(&scene, &fit, None, &palette));
+        assert!(key.is(&scene, &fit, None, &palette, Some(false)));
+        assert!(
+            !key.is(&scene, &fit, None, &palette, Some(true)),
+            "the pile opened"
+        );
+        assert!(
+            !key.is(&scene, &fit, None, &palette, None),
+            "a run began: the pile moves"
+        );
         assert_eq!(
             MapGeometry::new(size, 1.0, None, scene.space),
             fit,
@@ -2303,13 +2358,22 @@ mod tests {
         );
         let zoomed = MapGeometry::new(size, 1.25, None, scene.space);
         assert_ne!(zoomed, fit);
-        assert!(!key.is(&scene, &zoomed, None, &palette), "a zoom");
+        assert!(
+            !key.is(&scene, &zoomed, None, &palette, Some(false)),
+            "a zoom"
+        );
         let wider = MapGeometry::new(Size::new(600.0, 760.0), 1.0, None, scene.space);
-        assert!(!key.is(&scene, &wider, None, &palette), "a resize");
-        assert!(!key.is(&scene, &fit, Some("hub"), &palette), "a selection");
+        assert!(
+            !key.is(&scene, &wider, None, &palette, Some(false)),
+            "a resize"
+        );
+        assert!(
+            !key.is(&scene, &fit, Some("hub"), &palette, Some(false)),
+            "a selection"
+        );
         let mut dark = palette.clone();
         dark.ink = gtk::gdk::RGBA::WHITE;
-        assert!(!key.is(&scene, &fit, None, &dark), "a scheme");
+        assert!(!key.is(&scene, &fit, None, &dark, Some(false)), "a scheme");
         let other = Scene::traces(
             &TracesTree::build(&[], &[], None),
             &CommonsGate::with_state(ScreenState::Ready),
@@ -2318,7 +2382,10 @@ mod tests {
             &BTreeMap::new(),
             map_scene::SIZE,
         );
-        assert!(!key.is(&other, &fit, None, &palette), "a new scene");
+        assert!(
+            !key.is(&other, &fit, None, &palette, Some(false)),
+            "a new scene"
+        );
     }
 
     /// A dismissal's card sits at the map's foot while another tab than
