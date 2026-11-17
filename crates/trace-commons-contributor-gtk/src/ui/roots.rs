@@ -371,14 +371,13 @@ fn send_declaration(
     });
 }
 
-/// Whether the daemon's settings answer holds every declaration sent.
+/// Whether the daemon's settings answer took every declaration sent: the
+/// answer reports each one's mode, never the declaration itself
+/// (`first_run::roots_acknowledged`).
 fn declarations_confirmed(expected: &serde_json::Value, settings: &serde_json::Value) -> bool {
-    expected.as_object().is_some_and(|fields| {
-        !fields.is_empty()
-            && fields
-                .iter()
-                .all(|(key, value)| settings.get(key) == Some(value))
-    })
+    expected
+        .as_object()
+        .is_some_and(|fields| crate::first_run::roots_acknowledged(fields.iter(), settings))
 }
 
 /// A tool's name, as the Mac's `SourceKind.displayName` gives it: the only
@@ -460,7 +459,13 @@ mod tests {
     fn connected_tools_requires_acknowledgement_of_every_declaration() {
         use serde_json::json;
         let expected = json!({"claude_source": {"mode":"off"}, "codex_source": {"mode":"watch", "path":"/chosen/codex"}});
-        assert!(declarations_confirmed(&expected, &expected));
+        // `set_settings` answers without the declarations, with their modes.
+        let answer = json!({"claude_source_mode": "off", "codex_source_mode": "watch"});
+        assert!(declarations_confirmed(&expected, &answer));
+        assert!(!declarations_confirmed(
+            &expected,
+            &json!({"claude_source_mode": "off", "codex_source_mode": "unset"})
+        ));
         assert!(!declarations_confirmed(&expected, &json!({"ok":true})));
         assert!(!declarations_confirmed(&json!({}), &json!({})));
     }
