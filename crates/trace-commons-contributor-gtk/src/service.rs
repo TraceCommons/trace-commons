@@ -198,6 +198,11 @@ pub const SWITCH_RETRY_AFTER: std::time::Duration = std::time::Duration::from_se
 /// and replaces this window's daemon.
 pub const SWITCH_TRIES: u32 = 3;
 
+// The pause outlasts a whole switch-over's wait, so a try that is still
+// settling is never cut short by the next; and a failed try is retried.
+const _: () = assert!(SWITCH_RETRY_AFTER.as_secs() > SWITCH_WAIT.as_secs());
+const _: () = assert!(SWITCH_TRIES >= 2);
+
 /// The systemd user manager's `RestartUnit(in s name, in s mode, out o job)`
 /// (org.freedesktop.systemd1(5)), as one fixed call: destination, object,
 /// interface, method, then the arguments. Only the channel's unit.
@@ -601,10 +606,6 @@ mod tests {
             // Bounded.
             assert_eq!(step(tried(SWITCH_TRIES, Some(retry * 10))), WatchStep::Keep);
         }
-        // The pause outlasts a whole switch-over's wait, so a try that is
-        // still settling is never cut short by the next.
-        assert!(SWITCH_RETRY_AFTER > SWITCH_WAIT);
-        assert!(SWITCH_TRIES >= 2);
     }
 
     #[test]
