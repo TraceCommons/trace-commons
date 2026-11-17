@@ -174,7 +174,7 @@ pub fn refresh(app: &Rc<App>) {
         let standing = RosterStanding::from_rollup(&value);
         app.call(
             "list_history",
-            serde_json::json!({ "limit": 50 }),
+            serde_json::json!({ "limit": HISTORY_LIMIT }),
             move |app, result| {
                 // Kept for the Traces graph and an opened row's details. A
                 // failed or unreadable read is unknown, not an empty record.
@@ -189,6 +189,11 @@ pub fn refresh(app: &Rc<App>) {
         );
     });
 }
+
+/// How many rows `list_history` is asked for. A page that comes back this
+/// full may have been cut, so the Traces map counts nothing from it as a
+/// whole (`monitor::map_scene::Contributions`).
+pub const HISTORY_LIMIT: usize = 50;
 
 fn render(
     app: &Rc<App>,

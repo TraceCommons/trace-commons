@@ -345,6 +345,11 @@ pub struct QueueEntry {
     pub size_bytes: u64,
     #[serde(default)]
     pub discovered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the session itself started, when the daemon knew it. The
+    /// Traces map orders its folders by their newest waiting session, by
+    /// this first and `discovered_at` after (`monitor::traces_tree`).
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub state: String,
     #[serde(default)]
@@ -929,6 +934,11 @@ pub struct Settings {
     pub gemini_source_mode: String,
     #[serde(default)]
     pub cline_source_mode: String,
+    /// OpenCode's, which the Traces map reads beside the other four
+    /// (`monitor::traces_tree`). Absent on an older daemon, which reads as
+    /// unset, as the Mac's does.
+    #[serde(default)]
+    pub opencode_source_mode: String,
     /// The local proxy declaration as the daemon holds it. Absent means
     /// off -- there is no conventional fallback for a local service, so
     /// unlike a source root there is no third state.
@@ -1217,6 +1227,130 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
         1440..=2879 => "yesterday".to_string(),
         _ => format!("{} days ago", mins / 1440),
     }
+}
+
+/// `tool_destinations`, the parts the Traces map reads.
+///
+/// `tools` carries no default: a reply without it is not a reply this
+/// shell can read, and the map then draws as if the call had failed, which
+/// opens nothing (`monitor::map_scene::CommonsGate`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolDestinations {
+    /// The Private AI destination's state label.
+    #[serde(default)]
+    pub private_ai: Option<String>,
+    /// `witness`, `local`, `witness_refusing`, `not_enrolled` or
+    /// `settings_unreadable`.
+    #[serde(default)]
+    pub sessions_route: Option<String>,
+    pub tools: Vec<ToolDestination>,
+    /// Managed configuration, never evidence of a call or a contribution.
+    #[serde(default)]
+    pub managed_sessions: Option<Vec<ManagedMapSession>>,
+    /// The core's words for `managed_sessions`, keyed as the daemon keys
+    /// them.
+    #[serde(default)]
+    pub managed_copy: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// One `tool_destinations.tools[]` row.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolDestination {
+    pub tool: String,
+    #[serde(default)]
+    pub sessions: Option<SessionRoute>,
+    #[serde(default)]
+    pub counts: Option<ToolCounts>,
+    /// Absent on an older daemon, or for a tool with no executable probe.
+    #[serde(default)]
+    pub installed: Option<bool>,
+}
+
+/// Where a tool's sessions go: `watch` is `watched`, `off` or
+/// `not_watched`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SessionRoute {
+    pub watch: String,
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+/// A tool's counts for the window; `None` is unread, never zero.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolCounts {
+    #[serde(default)]
+    pub sessions: Option<u64>,
+}
+
+/// One `tool_destinations.managed_sessions[]` row.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ManagedMapSession {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collection_state: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+impl ManagedMapSession {
+    /// The source name the queue uses for this row's tool.
+    pub fn source(&self) -> &str {
+        if self.tool == "claude" {
+            "claude-code"
+        } else {
+            &self.tool
+        }
+    }
+
+    /// The row's line, in the core's words: provider, model, state and
+    /// collection, the ones the core named.
+    pub fn detail(&self, copy: &std::collections::BTreeMap<String, String>) -> String {
+        const STATES: [&str; 5] = ["starting", "running", "exited", "failed", "unknown"];
+        let state = if STATES.contains(&self.state.as_str()) {
+            self.state.as_str()
+        } else {
+            "unknown"
+        };
+        [
+            copy.get(&format!("provider_{}", self.provider)).cloned(),
+            self.model.clone(),
+            copy.get(&format!("state_{state}")).cloned(),
+            copy.get(&format!("collection_{}", self.collection_state))
+                .cloned(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+    }
+}
+
+/// The `status` fields the Traces map's commons gate reads, each `None`
+/// when the daemon did not send it. [`Status`] defaults these to the
+/// answer that reads as "nothing stops a flow", which a gate must never
+/// take from a missing field: a missing signal never draws a flow.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct GateStatus {
+    #[serde(default)]
+    pub paused: Option<bool>,
+    #[serde(default)]
+    pub logged_in: Option<bool>,
+    #[serde(default)]
+    pub automatic_contribution_held: Option<HeldSessions>,
+    #[serde(default)]
+    pub grant_voids: Option<Vec<serde_json::Value>>,
+}
+
+/// `status.automatic_contribution_held`'s count.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct HeldSessions {
+    #[serde(default)]
+    pub held_sessions: Option<u64>,
 }
 
 #[cfg(test)]
