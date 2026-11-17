@@ -1,6 +1,15 @@
 //! Pending queue relationships, never a claim about collection or transfer.
-use super::{App, inspector::Selection};
+//!
+//! A placeholder in the window's map pane. This is the map the Queue page
+//! carried, moved out to window level unchanged in what it draws; the full
+//! port of the Mac's Traces map (scene, node kinds, arcs, legend, zoom and
+//! focus) is the next slice of the 2026-11-16 spec. Two things changed
+//! with the move: the pane's own toolbar toggle shows and hides it, so its
+//! "Show the flow map" button is gone, and it is no longer hidden when
+//! nothing is pending (spec, "No hiding").
+use super::inspector::Selection;
 use crate::model::QueueEntry;
+use crate::ui::App;
 use adw::prelude::*;
 use std::{cell::RefCell, rc::Rc};
 
@@ -73,7 +82,7 @@ impl Scene {
 
 type Nodes = Rc<RefCell<Vec<(gtk::Widget, gtk::Widget)>>>;
 
-pub(super) struct TraceMap {
+pub struct TraceMap {
     pub root: gtk::Box,
     pub body: gtk::Box,
     folders: gtk::Box,
@@ -90,42 +99,6 @@ impl TraceMap {
     pub fn new() -> Self {
         let words = trace_commons_contributor::preview_copy::monitor_screens_copy();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let toggle = gtk::ToggleButton::with_label(words.shell.show_map);
-        toggle.set_halign(gtk::Align::Start);
-        let reveal = gtk::Revealer::new();
-        reveal.set_transition_type(gtk::RevealerTransitionType::SlideDown);
-        let settings = gtk::Settings::default();
-        if let Some(settings) = settings {
-            reveal.set_transition_duration(if settings.is_gtk_enable_animations() {
-                180
-            } else {
-                0
-            });
-            let weak = reveal.downgrade();
-            settings.connect_gtk_enable_animations_notify(move |settings| {
-                if let Some(reveal) = weak.upgrade() {
-                    reveal.set_transition_duration(if settings.is_gtk_enable_animations() {
-                        180
-                    } else {
-                        0
-                    });
-                }
-            });
-        } else {
-            reveal.set_transition_duration(0);
-        }
-        let weak = reveal.downgrade();
-        toggle.connect_toggled(move |button| {
-            let words = trace_commons_contributor::preview_copy::monitor_screens_copy();
-            button.set_label(if button.is_active() {
-                words.shell.hide_map
-            } else {
-                words.shell.show_map
-            });
-            if let Some(reveal) = weak.upgrade() {
-                reveal.set_reveal_child(button.is_active());
-            }
-        });
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 48);
         body.set_margin_top(16);
         body.set_margin_bottom(16);
@@ -191,13 +164,20 @@ impl TraceMap {
         let scroller = gtk::ScrolledWindow::builder()
             .child(&overlay)
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .max_content_height(300)
-            .propagate_natural_height(true)
+            .vexpand(true)
             .build();
         scroller.update_property(&[gtk::accessible::Property::Label(words.flow_map.map_label)]);
-        reveal.set_child(Some(&scroller));
-        root.append(&toggle);
-        root.append(&reveal);
+        root.append(&scroller);
+        // The pane's own width decides the columns' direction, as the Queue
+        // page's tick callback did for the page's.
+        let weak_body = body.downgrade();
+        root.add_tick_callback(move |root, _| {
+            let Some(body) = weak_body.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            Self::orient(&body, root.width());
+            glib::ControlFlow::Continue
+        });
         Self {
             root,
             body,
@@ -232,13 +212,15 @@ impl TraceMap {
                 &scene,
                 Rc::new(move |id| {
                     if let Some(app) = weak.upgrade() {
-                        app.queue.inspector.select(&app, Selection::Folder(id));
+                        // A folder clicked on the map is the selection and
+                        // the inspector's subject, on Traces.
+                        app.shell.select_from_map(&app, id);
                     }
                 }),
             );
             *self.scene.borrow_mut() = scene;
         }
-        self.highlight(&app.queue.inspector.selection(), &entries);
+        self.highlight(&app.shell.inspector.selection(), &entries);
     }
 
     fn populate(&self, scene: &Scene, select: Rc<dyn Fn(String)>) {
@@ -250,7 +232,6 @@ impl TraceMap {
                 column.remove(&child);
             }
         }
-        self.root.set_visible(scene.pending != 0);
         let words = trace_commons_contributor::preview_copy::monitor_screens_copy();
         let hub = gtk::Label::new(Some(&format!(
             "{}\n{}",
@@ -408,7 +389,11 @@ mod tests {
     }
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
-    fn mounted_map_preserves_identity_accessibility_and_reduced_motion() {
+    // The reduced-motion half of this test was about the map's own slide-down
+    // revealer, which went with its Show/Hide button. What still animates
+    // near it is the graph footer, whose reduced-motion assertion is
+    // `graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion`.
+    fn mounted_map_preserves_identity_and_accessibility() {
         gtk::init().expect("GTK display");
         let map = TraceMap::new();
         let entries: Vec<_> = (0..40)
@@ -434,23 +419,6 @@ mod tests {
         TraceMap::orient(&map.body, 800);
         assert_eq!(map.body.orientation(), gtk::Orientation::Horizontal);
         TraceMap::orient(&map.body, 480);
-        let settings = gtk::Settings::default().expect("settings");
-        let previous = settings.is_gtk_enable_animations();
-        settings.set_gtk_enable_animations(false);
-        let toggle = map
-            .root
-            .first_child()
-            .unwrap()
-            .downcast::<gtk::ToggleButton>()
-            .unwrap();
-        toggle.set_active(true);
-        let reveal = toggle
-            .next_sibling()
-            .unwrap()
-            .downcast::<gtk::Revealer>()
-            .unwrap();
-        assert_eq!(reveal.transition_duration(), 0);
-        assert!(reveal.reveals_child());
         assert_eq!(map.folder_buttons.borrow().len(), 40);
         let node = map.folder_buttons.borrow()[17].1.clone();
         assert!(node.is_focusable());
@@ -468,8 +436,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(node.width() > 0 && node.height() > 0);
-        let scroller = reveal
-            .child()
+        let scroller = map
+            .root
+            .first_child()
             .unwrap()
             .downcast::<gtk::ScrolledWindow>()
             .unwrap();
@@ -482,7 +451,9 @@ mod tests {
         assert!(node.has_css_class("suggested-action"));
         map.highlight(&Selection::None, &entries);
         assert!(!node.has_css_class("suggested-action"));
+        // The map is drawn with nothing pending too (spec, "No hiding").
+        map.populate(&Scene::default(), Rc::new(|_| {}));
+        assert!(map.root.is_visible());
         window.close();
-        settings.set_gtk_enable_animations(previous);
     }
 }

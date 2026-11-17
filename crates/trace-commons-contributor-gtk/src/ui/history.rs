@@ -176,11 +176,15 @@ pub fn refresh(app: &Rc<App>) {
             "list_history",
             serde_json::json!({ "limit": 50 }),
             move |app, result| {
-                let records: Vec<HistoryRecord> = result
+                // Kept for the Traces graph and an opened row's details. A
+                // failed or unreadable read is unknown, not an empty record.
+                let read: Option<Vec<HistoryRecord>> = result
                     .ok()
-                    .and_then(|v| serde_json::from_value(v.get("history").cloned()?).ok())
-                    .unwrap_or_default();
+                    .and_then(|v| serde_json::from_value(v.get("history").cloned()?).ok());
+                *app.history_records.borrow_mut() = read.clone();
+                let records = read.unwrap_or_default();
                 render(app, &rollup, standing.as_ref(), &records);
+                app.shell.render(app);
             },
         );
     });
@@ -612,6 +616,49 @@ fn held_group(quarantined: u32) -> gtk::Expander {
 /// One record: name and when on the first line, the state as a chip on the
 /// right, then whatever that state owes an explanation for.
 fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
+    let card = record_detail(record);
+    // The row's way into its details, which are the inspector's while
+    // History is shown. A record with no id cannot be found again.
+    if !record.submission_id.is_empty() {
+        let open = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .open,
+        );
+        open.add_css_class("tc-quiet");
+        open.set_halign(gtk::Align::Start);
+        open.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{} \u{2014} {}",
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .open,
+            record.project_label
+        ))]);
+        let weak = Rc::downgrade(app);
+        let id = record.submission_id.clone();
+        open.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.shell.open_history_row(&app, &id);
+            }
+        });
+        card.append(&open);
+    }
+
+    // Withdrawal, which the shared spec calls first-class: it is on every
+    // contribution still open to it. It is the one promise on this screen that is the
+    // contributor's to make about their own trace, so it is on the row
+    // rather than behind a menu. See `offers_withdrawal` for which rows
+    // get it.
+    if offers_withdrawal(record) {
+        card.append(&withdraw_control(app, record));
+    }
+    card
+}
+
+/// One record's facts, with no control on it: what the History row says,
+/// and what the inspector shows for an opened row. Read-only, so the
+/// inspector adds no action the row does not already carry.
+pub(crate) fn record_detail(record: &HistoryRecord) -> gtk::Box {
     let card = style::card(gtk::Orientation::Vertical, space::S);
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -675,15 +722,6 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
         line.add_css_class("tc-ledger");
         line.add_css_class("tc-neutral");
         card.append(&line);
-    }
-
-    // Withdrawal, which the shared spec calls first-class: it is on every
-    // contribution still open to it. It is the one promise on this screen that is the
-    // contributor's to make about their own trace, so it is on the row
-    // rather than behind a menu. See `offers_withdrawal` for which rows
-    // get it.
-    if offers_withdrawal(record) {
-        card.append(&withdraw_control(app, record));
     }
     card
 }
@@ -1392,6 +1430,7 @@ mod tests {
     fn record(status: &str, submission_id: &str) -> HistoryRecord {
         HistoryRecord {
             submission_id: submission_id.to_string(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),
@@ -1509,6 +1548,7 @@ mod tests {
     fn no_credit_figure_carries_a_symbol_or_a_projection() {
         let record = HistoryRecord {
             submission_id: String::new(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),
@@ -1528,6 +1568,7 @@ mod tests {
     fn a_record_with_nothing_scored_yet_states_that_rather_than_a_zero() {
         let mut record = HistoryRecord {
             submission_id: String::new(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),

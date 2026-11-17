@@ -32,6 +32,18 @@ mod tests {
         ("preview.rs", include_str!("preview.rs")),
         ("update.rs", include_str!("update.rs")),
         ("mark.rs", include_str!("mark.rs")),
+        // The Monitor window's views (spec 2026-11-16, window shell).
+        ("monitor/shell.rs", include_str!("monitor/shell.rs")),
+        (
+            "monitor/three_pane.rs",
+            include_str!("monitor/three_pane.rs"),
+        ),
+        (
+            "monitor/graph_footer.rs",
+            include_str!("monitor/graph_footer.rs"),
+        ),
+        ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
+        ("monitor/map.rs", include_str!("monitor/map.rs")),
     ];
 
     const STYLE_CSS: &str = include_str!("style.css");

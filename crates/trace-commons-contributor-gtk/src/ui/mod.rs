@@ -20,6 +20,7 @@ pub mod legacy_move;
 mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
+pub mod monitor;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
@@ -48,54 +49,14 @@ use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
 
-/// The header bar's height, from §5.1's Linux column. Set as a size request
-/// rather than in CSS because `AdwHeaderBar` derives its height from the
-/// tallest thing packed into it, and the mark and the switcher are both
-/// shorter than the bar the design draws.
-const HEADER_HEIGHT: i32 = 46;
-
 /// The reading column, shared by every screen in this window so the header's
 /// switcher, the health banner and the queue's cards all sit on the same two
 /// vertical lines.
 const COLUMN_MAX: i32 = 840;
 const COLUMN_TIGHTEN: i32 = 680;
 
-/// The six screens, in the order the switcher shows them, with the icon
-/// each one carries. One list, so the stack pages and the switcher items
-/// cannot drift apart.
-///
-/// **Every icon name here must stay symbolic.** GTK recolours a symbolic
-/// icon from its node's `color`, which is what lets style.css mute an
-/// unselected item's icon and turn the selected one green without this code
-/// setting anything. A full-colour icon ignores `color` and renders as-is,
-/// so swapping one in would silently leave that item's icon un-recoloured
-/// while the others kept working -- a difference that shows up in a
-/// screenshot months later and in no diff at all.
-///
-/// The model-calls item's label is read from the shared copy module and
-/// never retyped: the word this surface may not say is "private", and the
-/// only way three shells keep saying the same true thing is by reading one
-/// definition. The stack name below it is internal and is read by nobody.
-///
-/// This is the list that is always shown. The mission-drafts screen is
-/// appended by [`screens`] only while the daemon's `missions_enabled` switch
-/// is on, so the switcher, the tray menu and the accelerators, which all read
-/// [`screens`], hide it together.
-pub(crate) const BASE_SCREENS: [(&str, &str, &str); 5] = [
-    ("insights", "Insights", "view-statistics-symbolic"),
-    ("queue", "Queue", "view-list-symbolic"),
-    ("history", "History", "document-open-recent-symbolic"),
-    (
-        PRIVATE_INFERENCE_SCREEN,
-        copy::PRIVATE_INFERENCE_DESTINATION,
-        "network-transmit-receive-symbolic",
-    ),
-    ("settings", "Settings", "emblem-system-symbolic"),
-];
-
-/// The stack name of the local mission-draft inbox.
-pub(crate) const MISSION_DRAFTS_SCREEN: (&str, &str, &str) =
-    ("mission-drafts", "Mission drafts", "document-edit-symbolic");
+/// Settings, which is its own window and no tab.
+pub(crate) const SETTINGS_SCREEN: &str = "settings";
 
 /// Whether this process shows missions: the daemon's `missions_enabled`
 /// setting, read once at startup by `main` and fixed for the process. Off
@@ -136,36 +97,26 @@ pub fn peek_state_dir() -> std::path::PathBuf {
     }
 }
 
-/// The screens in switcher order for a given switch position.
-pub(crate) fn screens_with(missions: bool) -> Vec<(&'static str, &'static str, &'static str)> {
-    let mut screens = vec![(
-        "home",
-        trace_commons_contributor::preview_copy::monitor_screens_copy()
-            .shell
-            .tab_home,
-        "go-home-symbolic",
-    )];
-    screens.extend_from_slice(&BASE_SCREENS);
-    if missions {
-        screens.push(MISSION_DRAFTS_SCREEN);
-    }
-    screens
-}
-
-/// The screens this process shows. The one list the switcher, the tray menu
-/// and the accelerators all read.
-pub(crate) fn screens() -> Vec<(&'static str, &'static str, &'static str)> {
-    screens_with(missions_shown())
+/// The window's tabs, in the strip's order, as `(name, label)`: Home,
+/// Inference, Traces, Insights, labelled from the core's shell table
+/// (`monitor::tabs::Tab`). The one list the tab strip, the tray menu and
+/// the accelerators all read, so the digit a contributor presses is the
+/// position they see.
+///
+/// History, Mission drafts and Settings are not in it: History and Mission
+/// drafts are sub-pages behind the breadcrumb, and Settings is its own
+/// window. Each still opens by its old name (`App::open_screen`).
+pub(crate) fn screens() -> Vec<(&'static str, &'static str)> {
+    monitor::tabs::Tab::ALL
+        .into_iter()
+        .map(|tab| (tab.name(), tab.title()))
+        .collect()
 }
 
 /// The stack's name for the model-calls screen. Named once because the
 /// tray and every other shortcut into it has to spell it identically, and
 /// `set_visible_child_name` on a name no page carries is a silent no-op.
 pub const PRIVATE_INFERENCE_SCREEN: &str = "private-inference";
-
-/// The switcher's icon, §5.1 item 1. Set in pixels rather than by an icon
-/// size so it matches the label it sits beside at every text scale.
-const SWITCHER_ICON: i32 = 13;
 
 type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 
@@ -199,7 +150,10 @@ pub struct App {
     pub tray: crate::tray::TrayState,
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
-    pub stack: adw::ViewStack,
+    /// The three-pane Monitor shell: the tabs, the map pane and the
+    /// inspector pane. Which screen is showing is its state, and
+    /// [`App::open_screen`] is the one way anything else moves it.
+    pub shell: monitor::Shell,
 
     /// `admission_evidence_required`, as `get_settings` last answered it.
     ///
@@ -249,10 +203,6 @@ pub struct App {
     /// the notices column (Settings holds the other set of controls).
     pub legacy_move: legacy_move::MoveState,
     pub legacy_card: legacy_move::Controls,
-    /// The count on the switcher's Queue item. Hidden at zero rather than
-    /// drawn as a "0": an empty badge is a decoration, and the queue's own
-    /// empty state already says the true thing.
-    queue_badge: gtk::Label,
 
     callbacks: RefCell<HashMap<u64, Callback>>,
     pub entries: RefCell<Vec<QueueEntry>>,
@@ -267,6 +217,10 @@ pub struct App {
     /// day the rule changes an arm.
     pub projects: RefCell<Vec<crate::model::Project>>,
     pub status: RefCell<Option<Status>>,
+    /// The last `list_history` page, for the Traces graph and an opened
+    /// History row's details. `None` while unread or after a failed read,
+    /// which the graph draws as a dash, never as nothing shared.
+    pub history_records: RefCell<Option<Vec<crate::model::HistoryRecord>>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
@@ -352,15 +306,14 @@ impl App {
         // theme's palette and then repainted in this one.
         style::install();
 
+        // No default size here: the shell sets it from the panes it opens
+        // with (`monitor::Shell::new`).
         let window = adw::ApplicationWindow::builder()
             .application(application)
             .title(copy::APP_NAME)
-            .default_width(980)
-            .default_height(720)
             .build();
 
         window.set_widget_name("contributions-window");
-        let stack = adw::ViewStack::new();
         let home = home::HomeView::new(missions_shown());
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
@@ -368,51 +321,10 @@ impl App {
         let settings = settings::SettingsView::new();
         let update = update::UpdateView::new();
 
-        // Pages and switcher items are built from the same list, in the same
-        // order, so a screen cannot be renamed in one place and not the
-        // other.
         let insights = insights::InsightsView::new(&window);
         // Not constructed while missions are hidden; the code stays.
         let mission_drafts =
             missions_shown().then(|| mission_drafts::MissionDraftsView::new(&window));
-        let mut pages: Vec<&gtk::Box> = vec![
-            &home.root,
-            &insights.root,
-            &queue.root,
-            &history.root,
-            &private_inference.root,
-            &settings.root,
-        ];
-        if let Some(view) = &mission_drafts {
-            pages.push(&view.root);
-        }
-        debug_assert_eq!(pages.len(), screens().len());
-        for ((name, label, icon_name), page) in screens().into_iter().zip(pages) {
-            stack
-                .add_titled(page, Some(name), label)
-                .set_icon_name(Some(icon_name));
-        }
-
-        // Home is the overview; explicit screen actions still choose their destination.
-        stack.set_visible_child_name("home");
-        let queue_badge = gtk::Label::builder().visible(false).build();
-        queue_badge.add_css_class("tc-count-badge");
-        queue_badge.set_valign(gtk::Align::Center);
-
-        // The bar's own close button is left to `AdwHeaderBar`'s window
-        // controls rather than hand-built. The design draws a 24px round
-        // `x` on a faint wash, which is exactly what GNOME's own decoration
-        // already is -- and a hand-built one would lose the window menu, the
-        // keyboard path to it, and whatever button layout the contributor
-        // has chosen in their desktop settings.
-        let header = adw::HeaderBar::builder()
-            .title_widget(&view_switcher(&stack, &queue_badge))
-            .build();
-        header.add_css_class("tc-header");
-        header.set_size_request(-1, HEADER_HEIGHT);
-        // The mark, drawn from its own geometry rather than shipped as an
-        // asset. 20px is the header-bar size the design spec names.
-        header.pack_start(&mark::framed(20));
 
         let health_label = gtk::Label::builder()
             .wrap(true)
@@ -438,11 +350,11 @@ impl App {
         health_banner.append(&health_button);
         health_banner.add_css_class("tc-banner");
 
-        // The banner sits above the stack rather than inside the queue, so a
-        // contributor reading History or Settings still learns that
-        // contributions are held up. The design draws it on the queue
-        // because the queue is the only screen it drew; putting it here says
-        // the same thing on every screen and never says it twice.
+        // The banner is a notice over every tab rather than a card inside
+        // the queue, so a contributor reading another tab still learns that
+        // contributions are held up (`monitor::notices`; the Mac shows it on
+        // Traces alone, and this window keeps the wider rule it always
+        // had). Settings is its own window now and does not carry it.
         //
         // It is clamped to the same column as the screens below it, which is
         // the only reason this is a clamp and not a bare margin: an
@@ -480,17 +392,53 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.add_css_class("tc-root");
-        content.append(&header);
-        content.append(&update.root);
-        content.append(&banner_column);
-        content.append(&void_column);
-        content.append(&stack);
-        stack.set_vexpand(true);
+        // There is no header bar: the main pane's toolbar row is the title
+        // bar, with the desktop's own window controls in it
+        // (`monitor::shell`). The update banner, the health banner and the
+        // notices column that sat above the stack are popover notices over
+        // the tab now, in the order they were stacked.
+        let shell = monitor::Shell::new(
+            &window,
+            monitor::Pages {
+                home: &home.root,
+                inference: &private_inference.root,
+                traces: &queue.root,
+                history: &history.root,
+                insights: &insights.root,
+                mission_drafts: mission_drafts.as_ref().map(|view| &view.root),
+                settings: &settings.root,
+                notices: vec![
+                    (
+                        monitor::notices::Notice::Update,
+                        update.root.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Health,
+                        banner_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Consent,
+                        void_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::PrivateAiOffer,
+                        queue.private_inference_notice.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::ArmingOffer,
+                        queue.arming_notice.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Undo,
+                        queue.undo_notice.clone().upcast(),
+                    ),
+                ],
+            },
+            missions_shown(),
+        );
 
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&content));
+        toasts.set_child(Some(&shell.root));
         window.set_content(Some(&toasts));
 
         let app = Rc::new(Self {
@@ -498,7 +446,7 @@ impl App {
             tray: crate::tray::TrayState::default(),
             window,
             toasts,
-            stack,
+            shell,
             evidence_admitted: std::cell::Cell::new(false),
             home,
             queue,
@@ -512,11 +460,11 @@ impl App {
             void_notices,
             legacy_move: legacy_move::MoveState::default(),
             legacy_card,
-            queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
             projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
+            history_records: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
@@ -536,6 +484,7 @@ impl App {
 
         app.home.bind(&app);
         insights.bind_app(&app);
+        monitor::shell::wire(&app);
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
@@ -802,6 +751,10 @@ impl App {
                 // Both halves of "does this device need onboarding" are the
                 // daemon's to answer, so the question is asked here rather
                 // than at window construction, where neither is known yet.
+                // The same answer narrows the tab strip: before onboarding
+                // Home and Traces are not shown (`monitor::tabs`).
+                app.shell
+                    .set_requires_onboarding(onboarding::requires_onboarding(&status));
                 onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
@@ -1503,10 +1456,17 @@ impl App {
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             if let Ok(crate::notify::Action::Review) = rx.recv().await {
-                app.stack.set_visible_child_name("queue");
+                app.open_screen("queue");
                 app.window.present();
             }
         });
+    }
+
+    /// Opens a screen by name: a tab, a sub-page behind the breadcrumb, or
+    /// the Settings window. The one way anything outside the shell moves
+    /// what the window shows; a name nothing carries moves nothing.
+    pub fn open_screen(self: &Rc<Self>, name: &str) -> bool {
+        self.shell.open(self, name)
     }
 
     pub fn toast(self: &Rc<Self>, text: &str) {
@@ -1533,10 +1493,10 @@ impl App {
         if !label.is_empty() && shield == crate::shield::Shield::Attention {
             label.push_str(&format!(" {}", style::Tone::Attention.glyph()));
         }
-        self.queue_badge.set_label(&label);
-        self.queue_badge.set_visible(!label.is_empty());
+        self.shell.traces_badge.set_label(&label);
+        self.shell.traces_badge.set_visible(!label.is_empty());
         // The core's words for an unknown count, as the other shells say it.
-        self.queue_badge.set_tooltip_text(
+        self.shell.traces_badge.set_tooltip_text(
             decisions_owed
                 .is_none()
                 .then(|| trace_commons_contributor::preview_copy::decisions_owed_text(None))
@@ -1545,9 +1505,9 @@ impl App {
         // A colour is never the only carrier: the glyph above is what
         // survives greyscale, and this is what makes it findable.
         if shield == crate::shield::Shield::Attention {
-            self.queue_badge.add_css_class("tc-attention");
+            self.shell.traces_badge.add_css_class("tc-attention");
         } else {
-            self.queue_badge.remove_css_class("tc-attention");
+            self.shell.traces_badge.remove_css_class("tc-attention");
         }
     }
 
@@ -1682,8 +1642,6 @@ impl App {
     }
 }
 
-/// The segmented view switcher, §5.1's Linux column.
-///
 /// Carry out one [`crate::tray::TrayRequest`].
 ///
 /// A free function rather than the body of `wire_tray`'s loop because the
@@ -1698,86 +1656,14 @@ impl App {
 pub(crate) fn apply_tray_request(app: &Rc<App>, request: crate::tray::TrayRequest) {
     match request {
         crate::tray::TrayRequest::Open(screen) => {
-            app.stack.set_visible_child_name(screen);
+            app.open_screen(screen);
         }
         crate::tray::TrayRequest::StopAnsweringModelCalls => {
-            app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+            app.open_screen(PRIVATE_INFERENCE_SCREEN);
             private_inference::turn_off(app);
         }
     }
     app.window.present();
-}
-
-/// Hand-built rather than an `AdwViewSwitcher` because the design puts a
-/// count badge inside one item, and `AdwViewSwitcher` builds its own buttons
-/// from the stack pages' titles and icons with nowhere to put one.
-///
-/// The stack, not this widget, is the source of truth for which screen is
-/// showing: the tray and every notification action set the stack directly,
-/// so the items follow it rather than the other way round.
-fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
-    let track = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(0)
-        .valign(gtk::Align::Center)
-        .build();
-    track.add_css_class("tc-switcher");
-
-    let mut items: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
-    for (index, (name, label, icon_name)) in screens().into_iter().enumerate() {
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
-        // A real `GtkImage`, not a glyph: §6.6 turns the selected item's icon
-        // green while its label stays ink, and style.css matches that on the
-        // `image` node rather than on a class this code would have to
-        // remember to set.
-        let icon = gtk::Image::from_icon_name(icon_name);
-        icon.set_pixel_size(SWITCHER_ICON);
-        content.append(&icon);
-        content.append(&gtk::Label::new(Some(label)));
-        if name == "queue" {
-            content.append(queue_badge);
-        }
-        let item = gtk::ToggleButton::builder().child(&content).build();
-        item.add_css_class("tc-tab");
-        // `flat` drops Adwaita's own button face, so the track underneath is
-        // what the unselected items sit on.
-        item.add_css_class("flat");
-        // How the accelerator is discovered. The chord and nothing else: the
-        // item's own label is right beside it, and the text is GTK's --
-        // `accelerator_get_label` in the contributor's keyboard and language
-        // -- so no word of this is authored in this shell. A shortcuts
-        // window would need section and group titles nobody has written,
-        // which is the reason it is not one.
-        item.set_tooltip_text(shortcuts::screen_accel_label(index).as_deref());
-        if let Some((_, first)) = items.first() {
-            item.set_group(Some(first));
-        }
-        let stack = stack.clone();
-        item.connect_toggled(move |item| {
-            if item.is_active() {
-                stack.set_visible_child_name(name);
-            }
-        });
-        track.append(&item);
-        items.push((name, item));
-    }
-
-    let followers = items.clone();
-    stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
-        let Some(showing) = stack.visible_child_name() else {
-            return;
-        };
-        for (name, item) in &followers {
-            if *name == showing.as_str() {
-                item.set_active(true);
-            }
-        }
-    });
-    if let Some((_, first)) = items.first() {
-        first.set_active(true);
-    }
-
-    track
 }
 
 /// Replace `parent`'s children with K11 disclosure rows. Machine values --
@@ -2184,66 +2070,72 @@ mod card_preview_tests {
 mod screen_tests {
     use super::*;
 
-    /// The switcher's items and the stack's pages are built by zipping
-    /// `SCREENS` with `pages`, so a screen missing from one of the two would
-    /// simply never be reachable rather than fail to compile. Both are
-    /// fixed-size arrays of the same length for that reason; this pins the
-    /// length itself, so the next screen has to grow both.
+    /// The tab strip, the tray menu and the accelerators all read
+    /// `screens()`: the four tabs, Home first, in the Mac's order.
     #[test]
-    fn every_screen_has_a_page() {
-        assert_eq!(screens_with(false).len(), 6);
-        assert_eq!(screens_with(true).len(), 7);
-        assert_eq!(screens_with(false)[0].0, "home");
-        for (name, label, icon) in screens_with(true) {
-            assert!(!name.is_empty(), "a screen needs a stack name");
-            assert!(!label.is_empty(), "a screen needs a switcher label");
-            assert!(
-                icon.ends_with("-symbolic"),
-                "{icon} must be symbolic to recolour"
-            );
+    fn the_screens_are_the_four_tabs_in_the_strips_order() {
+        let names: Vec<_> = screens().iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            ["home", PRIVATE_INFERENCE_SCREEN, "queue", "insights"]
+        );
+        for (name, label) in screens() {
+            assert!(!name.is_empty(), "a tab needs a name");
+            assert!(!label.is_empty(), "a tab needs a label");
         }
     }
 
-    /// The label is read from the shared copy module, never retyped here.
+    /// Every tab label is the core's word, never one retyped here.
     #[test]
-    fn the_private_ai_screen_takes_its_label_from_the_shared_copy() {
-        let (name, label, _) = screens_with(false)
-            .into_iter()
-            .find(|(name, _, _)| *name == PRIVATE_INFERENCE_SCREEN)
-            .expect("the Private AI screen is one of the switcher's items");
-        assert_eq!(name, "private-inference");
-        assert_eq!(label, copy::PRIVATE_INFERENCE_DESTINATION);
-    }
-
-    #[test]
-    fn the_mission_drafts_screen_takes_its_label_from_shared_copy() {
-        let (_, label, _) = screens_with(true)
-            .into_iter()
-            .find(|(name, _, _)| *name == "mission-drafts")
-            .expect("the local mission inbox is one of the switcher's items");
+    fn the_tab_labels_come_from_the_shared_copy() {
+        let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
+        let labels: Vec<_> = screens().iter().map(|(_, label)| *label).collect();
+        assert_eq!(labels[0], shell.tab_home);
+        assert_eq!(labels[1], shell.tab_inference);
+        assert_eq!(labels[2], shell.tab_traces);
         assert_eq!(
-            label,
-            trace_commons_contributor::mission_draft_service::ui_copy()["title"]
+            labels[3],
+            trace_commons_contributor::insights::service::ui_copy()["title"]
         );
+        // The tab and the tray's model-calls rows name one destination.
+        assert_eq!(shell.tab_inference, copy::PRIVATE_INFERENCE_DESTINATION);
     }
 
-    /// Missions are hidden by default: no mission-drafts entry in the list
-    /// every navigation surface derives from, and the on position restores
-    /// it last, so no other accelerator renumbers.
+    /// The screens that left the strip still open by the names the tray,
+    /// the notification action, `--start-page` and the in-window links
+    /// spell: History and Mission drafts behind the breadcrumb, Settings in
+    /// its own window.
     #[test]
-    fn the_mission_drafts_screen_is_listed_only_while_missions_are_shown() {
+    fn the_screens_that_left_the_strip_still_open_by_name() {
+        use monitor::tabs::{HomePage, Location, Route, Tab, TracesPage, route};
+        let from = Location::default();
+        assert_eq!(route(SETTINGS_SCREEN, from, false), Some(Route::Settings));
+        match route("history", from, false) {
+            Some(Route::Show(to)) => {
+                assert_eq!((to.tab, to.traces_page), (Tab::Traces, TracesPage::History));
+            }
+            other => panic!("history did not land: {other:?}"),
+        }
+        match route("mission-drafts", from, true) {
+            Some(Route::Show(to)) => {
+                assert_eq!((to.tab, to.home_page), (Tab::Home, HomePage::MissionDrafts));
+            }
+            other => panic!("mission drafts did not land: {other:?}"),
+        }
+        // Hidden missions: the name lands on Home's overview, and no tab,
+        // tray row or accelerator lists it either way.
         assert!(!missions_shown(), "the process default is off");
-        assert!(
-            screens()
-                .iter()
-                .all(|(name, _, _)| *name != "mission-drafts"),
-            "a hidden mission screen must not be listed"
+        assert_eq!(
+            route("mission-drafts", from, false),
+            Some(Route::Show(from))
         );
-        let off = screens_with(false);
-        let on = screens_with(true);
-        assert!(off.iter().all(|(name, _, _)| *name != "mission-drafts"));
-        assert_eq!(on.last().map(|s| s.0), Some("mission-drafts"));
-        assert_eq!(&on[..on.len() - 1], &off[..]);
+        assert!(screens().iter().all(|(name, _)| *name != "mission-drafts"));
+        for (name, _) in screens() {
+            assert!(
+                matches!(route(name, from, false), Some(Route::Show(_))),
+                "{name} is listed but opens nothing"
+            );
+        }
     }
 
     /// The startup read: only a boolean `true` under `missions_enabled`
@@ -2270,7 +2162,7 @@ mod screen_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No switcher label may PROMISE privacy.
+    /// No tab label may PROMISE privacy.
     ///
     /// The product name is stripped first, the same way the shared sweep in
     /// `private_inference_copy` strips it: the destination is called
@@ -2278,23 +2170,16 @@ mod screen_tests {
     /// has never meant the destination cannot see you -- while no sentence
     /// may claim a call is private, because each one still goes on to
     /// whoever was configured to answer it.
-    ///
-    /// This guard is a second statement of a rule that lives in the shared
-    /// crate, and it drifted from it the moment the name changed: the sweep
-    /// was narrowed and this was not, so the rename failed here alone. It is
-    /// kept because a shell hardcoding a label is a thing only a shell test
-    /// can catch -- but it now strips the same way, so the two cannot
-    /// disagree about what the rule is.
     #[test]
     fn no_switcher_label_promises_privacy() {
-        for (_, label, _) in screens_with(true) {
+        for (_, label) in screens() {
             let lowered = label
                 .replace(copy::PRIVATE_INFERENCE_DESTINATION, "")
                 .to_ascii_lowercase();
             for forbidden in ["private", "secure", "proxy", "backend"] {
                 assert!(
                     !lowered.contains(forbidden),
-                    "switcher label {label:?} must not say {forbidden:?}"
+                    "tab label {label:?} must not say {forbidden:?}"
                 );
             }
         }

@@ -1,12 +1,18 @@
 //! Read-only context for the live queue selection. Full review stays in the sheet.
-use super::{App, style};
+//!
+//! The window-level inspector's Traces column: the selected session's or
+//! folder's card, or the summary when nothing is selected. It moved here
+//! from the Queue page, where it was the end child of a `gtk::Paned`; the
+//! window's inspector pane hosts it now (`monitor::shell`). As on the Mac,
+//! it never closes itself: a selection that has gone is the summary.
 use crate::model::{QueueEntry, human_when};
+use crate::ui::{App, style};
 use adw::prelude::*;
 use std::{cell::RefCell, rc::Rc};
 use style::brand_tokens::insights as tokens;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) enum Selection {
+pub enum Selection {
     #[default]
     None,
     Folder(String),
@@ -14,7 +20,7 @@ pub(super) enum Selection {
 }
 
 impl Selection {
-    fn resolve(&self, entries: &[QueueEntry]) -> Self {
+    pub(super) fn resolve(&self, entries: &[QueueEntry]) -> Self {
         let exists =
             entries
                 .iter()
@@ -28,7 +34,7 @@ impl Selection {
     }
 }
 
-pub(super) struct Inspector {
+pub struct Inspector {
     pub root: gtk::ScrolledWindow,
     content: gtk::Box,
     selected: RefCell<Selection>,
@@ -50,7 +56,6 @@ impl Inspector {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .min_content_width(280)
             .vexpand(true)
-            .visible(false)
             .build();
         Self {
             root,
@@ -63,23 +68,11 @@ impl Inspector {
         self.selected.borrow().clone()
     }
 
+    /// Moves the selection and redraws. Whether the pane opens is the
+    /// window's decision (`Shell::select`), not this column's.
     pub fn select(&self, app: &Rc<App>, selection: Selection) {
-        let opening = !self.root.is_visible() && selection != Selection::None;
         *self.selected.borrow_mut() = selection;
         self.render(app);
-        app.queue
-            .map
-            .highlight(&self.selection(), &app.entries.borrow());
-        if opening
-            && self.root.is_visible()
-            && let Some(split) = self.root.parent().and_downcast::<gtk::Paned>()
-        {
-            split.set_position(if split.orientation() == gtk::Orientation::Horizontal {
-                (split.width() - 320).max(0)
-            } else {
-                split.height() / 2
-            });
-        }
     }
 
     pub fn render(&self, app: &Rc<App>) {
@@ -89,17 +82,25 @@ impl Inspector {
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
         }
-        self.root.set_visible(selected != Selection::None);
+        let words = trace_commons_contributor::preview_copy::monitor_traces_copy();
         if selected == Selection::None {
+            // Nothing selected is the summary, never an empty pane.
+            let screens = trace_commons_contributor::preview_copy::monitor_screens_copy();
+            self.content.append(&heading(screens.summary));
+            let counts = crate::home::Counts::from_answers(app.status.borrow().as_ref(), None);
+            self.content.append(&caption(screens.waiting));
+            self.content
+                .append(&body(crate::home::figure(counts.waiting)));
             return;
         }
-        let words = trace_commons_contributor::preview_copy::monitor_traces_copy();
         let close = gtk::Button::with_label(crate::copy::CLOSE);
         close.set_halign(gtk::Align::End);
         let weak = Rc::downgrade(app);
         close.connect_clicked(move |_| {
             if let Some(app) = weak.upgrade() {
-                app.queue.inspector.select(&app, Selection::None);
+                // Close puts the card away and the pane with it.
+                app.shell.select(&app, Selection::None);
+                app.shell.set_inspector_shown(&app, false);
             }
         });
         self.content.append(&close);
@@ -161,7 +162,7 @@ impl Inspector {
                 let weak = Rc::downgrade(app);
                 look.connect_clicked(move |_| {
                     if let Some(app) = weak.upgrade() {
-                        super::super::preview::open_entry(&app, &id);
+                        crate::ui::preview::open_entry(&app, &id);
                     }
                 });
                 self.content.append(&look);
@@ -209,25 +210,10 @@ fn caption(text: impl AsRef<str>) -> gtk::Label {
     label
 }
 
-/// Keep both scrollable panes usable when the window is narrow.
-pub(super) fn orientation(width: i32) -> gtk::Orientation {
-    if width >= 1000 {
-        gtk::Orientation::Horizontal
-    } else {
-        gtk::Orientation::Vertical
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Selection;
 
-    #[test]
-    fn narrow_windows_stack_the_inspector_below_the_queue() {
-        assert_eq!(super::orientation(640), gtk::Orientation::Vertical);
-        assert_eq!(super::orientation(980), gtk::Orientation::Vertical);
-        assert_eq!(super::orientation(1200), gtk::Orientation::Horizontal);
-    }
     use crate::model::QueueEntry;
 
     fn entry(id: &str, project: &str, state: &str) -> QueueEntry {
@@ -250,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn disappeared_or_sent_session_closes_inspector() {
+    fn disappeared_or_sent_session_falls_back_to_the_summary() {
         let selection = Selection::Session("a".into());
         assert_eq!(selection.resolve(&[]), Selection::None);
         assert_eq!(

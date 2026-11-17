@@ -418,6 +418,17 @@ row:selected {
   color: @tc_gold_text;
 }
 
+/* --- The Monitor window's panes ------------------------------------
+   The grip in the gap between the main pane and the map, shown while the
+   divider is pointed at or dragged (the Mac's 3x36 capsule). The container
+   sets its opacity; this only gives it its shape and ink. */
+.tc-pane-grip {
+  background-color: @tc_ink;
+  border-radius: 2px;
+  min-width: 3px;
+  margin: 0 3px;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */

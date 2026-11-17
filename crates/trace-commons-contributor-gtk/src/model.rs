@@ -817,6 +817,11 @@ pub struct HistoryRecord {
     pub submission_id: String,
     #[serde(default)]
     pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The tool the session came from, when the daemon says. Read only to
+    /// count one tool's contributions in the Traces graph; absent, the
+    /// record counts under no tool.
+    #[serde(default)]
+    pub source: Option<String>,
     /// The opaque project id, for grouping history the same way the queue
     /// groups: on identity rather than on a display name.
     ///

@@ -298,10 +298,7 @@ fn billing_widgets_bind_and_invalidate_browser_handoffs() {
     let fixture = Fixture::new(&application);
     fixture.settle(&context);
     assert!(fixture.funding.borrow().is_empty());
-    fixture
-        .app
-        .stack
-        .set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+    assert!(fixture.app.open_screen(PRIVATE_INFERENCE_SCREEN));
     fixture.app.window.present();
     fixture.drive_until(&context, || {
         fixture.view().root.is_mapped() && !fixture.funding.borrow().is_empty()

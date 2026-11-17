@@ -823,8 +823,8 @@ pub fn wire(app: &Rc<App>) {
     app.settings
         .private_inference_link
         .connect_clicked(move |_| {
-            a.stack
-                .set_visible_child_name(crate::ui::PRIVATE_INFERENCE_SCREEN);
+            a.open_screen(crate::ui::PRIVATE_INFERENCE_SCREEN);
+            a.window.present();
         });
     let a = Rc::clone(app);
     app.settings.routing_apply.connect_clicked(move |_| {

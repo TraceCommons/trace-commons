@@ -46,15 +46,19 @@ const METRIC_GAP: i32 = 24;
 // TODO(tokens): promote to `style::space` when style.rs is next opened.
 const CONTENT_GAP: i32 = 14;
 
-#[path = "traces_inspector.rs"]
-mod inspector;
-#[path = "traces_map.rs"]
-mod traces_map;
+use super::monitor::inspector;
 
 pub struct QueueView {
-    inspector: inspector::Inspector,
-    map: traces_map::TraceMap,
     pub root: gtk::Box,
+    /// The three cards that were stacked above the list. They are popover
+    /// notices over the tab now, so the window places them
+    /// (`monitor::notices`): the undo bar and the arming offer over Traces,
+    /// the Private AI offer over Inference. Each wrapper still follows its
+    /// card's own visibility, and every `render_*` here still sets exactly
+    /// the card.
+    pub undo_notice: adw::Clamp,
+    pub arming_notice: adw::Clamp,
+    pub private_inference_notice: adw::Clamp,
     first_contribution: gtk::Expander,
     /// The arming offer, above the cards it is about. Persistent and
     /// emptied rather than rebuilt with the list, because it is not part of
@@ -77,6 +81,7 @@ pub struct QueueView {
     undo_undo: gtk::Button,
     undo_let_it_send: gtk::Button,
     heading: gtk::Label,
+    open_history: gtk::Button,
     /// The certificate-held section: heading, then either the sessions a
     /// certificate is held for or the sentence saying there are none yet.
     ///
@@ -136,9 +141,19 @@ impl QueueView {
             .margin_start(space::XL)
             .margin_end(space::XL)
             .build();
-        column.append(&heading);
-        let map = traces_map::TraceMap::new();
-        column.append(&map.root);
+        // History is the Traces tab's other page, behind the breadcrumb
+        // (owner, 2026-10-12 on the Mac). The word is the breadcrumb's own.
+        let history = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy().history,
+        );
+        history.add_css_class("tc-quiet");
+        history.set_halign(gtk::Align::End);
+        history.set_valign(gtk::Align::Center);
+        heading.set_hexpand(true);
+        let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        heading_row.append(&heading);
+        heading_row.append(&history);
+        column.append(&heading_row);
         column.append(&list);
         column.append(&disclaimer);
         column.append(&disclosure);
@@ -164,8 +179,9 @@ impl QueueView {
             .build();
         empty.add_css_class("tc-empty");
 
-        // The undo bar sits in the page root, ABOVE the empty state and the
-        // scroller, rather than at the top of the scrolling column.
+        // The undo bar is not in the scrolling column. It was in the page
+        // root, above the empty state and the scroller; it is a popover
+        // notice over the tab now (`undo_notice`), for the same reason:
         //
         // It has to outlive the thing it is undoing. Approving the last
         // waiting session empties the queue, and `render` hides the whole
@@ -276,55 +292,17 @@ impl QueueView {
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
-        root.append(&private_inference_clamp);
-        root.append(&arming_clamp);
-        root.append(&undo_clamp);
         root.append(&first_contribution);
         root.append(&certificates);
         root.append(&empty);
         root.append(&scroller);
 
-        let inspector = inspector::Inspector::new();
-        let split = gtk::Paned::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .start_child(&root)
-            .end_child(&inspector.root)
-            .resize_start_child(true)
-            .shrink_start_child(true)
-            .shrink_end_child(true)
-            .vexpand(true)
-            .build();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&split);
-        // The libadwaita 1.2 floor predates Breakpoint. Observe the actual
-        // allocation, not the persisted default window width; change the
-        // layout only when crossing the breakpoint.
-        let weak_split = split.downgrade();
-        let map_body = map.body.downgrade();
-        root.add_tick_callback(move |root, _| {
-            let Some(split) = weak_split.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            if let Some(body) = map_body.upgrade() {
-                let width = body.parent().map_or(root.width(), |parent| parent.width());
-                traces_map::TraceMap::orient(&body, width);
-            }
-            let orientation = inspector::orientation(root.width());
-            if split.orientation() != orientation {
-                split.set_orientation(orientation);
-                split.set_position(if orientation == gtk::Orientation::Horizontal {
-                    (root.width() - 320).max(0)
-                } else {
-                    root.height() / 2
-                });
-            }
-            glib::ControlFlow::Continue
-        });
-
         Self {
             root,
-            inspector,
-            map,
+            undo_notice: undo_clamp,
+            arming_notice: arming_clamp,
+            private_inference_notice: private_inference_clamp,
+            open_history: history,
             first_contribution,
             arming_offer,
             private_inference_offer,
@@ -377,6 +355,13 @@ fn build_undo_bar(
 
 pub fn wire(app: &Rc<App>) {
     let view = &app.queue;
+
+    let weak = Rc::downgrade(app);
+    view.open_history.connect_clicked(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.open_screen("history");
+        }
+    });
 
     let app_for_undo = Rc::clone(app);
     view.undo_undo.connect_clicked(move |_| {
@@ -488,8 +473,7 @@ pub(super) fn render_badge(app: &Rc<App>) {
 }
 
 pub fn render(app: &Rc<App>) {
-    app.queue.inspector.render(app);
-    app.queue.map.render(app);
+    app.shell.render(app);
     render_badge(app);
     let view = &app.queue;
     view.first_contribution
@@ -910,6 +894,8 @@ fn hide_private_inference_offer(app: &Rc<App>) {
 pub fn render_undo(app: &Rc<App>) {
     let view = &app.queue;
     let pending = app.undo.borrow();
+    // An undo window is a demand on the inspector (`monitor::demand`).
+    app.shell.refresh_demand(app);
     let Some(undo) = pending.as_ref() else {
         view.undo_bar.set_visible(false);
         return;
@@ -1316,8 +1302,7 @@ fn manifest_block(
     let selected_id = entry.entry_id.clone();
     review.connect_clicked(move |_| {
         if let Some(app) = weak.upgrade() {
-            app.queue
-                .inspector
+            app.shell
                 .select(&app, inspector::Selection::Session(selected_id.clone()));
         }
     });
@@ -1569,7 +1554,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
     open.connect_clicked(move |_| {
         *app_for_open.queue_location.borrow_mut() =
             crate::queue_folders::Location::Project(id_for_open.clone());
-        app_for_open.queue.inspector.select(
+        app_for_open.shell.select(
             &app_for_open,
             inspector::Selection::Folder(id_for_open.clone()),
         );

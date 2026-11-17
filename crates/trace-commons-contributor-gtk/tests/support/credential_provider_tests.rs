@@ -218,7 +218,7 @@ fn wallet_provider_signals_preserve_pending_and_recover() {
     let fixture = Fixture::new(&application);
     fixture.settle(&context);
     let app = &fixture.app;
-    app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+    assert!(app.open_screen(PRIVATE_INFERENCE_SCREEN));
     app.window.present();
     let root = app
         .private_inference
