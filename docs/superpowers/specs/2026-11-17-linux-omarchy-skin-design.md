@@ -194,7 +194,10 @@ the skin off and on again with an unchanged theme loads it again.
 
 A `gio::FileMonitor` on each candidate's `current/` directory (or its
 nearest existing ancestor, so a later Omarchy install is noticed) and one on
-the resolved `colors.toml`. Any event schedules a re-resolve 300 ms later;
+each candidate theme directory that exists, so an edit in place is noticed
+whether or not the last read succeeded. Watching only the palette that read
+cleanly missed a broken or deleted `colors.toml` fixed without a theme
+switch; that was seen on the Omarchy 4.5 test box. Any event schedules a re-resolve 300 ms later;
 events inside that window restart it, which absorbs the `rm`/`mv` pair. A
 re-resolve re-reads, re-arms the monitors on whatever now exists, and, on a
 valid palette that differs from the current one, reloads the one CSS

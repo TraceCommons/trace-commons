@@ -90,13 +90,11 @@ pub fn env_override(value: Option<&str>) -> Option<Appearance> {
 /// installed after launch is noticed: each candidate's `current/` directory
 /// -- the theme directory itself is deleted and replaced on a switch, so a
 /// monitor on it would die with it -- or, while that does not exist yet, its
-/// nearest existing ancestor up to the candidate's base directory; and the
-/// resolved palette file itself, for edits in place.
-pub fn watch_targets(
-    dirs: &[PathBuf],
-    resolved: Option<&Path>,
-    exists: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
+/// nearest existing ancestor up to the candidate's base directory; and each
+/// theme directory that exists now, for edits in place. That covers a
+/// palette that read cleanly and one that did not: a broken, deleted or
+/// never-shipped `colors.toml` fixed without a theme switch is noticed too.
+pub fn watch_targets(dirs: &[PathBuf], exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = Vec::new();
     for theme in dirs {
         // theme = <base>/omarchy/current/theme: try current, omarchy, base.
@@ -108,8 +106,10 @@ pub fn watch_targets(
             }
         }
     }
-    if let Some(dir) = resolved {
-        targets.push(dir.join("colors.toml"));
+    for theme in dirs {
+        if exists(theme) && !targets.contains(theme) {
+            targets.push(theme.clone());
+        }
     }
     targets
 }
@@ -273,14 +273,13 @@ fn reread() {
     }
     let dirs = omarchy::theme_dirs(&omarchy::Env::from_process());
     let read = omarchy::resolve(&dirs);
-    let resolved = read.as_ref().ok().map(|(dir, _)| dir.clone());
     STATE.with(|state| {
         state
             .borrow_mut()
             .retained
             .offer(read.map(|(_, palette)| palette))
     });
-    arm(&watch_targets(&dirs, resolved.as_deref(), Path::exists));
+    arm(&watch_targets(&dirs, Path::exists));
     show();
 }
 
@@ -522,25 +521,45 @@ mod tests {
             PathBuf::from("/h/.local/state/omarchy/current/theme"),
             PathBuf::from("/h/.config/omarchy/current/theme"),
         ];
-        // Omarchy 4.x installed: watch current/, and the palette in place.
+        // Omarchy 4.x installed: watch current/, and the theme directory
+        // for edits in place.
         let exists = |p: &Path| p.starts_with("/h/.local/state") || p == Path::new("/h/.config");
         assert_eq!(
-            watch_targets(
-                &dirs,
-                Some(Path::new("/h/.local/state/omarchy/current/theme")),
-                exists
-            ),
+            watch_targets(&dirs, exists),
             vec![
                 PathBuf::from("/h/.local/state/omarchy/current"),
                 PathBuf::from("/h/.config"),
-                PathBuf::from("/h/.local/state/omarchy/current/theme/colors.toml"),
+                PathBuf::from("/h/.local/state/omarchy/current/theme"),
             ]
         );
         // Nothing installed and no base directories: nothing to watch.
-        assert!(watch_targets(&dirs, None, |_| false).is_empty());
+        assert!(watch_targets(&dirs, |_| false).is_empty());
         // The watch never climbs above a candidate's base directory.
         let only_home = |p: &Path| p == Path::new("/h");
-        assert!(watch_targets(&dirs, None, only_home).is_empty());
+        assert!(watch_targets(&dirs, only_home).is_empty());
+    }
+
+    /// A palette that failed to read -- broken, deleted, or a theme that
+    /// ships none -- can be fixed in place, with no theme switch to touch
+    /// `current/`. The theme directory itself is watched, so the fix is
+    /// noticed. Seen on Omarchy 4.5: without it the old colours stayed.
+    #[test]
+    fn a_palette_that_failed_to_read_is_still_watched_in_place() {
+        let dirs = vec![
+            PathBuf::from("/h/.local/state/omarchy/current/theme"),
+            PathBuf::from("/h/.config/omarchy/current/theme"),
+        ];
+        let exists = |p: &Path| p.starts_with("/h/.local/state") || p == Path::new("/h/.config");
+        let targets = watch_targets(&dirs, exists);
+        assert!(
+            targets.contains(&PathBuf::from("/h/.local/state/omarchy/current/theme")),
+            "{targets:?}"
+        );
+        // A candidate whose theme directory does not exist adds none.
+        assert!(
+            !targets.contains(&PathBuf::from("/h/.config/omarchy/current/theme")),
+            "{targets:?}"
+        );
     }
 
     #[test]
