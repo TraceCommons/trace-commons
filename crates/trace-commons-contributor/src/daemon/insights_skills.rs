@@ -49,6 +49,9 @@ struct Publisher {
     instructions_url: &'static str,
 }
 
+// Curated Home suggestions, not implicit follows or an activity ranking.
+const DEFAULT_HOME_PUBLISHERS: [&str; 3] = ["obra", "poteto", "slack"];
+
 fn publishers() -> [Publisher; 4] {
     [
         Publisher {
@@ -354,6 +357,36 @@ fn catalog_rows(
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0));
     ranked.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Reserve one real example per Home creator before the shared catalog is
+/// bounded. The remaining rows keep their active/installed/catalog priority;
+/// a large first creator cannot crowd every other default out of Home.
+fn reserve_home_creator_examples(mut rows: Vec<Value>, defaults: &[&str]) -> Vec<Value> {
+    // Preserve the existing active/installed order when no rows will be cut.
+    // Use the same encoded-byte accounting as bounded_rows below.
+    let fits = rows
+        .iter()
+        .try_fold(2usize, |bytes, row| {
+            let size = serde_json::to_vec(row).ok()?.len();
+            let total = bytes.saturating_add(size).saturating_add(1);
+            (total <= 180 * 1024).then_some(total)
+        })
+        .is_some();
+    if defaults.is_empty() || fits {
+        return rows;
+    }
+    let mut examples = Vec::with_capacity(defaults.len());
+    for publisher in defaults {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| row.get("publisher_id").and_then(Value::as_str) == Some(*publisher))
+        {
+            examples.push(rows.remove(index));
+        }
+    }
+    examples.extend(rows);
+    examples
 }
 
 type Results = Vec<(&'static str, Result<FetchedCatalog, ()>)>;
@@ -898,19 +931,13 @@ impl SkillsService {
     }
 }
 
-/// Daemon polling refreshes only after the user follows a publisher. Opening
-/// the Skills tab remains an explicit catalog request, subject to throttling.
+/// Keep the default Home creators and explicit follows current. The feature,
+/// analysis, dry-run and six-hour throttle gates remain in the refresh path.
 pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
     if !enabled(shared) {
         return;
     }
-    let followed = shared
-        .insights_skills
-        .state(shared.store.dir())
-        .is_ok_and(|runtime| !runtime.public.followed.is_empty());
-    if followed {
-        shared.insights_skills.start_refresh(shared, false);
-    }
+    shared.insights_skills.start_refresh(shared, false);
     suggestions::maybe_send(shared);
 }
 
@@ -1148,6 +1175,11 @@ fn snapshot(shared: &DaemonShared) -> Value {
     let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
     let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
     let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
+    let defaults = if runtime.public.followed.is_empty() {
+        DEFAULT_HOME_PUBLISHERS.as_slice()
+    } else {
+        &[]
+    };
     // Recently active publishers, chosen from the verified document's
     // public signals alone and before any row is sized, so every install
     // holding this document is sent the same choice.
@@ -1160,7 +1192,10 @@ fn snapshot(shared: &DaemonShared) -> Value {
         .map(|skill| (skill.repository.as_str(), skill.path.as_str()))
         .collect();
     let (catalog, catalog_partial) = bounded_rows(
-        catalog_rows(&runtime.public, server, &inventory, &active_skills),
+        reserve_home_creator_examples(
+            catalog_rows(&runtime.public, server, &inventory, &active_skills),
+            defaults,
+        ),
         180 * 1024,
     );
     // A skill is named by the id of the row sent for it; a seed's row is
@@ -1216,6 +1251,16 @@ fn snapshot(shared: &DaemonShared) -> Value {
         updates_with_server(&inventory, &runtime.public, server, now),
         64 * 1024,
     );
+    // Home's default news is separate from Following. Only one feed can be
+    // nonempty, so the existing combined response budget does not grow.
+    let (home_feed, home_feed_partial) = bounded_rows(
+        runtime
+            .public
+            .feed
+            .iter()
+            .filter(|item| defaults.contains(&item.publisher_id.as_str())),
+        48 * 1024,
+    );
     let (feed, feed_partial) = bounded_rows(
         runtime
             .public
@@ -1234,6 +1279,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
             "active_publishers": active_rows},
         "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
+        "default_publishers":defaults,"home_feed":home_feed,"home_feed_partial":home_feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
     });

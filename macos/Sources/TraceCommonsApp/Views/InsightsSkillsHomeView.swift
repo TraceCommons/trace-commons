@@ -113,6 +113,16 @@ struct InsightsSkillsHomeView: View {
                     }
                 }.insightsCard()
             }
+            if !feed.defaultCreators.isEmpty {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    Text(model.text("skills_home_creators")).insightsCaption()
+                        .padding(.leading, GlassTokens.Space.cardPaddingHorizontal)
+                        .accessibilityAddTraits(.isHeader)
+                    ForEach(feed.defaultCreators) { creator in
+                        SkillsHomeCard(motion: moves) { defaultCreator(creator) }
+                    }
+                }
+            }
             ForEach(groups) { group in
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     Text(model.text(group.period.copyKey)).insightsCaption()
@@ -256,6 +266,31 @@ struct InsightsSkillsHomeView: View {
                 .help(skill.name)
             }
         }
+    }
+
+    // MARK: Default creators
+
+    private func defaultCreator(_ creator: InsightsSkillsHome.DefaultCreator) -> some View {
+        let publisher = creator.publisher
+        return HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            SkillCover(spec: .init(skillID: "", publisherID: publisher.id), initials: SkillCoverArt.initials(publisher.name))
+                .frame(width: markSize, height: markSize)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                    Text(publisher.name).insightsHeading().lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button(model.text("skills_follow")) {
+                        Task { await model.setFollow(publisherID: publisher.id, followed: true) }
+                    }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .accessibilityLabel(model.text("skills_follow_accessibility", values: ["publisher": publisher.name]))
+                    .disabled(!model.canFollow)
+                }
+                Text(publisher.repository).insightsCaption().lineLimit(1).truncationMode(.middle)
+                coverStrip(creator.skills, publisher: publisher.name)
+            }
+        }
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: Publishers with recent public activity
