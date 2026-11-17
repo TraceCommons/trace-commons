@@ -138,6 +138,50 @@ fn mark_surface(card: &gtk::Widget, closable: bool) {
     }
 }
 
+/// Has GTK fetch a fresh size-request mode for `card`, everything in it,
+/// and each ancestor up to `top`, deepest first.
+///
+/// GTK 4.14 (Ubuntu 24.04) caches a widget's request mode when its parent
+/// asks for it, without settling the resize it still has queued, and while
+/// that resize stays queued no later `queue_resize` clears the cache. A
+/// notice card asked while it sat empty behind a hidden frame keeps
+/// "constant size" after it is filled, so it is measured as if its words
+/// were on one line and laid out with them wrapped: the Private AI offer
+/// was placed 67 high and drew its buttons at 54 to 88, clipping "Turn
+/// on". Measuring a widget settles its queued resize, so the
+/// `queue_resize` after it drops the stale mode. GTK 4.22 settles it when it
+/// fetches the mode, and there this costs one measure.
+fn renew_request_modes(card: &gtk::Widget, top: &gtk::Widget) {
+    let renew = |widget: &gtk::Widget| {
+        // A hidden widget is not measured, so its queued resize would stay.
+        if widget.get_visible() {
+            let _ = widget.measure(gtk::Orientation::Horizontal, -1);
+            widget.queue_resize();
+        }
+    };
+    let mut all = vec![card.clone()];
+    let mut index = 0;
+    while index < all.len() {
+        let mut child = all[index].first_child();
+        while let Some(next) = child {
+            child = next.next_sibling();
+            all.push(next);
+        }
+        index += 1;
+    }
+    for widget in all.iter().rev() {
+        renew(widget);
+    }
+    let mut ancestor = card.parent();
+    while let Some(widget) = ancestor {
+        renew(&widget);
+        if &widget == top {
+            break;
+        }
+        ancestor = widget.parent();
+    }
+}
+
 /// The card's drawn surface, the first shown `tc-banner` or `tc-card` in
 /// it: where its X goes. The cards wrap it in clamps and margins.
 fn card_surface(card: &gtk::Widget) -> Option<gtk::Widget> {
@@ -516,6 +560,7 @@ impl Shell {
                     parts.push(Some((*notice, frame, card, close, shown)));
                 }
                 let stack = notices::stack(&open);
+                let mut front = None;
                 for (index, part) in parts.into_iter().enumerate() {
                     let Some((notice, frame, card, close, shown)) = part else {
                         continue;
@@ -523,6 +568,9 @@ impl Shell {
                     // A hidden or closed card shows neither its frame nor
                     // its X; of the open ones only the front is whole.
                     frame.set_visible(stack.front == Some(index));
+                    if stack.front == Some(index) {
+                        front = Some(card.clone());
+                    }
                     let x = shown
                         && notice.close() != notices::Close::Own
                         && !card.has_css_class(notices::STAYS_CLASS);
@@ -540,6 +588,9 @@ impl Shell {
                     }
                 }
                 scroller.set_visible(stack.front.is_some());
+                if let Some(card) = front {
+                    renew_request_modes(&card, scroller.upcast_ref());
+                }
             });
             *itself.borrow_mut() = Rc::downgrade(&follow);
             follow
@@ -571,7 +622,9 @@ impl Shell {
         // Its height is measured for the width it is given: GTK 4.14's
         // default placement measured it for its natural width, one line of
         // buttons, and then gave it less height than the narrower card drew,
-        // clipping the Private AI offer's "Turn on".
+        // clipping the Private AI offer's "Turn on". That measure is for the
+        // width given only while the card's request mode is current, which
+        // on GTK 4.14 takes `renew_request_modes`.
         notice_scroller.add_css_class(NOTICE_BACKDROP_CLASS);
         let over_content = gtk::Overlay::new();
         over_content.set_child(Some(&content_scroller));
