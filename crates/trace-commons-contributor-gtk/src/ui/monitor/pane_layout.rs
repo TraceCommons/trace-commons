@@ -45,12 +45,6 @@ pub const INSPECTOR_BREAKPOINT: f64 = 900.0;
 pub const WINDOW_HEIGHT: f64 = 614.0;
 /// `GlassTokens.Size.windowMinHeight`.
 pub const WINDOW_MIN_HEIGHT: f64 = 560.0;
-/// The tallest the notice column above a tab's content grows before it
-/// scrolls: a third of the window's least height, so at the window's
-/// minimum the toolbar, the tabs and the tab's first lines stay in view
-/// under any number of notices. Not a Mac token: the Mac's peeking stack
-/// is one card tall (`GlassPopoverStack`).
-pub const NOTICES_MAX_HEIGHT: f64 = WINDOW_MIN_HEIGHT / 3.0;
 /// How far into the map the divider takes the pointer
 /// (`GlassPaneLayout.dividerReach`). Not into the main pane: its scroller
 /// runs along the edge beside the gap.
