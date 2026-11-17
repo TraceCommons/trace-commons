@@ -33,6 +33,9 @@ pub const SERVICE_LEVEL: u64 = 1;
 /// The lowest [`SERVICE_LEVEL`] this build's shells work with.
 pub const MIN_SERVICE_LEVEL: u64 = 1;
 
+// This daemon always meets its own shells.
+const _: () = assert!(SERVICE_LEVEL >= MIN_SERVICE_LEVEL);
+
 /// The background service, as every shell names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -246,11 +249,6 @@ mod tests {
                 "{odd}"
             );
         }
-    }
-
-    #[test]
-    fn this_daemon_meets_its_own_shells() {
-        assert!(SERVICE_LEVEL >= MIN_SERVICE_LEVEL);
     }
 
     /// Fixed strings: the dialogs show exactly these. Production values.
