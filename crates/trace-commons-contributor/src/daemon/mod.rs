@@ -451,6 +451,34 @@ pub(crate) fn record_identity_once(store: &ConfigStore) -> bool {
 }
 
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
+    start_embedded_at(store, None).await
+}
+
+/// Where a daemon takes `watcher.lock` and serves the host link, named by
+/// the caller rather than read from the environment and the platform's
+/// default state directory. For an embedder's tests: a shell's own test
+/// cannot set `XDG_RUNTIME_DIR` without `unsafe`, and the real path is
+/// Linux only. See `host_link::claim` for what each field decides.
+#[derive(Debug, Clone)]
+pub struct HostLinkSite {
+    /// The runtime directory (`$XDG_RUNTIME_DIR/<state-dir-name>`).
+    pub runtime: std::path::PathBuf,
+    /// The state directory that counts as the platform default; a daemon on
+    /// any other takes no lock and serves no link.
+    pub platform_default: std::path::PathBuf,
+    pub sandboxed: bool,
+    /// Whether the daemon plays the systemd user unit's (writes the marker).
+    pub host_unit: bool,
+}
+
+/// [`start_embedded`], with the host link's place given (`None`: from the
+/// environment, as `start_embedded`).
+pub async fn start_embedded_at(
+    store: ConfigStore,
+    site: Option<HostLinkSite>,
+) -> Result<EmbeddedDaemon> {
+    #[cfg(not(unix))]
+    let _ = site;
     // K2 (#1173): a dev dry run never opens the real state directory for
     // writing -- not even its lock file.
     let store = dev_dry_run_store(store)?;
@@ -535,7 +563,7 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // refused start leaves no socket file behind. Linux only: elsewhere
         // there is no Flatpak and no `XDG_RUNTIME_DIR`.
         #[cfg(unix)]
-        let host_link = start_host_link(&shared)?;
+        let host_link = start_host_link(&shared, site.as_ref())?;
 
         // The two transports are the same protocol over different plumbing: a
         // unix socket guarded by its 0700 state directory, or a Windows named
@@ -614,7 +642,19 @@ const WATCHER_HELD_TEXT: &str = "another trace-commons-contributor daemon on thi
 /// could watch beside a daemon in the sandbox. Anything else that goes wrong
 /// here costs only the host link, never the daemon.
 #[cfg(unix)]
-fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRuntime>> {
+fn start_host_link(
+    shared: &Arc<ipc::DaemonShared>,
+    site: Option<&HostLinkSite>,
+) -> Result<Option<HostLinkRuntime>> {
+    if let Some(site) = site {
+        return start_host_link_with(
+            shared,
+            &site.platform_default,
+            Some(site.runtime.clone()),
+            site.sandboxed,
+            site.host_unit,
+        );
+    }
     #[cfg(test)]
     if let Some(test) = host_link_test_runtime(shared.store.dir()) {
         return start_host_link_with(

@@ -36,6 +36,13 @@ pub const MIN_SERVICE_LEVEL: u64 = 1;
 // This daemon always meets its own shells.
 const _: () = assert!(SERVICE_LEVEL >= MIN_SERVICE_LEVEL);
 
+/// How long a unit must have been `active`, with no host link and no marker,
+/// before a shell reads it as a daemon from before the host link. A current
+/// daemon started by the unit takes `watcher.lock` and writes the marker
+/// within its first moments, or exits on the lock; it is never active and
+/// markerless this long.
+pub const TOO_OLD_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The background service, as every shell names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -92,6 +99,10 @@ pub struct ServiceFacts {
     /// the shell can ask. A unit held off by this window's lock is
     /// restarting (`activating`), not active.
     pub unit_active: Option<bool>,
+    /// How long the unit has been `active` (its `ActiveEnterTimestamp`
+    /// against now), when the shell can ask. `None` when it cannot, the
+    /// unit is not active, or the timestamp is unset or in the future.
+    pub unit_active_for: Option<std::time::Duration>,
     /// `hello` from a daemon outside this window: the one it is attached
     /// to, or one listening on the host link.
     pub answer: DaemonAnswer,
@@ -102,11 +113,17 @@ pub fn classify(facts: &ServiceFacts) -> ServiceState {
     match facts.answer {
         DaemonAnswer::Meets => ServiceState::Running,
         DaemonAnswer::TooOld => ServiceState::TooOld,
-        // The unit runs and nobody answers on the host link: a daemon from
-        // before the host link (and `service_level`), unreachable from a
-        // sandbox. Running the install command again replaces it.
+        // The unit has run past the grace period, with no host link and no
+        // marker: a daemon from before the host link (and `service_level`),
+        // unreachable from a sandbox. Positive evidence only: a current unit
+        // daemon writes the marker when it takes `watcher.lock` (so it reads
+        // `Down` even if it could not bind the link), and one that loses the
+        // lock exits within the grace period. Running the install command
+        // again replaces an old one.
         DaemonAnswer::NoAnswer
-            if facts.unit_active == Some(true) && facts.link != LinkState::Listening =>
+            if facts.unit_active == Some(true)
+                && facts.link == LinkState::Absent
+                && facts.unit_active_for.is_some_and(|d| d >= TOO_OLD_GRACE) =>
         {
             ServiceState::TooOld
         }
@@ -139,13 +156,20 @@ mod tests {
             hosting,
             unit_installed: unit,
             unit_active: None,
+            unit_active_for: None,
             answer,
         }
     }
 
+    fn active_for(seen: &mut ServiceFacts, secs: Option<u64>) {
+        seen.unit_active = Some(true);
+        seen.unit_active_for = secs.map(std::time::Duration::from_secs);
+    }
+
     #[test]
     fn an_active_unit_nobody_reaches_on_the_host_link_is_too_old() {
-        // From a sandbox: an older host daemon runs and serves no host link.
+        // From a sandbox: an older host daemon has run past the grace period,
+        // wrote no marker and serves no host link.
         for hosting in [false, true] {
             let mut seen = facts(
                 LinkState::Absent,
@@ -153,7 +177,7 @@ mod tests {
                 Some(true),
                 DaemonAnswer::NoAnswer,
             );
-            seen.unit_active = Some(true);
+            active_for(&mut seen, Some(TOO_OLD_GRACE.as_secs() + 1));
             assert_eq!(classify(&seen), ServiceState::TooOld);
         }
         // Not active (held off by this window's lock, restarting): not too
@@ -170,6 +194,43 @@ mod tests {
         );
         seen.unit_active = Some(true);
         assert_eq!(classify(&seen), ServiceState::InstalledNotRunning);
+    }
+
+    /// Too old needs positive evidence of an old daemon: active past the
+    /// grace period with no marker. A current unit daemon that lost
+    /// `watcher.lock` right after the install command is active only until
+    /// it exits; one that claimed the lock wrote the marker (`Down`) even if
+    /// it could not bind the link.
+    #[test]
+    fn an_active_unit_is_too_old_only_after_the_grace_with_no_marker() {
+        let grace = TOO_OLD_GRACE.as_secs();
+        for hosting in [false, true] {
+            // Just started (Type=simple reads active at once), or the
+            // duration is unknown: not too old.
+            for secs in [Some(0), Some(grace - 1), None] {
+                let mut seen = facts(
+                    LinkState::Absent,
+                    hosting,
+                    Some(true),
+                    DaemonAnswer::NoAnswer,
+                );
+                active_for(&mut seen, secs);
+                assert_eq!(
+                    classify(&seen),
+                    ServiceState::InstalledNotRunning,
+                    "{secs:?}"
+                );
+            }
+            // A current daemon that claimed the lock left the marker: down,
+            // however long it has been active.
+            let mut seen = facts(LinkState::Down, hosting, Some(true), DaemonAnswer::NoAnswer);
+            active_for(&mut seen, Some(grace * 100));
+            assert_eq!(classify(&seen), ServiceState::InstalledNotRunning);
+        }
+        // Exactly at the grace: too old.
+        let mut seen = facts(LinkState::Absent, false, Some(true), DaemonAnswer::NoAnswer);
+        active_for(&mut seen, Some(grace));
+        assert_eq!(classify(&seen), ServiceState::TooOld);
     }
 
     #[test]
