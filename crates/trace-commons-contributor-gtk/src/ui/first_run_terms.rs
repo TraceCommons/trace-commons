@@ -206,18 +206,20 @@ impl Reader {
     }
 }
 
+/// The step's title: the light half then the bold one, joined as the Mac's
+/// `FirstRunTitle` joins them (the light half ends in its own space).
+fn title() -> String {
+    let legal = trace_commons_contributor::first_run_copy::first_run_copy()
+        .welcome
+        .legal;
+    [legal.title_light, legal.terms].concat()
+}
+
 impl TermsPage {
     pub(super) fn new(on_continue: impl Fn() + 'static) -> Self {
         let copy = trace_commons_contributor::first_run_copy::first_run_copy();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        let title = gtk::Label::new(Some(&format!(
-            "{} {}",
-            copy.welcome.legal.title_light, copy.welcome.legal.terms
-        )));
-        title.set_xalign(0.0);
-        title.set_wrap(true);
-        title.add_css_class("title-1");
-        root.append(&title);
+        // The same frame and title as every other step (`first_run_screens::page`).
+        let root = super::first_run_screens::page(&title());
         let text = gtk::TextView::builder()
             .editable(false)
             .cursor_visible(false)
@@ -249,6 +251,7 @@ impl TermsPage {
         root.append(&accept);
         let next = gtk::Button::with_label(copy.frame.continue_button);
         next.add_css_class("suggested-action");
+        next.set_halign(gtk::Align::End);
         next.set_sensitive(false);
         root.append(&next);
         let accepted = Rc::new(RefCell::new(None));
@@ -399,5 +402,46 @@ mod tests {
         for word in ["Heading", "one", "two", "A | B", "C | D", "callout"] {
             assert!(text.contains(word));
         }
+    }
+    #[test]
+    fn title_joins_its_halves_as_the_mac_does() {
+        // `FirstRunTitle` concatenates; the light half carries its own space.
+        let legal = trace_commons_contributor::first_run_copy::first_run_copy()
+            .welcome
+            .legal;
+        assert_eq!(title(), [legal.title_light, legal.terms].concat());
+        assert!(!title().contains("  "), "double space in {:?}", title());
+    }
+}
+
+/// Mounted checks, run under a Linux display: `--ignored --test-threads=1`.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod mounted_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn terms_sits_in_the_same_frame_as_the_other_steps() {
+        adw::init().expect("GTK display unavailable");
+        let page = TermsPage::new(|| {});
+        let framed = super::super::first_run_screens::page("");
+        assert_eq!(page.root.margin_start(), framed.margin_start());
+        assert_eq!(page.root.margin_end(), framed.margin_end());
+        assert_eq!(page.root.margin_top(), framed.margin_top());
+        assert_eq!(page.root.margin_bottom(), framed.margin_bottom());
+        let heading = page
+            .root
+            .first_child()
+            .and_then(|w| w.downcast::<gtk::Label>().ok())
+            .expect("title label first");
+        assert!(heading.has_css_class("tc-flow-title"));
+        assert_eq!(heading.label(), title());
+        let next = page
+            .root
+            .last_child()
+            .and_then(|w| w.downcast::<gtk::Button>().ok())
+            .expect("continue last");
+        assert_eq!(next.halign(), gtk::Align::End);
     }
 }
