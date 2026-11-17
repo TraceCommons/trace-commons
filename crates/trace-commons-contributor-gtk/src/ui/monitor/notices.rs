@@ -22,11 +22,13 @@
 //!   A closed card comes back when what it says changes, or when it goes
 //!   and its cause recurs.
 //! - The undo, the consent notices, the account's notices and the Private
-//!   AI offer carry no extra X (`Close::Own`). On the Mac each one's X is
-//!   its own Dismiss (the undo's "close, it still sends"), Acknowledge or
-//!   Not now, which these cards already draw as a button in the same
-//!   words; a second control doing the same thing is not added. A gate
-//!   hold has no X on the Mac either: it goes when the hold does.
+//!   AI offer carry no extra X (`Close::Own`). On the Mac each of these
+//!   draws an X (`GlassPopoverNotice`'s `onClose`) that runs its own
+//!   Dismiss (the undo's "close, it still sends"), Acknowledge or Not now;
+//!   these cards already draw that as a button in the same words, so a
+//!   second control doing the same thing is not added here (the X set the
+//!   owner approved). A gate hold has no X on the Mac: it goes when the
+//!   hold does.
 //!
 //! Deliberate platform differences from the Swift:
 //!
@@ -42,9 +44,12 @@
 //!   again on 2026-11-17): it pushes nothing down, so the front card covers
 //!   the top of the tab until it is closed. Only the front card is drawn
 //!   whole and up to two cards behind it peek out under it (`stack`). A
-//!   front card with no X (the undo, a consent or account notice, the
+//!   front card with no X here (the undo, a consent or account notice, the
 //!   Private AI offer, an update installing) keeps the cards behind it out
-//!   of reach until its own button puts it away, as on the Mac.
+//!   of reach until its own button puts it away. The Mac differs: there
+//!   every one of those but an update (which it does not show) has an X,
+//!   and only a card that goes when its cause does (a gate hold, the terms
+//!   hold, a down or unread core's health) has none.
 //! - Not ported: the Mac's slide-in and fade (a new card simply replaces
 //!   the front one here), its plates drawn behind the front card at the
 //!   front card's size (here they are slivers under it), and the 4% a

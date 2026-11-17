@@ -216,6 +216,14 @@
   color: @tc_gold_text;
 }
 
+/* The Traces count badge with its attention glyph: still text on the
+   accent fill, so it keeps the fill's own label colour. The glyph, not a
+   gold that reads 1.08:1 on purple, is what says "look at this"; the Mac's
+   badge has one colour pair whatever it counts. */
+.tc-count-badge.tc-attention {
+  color: @tc_primary_label;
+}
+
 .tc-held {
   color: @tc_blue_text;
 }
@@ -516,9 +524,14 @@ row:selected {
 /* A notice carrying its X (`monitor::shell`): the X sits inside the card's
    top-right corner, as the Mac's `GlassPopoverNotice` draws it, and the
    card keeps the room for it so it never sits on the words. */
-.tc-notice-closable .tc-banner,
-.tc-notice-closable .tc-card {
+.tc-notice-closable .tc-notice-surface {
   padding-right: 48px;
+}
+
+/* The notice stack's ground (`monitor::shell`): the pane's colour across
+   the pane's width, so nothing of the tab shows beside a card. */
+.tc-notice-backdrop {
+  background-color: @tc_bg;
 }
 
 /* A card behind the front one, peeking out under it
@@ -570,4 +583,12 @@ row:selected {
 .tc-field text {
   background-color: @tc_surface;
   color: @tc_ink;
+}
+
+/* A switcher inside an Insights card (By model / By project / By tool):
+   each button as wide as its words. libadwaita gives a switcher's text
+   button a 100px floor, and three of them made the Overview's column wider
+   than the Monitor's 440 main pane. */
+stackswitcher.tc-compact-switcher > button.text-button {
+  min-width: 0;
 }

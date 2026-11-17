@@ -1433,6 +1433,9 @@ fn breakdown(overview: &WeekOverview) -> gtk::Box {
     let card = card_box();
     let stack = gtk::Stack::new();
     let switcher = gtk::StackSwitcher::new();
+    // Each button as wide as its words: libadwaita's 100px floor for a
+    // switcher button made these three wider than the 440 pane's column.
+    switcher.add_css_class("tc-compact-switcher");
     switcher.set_stack(Some(&stack));
     card.append(&switcher);
     card.append(&stack);
