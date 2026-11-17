@@ -12,13 +12,11 @@
 # opens it directly on a named page, so no clicking at root-window coordinates
 # is needed here -- unlike roots-answer.sh, which has no such flag to lean on.
 #
-# Two of the labels under test start hidden (`invite_error` and
-# `invite_instance` are `.visible(false)` until a connect attempt fails), so a
-# plain connect shot cannot show them. TC_FORCE_CONNECT_NOTICES makes the
-# Connect page reveal both with placeholder text, for the camera only.
+# The Connect page is gone: joining is the first run's Join (owner,
+# 2026-11-17), so it is not photographed here.
 set -euo pipefail
 
-PAGES=${PAGES:-"welcome connect consent watch"}
+PAGES=${PAGES:-"welcome consent watch"}
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fixture.sh
@@ -41,7 +39,6 @@ sleep 5
 
 export GSETTINGS_BACKEND=memory
 export G_MESSAGES_DEBUG=
-export TC_FORCE_CONNECT_NOTICES=1
 
 for page in $PAGES; do
   shot=".linux-onboarding-$page.png"

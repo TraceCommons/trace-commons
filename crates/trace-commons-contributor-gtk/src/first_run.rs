@@ -504,6 +504,10 @@ impl Runner {
     pub fn busy(&self) -> bool {
         self.current.is_some()
     }
+    /// The action now waiting on the daemon, if any.
+    pub fn current(&self) -> Option<&Ticket> {
+        self.current.as_ref()
+    }
     pub fn begin(&mut self, state: &State, commit: Commit) -> Option<Ticket> {
         if self.busy() {
             return None;

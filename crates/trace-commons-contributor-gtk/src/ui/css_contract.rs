@@ -20,6 +20,8 @@ mod tests {
     const SOURCES: &[(&str, &str)] = &[
         ("roots.rs", include_str!("roots.rs")),
         ("first_run.rs", include_str!("first_run.rs")),
+        ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+        ("first_run_tools.rs", include_str!("first_run_tools.rs")),
         ("insights.rs", include_str!("insights.rs")),
         (
             "insights_analytics.rs",
@@ -195,8 +197,8 @@ mod tests {
             ("first_run_terms.rs", include_str!("first_run_terms.rs")),
             ("roots.rs", include_str!("roots.rs")),
             ("onboarding.rs", include_str!("onboarding.rs")),
-            ("onboarding_nearai.rs", include_str!("onboarding_nearai.rs")),
-            ("onboarding_wallet.rs", include_str!("onboarding_wallet.rs")),
+            ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+            ("first_run_tools.rs", include_str!("first_run_tools.rs")),
         ];
         let mut offenders = Vec::new();
         for (file, source) in FLOW {

@@ -128,13 +128,14 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 206),
+    // Lowered from 206 (first-run parity, 2026-11-17): the roots and
+    // Connect screens' own words left with them.
+    ("copy.rs", 193),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
     ("tray.rs", 1),
     ("ui/history.rs", 3),
-    ("ui/onboarding.rs", 2),
     ("ui/preview.rs", 10),
     ("ui/queue.rs", 8),
     // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became

@@ -25,7 +25,7 @@ use gtk::glib;
 use serde_json::{Value, json};
 
 use crate::copy;
-use crate::ui::{App, PRIVATE_INFERENCE_SCREEN, credential, onboarding};
+use crate::ui::{App, PRIVATE_INFERENCE_SCREEN, credential};
 use crate::worker::{Job, Outcome, Worker};
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -246,48 +246,6 @@ fn wallet_provider_signals_preserve_pending_and_recover() {
     fixture.assert_unnamed_start(1);
     fixture.refuse_start(1);
     fixture.settle(&context);
-
-    assert!(onboarding::present_at_page(app, "connect"));
-    let window = gtk::Window::list_toplevels()
-        .into_iter()
-        .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
-        .find(|window| window.transient_for().as_ref() == Some(app.window.upcast_ref()))
-        .expect("real onboarding window must open");
-    let root = window.upcast_ref::<gtk::Widget>();
-    fixture.drive_until(&context, || {
-        descendants(root).into_iter().any(|widget| {
-            widget.downcast::<gtk::Button>().ok().is_some_and(|button| {
-                button.label().as_deref() == Some(copy::CREDENTIAL_OBTAIN) && button.is_mapped()
-            })
-        })
-    });
-    assert_no_login_choice(root);
-    obtain_button(root).emit_clicked();
-    obtain_button(root).emit_clicked();
-    fixture.drive_until(&context, || fixture.starts.borrow().len() == 3);
-    fixture.assert_unnamed_start(2);
-    assert!(credential::pending(app));
-    assert!(!obtain_button(root).is_sensitive());
-    let reads = fixture.status_reads();
-    // Let the actual mapped card's periodic status callback execute while its
-    // sign-in response stays held. A poll must not make the action pressable.
-    fixture.drive_until(&context, || fixture.status_reads() > reads);
-    fixture.drive_until(&context, || app.callbacks.borrow().len() == 1);
-    assert!(
-        !obtain_button(root).is_sensitive(),
-        "onboarding poll re-enabled a pending sign-in"
-    );
-    obtain_button(root).emit_clicked();
-    fixture.drain_jobs();
-    fixture.assert_unnamed_start(2);
-    fixture.refuse_start(2);
-    fixture.drive_until(&context, || {
-        !credential::pending(app) && obtain_button(root).is_sensitive()
-    });
-    obtain_button(root).emit_clicked();
-    fixture.drive_until(&context, || fixture.starts.borrow().len() == 4);
-    fixture.assert_unnamed_start(3);
-    fixture.refuse_start(3);
-    fixture.settle(&context);
-    assert!(!credential::pending(app));
+    // The legacy Connect screen's near.ai card is gone: joining is the
+    // first run's Join, which runs the sign-in as a commit.
 }

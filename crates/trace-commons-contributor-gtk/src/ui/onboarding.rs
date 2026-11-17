@@ -14,11 +14,10 @@
 //!
 //! ## Three things here are contract, not styling
 //!
-//! 1. **One failure sentence for the whole invite path.** `enroll` answers
-//!    `enroll-failed` and never echoes the HTTP condition, so
-//!    [`copy::ONBOARD_CONNECT_FAILED`] is shown whatever went wrong --
-//!    including for an invite this app rejected before sending. Anything
-//!    more specific would leak what the daemon withheld.
+//! 1. **Joining is the first run's.** The Connect screen that enrolled an
+//!    invite, with its near.ai and wallet cards, was replaced by the first
+//!    run's Join (`first_run.rs`), as on the Mac; wallet sign-in is not
+//!    offered on Linux (owner, 2026-11-17). Get started here opens it.
 //!
 //! 2. **Scope rows come from `consent_options`.** The list and the
 //!    descriptions are the daemon's, never a hardcoded table here, so an
@@ -48,7 +47,6 @@ use adw::prelude::*;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Step {
     Welcome,
-    Connect,
     Consent,
     Scan,
     Watch,
@@ -59,7 +57,6 @@ impl Step {
     fn page_name(self) -> &'static str {
         match self {
             Step::Welcome => "welcome",
-            Step::Connect => "connect",
             Step::Consent => "consent",
             Step::Scan => "scan",
             Step::Watch => "watch",
@@ -88,16 +85,6 @@ struct ScopeOption {
 pub struct Onboarding {
     pub(super) window: adw::Window,
     stack: gtk::Stack,
-    joined: Option<Box<dyn Fn()>>,
-    join_lifetime: JoinLifetime,
-    join_cancellations: RefCell<Vec<Box<dyn Fn()>>>,
-    /// The invite field. Read once, on Connect, and never re-read into any
-    /// label -- the raw text is a credential.
-    pub(super) invite: gtk::Entry,
-    invite_error: gtk::Label,
-    invite_instance: gtk::Label,
-    pub(super) connect_button: gtk::Button,
-    pub(super) connection_busy: std::cell::Cell<bool>,
     /// Checkboxes for the optional scopes, in wire-name order. The floor
     /// scope is not in here: it is drawn but never toggleable.
     scope_checks: RefCell<Vec<(String, gtk::CheckButton)>>,
@@ -266,73 +253,10 @@ pub(super) fn register_automatic_window(window: &adw::Window) {
     AUTOMATIC_WINDOW.with(|current| *current.borrow_mut() = Some(window.downgrade()));
 }
 
-/// Enrollment controls embedded after Terms in the first-run coordinator.
-/// Authentication remains in the existing Linux adapters; success returns to
-/// the coordinator before any consent or sharing changes are made.
-pub(super) fn join_surface(
-    app: &Rc<App>,
-    window: &adw::Window,
-    on_joined: impl Fn() + 'static,
-) -> gtk::Box {
-    let invite_error = body_label(copy::ONBOARD_CONNECT_FAILED);
-    invite_error.add_css_class("tc-refused");
-    invite_error.set_visible(false);
-    let invite_instance = body_label("");
-    invite_instance.add_css_class("tc-meta");
-    invite_instance.set_visible(false);
-    let connect_button = gtk::Button::with_label(copy::ONBOARD_CONNECT_BUTTON);
-    connect_button.add_css_class("suggested-action");
-    connect_button.set_sensitive(false);
-    let onboarding = Rc::new(Onboarding {
-        window: window.clone(),
-        stack: gtk::Stack::new(),
-        joined: Some(Box::new(on_joined)),
-        join_lifetime: JoinLifetime::default(),
-        join_cancellations: RefCell::new(Vec::new()),
-        invite: gtk::Entry::builder()
-            .placeholder_text(copy::ONBOARD_CONNECT_PLACEHOLDER)
-            .hexpand(true)
-            .build(),
-        invite_error,
-        invite_instance,
-        connect_button,
-        connection_busy: std::cell::Cell::new(false),
-        scope_checks: RefCell::new(Vec::new()),
-        consent_body: gtk::Box::new(gtk::Orientation::Vertical, space::M),
-        scan_local_only: gtk::CheckButton::new(),
-        scan_offered: std::cell::Cell::new(false),
-    });
-    let page = connect_page(app, &onboarding);
-    page.connect_map({
-        let weak = Rc::downgrade(&onboarding);
-        move |_| {
-            if let Some(onboarding) = weak.upgrade() {
-                onboarding.join_lifetime.active.set(true);
-            }
-        }
-    });
-    page.connect_unmap({
-        let weak = Rc::downgrade(&onboarding);
-        move |_| {
-            if let Some(onboarding) = weak.upgrade() {
-                onboarding.invalidate_join();
-            }
-        }
-    });
-    window.connect_close_request({
-        let weak = Rc::downgrade(&onboarding);
-        move |_| {
-            if let Some(onboarding) = weak.upgrade() {
-                onboarding.invalidate_join();
-            }
-            glib::Propagation::Proceed
-        }
-    });
-    // Consume the credential only here: deep links must never skip Terms.
-    if let Some(invite) = PENDING_INVITE.with(|pending| pending.borrow_mut().take()) {
-        onboarding.invite.set_text(&invite);
-    }
-    page
+/// An invite handed to this process, for the first run's Join to show after
+/// Terms. Taken once: deep links must never skip Terms.
+pub(super) fn take_pending_invite() -> Option<String> {
+    PENDING_INVITE.with(|pending| pending.borrow_mut().take())
 }
 
 /// Build and show the window, optionally opening on a specific screen.
@@ -364,35 +288,6 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         .vexpand(true)
         .build();
 
-    let invite = gtk::Entry::builder()
-        .placeholder_text(copy::ONBOARD_CONNECT_PLACEHOLDER)
-        .hexpand(true)
-        .build();
-    let invite_error = gtk::Label::builder()
-        .label(copy::ONBOARD_CONNECT_FAILED)
-        .xalign(0.0)
-        .wrap(true)
-        .visible(false)
-        .build();
-    // The same class the roots screen gives its failure line: a refusal
-    // sentence reads as a refusal because of its colour, and this one shipped
-    // wearing `tc-error`, which no stylesheet defines -- so a contributor whose
-    // invite was rejected got that news in the same black as the instructions.
-    invite_error.add_css_class("tc-refused");
-    let invite_instance = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .visible(false)
-        .build();
-    // A secondary annotation under a field, which is what `tc-meta` is for --
-    // the roots screen uses it for the evidence line in the same position.
-    invite_instance.add_css_class("tc-meta");
-    let connect_button = gtk::Button::builder()
-        .label(copy::ONBOARD_CONNECT_BUTTON)
-        .sensitive(false)
-        .build();
-    connect_button.add_css_class("suggested-action");
-
     let consent_body = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(space::M)
@@ -406,24 +301,15 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     let onboarding = Rc::new(Onboarding {
         window: window.clone(),
         stack: stack.clone(),
-        joined: None,
-        join_lifetime: JoinLifetime::default(),
-        join_cancellations: RefCell::new(Vec::new()),
-        invite: invite.clone(),
-        invite_error: invite_error.clone(),
-        invite_instance: invite_instance.clone(),
-        connect_button: connect_button.clone(),
-        connection_busy: std::cell::Cell::new(false),
         scope_checks: RefCell::new(Vec::new()),
         consent_body: consent_body.clone(),
         scan_local_only: scan_local_only.clone(),
         scan_offered: std::cell::Cell::new(false),
     });
 
-    stack.add_named(&welcome_page(&onboarding), Some(Step::Welcome.page_name()));
     stack.add_named(
-        &connect_page(app, &onboarding),
-        Some(Step::Connect.page_name()),
+        &welcome_page(app, &onboarding),
+        Some(Step::Welcome.page_name()),
     );
     stack.add_named(
         &consent_page(app, &onboarding),
@@ -447,6 +333,11 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     content.append(&stack);
     window.set_content(Some(&content));
 
+    // Consent fills itself from `consent_options`; nothing else leads to it
+    // now that joining is the first run's, so it asks when opened directly.
+    if start == Some(Step::Consent) {
+        load_consent_options(app, &onboarding);
+    }
     onboarding.go(start.unwrap_or(Step::Welcome));
     if start.is_none() {
         register_automatic_window(&window);
@@ -486,7 +377,6 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
 pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
     let step = match page {
         "welcome" => Step::Welcome,
-        "connect" => Step::Connect,
         "consent" => Step::Consent,
         "scan" => Step::Scan,
         "watch" => Step::Watch,
@@ -516,65 +406,16 @@ pub fn present_for_health(app: &Rc<App>, label: &str) {
 /// with somewhere to send someone are the same set.
 fn health_step(label: &str) -> Option<Step> {
     match label {
-        "not-logged-in" => Some(Step::Connect),
+        // Answered by the first run's Join; `present_for_health` opens it
+        // before this is asked.
+        "not-logged-in" => Some(Step::Welcome),
         "near-ai-notice-not-acknowledged" => Some(Step::Scan),
         _ => None,
     }
 }
 
-/// A callback may continue only during the appearance that started it.
-struct JoinLifetime {
-    generation: std::cell::Cell<u64>,
-    active: std::cell::Cell<bool>,
-}
-impl Default for JoinLifetime {
-    fn default() -> Self {
-        Self {
-            generation: std::cell::Cell::new(0),
-            active: std::cell::Cell::new(true),
-        }
-    }
-}
-impl JoinLifetime {
-    fn valid(&self, generation: u64) -> bool {
-        self.active.get() && self.generation.get() == generation
-    }
-    fn invalidate(&self) {
-        self.active.set(false);
-        self.generation.set(self.generation.get().wrapping_add(1));
-    }
-}
-
 impl Onboarding {
-    pub(super) fn embedded(&self) -> bool {
-        self.joined.is_some()
-    }
-    pub(super) fn join_generation(&self) -> u64 {
-        self.join_lifetime.generation.get()
-    }
-    pub(super) fn join_valid(&self, generation: u64) -> bool {
-        self.join_lifetime.valid(generation)
-    }
-    pub(super) fn on_join_cancel(&self, callback: impl Fn() + 'static) {
-        self.join_cancellations
-            .borrow_mut()
-            .push(Box::new(callback));
-    }
-    fn invalidate_join(&self) {
-        self.join_lifetime.invalidate();
-        self.connection_busy.set(false);
-        for cancel in self.join_cancellations.borrow().iter() {
-            cancel();
-        }
-    }
-
     pub(super) fn go(self: &Rc<Self>, step: Step) {
-        if step == Step::Consent
-            && let Some(joined) = &self.joined
-        {
-            joined();
-            return;
-        }
         self.stack.set_visible_child_name(step.page_name());
     }
 
@@ -749,7 +590,7 @@ fn button_row(button: &gtk::Button) -> gtk::Box {
     row
 }
 
-fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
+fn welcome_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_WELCOME_TITLE);
 
     // The mark, on the one screen whose job is to introduce the product.
@@ -809,9 +650,16 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
 
     let next = gtk::Button::with_label(copy::ONBOARD_GET_STARTED);
     next.add_css_class("suggested-action");
+    // Joining is the first run's now: Get started hands over to it.
     next.connect_clicked({
         let onboarding = onboarding.clone();
-        move |_| onboarding.go(Step::Connect)
+        let app = Rc::downgrade(app);
+        move |_| {
+            onboarding.window.close();
+            if let Some(app) = app.upgrade() {
+                present(&app);
+            }
+        }
     });
     let agent = gtk::Button::with_label(
         trace_commons_contributor::first_run_copy::first_run_copy()
@@ -832,161 +680,9 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     outer
 }
 
-fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_CONNECT_TITLE);
-    body.append(&body_label(copy::ONBOARD_CONNECT_PROMPT));
-    body.append(&onboarding.invite);
-    body.append(&onboarding.invite_instance);
-    body.append(&onboarding.invite_error);
-
-    // Both notices are hidden until a connect attempt resolves, so neither is
-    // on screen for a camera -- which is exactly how they shipped wearing
-    // class names no stylesheet defined. Under Xvfb, reveal them with
-    // placeholder text so `scripts/onboarding-shots.sh` can photograph the
-    // states a contributor only meets when something has gone wrong. Guarded
-    // by an environment variable rather than a flag: nothing in a real
-    // session sets it, and a contributor cannot reach it by accident.
-    if std::env::var_os("TC_FORCE_CONNECT_NOTICES").is_some() {
-        onboarding
-            .invite_instance
-            .set_label("This invite is for issuer.example.org.");
-        onboarding.invite_instance.set_visible(true);
-        onboarding.invite_error.set_visible(true);
-    }
-
-    // Resolve and show the instance before committing, per the spec. The
-    // host is all this asks for: `invite_issuer_host` exists so a shell
-    // cannot be handed the code alongside it.
-    onboarding.invite.connect_changed({
-        let onboarding = onboarding.clone();
-        move |entry| {
-            let raw = entry.text();
-            let host = trace_commons_contributor::commands::invite_issuer_host(&raw);
-            onboarding.invite_error.set_visible(false);
-            match host {
-                Some(host) => {
-                    onboarding
-                        .invite_instance
-                        .set_label(&format!("This invite is for {host}."));
-                    onboarding.invite_instance.set_visible(true);
-                    onboarding
-                        .connect_button
-                        .set_sensitive(!onboarding.connection_busy.get());
-                }
-                None => {
-                    onboarding.invite_instance.set_visible(false);
-                    // Not an error yet -- someone is still typing. The
-                    // failure sentence belongs to a submitted invite, not
-                    // to a half-pasted one.
-                    onboarding.connect_button.set_sensitive(false);
-                }
-            }
-        }
-    });
-
-    // The way in that needs no wallet, above the wallet ceremony rather than
-    // below it. Both are offered and neither replaces the other; this one is
-    // first because it is the shorter road for a contributor who already has
-    // the NEAR AI account the receipts come from anyway.
-    let near_ai = super::onboarding_nearai::build(app, onboarding);
-    body.append(&near_ai);
-
-    let wallet = super::onboarding_wallet::build(app, onboarding);
-    body.append(&wallet);
-
-    onboarding.connect_button.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        let wallet = wallet.clone();
-        move |button| {
-            let generation = onboarding.join_generation();
-            if !onboarding.join_valid(generation) || onboarding.connection_busy.replace(true) {
-                return;
-            }
-            wallet.set_sensitive(false);
-            onboarding.invite.set_sensitive(false);
-            button.set_sensitive(false);
-            onboarding.invite_error.set_visible(false);
-            let invite = onboarding.invite.text().to_string();
-            // No `scopes` here on purpose: absent means floor-scope-only,
-            // and the scopes screen is next. Sending a guess now would
-            // grant something the contributor has not been asked about.
-            let enroll = {
-                let onboarding = onboarding.clone();
-                let wallet = wallet.clone();
-                move |app: &Rc<App>| {
-                    if !onboarding.join_valid(generation) {
-                        return;
-                    }
-                    app.call("enroll", serde_json::json!({"invite":invite}), {
-                        let onboarding = onboarding.clone();
-                        let wallet = wallet.clone();
-                        move |app, result| {
-                            if !onboarding.join_valid(generation) {
-                                return;
-                            }
-                            onboarding.connection_busy.set(false);
-                            wallet.set_sensitive(true);
-                            onboarding.invite.set_sensitive(true);
-                            if result.is_ok() {
-                                onboarding.invite.set_text("");
-                                load_consent_options(app, &onboarding);
-                                onboarding.go(Step::Consent);
-                            } else {
-                                onboarding.invite_error.set_visible(true);
-                                onboarding.connect_button.set_sensitive(true);
-                            }
-                        }
-                    });
-                }
-            };
-            if onboarding.embedded() {
-                let onboarding = onboarding.clone();
-                let wallet = wallet.clone();
-                app.call(
-                    "invite_lookup",
-                    serde_json::json!({"code":onboarding.invite.text().as_str()}),
-                    move |app, result| {
-                        if !onboarding.join_valid(generation) {
-                            return;
-                        }
-                        if result
-                            .ok()
-                            .is_some_and(|value| value["valid"].as_bool() == Some(true))
-                        {
-                            enroll(app);
-                        } else {
-                            onboarding.connection_busy.set(false);
-                            wallet.set_sensitive(true);
-                            onboarding.invite.set_sensitive(true);
-                            onboarding.invite_error.set_visible(true);
-                            onboarding.connect_button.set_sensitive(true);
-                        }
-                    },
-                );
-            } else {
-                enroll(&app);
-            }
-        }
-    });
-
-    // The connect choices scroll at narrow window sizes and large text settings.
-    outer.remove(&body);
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .child(&body)
-        .build();
-    outer.append(&scroll);
-    outer.append(&button_row(&onboarding.connect_button));
-    outer
-}
-
 /// Fill the consent screen from `consent_options`, and decide on the way
 /// past whether screen 4 has anything to offer.
 pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
-    if onboarding.joined.is_some() {
-        return;
-    }
     app.call("consent_options", serde_json::json!({}), {
         let onboarding = onboarding.clone();
         move |_app, result| {
@@ -1523,18 +1219,6 @@ mod tests {
             }))
             .is_err()
         );
-    }
-
-    #[test]
-    fn leaving_join_invalidates_pending_enrollment_even_after_return() {
-        let lifetime = JoinLifetime::default();
-        let started = lifetime.generation.get();
-        assert!(lifetime.valid(started));
-        lifetime.invalidate();
-        assert!(!lifetime.valid(started));
-        lifetime.active.set(true);
-        assert!(!lifetime.valid(started));
-        assert!(lifetime.valid(lifetime.generation.get()));
     }
 
     #[test]

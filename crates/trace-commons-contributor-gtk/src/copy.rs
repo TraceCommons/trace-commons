@@ -1450,21 +1450,6 @@ pub fn scrub_detector_label(slug: &str) -> String {
     }
 }
 
-pub const ONBOARD_CONNECT_TITLE: &str = "Connect";
-pub const ONBOARD_CONNECT_PROMPT: &str =
-    "Paste the invite link someone sent you, or click it from your email.";
-pub const ONBOARD_CONNECT_PLACEHOLDER: &str = "https://…/onboard#…";
-pub const ONBOARD_CONNECT_BUTTON: &str = "Connect";
-/// One sentence for the entire invite path -- an invite this app cannot
-/// parse and one the daemon refused both land here.
-///
-/// `enroll` answers `enroll-failed` and never echoes the underlying HTTP
-/// condition (see "### `enroll`" in `docs/contributor-daemon-ipc-v1_1.md`),
-/// so showing anything more specific would either invent detail the daemon
-/// withheld or leak the detail it deliberately withheld.
-pub const ONBOARD_CONNECT_FAILED: &str =
-    "This invite link is no longer valid. Ask whoever sent it for a new one.";
-
 pub const ONBOARD_CONSENT_TITLE: &str = "How may your traces be used?";
 pub const ONBOARD_CONSENT_SUBTITLE: &str =
     "You can change this later. It applies to traces you send from now on.";
@@ -1572,75 +1557,22 @@ pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";
 pub const ONBOARD_DONE_BODY: &str = trace_commons_contributor::onboarding_copy::DONE_BODY;
 pub const ONBOARD_DONE_BUTTON: &str = "Finish";
 
-// The roots screen. It runs BEFORE the daemon starts, so it is not one of
-// the six onboarding screens above -- those are all daemon-backed, which is
-// exactly why the roots refusal used to be a dead end.
+// The first run's Tools, before the daemon starts. Its words are the core's
+// (`first_run_copy`); these are the tools' names, which the Mac also keeps
+// in its shell (`SourceKind.displayName`), and the one failure line for a
+// declaration the settings file would not take.
 
-pub const ROOTS_TITLE: &str = "Which folders may this app watch?";
-pub const ROOTS_BODY: &str = concat!(
-    app_name!(),
-    " reads coding-agent transcripts. It will not guess where they are, and it will not \
-     watch anything until you say so."
-);
-/// Says the consequence, per the copy rules. Without this sentence "skip it"
-/// reads as safe, and it is the opposite of safe: an unanswered source is
-/// the one that falls back to the real location.
-///
-/// Says "each" rather than naming how many rows there are: the screen has
-/// grown as adapters were added, and a count here would need updating every
-/// time another one is.
-pub const ROOTS_BOTH: &str = "Answer for each. Leaving one blank is not the same as skipping it -- an unanswered folder \
-     falls back to the standard location, which is probably your real work.";
-pub const ROOTS_CLAUDE: &str = "Claude Code traces";
-pub const ROOTS_CODEX: &str = "Codex traces";
-pub const ROOTS_GEMINI: &str = "Gemini CLI traces";
-pub const ROOTS_CLINE: &str = "Cline traces";
-pub const ROOTS_OPENCODE: &str = "OpenCode traces";
+pub const ROOTS_CLAUDE: &str = "Claude Code";
+pub const ROOTS_CODEX: &str = "Codex";
+pub const ROOTS_GEMINI: &str = "Gemini CLI";
+pub const ROOTS_CLINE: &str = "Cline";
+pub const ROOTS_OPENCODE: &str = "OpenCode";
 /// Shown when a store arrives that this build has no name for -- a newer
 /// contributor library discovering a source this shell predates. Deliberately
 /// not one of the named titles: a row must never claim to be a product it is
 /// not, and the path beside it still says exactly what would be read.
 pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent traces";
-pub const ROOTS_WATCH: &str = "Watch this folder";
-pub const ROOTS_OFF: &str = "Not used";
-pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
-pub const ROOTS_CONTINUE: &str = "Continue";
 pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
-/// Shown against a path that is not on this machine. Not an error: naming a
-/// folder that does not exist yet is allowed, and saying so is more use than
-/// refusing it.
-pub const ROOTS_ABSENT: &str = "Not on this machine";
-pub const ROOTS_EMPTY: &str = "No traces yet";
-/// Said when an environment variable moved the store, so a path that is not
-/// the usual one does not read as a mistake.
-pub const ROOTS_RELOCATED: &str = "Set by an environment variable";
-
-/// The evidence line under a discovered folder.
-///
-/// A count and a recency, because that is what makes this a consent prompt
-/// rather than a text field: "946 traces, most recent 2 hours ago" tells a
-/// contributor what they are agreeing to.
-pub fn roots_evidence(session_count: u64, recent: Option<&str>) -> String {
-    let sessions = if session_count == 1 {
-        "1 trace".to_string()
-    } else {
-        format!("{session_count} traces")
-    };
-    match recent {
-        Some(when) => format!("{sessions}, most recent {when}"),
-        None => sessions,
-    }
-}
-
-/// A coarse "how long ago", in the vocabulary the rest of the app uses.
-pub fn roots_ago(seconds: i64) -> String {
-    match seconds {
-        s if s < 90 => "just now".to_string(),
-        s if s < 5400 => format!("{} minutes ago", (s + 30) / 60),
-        s if s < 172_800 => format!("{} hours ago", (s + 1800) / 3600),
-        s => format!("{} days ago", (s + 43200) / 86400),
-    }
-}
 
 // --- The submit toast --------------------------------------------------
 //
@@ -2408,38 +2340,6 @@ mod tests {
         // test case -- two different sizes must produce two different
         // captions.
         assert_ne!(too_large_caption(1_000_000), too_large_caption(400_000_000));
-    }
-
-    #[test]
-    fn the_evidence_line_counts_one_session_without_a_plural() {
-        assert_eq!(roots_evidence(1, None), "1 trace");
-        assert_eq!(roots_evidence(0, None), "0 traces");
-        assert_eq!(roots_evidence(946, None), "946 traces");
-    }
-
-    #[test]
-    fn the_evidence_line_carries_the_recency_when_there_is_one() {
-        assert_eq!(
-            roots_evidence(946, Some("2 hours ago")),
-            "946 traces, most recent 2 hours ago"
-        );
-    }
-
-    #[test]
-    fn ago_reads_in_the_largest_unit_that_fits() {
-        assert_eq!(roots_ago(5), "just now");
-        assert_eq!(roots_ago(600), "10 minutes ago");
-        assert_eq!(roots_ago(7200), "2 hours ago");
-        assert_eq!(roots_ago(86_400 * 3), "3 days ago");
-    }
-
-    #[test]
-    fn the_roots_copy_says_what_leaving_one_blank_actually_does() {
-        // A screen that said only "answer both" would leave the
-        // contributor thinking a blank means "skip that one", which is the
-        // fail-open this whole slice removes.
-        assert!(ROOTS_BOTH.contains("falls back"));
-        assert!(ROOTS_BODY.contains("will not watch anything until you say"));
     }
 
     #[test]
