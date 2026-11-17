@@ -93,7 +93,8 @@ finish-args:
   # (the CLI installer plus its systemd user unit), it serves a second socket,
   # the host link, at $XDG_RUNTIME_DIR/trace-commons/daemon.sock, and this
   # window attaches to it instead of running a daemon in the sandbox: the
-  # sandbox has no network and cannot open a host terminal. The directory
+  # sandbox cannot open a host terminal, and a daemon in it stops watching
+  # when the window closes. The directory
   # holds that socket, a lock file (watcher.lock) that keeps a host daemon
   # and an in-sandbox one from watching the same sessions, and the empty
   # host-unit marker the systemd unit's daemon writes -- never the host

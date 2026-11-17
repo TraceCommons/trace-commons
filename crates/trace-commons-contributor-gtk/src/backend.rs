@@ -155,8 +155,9 @@ impl Backend {
     /// given, so the preference order is testable off Linux.
     ///
     /// Inside a Flatpak sandbox, a host daemon -- listening, or installed and
-    /// down -- comes first: the sandbox has no network and cannot open a host
-    /// terminal, and a second daemon there would watch the same sessions.
+    /// down -- comes first: the sandbox cannot open a host terminal, a daemon
+    /// in it stops when the window closes, and a second daemon there would
+    /// watch the same sessions.
     /// Without one, the path below runs exactly as outside a sandbox. See
     /// `docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`.
     pub fn open_with(

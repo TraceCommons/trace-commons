@@ -7,21 +7,18 @@ Linux yet; the checklist at the end is what a Linux box must confirm.
 ## Problem
 
 The Flatpak build of the Linux shell runs its daemon inside the sandbox, and
-inside the sandbox almost nothing the daemon needs is reachable:
+from inside the sandbox two things the product needs are out of reach:
 
-- **No network.** `finish-args` in
-  `crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml`
-  has no `--share=network`, and it never had one (`git log -S'share=network'`
-  on the manifest finds nothing; `release-apps.yml` passes no finish-arg
-  overrides to `flatpak-builder`). A Flatpak without that permission gets its
-  own network namespace with loopback only. From code reading, then: the
-  in-sandbox daemon cannot reach the issuer, ingest, or NEAR AI, so it cannot
-  enroll, upload, sign in, or run a Private AI session today. Not yet
-  confirmed on a Linux box (checklist item 1).
+- **Network is not the reason.** The manifest had no `--share=network`;
+  #2172 adds it (owner, 2026-11-17), so the in-sandbox daemon can reach the
+  issuer, ingest and NEAR AI. The host daemon is not a network workaround.
 - **No host terminal.** `managed::terminal::sandboxed()` turns Launch off
   under `/.flatpak-info`; the sandbox cannot exec a host terminal.
 - **No host tools or folders.** `claude`, `codex` and `opencode` on the host
   `PATH`, and the person's project folders, are outside the sandbox.
+- **No watching once the window closes.** A daemon in the sandbox lives in
+  the window's process; the host daemon keeps watching for traces when the
+  window is closed, and is the single watcher on the login.
 
 ## Decision
 
@@ -156,9 +153,10 @@ it, so the window then shows its existing not-running state.
 `flock` on one inode reached through a bind mount is the same lock on both
 sides (checklist item 4).
 
-Existing in-sandbox enrollments: without network the sandbox could not
-enroll, so none should exist. If one did, it stays in the sandbox directory,
-unused while the host daemon runs; nothing migrates it.
+Existing in-sandbox enrollments: with #2172's network grant the sandbox can
+enroll. Such an enrollment, its declared folders and its sign-ins stay in the
+sandbox directory, unused while the host daemon runs; nothing migrates them,
+and the host daemon starts with its own state (owner review point below).
 
 ## Version skew
 
@@ -220,8 +218,8 @@ Not changed in this branch, because the in-sandbox fallback (case 4) still
 needs them:
 
 - `--filesystem=~/.claude/projects:ro` and `~/.codex/sessions:ro`: only the
-  in-sandbox daemon reads sessions. If the in-sandbox daemon is retired (it
-  cannot upload without network anyway), both go.
+  in-sandbox daemon reads sessions. If the in-sandbox daemon is retired,
+  both go.
 - `--socket=session-bus` could narrow to `--talk-name` entries for
   Notifications, the StatusNotifierWatcher and `portal.Flatpak`, plus
   `org.freedesktop.secrets` only while the sandbox still hosts. Risky without
@@ -257,8 +255,9 @@ needs them:
 ## Linux checklist
 
 1. In the installed Flatpak, `flatpak run --command=sh ai.tracecommons.Contributor`
-   then `curl -sS https://tracecommons.ai` (or `getent hosts tracecommons.ai`)
-   fails: confirms there is no network in the sandbox today.
+   then `getent hosts tracecommons.ai`: record whether the sandbox resolves
+   names (it does once #2172's `--share=network` ships). Informational; the
+   host daemon does not depend on it.
 2. Host: install the CLI, `daemon install`, `systemctl --user enable --now`.
    `ls -ld $XDG_RUNTIME_DIR/trace-commons` is `drwx------` owned by you, and
    `daemon.sock` and `watcher.lock` are in it.

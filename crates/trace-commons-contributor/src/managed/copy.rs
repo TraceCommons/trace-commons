@@ -382,34 +382,17 @@ pub fn copy() -> serde_json::Value {
     }"#).expect("static managed copy is valid JSON")
 }
 
-/// The Flatpak window's offer to install the host part, so sessions can open
-/// in a host terminal (`docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`).
-///
-/// DRAFT, NEEDS APPROVAL (2026-11-17). A new notice: under rule 9 of
-/// `docs/ui-copy-guide.md` it is not shown anywhere, and it is deliberately
-/// not in [`copy`], so no shell can draw it, until the owner approves both
-/// the notice and these words.
-pub mod host_daemon_offer_draft {
-    /// The card's title.
-    pub const TITLE: &str = "Open sessions from this app";
-    /// The card's line.
-    pub const BODY: &str = "The Flatpak app can't open a terminal by itself. Install this app's command-line tool on this computer, and the app will use it to start sessions.";
-    /// The button: opens the install instructions in the browser.
-    pub const ACTION: &str = "Show install steps";
-}
-
 #[cfg(test)]
 mod tests {
+    /// The unshown 2026-11-17 draft offer to install the host part was
+    /// replaced by the approved background-service dialogs
+    /// (`background_service`); neither its module nor its words remain.
     #[test]
-    fn the_draft_host_daemon_offer_is_not_shared_copy_yet() {
-        let copy = super::copy().to_string();
-        for draft in [
-            super::host_daemon_offer_draft::TITLE,
-            super::host_daemon_offer_draft::BODY,
-            super::host_daemon_offer_draft::ACTION,
-        ] {
-            assert!(!copy.contains(draft), "{draft}");
-        }
+    fn the_replaced_draft_install_offer_is_gone() {
+        let source = include_str!("copy.rs");
+        assert!(!source.contains(concat!("host_daemon_offer", "_draft")));
+        assert!(!source.contains(concat!("Open sessions from ", "this app")));
+        assert!(!source.contains(concat!("Show install ", "steps")));
     }
 
     use super::copy;

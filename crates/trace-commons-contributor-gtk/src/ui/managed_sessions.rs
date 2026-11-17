@@ -458,6 +458,13 @@ fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
     window.present();
 }
 
+/// The `cwd` a launch sends for a folder the portal mapped to its host
+/// path. `None` for a path that is not UTF-8: the wire carries a string, and
+/// a lossy one would name a different folder.
+fn launch_cwd(host: &std::path::Path) -> Option<Value> {
+    host.to_str().map(|cwd| json!(cwd))
+}
+
 fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     let accounts = launch_accounts(snapshot);
     if accounts.is_empty() {
@@ -603,10 +610,13 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
             let a = Rc::clone(&a);
             gtk::glib::spawn_future_local(async move {
                 match rx.recv().await {
-                    Ok(Ok(host)) => {
-                        request["cwd"] = json!(host.to_string_lossy());
-                        launch(&a, request);
-                    }
+                    Ok(Ok(host)) => match launch_cwd(&host) {
+                        Some(cwd) => {
+                            request["cwd"] = cwd;
+                            launch(&a, request);
+                        }
+                        None => a.toast(&text("action_failed")),
+                    },
                     _ => a.toast(&text("action_failed")),
                 }
             });
@@ -620,6 +630,21 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
 
 #[cfg(test)]
 mod tests {
+    /// A mapped host folder that is not UTF-8 is refused, never sent with
+    /// U+FFFD in place of its bytes: the host daemon would open a session in
+    /// a folder that does not exist, or in a different one.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_folder_that_is_not_utf8_is_refused_not_mangled() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/home/u/caf\xe9"));
+        assert_eq!(super::launch_cwd(bad), None);
+        assert_eq!(
+            super::launch_cwd(std::path::Path::new("/home/u/café")),
+            Some(json!("/home/u/café"))
+        );
+    }
+
     /// Owner, 2026-11-03: a session grouped in herdr opens there, so the
     /// launch lines and a launch's refusal name herdr; an older daemon sends
     /// only `terminal_destination`, which then names where sessions open.

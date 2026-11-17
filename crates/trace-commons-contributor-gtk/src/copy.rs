@@ -1188,15 +1188,17 @@ pub fn portal_status_line(
 
 // --- Flatpak session-root access (for onboarding, not yet built) ---------
 
-/// The Linux design spec's exact wording for why a confined build asks for
-/// two specific folders rather than the whole home directory. Onboarding
-/// does not exist yet (see the report), so nothing renders this today; it
-/// is pinned here so the string is ready and cannot drift from the spec
-/// when onboarding is built.
+/// Why a confined build asks for two specific folders rather than the whole
+/// home directory, and for the private runtime folder the host link lives in
+/// (`xdg-run/trace-commons`). Approved by the owner 2026-11-17, replacing
+/// "It asks for access to those folders only.", which stopped being exact
+/// once the manifest granted the runtime folder. Nothing renders this today;
+/// it is pinned so the string is ready when onboarding uses it.
 pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = concat!(
     app_name!(),
     " needs to read your Claude Code and Codex trace files. It asks for access to those \
-     folders only."
+     folders, and to a private folder it uses to talk to the command-line tool if you \
+     install it."
 );
 
 // --- Health ------------------------------------------------------------
@@ -2093,6 +2095,21 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+    /// Owner-approved 2026-11-17: the Flatpak also asks for a private
+    /// runtime folder, used to talk to the command-line tool.
+    #[test]
+    fn the_flatpak_roots_explanation_names_the_private_folder() {
+        assert_eq!(
+            super::FLATPAK_SESSION_ROOTS_EXPLANATION,
+            concat!(
+                super::app_name!(),
+                " needs to read your Claude Code and Codex trace files. It asks for access to \
+                 those folders, and to a private folder it uses to talk to the command-line \
+                 tool if you install it."
+            )
+        );
+    }
+
     /// A refused contribution must not read as one that never left.
     ///
     /// This shell's outcome default is "Nothing was sent.", which on the

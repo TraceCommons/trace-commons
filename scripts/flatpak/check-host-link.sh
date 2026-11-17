@@ -5,10 +5,12 @@
 #
 # Run as the contributor, in a desktop session, with the CLI installed and the
 # Flatpak (ai.tracecommons.Contributor) installed. It starts nothing that
-# uploads and changes no settings: it reads the runtime directory, probes the
-# host link from the host and from inside the sandbox, and confirms the
-# sandbox has no network. Each check prints PASS or FAIL; the exit status is
-# the number of failures.
+# uploads and changes no settings: it reads the runtime directory and probes
+# the host link from the host and from inside the sandbox. Whether the sandbox
+# has network is reported, never failed: #2172 grants it (--share=network),
+# and the host daemon is there for host terminals and a single watcher, not
+# for network. Each check prints PASS, FAIL or INFO; the exit status is the
+# number of failures.
 #
 #   scripts/flatpak/check-host-link.sh
 set -uo pipefail
@@ -18,6 +20,7 @@ UNIT=trace-commons-contributor.service
 failures=0
 pass() { printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
+info() { printf 'INFO %s\n' "$1"; }
 
 : "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set; run this in a login session}"
 RUN_DIR="$XDG_RUNTIME_DIR/trace-commons"
@@ -73,9 +76,9 @@ if command -v flatpak >/dev/null && flatpak info "$APP_ID" >/dev/null 2>&1; then
     fail "host link does not answer from inside the sandbox (python3 may be missing from the runtime; try flatpak run --command=sh and socat)"
   fi
   if flatpak run --command=sh "$APP_ID" -c 'getent hosts tracecommons.ai' >/dev/null 2>&1; then
-    fail "the sandbox resolved a host name: it has network after all"
+    info "the sandbox resolves host names (--share=network granted)"
   else
-    pass "the sandbox has no network"
+    info "the sandbox resolves no host names (no --share=network)"
   fi
 else
   fail "the Flatpak $APP_ID is not installed"
