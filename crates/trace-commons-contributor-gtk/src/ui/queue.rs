@@ -1326,11 +1326,15 @@ fn manifest_block(
     let app_for_skip = Rc::clone(app);
     let entry_id = entry.entry_id.clone();
     skip.connect_clicked(move |_| {
+        let entry_id = entry_id.clone();
         app_for_skip.call(
             "dismiss",
             serde_json::json!({ "entry_id": entry_id }),
-            |app, result| {
+            move |app, result| {
                 if result.is_ok() {
+                    // Its card on the Traces map, found among the traces
+                    // the map listed before this reload drops it.
+                    app.note_dismissed(&entry_id);
                     app.refresh();
                 }
             },

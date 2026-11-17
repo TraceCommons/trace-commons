@@ -171,6 +171,7 @@ else
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
+    ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \

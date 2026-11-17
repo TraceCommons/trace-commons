@@ -221,6 +221,13 @@ pub struct App {
     /// History row's details. `None` while unread or after a failed read,
     /// which the graph draws as a dash, never as nothing shared.
     pub history_records: RefCell<Option<Vec<crate::model::HistoryRecord>>>,
+    /// The entry this window last kept, and the one it last dismissed, for
+    /// the Traces map's transfer cards (`monitor::transfers::Feed`), as the
+    /// Mac's `TracesStore.lastKept` and `lastDismissed`. Set only after the
+    /// daemon answered. This shell has no keep action yet, so `last_kept`
+    /// stays `None` until one sets it.
+    pub last_kept: RefCell<Option<String>>,
+    pub last_dismissed: RefCell<Option<String>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
@@ -466,6 +473,8 @@ impl App {
             projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
             history_records: RefCell::new(None),
+            last_kept: RefCell::new(None),
+            last_dismissed: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
@@ -1657,6 +1666,14 @@ impl App {
         if let Some(source) = self.undo_tick.borrow_mut().take() {
             source.remove();
         }
+    }
+
+    /// The daemon dismissed `entry_id`: the Traces map shows its card. The
+    /// map looks it up now, while the entries still list it.
+    pub fn note_dismissed(self: &Rc<Self>, entry_id: &str) {
+        *self.last_kept.borrow_mut() = None;
+        *self.last_dismissed.borrow_mut() = Some(entry_id.to_string());
+        self.shell.map.render(self);
     }
 
     /// Withdraw the undo bar without cancelling: the hold simply runs out.

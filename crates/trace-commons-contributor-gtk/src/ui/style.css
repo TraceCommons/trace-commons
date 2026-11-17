@@ -461,6 +461,40 @@ row:selected {
   padding: 10px 12px;
 }
 
+/* A trace being contributed, kept or dismissed: a card at the map's foot
+   while another tab than Traces is shown. Opaque, as a popover notice. */
+.tc-map-transfer-card {
+  background-color: @tc_surface;
+  color: @tc_ink;
+  border: 1px solid @tc_line_divider;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+/* The tool's coin on the card: its initials in a ring. */
+.tc-map-transfer-mark {
+  min-width: 26px;
+  min-height: 26px;
+  border: 2px solid @tc_line_divider;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* What is happening to the trace. */
+.tc-map-transfer-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid @tc_line_divider;
+}
+
+.tc-map-transfer-tag-on {
+  color: @tc_green_text;
+  border-color: @tc_green;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */

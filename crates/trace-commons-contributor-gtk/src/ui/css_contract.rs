@@ -44,6 +44,10 @@ mod tests {
         ),
         ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
         ("monitor/map.rs", include_str!("monitor/map.rs")),
+        (
+            "monitor/transfer_card.rs",
+            include_str!("monitor/transfer_card.rs"),
+        ),
     ];
 
     const STYLE_CSS: &str = include_str!("style.css");

@@ -887,6 +887,7 @@ impl Shell {
             words.shell.show_graph,
         );
         self.graph.root.set_reveal_child(graph_shown);
+        self.map.set_cards_shown(tabs::transfer_cards_shown(at.tab));
         self.set_toggle(
             &self.map_toggle,
             prefs.shows_map,

@@ -1661,8 +1661,11 @@ impl Sheet {
         let sheet = Rc::clone(self);
         self.app.call(
             "dismiss",
-            serde_json::json!({ "entry_id": entry_id }),
-            move |app, _| {
+            serde_json::json!({ "entry_id": entry_id.clone() }),
+            move |app, result| {
+                if result.is_ok() {
+                    app.note_dismissed(&entry_id);
+                }
                 app.refresh();
                 sheet.advance();
             },
