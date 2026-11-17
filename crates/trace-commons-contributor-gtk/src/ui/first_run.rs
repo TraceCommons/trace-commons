@@ -63,7 +63,14 @@ impl StageScheme {
             holders.set((count + 1, previous));
         });
         manager.set_color_scheme(adw::ColorScheme::ForceDark);
-        window.upcast_ref::<gtk::Window>().connect_destroy(|_| {
+        // GTK 4 emits `destroy` at dispose, which waits for the last
+        // reference; `gtk_window_destroy` unrealizes at once. Release on
+        // whichever comes first, exactly once per hold.
+        let held = Rc::new(Cell::new(true));
+        let release = move || {
+            if !held.replace(false) {
+                return;
+            }
             STAGE_HOLDERS.with(|holders| {
                 let (count, previous) = holders.get();
                 let count = count.saturating_sub(1);
@@ -72,7 +79,13 @@ impl StageScheme {
                     adw::StyleManager::default().set_color_scheme(previous);
                 }
             });
+        };
+        let window = window.upcast_ref::<gtk::Window>();
+        window.connect_unrealize({
+            let release = release.clone();
+            move |_| release()
         });
+        window.connect_destroy(move |_| release());
     }
 }
 
