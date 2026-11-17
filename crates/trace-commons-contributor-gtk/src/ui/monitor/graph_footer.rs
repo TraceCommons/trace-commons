@@ -137,8 +137,12 @@ impl GraphFooter {
         body.append(&column);
         body.set_size_request(-1, HEIGHT);
 
+        // Never expanding: the bars' vexpand would otherwise pass up through
+        // the revealer, hidden or not, and a hidden footer would take a
+        // share of the main pane's height from the tab's screen.
         let root = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .vexpand(false)
             .child(&body)
             .build();
         follow_reduced_motion(&root);
