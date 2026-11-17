@@ -10,8 +10,8 @@
 //!    controls on the side `gtk-decoration-layout` names;
 //! 2. the tab strip;
 //! 3. the breadcrumb, on the sub-pages;
-//! 4. the popover notices, each with the Mac's X, in a column above the
-//!    tab's screen (`notices`);
+//! 4. the popover notices, each with the Mac's X inside it, laid over the
+//!    top of the tab's screen as the Mac's peeking stack (`notices`);
 //! 5. the tab's screen, which fits the pane's 440 and scrolls itself;
 //! 6. the graph footer, on Traces.
 //!
@@ -52,7 +52,7 @@ use super::three_pane::ThreePane;
 use super::{demand, graph_model};
 use crate::ui::{App, style};
 
-/// The existing screens the window hosts, and the notices shown above them.
+/// The existing screens the window hosts, and the notices laid over them.
 pub struct Pages<'a> {
     pub home: &'a gtk::Box,
     pub inference: &'a gtk::Box,
@@ -63,7 +63,8 @@ pub struct Pages<'a> {
     pub mission_drafts: Option<&'a gtk::Box>,
     /// Hosted in its own window, never in a tab.
     pub settings: &'a gtk::Box,
-    /// Each notice's card, in the order they are stacked.
+    /// Each notice's card, in the order they are stacked, the front first
+    /// (`Notice::ALL`).
     pub notices: Vec<(Notice, gtk::Widget)>,
 }
 
@@ -86,13 +87,66 @@ struct State {
     missions: bool,
 }
 
-/// One notice's place in the column: the slot `notices::shown` places,
-/// the card, and the card's X.
+/// One notice's place in the stack: the slot `notices::shown` places, the
+/// frame the stack shows while the card is in front, the card, and the
+/// card's X.
 struct NoticeSlot {
     notice: Notice,
     slot: gtk::Box,
+    frame: gtk::Overlay,
     card: gtk::Widget,
     close: gtk::Button,
+}
+
+/// The card's drawn surface, the first shown `tc-banner` or `tc-card` in
+/// it: where its X goes. The cards wrap it in clamps and margins.
+fn card_surface(card: &gtk::Widget) -> Option<gtk::Widget> {
+    if card.get_visible() && (card.has_css_class("tc-banner") || card.has_css_class("tc-card")) {
+        return Some(card.clone());
+    }
+    let mut child = card.first_child();
+    while let Some(next) = child {
+        if next.get_visible()
+            && let Some(surface) = card_surface(&next)
+        {
+            return Some(surface);
+        }
+        child = next.next_sibling();
+    }
+    None
+}
+
+/// Calls `refresh` whenever a label in `card` changes its words or shows
+/// or hides: what `card_text` reads. Each label is watched once.
+fn watch_words(
+    card: &gtk::Widget,
+    watched: &RefCell<Vec<gtk::glib::WeakRef<gtk::Label>>>,
+    refresh: &Rc<RefCell<Weak<dyn Fn()>>>,
+) {
+    if let Some(label) = card.downcast_ref::<gtk::Label>() {
+        let mut watched = watched.borrow_mut();
+        watched.retain(|weak| weak.upgrade().is_some());
+        if !watched
+            .iter()
+            .any(|weak| weak.upgrade().as_ref() == Some(label))
+        {
+            watched.push(label.downgrade());
+            for property in ["label", "visible"] {
+                let refresh = Rc::clone(refresh);
+                label.connect_notify_local(Some(property), move |_, _| {
+                    let follow = refresh.borrow().upgrade();
+                    if let Some(follow) = follow {
+                        follow();
+                    }
+                });
+            }
+        }
+    }
+    let mut child = card.first_child();
+    while let Some(next) = child {
+        watch_words(&next, watched, refresh);
+        child = next.next_sibling();
+    }
 }
 
 /// Everything a card says, in order: what its X closed, so that new words
@@ -137,7 +191,7 @@ pub struct Shell {
     inspector_stack: gtk::Stack,
     history_detail: gtk::Box,
     notice_slots: Vec<NoticeSlot>,
-    /// Re-reads every notice's frame, X and the column from the cards.
+    /// Re-reads every notice's frame, X and the stack from the cards.
     refresh_notices: Rc<dyn Fn()>,
     settings_root: gtk::Box,
     settings_window: RefCell<Option<adw::Window>>,
@@ -282,58 +336,97 @@ impl Shell {
             .child(&content)
             .build();
 
-        // The notices, in a column above the tab's screen: no heading or
-        // control of the tab is ever under a card. The column is never
-        // taller than `NOTICES_MAX_HEIGHT`: past that it scrolls, so a
-        // card's Undo or acknowledge button can always be reached. With no
-        // card showing it is hidden and takes no room.
-        let notice_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // The notices, laid over the top of the tab's screen as on the Mac
+        // (`GlassPopoverStack`, owner decision 1 of the 2026-11-16 spec):
+        // they push nothing down, and the screen keeps the whole of the
+        // pane. Only the front card is drawn whole, with up to two behind
+        // it peeking out under it (`notices::stack`); each card's X closes
+        // it and the next comes forward. A front card taller than the pane
+        // scrolls inside the stack, so its buttons stay in reach.
+        let notice_stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let notice_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .propagate_natural_height(true)
-            .max_content_height(pane_layout::NOTICES_MAX_HEIGHT as i32)
+            .valign(gtk::Align::Start)
             .visible(false)
-            .child(&notice_column)
+            .child(&notice_stack)
             .build();
         let closed = Rc::new(RefCell::new(notices::Closed::default()));
         let mut notice_slots = Vec::new();
         for (notice, card) in pages.notices {
             // Three flags, each set by one owner: the slot by the tab
-            // (`notices::shown`), the frame by the card's X, the card by
-            // whatever draws it.
+            // (`notices::shown`), the frame by the stack and the card's X,
+            // the card by whatever draws it.
             let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            // The X beside the card's top edge, never over its words.
-            let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            // The X inside the card, at its top-right corner, as the Mac's
+            // `GlassPopoverNotice` draws it; a closable card keeps the room
+            // for it (`tc-notice-closable`), so it never sits on the words.
+            let frame = gtk::Overlay::new();
             card.set_hexpand(true);
-            frame.append(&card);
+            frame.set_child(Some(&card));
             let close = gtk::Button::from_icon_name("window-close-symbolic");
             close.add_css_class("flat");
             close.add_css_class("circular");
-            close.set_valign(gtk::Align::Start);
-            close.set_margin_top(style::space::L);
-            close.set_margin_end(style::space::XS);
             close.set_tooltip_text(Some(words.close));
             close.update_property(&[gtk::accessible::Property::Label(words.close)]);
             close.set_visible(false);
-            frame.append(&close);
+            frame.add_overlay(&close);
+            frame.set_measure_overlay(&close, false);
+            frame.connect_get_child_position(|frame, close| {
+                let card = frame.child()?;
+                let surface = card_surface(&card).unwrap_or(card);
+                let bounds = surface.compute_bounds(frame)?;
+                let (_, size) = close.preferred_size();
+                let inset = style::space::XS as f32;
+                Some(gtk::gdk::Rectangle::new(
+                    (bounds.x() + bounds.width() - inset) as i32 - size.width(),
+                    (bounds.y() + inset) as i32,
+                    size.width(),
+                    size.height(),
+                ))
+            });
+            frame.set_visible(false);
             slot.append(&frame);
-            notice_column.append(&slot);
+            notice_stack.append(&slot);
             notice_slots.push(NoticeSlot {
                 notice,
                 slot,
+                frame,
                 card,
                 close,
             });
         }
-        // Each card shows and hides itself, and its X closes it; the
-        // frames and the column follow both.
+        // The cards behind the front one, peeking out under it.
+        let mut plates = Vec::new();
+        for level in 1..=notices::BEHIND {
+            let plate = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            plate.add_css_class("tc-notice-plate");
+            plate.set_height_request(notices::PEEK);
+            let inset = style::space::XL + style::space::S * level as i32;
+            plate.set_margin_start(inset);
+            plate.set_margin_end(inset);
+            plate.set_can_target(false);
+            plate.set_visible(false);
+            plate.update_state(&[gtk::accessible::State::Hidden(true)]);
+            notice_stack.append(&plate);
+            plates.push(plate);
+        }
+        // Each card shows and hides itself and says what it says, and its X
+        // closes it; the stack follows all three. The words are watched on
+        // every label in the card, so a closed card whose words change comes
+        // back as they change; a card that rebuilds its labels says so
+        // through `Shell::notices_changed`.
         let follow = {
             let scroller = notice_scroller.downgrade();
             let closed = Rc::clone(&closed);
+            let unset: Weak<dyn Fn()> = Weak::<fn()>::new();
+            let itself = Rc::new(RefCell::new(unset));
+            let watched: RefCell<Vec<gtk::glib::WeakRef<gtk::Label>>> = RefCell::new(Vec::new());
             let cards: Vec<(
                 Notice,
                 gtk::glib::WeakRef<gtk::Box>,
+                gtk::glib::WeakRef<gtk::Overlay>,
                 gtk::glib::WeakRef<gtk::Widget>,
                 gtk::glib::WeakRef<gtk::Button>,
             )> = notice_slots
@@ -342,42 +435,73 @@ impl Shell {
                     (
                         slot.notice,
                         slot.slot.downgrade(),
+                        slot.frame.downgrade(),
                         slot.card.downgrade(),
                         slot.close.downgrade(),
                     )
                 })
                 .collect();
-            Rc::new(move || {
+            let plates: Vec<gtk::glib::WeakRef<gtk::Box>> =
+                plates.iter().map(|plate| plate.downgrade()).collect();
+            let hook = Rc::clone(&itself);
+            let follow: Rc<dyn Fn()> = Rc::new(move || {
                 let Some(scroller) = scroller.upgrade() else {
                     return;
                 };
-                let mut any = false;
-                for (notice, slot, card, close) in &cards {
-                    let (Some(slot), Some(card), Some(close)) =
-                        (slot.upgrade(), card.upgrade(), close.upgrade())
-                    else {
+                let mut open = Vec::with_capacity(cards.len());
+                let mut parts = Vec::with_capacity(cards.len());
+                for (notice, slot, frame, card, close) in &cards {
+                    let (Some(slot), Some(frame), Some(card), Some(close)) = (
+                        slot.upgrade(),
+                        frame.upgrade(),
+                        card.upgrade(),
+                        close.upgrade(),
+                    ) else {
+                        open.push(false);
+                        parts.push(None);
                         continue;
                     };
+                    watch_words(&card, &watched, &hook);
                     // Each widget's own flag, not `is_visible`: that one
-                    // asks the ancestors too, and the column starts hidden,
+                    // asks the ancestors too, and the stack starts hidden,
                     // so no card would ever look shown.
                     if !card.get_visible() {
                         // The card went: when its cause recurs it is shown
                         // again.
                         closed.borrow_mut().forget(*notice);
                     }
-                    let open = !closed.borrow().hides(*notice, &card_text(&card));
-                    if let Some(frame) = card.parent() {
-                        frame.set_visible(open);
-                    }
-                    close.set_visible(
-                        notice.close() != notices::Close::Own
-                            && !card.has_css_class(notices::STAYS_CLASS),
-                    );
-                    any |= slot.get_visible() && open && card.get_visible();
+                    let shown =
+                        card.get_visible() && !closed.borrow().hides(*notice, &card_text(&card));
+                    open.push(slot.get_visible() && shown);
+                    parts.push(Some((*notice, frame, card, close, shown)));
                 }
-                scroller.set_visible(any);
-            })
+                let stack = notices::stack(&open);
+                for (index, part) in parts.into_iter().enumerate() {
+                    let Some((notice, frame, card, close, shown)) = part else {
+                        continue;
+                    };
+                    // A hidden or closed card shows neither its frame nor
+                    // its X; of the open ones only the front is whole.
+                    frame.set_visible(stack.front == Some(index));
+                    let x = shown
+                        && notice.close() != notices::Close::Own
+                        && !card.has_css_class(notices::STAYS_CLASS);
+                    close.set_visible(x);
+                    if x {
+                        frame.add_css_class("tc-notice-closable");
+                    } else {
+                        frame.remove_css_class("tc-notice-closable");
+                    }
+                }
+                for (level, plate) in plates.iter().enumerate() {
+                    if let Some(plate) = plate.upgrade() {
+                        plate.set_visible(level < stack.behind);
+                    }
+                }
+                scroller.set_visible(stack.front.is_some());
+            });
+            *itself.borrow_mut() = Rc::downgrade(&follow);
+            follow
         };
         for slot in &notice_slots {
             let refresh = follow.clone();
@@ -401,9 +525,9 @@ impl Shell {
             });
         }
 
-        let over_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        over_content.append(&notice_scroller);
-        over_content.append(&content_scroller);
+        let over_content = gtk::Overlay::new();
+        over_content.set_child(Some(&content_scroller));
+        over_content.add_overlay(&notice_scroller);
         over_content.set_vexpand(true);
 
         let graph = GraphFooter::new();
@@ -704,6 +828,13 @@ impl Shell {
                 .close(notice, card_text(&slot.card));
             (self.refresh_notices)();
         }
+    }
+
+    /// A card rebuilt its labels (the arming offer redraws its words from
+    /// scratch): a closed card whose words changed comes back. A label's
+    /// own words changing needs no call; the stack watches those.
+    pub fn notices_changed(&self) {
+        (self.refresh_notices)();
     }
 
     // --- Selection and the inspector -------------------------------------
@@ -1639,61 +1770,131 @@ mod tests {
             .expect("every notice has a slot")
     }
 
-    #[test]
-    #[ignore = "requires a GTK display; exercised by weston"]
-    fn mounted_notices_sit_above_the_tab_they_belong_to() {
-        let mounted = mounted(false);
-        let shell = &mounted.shell;
-        // Each card is inside its slot, in the column above the content,
-        // never in an overlay laid over it.
-        for (notice, card) in &mounted.notices {
-            let slot = slot(shell, *notice);
-            assert!(card.is_ancestor(&slot.slot));
-            assert!(
-                slot.slot.ancestor(gtk::Overlay::static_type()).is_none(),
-                "{notice:?} is laid over the tab's content"
-            );
-        }
-        // The undo comes first: it is the one card with a clock on it.
-        assert_eq!(shell.notice_slots[0].notice, Notice::Undo);
-        let scroller = shell.notice_slots[0]
+    /// The stack the notices are laid out in: the scroller laid over the
+    /// tab's screen.
+    fn notice_scroller(shell: &Shell) -> gtk::ScrolledWindow {
+        shell.notice_slots[0]
             .slot
             .ancestor(gtk::ScrolledWindow::static_type())
             .and_downcast::<gtk::ScrolledWindow>()
-            .expect("the notices are in a column that scrolls");
-        // Empty cards are showing here (Update and Account are on every
-        // tab), so the column is too; with every card hidden it is gone,
-        // and takes no room from the tab under it.
+            .expect("the notices are in a stack that scrolls")
+    }
+
+    /// The frames drawn whole: the stack's front card, or none.
+    fn fronts(shell: &Shell) -> Vec<Notice> {
+        shell
+            .notice_slots
+            .iter()
+            .filter(|slot| slot.frame.is_visible())
+            .map(|slot| slot.notice)
+            .collect()
+    }
+
+    /// The plates peeking out behind the front card.
+    fn plates(shell: &Shell) -> usize {
+        let mut found = Vec::new();
+        descendants(notice_scroller(shell).upcast_ref(), &mut found);
+        found
+            .iter()
+            .filter(|widget| widget.has_css_class("tc-notice-plate") && widget.is_visible())
+            .count()
+    }
+
+    /// The Mac's placement (owner decision 1, chosen again 2026-11-17):
+    /// the notices are laid over the top of the tab, pushing nothing down,
+    /// so the tab's screen keeps the whole of the pane. Only the front card
+    /// is whole, with up to two peeking behind it, and a front card taller
+    /// than the pane scrolls.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_notices_are_laid_over_the_tab_they_belong_to() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        let scroller = notice_scroller(shell);
+        let content = shell.content_scroller();
+        let overlay = content
+            .parent()
+            .and_downcast::<gtk::Overlay>()
+            .expect("the tab's screen is under an overlay");
+        assert_eq!(overlay.child().as_ref(), Some(content.upcast_ref()));
+        assert_eq!(
+            scroller.parent().as_ref(),
+            Some(overlay.upcast_ref()),
+            "the notices are not laid over the tab"
+        );
+        for (notice, card) in &mounted.notices {
+            assert!(card.is_ancestor(&slot(shell, *notice).slot));
+        }
+        // The front card first: the undo, the one card with a clock on it.
+        assert_eq!(shell.notice_slots[0].notice, Notice::Undo);
+
+        // (a) Every card showing on Traces: the screen keeps the whole of
+        // the pane under them.
+        shell.pick_tab(Tab::Traces);
+        for (_, card) in &mounted.notices {
+            card.set_size_request(-1, 120);
+        }
+        pump_until(|| scroller.height() > 0 && content.height() > 0);
         assert!(scroller.is_visible());
+        assert_eq!(
+            content.height(),
+            overlay.height(),
+            "the notices pushed the tab's screen down"
+        );
+        let bounds = scroller.compute_bounds(&overlay).expect("laid out");
+        assert_eq!(bounds.y(), 0.0, "the stack is not at the top of the tab");
+
+        // (c) Collapsed as on the Mac: only the front card is whole, and two
+        // behind it peek out; closing or hiding it brings the next forward.
+        assert_eq!(fronts(shell), vec![Notice::Undo]);
+        assert_eq!(plates(shell), notices::BEHIND);
+        let card = |notice: Notice| {
+            mounted
+                .notices
+                .iter()
+                .find(|(kind, _)| *kind == notice)
+                .map(|(_, card)| card.clone())
+                .unwrap()
+        };
+        card(Notice::Undo).set_visible(false);
+        assert_eq!(fronts(shell), vec![Notice::Health]);
+        for notice in [
+            Notice::Health,
+            Notice::Consent,
+            Notice::ArmingOffer,
+            Notice::Account,
+        ] {
+            card(notice).set_visible(false);
+        }
+        // Only Update is left on Traces (the Private AI offer is Inference's).
+        assert_eq!(fronts(shell), vec![Notice::Update]);
+        assert_eq!(plates(shell), 0);
         for (_, card) in &mounted.notices {
             card.set_visible(false);
         }
-        assert!(!scroller.is_visible(), "an empty notice column takes room");
-        // Cards taller than the column's cap scroll inside it; the tab's
-        // screen keeps the rest of the pane.
-        shell.pick_tab(Tab::Traces);
-        for (_, card) in &mounted.notices {
-            card.set_size_request(-1, 400);
-            card.set_visible(true);
-        }
+        assert!(!scroller.is_visible(), "an empty stack is drawn");
+        assert!(fronts(shell).is_empty());
+
+        // A front card taller than the pane scrolls inside the stack, which
+        // is never taller than the tab.
+        let tall = card(Notice::Undo);
+        tall.set_size_request(-1, 2000);
+        tall.set_visible(true);
         let scroll = scroller.vadjustment();
-        pump_until(|| scroll.upper() > 400.0);
-        assert!(scroller.is_visible());
+        pump_until(|| scroll.upper() >= 2000.0);
         assert!(
-            f64::from(scroller.height()) <= pane_layout::NOTICES_MAX_HEIGHT,
-            "the notice column grew past its cap"
-        );
-        assert!(
-            shell.content_scroller().height() > 0,
-            "the notices took the whole of the tab"
+            scroller.height() <= overlay.height(),
+            "the stack ran past the tab"
         );
         assert!(
             scroll.upper() > scroll.page_size(),
-            "the cards that do not fit cannot be scrolled to"
+            "the front card's foot cannot be scrolled to"
         );
         for (_, card) in &mounted.notices {
             card.set_size_request(-1, -1);
+            card.set_visible(true);
         }
+
         for tab in Tab::ALL {
             shell.pick_tab(tab);
             let place = tabs::place(shell.shown());
@@ -1704,6 +1905,7 @@ mod tests {
                     "{notice:?} on {tab:?}"
                 );
             }
+            assert_eq!(fronts(shell).len(), 1, "{tab:?}: one front card");
         }
         // Health is the Traces tab's, as on the Mac.
         shell.pick_tab(Tab::Home);
@@ -1713,14 +1915,15 @@ mod tests {
         mounted.window.close();
     }
 
-    /// The review's defect: a notice laid over the tab hid its heading. A
-    /// card showing must leave the first heading of every tab in view and
-    /// uncovered.
+    /// (b) The notices lie over the top of the tab, so a card in front
+    /// covers the tab's first heading; putting every card away, by its X or
+    /// by its own Dismiss, Acknowledge or Not now, uncovers it.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
-    fn mounted_a_notice_never_covers_the_tabs_first_heading() {
+    fn mounted_closing_every_notice_uncovers_the_tabs_first_heading() {
         let mounted = mounted(false);
         let shell = &mounted.shell;
+        let scroller = notice_scroller(shell);
         // Every tab's first line, as each screen draws its title.
         let mut headings = Vec::new();
         for name in ["home", "private-inference", "queue", "insights"] {
@@ -1739,24 +1942,60 @@ mod tests {
             card.append(&gtk::Label::new(Some(&format!("{notice:?}"))));
             card.set_size_request(-1, 120);
         }
-        for (tab, (name, heading)) in Tab::ALL.into_iter().zip(&headings) {
-            shell.pick_tab(tab);
-            pump_until(|| heading.is_mapped() && heading.height() > 0);
-            let column = shell.notice_slots[0]
-                .slot
-                .ancestor(gtk::ScrolledWindow::static_type())
-                .expect("the notice column");
-            assert!(column.is_visible(), "no notice is showing on {name}");
-            let root: &gtk::Widget = shell.root.upcast_ref();
-            let notices = column.compute_bounds(root).expect("the column is laid out");
+        let root: &gtk::Widget = shell.root.upcast_ref();
+        let covers = |heading: &gtk::Label| {
             let title = heading
                 .compute_bounds(root)
                 .expect("the heading is laid out");
+            shell.notice_slots.iter().any(|slot| {
+                slot.frame.is_visible()
+                    && slot
+                        .frame
+                        .compute_bounds(root)
+                        .is_some_and(|card| card.intersection(&title).is_some())
+            })
+        };
+        for (tab, (name, heading)) in Tab::ALL.into_iter().zip(&headings) {
+            shell.state.closed.borrow_mut().clear();
+            for (_, card) in &mounted.notices {
+                card.set_visible(true);
+            }
+            shell.pick_tab(tab);
+            pump_until(|| heading.is_mapped() && heading.height() > 0 && scroller.height() > 0);
+            assert!(scroller.is_visible(), "no notice is showing on {name}");
             assert!(
-                title.y() >= notices.y() + notices.height(),
-                "a notice covers the {name} tab's heading: notices {notices:?}, heading {title:?}"
+                covers(heading),
+                "the {name} tab's notices are not laid over it"
+            );
+            // Put every card away, front first, as the person would.
+            for notice in Notice::ALL {
+                if !slot(shell, notice).slot.get_visible() {
+                    continue;
+                }
+                match notice.close() {
+                    notices::Close::Session => shell.close_notice(notice),
+                    notices::Close::Own => {
+                        mounted
+                            .notices
+                            .iter()
+                            .find(|(kind, _)| *kind == notice)
+                            .unwrap()
+                            .1
+                            .set_visible(false);
+                    }
+                }
+                assert!(fronts(shell).len() <= 1, "{name}: more than one card whole");
+            }
+            assert!(!scroller.is_visible(), "a card is left over the {name} tab");
+            pump();
+            assert!(
+                !covers(heading),
+                "the {name} tab's heading is still covered"
             );
             // And the heading is in the pane, not pushed out of it.
+            let title = heading
+                .compute_bounds(root)
+                .expect("the heading is laid out");
             assert!(
                 f64::from(title.y() + title.height()) <= f64::from(root.height()),
                 "the {name} tab's heading is below the window"
@@ -1765,18 +2004,18 @@ mod tests {
         mounted.window.close();
     }
 
-    /// The Mac's X: it closes the card until the window is opened again;
-    /// the same card re-shown stays closed, new words or the card going
-    /// and coming back show it again. The undo, the consent and account
-    /// cards and the Private AI offer carry their own Dismiss, Acknowledge
-    /// or Not now and no extra X.
+    /// The Mac's X, inside the card: it closes the card until the window is
+    /// opened again; the same card re-shown stays closed, new words (as
+    /// they change, with nothing else redrawn) or the card going and coming
+    /// back show it again. A hidden card shows no frame and no X. The undo,
+    /// the consent and account cards and the Private AI offer carry their
+    /// own Dismiss, Acknowledge or Not now and no extra X.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_a_notices_x_closes_that_card() {
         let mounted = mounted(false);
         let shell = &mounted.shell;
         let words = monitor_screens_copy();
-        shell.pick_tab(Tab::Traces);
         let card = |notice: Notice| {
             mounted
                 .notices
@@ -1785,40 +2024,92 @@ mod tests {
                 .map(|(_, card)| card.clone())
                 .unwrap()
         };
+        // Each card alone, in front on a tab it belongs to: an X on the
+        // cards that have one, inside the card's drawn surface.
+        for (notice, card) in &mounted.notices {
+            card.add_css_class("tc-banner");
+            card.set_size_request(-1, 60);
+            card.append(&gtk::Label::new(Some(&format!("{notice:?} says"))));
+        }
+        shell.notices_changed();
+        for notice in Notice::ALL {
+            shell.pick_tab(if notice == Notice::PrivateAiOffer {
+                Tab::Inference
+            } else {
+                Tab::Traces
+            });
+            for (kind, other) in &mounted.notices {
+                other.set_visible(*kind == notice);
+            }
+            let slot = slot(shell, notice);
+            assert_eq!(fronts(shell), vec![notice]);
+            let closable = notice.close() != notices::Close::Own;
+            assert_eq!(slot.close.is_visible(), closable, "{notice:?}");
+            assert_eq!(
+                slot.close.parent().as_ref(),
+                Some(slot.frame.upcast_ref()),
+                "{notice:?}: the X is not in the card's frame"
+            );
+            if closable {
+                let close = slot.close.clone();
+                pump_until(|| close.is_mapped() && close.width() > 0);
+                let x = slot.close.compute_bounds(&slot.frame).expect("placed");
+                let surface = slot.card.compute_bounds(&slot.frame).expect("placed");
+                assert!(
+                    x.x() >= surface.x()
+                        && x.y() >= surface.y()
+                        && x.x() + x.width() <= surface.x() + surface.width()
+                        && x.y() + x.height() <= surface.y() + surface.height(),
+                    "{notice:?}: the X {x:?} is beside the card {surface:?}, not inside it"
+                );
+                assert!(slot.frame.has_css_class("tc-notice-closable"));
+            }
+            // A hidden card: no frame and no bare X.
+            slot.card.set_visible(false);
+            assert!(!slot.frame.get_visible(), "{notice:?}: an empty frame");
+            assert!(!slot.close.get_visible(), "{notice:?}: a bare X");
+        }
+
+        shell.pick_tab(Tab::Traces);
+        for (_, other) in &mounted.notices {
+            other.set_visible(false);
+        }
         let said = gtk::Label::new(Some("built from source"));
         card(Notice::Update).append(&said);
-        (shell.refresh_notices)();
+        // A card that rebuilds its labels says so, as the arming offer does.
+        shell.notices_changed();
+        card(Notice::Update).set_visible(true);
+        card(Notice::Health).set_visible(true);
         let update = slot(shell, Notice::Update);
-        let frame = update.card.parent().expect("the card's frame");
-        // An X named in the core's word, on the cards that have one.
-        for slot in &shell.notice_slots {
-            assert_eq!(
-                slot.close.get_visible(),
-                slot.notice.close() != notices::Close::Own,
-                "{:?}",
-                slot.notice
-            );
-        }
-        assert_eq!(update.close.tooltip_text().as_deref(), Some(words.close));
-        assert!(frame.is_visible());
-        // Not wired without an `App`: apply the press as its handler would.
-        shell.close_notice(Notice::Update);
-        assert!(!frame.is_visible(), "the X did not close the card");
-        // Only that card.
         let health = slot(shell, Notice::Health);
-        assert!(health.card.parent().unwrap().is_visible());
-        // The same card drawn again stays closed.
+        assert_eq!(update.close.tooltip_text().as_deref(), Some(words.close));
+        // Health is in front of Update; its X brings Update forward.
+        assert_eq!(fronts(shell), vec![Notice::Health]);
+        // Not wired without an `App`: apply the press as its handler would.
+        shell.close_notice(Notice::Health);
+        assert!(!health.frame.is_visible(), "the X did not close the card");
+        assert_eq!(fronts(shell), vec![Notice::Update], "only that card");
+        card(Notice::Health).set_visible(false);
+        shell.close_notice(Notice::Update);
+        assert!(!update.frame.is_visible(), "the X did not close the card");
+        // The same card drawn again after going is new.
         update.card.set_visible(false);
         update.card.set_visible(true);
-        assert!(frame.is_visible(), "a card that went and came back is new");
+        assert!(
+            update.frame.is_visible(),
+            "a card that went and came back is new"
+        );
         shell.close_notice(Notice::Update);
-        assert!(!frame.is_visible());
+        assert!(!update.frame.is_visible());
         shell.apply();
-        assert!(!frame.is_visible(), "a redraw reopened a closed card");
-        // New words are a new card.
+        assert!(
+            !update.frame.is_visible(),
+            "a redraw reopened a closed card"
+        );
+        // New words are a new card, as soon as they change: nothing else is
+        // redrawn here.
         said.set_text("an update is ready");
-        shell.apply();
-        assert!(frame.is_visible(), "new words stayed closed");
+        assert!(update.frame.is_visible(), "new words stayed closed");
         // An install under way has no X.
         update.card.add_css_class(notices::STAYS_CLASS);
         assert!(!update.close.get_visible());
@@ -1826,12 +2117,12 @@ mod tests {
         assert!(update.close.get_visible());
         // Opening the window again shows every closed card.
         shell.close_notice(Notice::Update);
-        assert!(!frame.is_visible());
+        assert!(!update.frame.is_visible());
         mounted.window.set_visible(false);
         mounted.window.set_visible(true);
         pump();
         assert!(
-            frame.is_visible(),
+            update.frame.is_visible(),
             "reopening the window kept the card closed"
         );
         mounted.window.close();

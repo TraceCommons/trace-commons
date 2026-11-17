@@ -479,6 +479,23 @@ row:selected {
 .tc-notice-stays {
 }
 
+/* A notice carrying its X (`monitor::shell`): the X sits inside the card's
+   top-right corner, as the Mac's `GlassPopoverNotice` draws it, and the
+   card keeps the room for it so it never sits on the words. */
+.tc-notice-closable .tc-banner,
+.tc-notice-closable .tc-card {
+  padding-right: 48px;
+}
+
+/* A card behind the front one, peeking out under it
+   (`GlassPopoverStack`'s plates). */
+.tc-notice-plate {
+  background-color: @tc_surface;
+  border: 1px solid @tc_line;
+  border-top-width: 0;
+  border-radius: 0 0 8px 8px;
+}
+
 /* --- The transcript ------------------------------------------------ */
 
 /* `mono.transcript`: 11px mono. The spec's 1.7 line-height is set by the

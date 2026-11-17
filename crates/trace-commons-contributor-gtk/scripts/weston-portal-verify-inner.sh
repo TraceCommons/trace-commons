@@ -22,31 +22,28 @@ fail() {
 
 # The rendering fixture explicitly selects Insights and its Overview tab;
 # the connected shell's default destination is Home.
-# Require the page's own tab switcher -- an interactive control on the
-# Insights page, not the tab strip's "Insights" tab -- and the Overview's
-# "Tokens by day" card heading, which shows its body rendered. The notices
-# sit above the tab's content, never over it
-# (`ui::monitor::shell::tests::mounted_a_notice_never_covers_the_tabs_first_heading`),
-# so a notice this build shows (from source, outside a flatpak) leaves the
-# switcher in the frame; no notice's text is asked for.
 #
-# $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
-# the page in a shaded bar, and Tesseract's default layout analysis skips
-# that bar entirely, so the tab names are read word by word instead of as
-# one line. The selected tab (Overview, white on the accent) is not read
-# even then -- not inverted, thresholded or upscaled either -- so the check
-# asks for two unselected tabs: "Breakdown", and "Benchmarks" as a whole
-# word. The main pane is 440 wide and never narrower, and the switcher
-# scrolls sideways inside it, so Analyze, the last tab, is off the edge of
-# the frame; it is not asked for here. Every label and the switching itself
-# are asserted by the mounted
+# The popover notices are laid over the top of the tab, as on the Mac
+# (owner decision 1 of the 2026-11-16 spec, chosen again 2026-11-17), and a
+# build from source outside a flatpak always shows the update notice. That
+# card lies over the Insights page's tab switcher (Overview, Benchmarks,
+# Breakdown), which is the first thing on the page, so no switcher word is
+# readable in this frame and none is asked for. The switcher's labels and
+# its switching are asserted by the mounted
 # `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
-# run above. Tesseract has misread tab names before ("Details" as "Deta"),
-# so only Breakdown's first letters are required. The capture loop below
-# retries while the body loads.
+# run above, and the notices' placement and X by
+# `ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to`
+# and `mounted_closing_every_notice_uncovers_the_tabs_first_heading`.
+#
+# What the frame does require is the Overview's body, below the card: the
+# "Cache share" and "Tokens by day" card headings, which only the Overview
+# draws (the tab strip and the map say neither). No notice's text is asked
+# for.
+#
+# $1 is a sparse-text OCR pass (`--psm 11`), which reads the page's text
+# word by word; the capture loop below retries while the body loads.
 insights_frame() {
-  grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
-    grep -qE '(^|[[:space:]])Benchmarks([[:space:]]|$)' <<< "$1" &&
+  grep -qi 'Cache share' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
@@ -186,8 +183,8 @@ else
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
-    ui::monitor::shell::tests::mounted_notices_sit_above_the_tab_they_belong_to \
-    ui::monitor::shell::tests::mounted_a_notice_never_covers_the_tabs_first_heading \
+    ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
+    ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
     ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
@@ -350,9 +347,9 @@ else
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
-        echo "OCR found the Insights tab switcher and the Overview's Tokens by day card"
+        echo "OCR found the Overview's Cache share and Tokens by day cards"
       else
-        fail "OCR did not find the Insights tab switcher and the Overview's Tokens by day card in the screenshot"
+        fail "OCR did not find the Overview's Cache share and Tokens by day cards in the screenshot"
       fi
     else
       fail "tesseract not available -- OCR text-presence check could not run"
