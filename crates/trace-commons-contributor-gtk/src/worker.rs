@@ -142,7 +142,11 @@ impl Worker {
                         let mut stream = Some(stream);
                         std::thread::spawn(move || {
                             pump_events(
-                                || stream.take().ok_or_else(|| anyhow::anyhow!("opened once")),
+                                || {
+                                    stream
+                                        .take()
+                                        .ok_or_else(|| anyhow::anyhow!("events-opened-once"))
+                                },
                                 &event_tx,
                                 None,
                             )
@@ -289,8 +293,8 @@ mod event_tests {
         }
     }
 
-    fn stream(names: &[&'static str]) -> Result<Box<dyn EventStream>> {
-        Ok(Box::new(Scripted(names.to_vec().into_iter())))
+    fn stream(names: Vec<&'static str>) -> Result<Box<dyn EventStream>> {
+        Ok(Box::new(Scripted(names.into_iter())))
     }
 
     #[test]
@@ -305,8 +309,8 @@ mod event_tests {
                     attempt += 1;
                     match attempt {
                         1 | 3 => Err(anyhow::anyhow!("daemon-not-running")),
-                        2 => stream(&["queue_changed"]),
-                        4 => stream(&["status_changed"]),
+                        2 => stream(vec!["queue_changed"]),
+                        4 => stream(vec!["status_changed"]),
                         _ => Err(anyhow::anyhow!("daemon-not-running")),
                     }
                 },
@@ -339,7 +343,7 @@ mod event_tests {
                         return Err(anyhow::anyhow!("daemon-not-running"));
                     }
                     opened = true;
-                    stream(&["queue_changed"])
+                    stream(vec!["queue_changed"])
                 },
                 &tx,
                 Some(std::time::Duration::ZERO),
@@ -357,7 +361,7 @@ mod event_tests {
         pump_events(
             || {
                 opens += 1;
-                stream(&["queue_changed"])
+                stream(vec!["queue_changed"])
             },
             &tx,
             None,
