@@ -1724,10 +1724,11 @@ fn memory_legend_word() -> &'static str {
     monitor_screens_copy().flow_map.legend_memory_computer
 }
 
-/// The legend's memory item: the coins' lock, and its word.
-fn memory_legend_item() -> gtk::Box {
-    let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+/// The coins' lock as a small widget, for the legend's memory item and the
+/// transfer card's memory well (the Mac's `Image(systemName: "lock")`).
+pub(super) fn lock_icon() -> gtk::DrawingArea {
     let lock = gtk::DrawingArea::new();
+    lock.add_css_class("tc-map-lock");
     lock.set_content_width(10);
     lock.set_content_height(10);
     lock.set_valign(gtk::Align::Center);
@@ -1736,6 +1737,13 @@ fn memory_legend_item() -> gtk::Box {
         let centre = Point::new(f64::from(w) / 2.0, f64::from(h) / 2.0);
         draw_lock(cr, centre, 1.0, &palette.ink, 0.6);
     });
+    lock
+}
+
+/// The legend's memory item: the coins' lock, and its word.
+fn memory_legend_item() -> gtk::Box {
+    let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let lock = lock_icon();
     let label = gtk::Label::new(Some(memory_legend_word()));
     label.add_css_class("caption");
     label.add_css_class("dim-label");
@@ -2281,6 +2289,28 @@ mod tests {
         assert!(coin_has_lock(false, true, 3));
         assert!(!coin_has_lock(true, true, 0));
         assert!(!coin_has_lock(true, false, 0));
+    }
+
+    /// The lock the legend and the transfer card share draws ink in its
+    /// 10 by 10 box.
+    #[test]
+    fn the_lock_draws_ink_in_its_box() {
+        let surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 10, 10)
+            .expect("surface");
+        {
+            let cr = gtk::cairo::Context::new(&surface).expect("context");
+            let ink = gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
+            draw_lock(&cr, Point::new(5.0, 5.0), 1.0, &ink, 1.0);
+        }
+        surface.flush();
+        let mut surface = surface;
+        let inked = surface
+            .data()
+            .expect("pixels")
+            .chunks(4)
+            .filter(|px| px[3] != 0)
+            .count();
+        assert!(inked >= 20, "the lock drew {inked} pixels");
     }
 
     fn entry(id: &str, project: &str, source: &str) -> QueueEntry {
