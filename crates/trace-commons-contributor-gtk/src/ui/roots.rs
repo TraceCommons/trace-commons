@@ -494,33 +494,105 @@ pub(super) fn connected(app: &Rc<super::App>, on_saved: impl Fn() + 'static) -> 
                 failure.set_visible(true);
                 return;
             };
+            // A window attached to the host daemon from the sandbox: a
+            // folder the chooser handed back as a document-portal path is
+            // sent as the host folder it stands for, as Launch does, or
+            // not at all. The daemon in the sandbox opens the portal path
+            // itself.
+            let on_host = app.worker.via_host_link();
+            let maps = watch_paths(&params)
+                .iter()
+                .any(|path| crate::document_portal::needs_mapping(path, on_host));
+            let send = {
+                let pending = pending.clone();
+                let update = update.clone();
+                let failure = failure.clone();
+                let on_saved = on_saved.clone();
+                let weak_root = root.downgrade();
+                let generation = generation.clone();
+                move |app: &Rc<super::App>, params: serde_json::Value| {
+                    let expected = params.clone();
+                    let submitted_generation = generation.get();
+                    app.call("set_settings", params, move |_, result| {
+                        pending.set(false);
+                        update();
+                        if generation.get() != submitted_generation
+                            || !weak_root.upgrade().is_some_and(|root| root.is_mapped())
+                        {
+                            return;
+                        }
+                        let confirmed = result
+                            .as_ref()
+                            .is_ok_and(|settings| declarations_confirmed(&expected, settings));
+                        failure.set_visible(!confirmed);
+                        if confirmed {
+                            on_saved();
+                        }
+                    });
+                }
+            };
+            if !maps {
+                send(&app, params);
+                return;
+            }
+            // One bounded D-Bus round trip per folder, off the GTK thread.
             let pending = pending.clone();
             let update = update.clone();
             let failure = failure.clone();
-            let on_saved = on_saved.clone();
             let weak_root = root.downgrade();
-            let expected = params.clone();
-            let submitted_generation = generation.get();
+            let weak_app = Rc::downgrade(&app);
+            let mapped_generation = generation.get();
             let generation = generation.clone();
-            app.call("set_settings", params, move |_, result| {
-                pending.set(false);
-                update();
-                if generation.get() != submitted_generation
-                    || !weak_root.upgrade().is_some_and(|root| root.is_mapped())
-                {
-                    return;
-                }
-                let confirmed = result
-                    .as_ref()
-                    .is_ok_and(|settings| declarations_confirmed(&expected, settings));
-                failure.set_visible(!confirmed);
-                if confirmed {
-                    on_saved();
-                }
-            });
+            super::service_dialog::off_thread(
+                move || {
+                    host_declarations(params, |path| crate::document_portal::host_path(path, true))
+                },
+                move |mapped| {
+                    let live = generation.get() == mapped_generation
+                        && weak_root.upgrade().is_some_and(|root| root.is_mapped());
+                    match (mapped, weak_app.upgrade()) {
+                        (Some(params), Some(app)) if live => send(&app, params),
+                        (mapped, _) => {
+                            pending.set(false);
+                            update();
+                            failure.set_visible(live && mapped.is_none());
+                        }
+                    }
+                },
+            );
         });
     });
     root
+}
+
+/// The folders `params` (as [`declaration_params`] builds them) would
+/// watch, in order.
+fn watch_paths(params: &serde_json::Value) -> Vec<PathBuf> {
+    params
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.values())
+        .filter(|value| value["mode"] == "watch")
+        .filter_map(|value| value["path"].as_str().map(PathBuf::from))
+        .collect()
+}
+
+/// `params` with each watched folder replaced by what `map` makes of it
+/// (`document_portal::host_path`), or `None` when one cannot be mapped or
+/// its mapping is not UTF-8: then nothing is sent.
+fn host_declarations(
+    mut params: serde_json::Value,
+    mut map: impl FnMut(&std::path::Path) -> Result<PathBuf, crate::document_portal::Unmapped>,
+) -> Option<serde_json::Value> {
+    for value in params.as_object_mut()?.values_mut() {
+        if value["mode"] != "watch" {
+            continue;
+        }
+        let path = PathBuf::from(value["path"].as_str()?);
+        let host = map(&path).ok()?;
+        value["path"] = serde_json::Value::from(host.to_str()?);
+    }
+    Some(params)
 }
 
 fn declarations_confirmed(expected: &serde_json::Value, settings: &serde_json::Value) -> bool {
@@ -727,6 +799,71 @@ mod tests {
         changed["codex_source"]["path"] = json!("/different/path");
         assert!(!declarations_confirmed(&expected, &changed));
         assert!(!declarations_confirmed(&json!({}), &json!({})));
+    }
+
+    /// A folder picked in the sandbox's chooser outside the app's grants is
+    /// a document-portal path; the host daemon is sent the folder it stands
+    /// for, as Launch does, and an Off answer or an ordinary path is sent
+    /// as it is.
+    #[test]
+    fn a_portal_folder_declared_to_the_host_daemon_is_sent_as_its_host_path() {
+        use serde_json::json;
+        let root = std::path::Path::new("/run/user/1000/doc");
+        let params = json!({
+            "claude_source": {"mode": "watch", "path": "/run/user/1000/doc/a1b2/projects"},
+            "codex_source": {"mode": "off"},
+            "gemini_source": {"mode": "watch", "path": "/home/u/.gemini/tmp"},
+        });
+        assert_eq!(
+            watch_paths(&params),
+            vec![
+                PathBuf::from("/run/user/1000/doc/a1b2/projects"),
+                PathBuf::from("/home/u/.gemini/tmp")
+            ]
+        );
+        let mapped = host_declarations(params, |path| {
+            crate::document_portal::host_path_with(path, true, Some(root), |id| {
+                assert_eq!(id, "a1b2");
+                Some(PathBuf::from("/home/u/.claude/projects"))
+            })
+        });
+        assert_eq!(
+            mapped,
+            Some(json!({
+                "claude_source": {"mode": "watch", "path": "/home/u/.claude/projects"},
+                "codex_source": {"mode": "off"},
+                "gemini_source": {"mode": "watch", "path": "/home/u/.gemini/tmp"},
+            }))
+        );
+    }
+
+    /// No folder is sent when the portal cannot say where it is, or names
+    /// one that is not UTF-8: the screen refuses rather than declaring the
+    /// portal path (which the host daemon would watch as an empty mount)
+    /// or a mangled one.
+    #[test]
+    fn a_portal_folder_that_cannot_be_mapped_is_not_declared() {
+        use serde_json::json;
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::path::Path::new("/run/user/1000/doc");
+        let params = json!({
+            "claude_source": {"mode": "watch", "path": "/run/user/1000/doc/a1b2/projects"},
+            "codex_source": {"mode": "off"},
+        });
+        assert_eq!(
+            host_declarations(params.clone(), |path| {
+                crate::document_portal::host_path_with(path, true, Some(root), |_| None)
+            }),
+            None
+        );
+        assert_eq!(
+            host_declarations(params, |path| {
+                crate::document_portal::host_path_with(path, true, Some(root), |_| {
+                    Some(PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/u/\xff")))
+                })
+            }),
+            None
+        );
     }
 
     fn candidate(source: &str, count: u64, exists: bool) -> SourceCandidate {
