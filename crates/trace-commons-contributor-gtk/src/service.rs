@@ -121,11 +121,13 @@ pub fn asks_for_folders(
     asked: bool,
     first_run_open: bool,
 ) -> bool {
-    // `null` is "never asked" (`daemon::settings::roots_declared` needs
-    // both); a missing key is a daemon that does not say, never a question.
-    let undeclared = ["claude_source", "codex_source"]
+    // `get_settings` never carries the declarations themselves (they hold
+    // paths); it answers `*_source_mode`, where "unset" is "never asked"
+    // (`daemon::settings::roots_declared` needs both). A missing key is a
+    // daemon that does not say, never a question.
+    let undeclared = ["claude_source_mode", "codex_source_mode"]
         .iter()
-        .any(|key| settings.get(key).is_some_and(Value::is_null));
+        .any(|key| settings.get(key).and_then(Value::as_str) == Some("unset"));
     !hosting && !asked && !first_run_open && undeclared
 }
 
@@ -707,9 +709,13 @@ mod tests {
 
     #[test]
     fn an_attached_daemon_without_folders_gets_the_folders_screen_once() {
-        let undeclared = json!({"claude_source": null, "codex_source": null});
-        let half = json!({"claude_source": {"watch": "/c"}, "codex_source": null});
-        let declared = json!({"claude_source": {"watch": "/c"}, "codex_source": "off"});
+        // What `get_settings` answers: it drops every `*_source` key (a
+        // declaration holds a path) and reports `*_source_mode` instead
+        // (`daemon::ipc::redacted_settings`). A fresh host daemon read on
+        // Ubuntu 24.04 answered `"unset"` for both, and no `claude_source`.
+        let undeclared = json!({"claude_source_mode": "unset", "codex_source_mode": "unset"});
+        let half = json!({"claude_source_mode": "watch", "codex_source_mode": "unset"});
+        let declared = json!({"claude_source_mode": "watch", "codex_source_mode": "off"});
         assert!(asks_for_folders(false, &undeclared, false, false));
         assert!(asks_for_folders(false, &half, false, false));
         assert!(!asks_for_folders(false, &declared, false, false));
