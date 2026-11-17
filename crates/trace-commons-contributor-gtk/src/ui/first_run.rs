@@ -86,6 +86,9 @@ pub(super) struct Coordinator {
     /// The optional referral code under near.ai's Sign in, sent with the
     /// NEAR AI enrollment.
     referral: RefCell<String>,
+    /// The NEAR AI credit section, drawn once an enrollment is held.
+    payout: RefCell<Option<Rc<super::payout_link::PayoutLinkView>>>,
+    payout_shown: Cell<bool>,
 }
 
 fn name(step: Step) -> &'static str {
@@ -207,6 +210,8 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         forward: Cell::new(false),
         lookup: RefCell::new(None),
         referral: RefCell::new(String::new()),
+        payout: RefCell::new(None),
+        payout_shown: Cell::new(false),
     });
     if let Some(handed) = super::roots::take_first_run_handoff() {
         let mut state = c.state.borrow_mut();
@@ -1086,6 +1091,23 @@ impl Coordinator {
         card.append(&actions);
         self.join_body.append(&card);
         self.join_body.append(&self.referral_field());
+        // Which organization NEAR AI credit goes to, once an enrollment is
+        // held, as the Mac's Join draws `PayoutLinkView`.
+        if state.holds_enrollment() {
+            if let Some(app) = self.app.upgrade() {
+                let view = self
+                    .payout
+                    .borrow_mut()
+                    .get_or_insert_with(|| super::payout_link::PayoutLinkView::new(&app))
+                    .clone();
+                self.join_body.append(&view.root);
+                if !self.payout_shown.replace(true) {
+                    view.refresh();
+                }
+            }
+        } else {
+            self.payout_shown.set(false);
+        }
         if join::shows_invite_card(&state) {
             self.join_body.append(&self.invite_card(&state));
         }

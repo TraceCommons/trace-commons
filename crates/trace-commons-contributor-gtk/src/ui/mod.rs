@@ -23,6 +23,7 @@ mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod onboarding;
+mod payout_link;
 pub mod preview;
 pub mod private_inference;
 pub mod queue;
