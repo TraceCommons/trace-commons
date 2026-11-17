@@ -1314,6 +1314,12 @@ impl Coordinator {
             if let Some(c) = weak.upgrade().filter(|c| c.valid(generation)) {
                 c.set_busy(false);
                 c.render_join();
+                // The setup may have linked the organization: read the credit
+                // section's rail again.
+                let payout = c.payout.borrow().clone();
+                if let Some(view) = payout {
+                    view.refresh();
+                }
                 let ready = c.state.borrow().clone();
                 if outcome == org::Outcome::Ready
                     && !c.auto_started.replace(true)
