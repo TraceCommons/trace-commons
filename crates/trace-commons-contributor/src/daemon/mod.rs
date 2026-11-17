@@ -7888,11 +7888,17 @@ mod tests {
         .unwrap();
         server.abort();
         embedded.close();
-        assert_eq!(
-            reply.expect("closed, not timed out"),
-            Vec::<u8>::new(),
-            "a refused peer gets no answer"
-        );
+        // Refused means closed with nothing written. On Linux, closing a
+        // unix socket whose request was never read resets the peer instead
+        // of ending its stream; that is the same refusal. A timeout is not.
+        match reply {
+            Ok(answer) => assert_eq!(answer, Vec::<u8>::new(), "a refused peer gets no answer"),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset,
+                "closed, not timed out: {e}"
+            ),
+        }
     }
 
     #[cfg(unix)]

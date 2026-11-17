@@ -730,9 +730,8 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     window.present();
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod mounted_tests {
-    #![cfg(target_os = "linux")]
     use super::*;
     use crate::worker::{Job, Outcome, Worker};
     use trace_commons_contributor::managed::copy::background_service as words;
