@@ -784,6 +784,9 @@ mod mounted_tests {
         let render = |dismissed: bool| -> Vec<(String, bool)> {
             crate::ui::service_dialog::set_dismissed(dismissed);
             app.private_inference.managed_revision.set(0);
+            // Without this the loop below can read the previous draw, which
+            // has "Set up" too, before the new answer is drawn.
+            clear(&app.private_inference.managed);
             refresh(&app);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {

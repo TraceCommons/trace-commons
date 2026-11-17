@@ -456,8 +456,8 @@ mod tests {
         );
         assert_eq!(parts.not_now.label().unwrap(), words::NOT_NOW);
         assert_eq!(parts.waiting.label(), words::WAITING);
-        assert!(!parts.waiting.is_visible());
-        assert!(!parts.failed.is_visible());
+        assert!(!parts.waiting.get_visible());
+        assert!(!parts.failed.get_visible());
         for word in [
             words::NOT_INSTALLED_TITLE,
             words::NOT_INSTALLED_BODY,
@@ -481,7 +481,7 @@ mod tests {
         assert!(parts.guide.is_none());
         assert_eq!(parts.primary.label().unwrap(), words::START_IT);
         assert_eq!(parts.not_now.label().unwrap(), words::NOT_NOW);
-        assert!(!parts.failed.is_visible());
+        assert!(!parts.failed.get_visible());
         assert!(shown.iter().any(|s| s == words::START_FAILED));
         assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND));
         assert!(!shown.iter().any(|s| s == SERVICE_INSTALL_COMMAND));
@@ -498,11 +498,11 @@ mod tests {
         assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND));
         parts.waiting.set_visible(true);
         show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
-        assert!(!parts.failed.is_visible());
-        assert!(parts.waiting.is_visible());
+        assert!(!parts.failed.get_visible());
+        assert!(parts.waiting.get_visible());
         show_step(&parts.failed, &parts.waiting, WatchStep::Failed);
-        assert!(parts.failed.is_visible());
-        assert!(!parts.waiting.is_visible());
+        assert!(parts.failed.get_visible());
+        assert!(!parts.waiting.get_visible());
         let mut failed = Vec::new();
         labels(parts.failed.upcast_ref(), &mut failed);
         assert_eq!(
@@ -514,7 +514,7 @@ mod tests {
         );
         // The service gone again: the line goes with it.
         show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
-        assert!(!parts.failed.is_visible());
+        assert!(!parts.failed.get_visible());
     }
 
     #[test]
