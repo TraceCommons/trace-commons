@@ -416,8 +416,8 @@ impl App {
         // There is no header bar: the main pane's toolbar row is the title
         // bar, with the desktop's own window controls in it
         // (`monitor::shell`). The update banner, the health banner and the
-        // notices column that sat above the stack are popover notices over
-        // the tab now, in the order they were stacked.
+        // notices column that sat above the stack are popover notices laid
+        // over the tab now, in the Mac's stack.
         let shell = monitor::Shell::new(
             &window,
             monitor::Pages {
@@ -429,18 +429,11 @@ impl App {
                 mission_drafts: mission_drafts.as_ref().map(|view| &view.root),
                 settings: &settings.root,
                 notices: vec![
-                    // First: the one card with a clock on it.
+                    // The front first, as the Mac stacks them
+                    // (`monitor::notices::Notice::ALL`).
                     (
                         monitor::notices::Notice::Undo,
                         queue.undo_notice.clone().upcast(),
-                    ),
-                    (
-                        monitor::notices::Notice::Update,
-                        update.root.clone().upcast(),
-                    ),
-                    (
-                        monitor::notices::Notice::Account,
-                        account_column.clone().upcast(),
                     ),
                     (
                         monitor::notices::Notice::Health,
@@ -451,12 +444,20 @@ impl App {
                         void_column.clone().upcast(),
                     ),
                     (
+                        monitor::notices::Notice::ArmingOffer,
+                        queue.arming_notice.clone().upcast(),
+                    ),
+                    (
                         monitor::notices::Notice::PrivateAiOffer,
                         queue.private_inference_notice.clone().upcast(),
                     ),
                     (
-                        monitor::notices::Notice::ArmingOffer,
-                        queue.arming_notice.clone().upcast(),
+                        monitor::notices::Notice::Account,
+                        account_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Update,
+                        update.root.clone().upcast(),
                     ),
                 ],
             },
