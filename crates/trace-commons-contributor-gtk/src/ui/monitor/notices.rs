@@ -21,14 +21,12 @@
 //!   X closes the card until the window is opened again (`Close::Session`).
 //!   A closed card comes back when what it says changes, or when it goes
 //!   and its cause recurs.
-//! - The undo: the X is the Mac's "close, it still sends": it puts the
-//!   card away and the approval stands (`Close::LetItSend`).
-//! - The consent notices, the account's notices and the Private AI offer
-//!   carry no extra X (`Close::Own`). On the Mac each one's X is its own
-//!   Acknowledge, Dismiss or Not now, which these cards already draw as a
-//!   button in the same words; a second control doing the same thing is
-//!   not added. A gate hold has no X on the Mac either: it goes when the
-//!   hold does.
+//! - The undo, the consent notices, the account's notices and the Private
+//!   AI offer carry no extra X (`Close::Own`). On the Mac each one's X is
+//!   its own Dismiss (the undo's "close, it still sends"), Acknowledge or
+//!   Not now, which these cards already draw as a button in the same
+//!   words; a second control doing the same thing is not added. A gate
+//!   hold has no X on the Mac either: it goes when the hold does.
 //!
 //! Deliberate platform differences from the Swift:
 //!
@@ -76,10 +74,7 @@ pub enum Close {
     /// Closed until the window is opened again, or until what the card says
     /// changes.
     Session,
-    /// The undo's "close, it still sends": the card goes and the approval
-    /// stands.
-    LetItSend,
-    /// No extra X: the card's own Acknowledge, Dismiss or Not now is the
+    /// No extra X: the card's own Dismiss, Acknowledge or Not now is the
     /// Mac's X, already drawn in the same words.
     Own,
 }
@@ -100,8 +95,7 @@ impl Notice {
     pub fn close(self) -> Close {
         match self {
             Notice::Update | Notice::Health | Notice::ArmingOffer => Close::Session,
-            Notice::Undo => Close::LetItSend,
-            Notice::Account | Notice::Consent | Notice::PrivateAiOffer => Close::Own,
+            Notice::Undo | Notice::Account | Notice::Consent | Notice::PrivateAiOffer => Close::Own,
         }
     }
 }
@@ -223,8 +217,12 @@ mod tests {
         assert_eq!(Notice::Update.close(), Close::Session);
         assert_eq!(Notice::Health.close(), Close::Session);
         assert_eq!(Notice::ArmingOffer.close(), Close::Session);
-        assert_eq!(Notice::Undo.close(), Close::LetItSend);
-        for notice in [Notice::Account, Notice::Consent, Notice::PrivateAiOffer] {
+        for notice in [
+            Notice::Undo,
+            Notice::Account,
+            Notice::Consent,
+            Notice::PrivateAiOffer,
+        ] {
             assert_eq!(notice.close(), Close::Own, "{notice:?}");
         }
     }

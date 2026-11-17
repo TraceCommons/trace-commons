@@ -52,7 +52,7 @@ use super::three_pane::ThreePane;
 use super::{demand, graph_model};
 use crate::ui::{App, style};
 
-/// The existing screens the window hosts, and the notices laid over them.
+/// The existing screens the window hosts, and the notices shown above them.
 pub struct Pages<'a> {
     pub home: &'a gtk::Box,
     pub inference: &'a gtk::Box,
@@ -691,27 +691,18 @@ impl Shell {
 
     // --- Notices ---------------------------------------------------------
 
-    /// A notice's X (`notices::Close`). The undo's puts the card away and
-    /// the approval still sends, as the Mac's does; without an `App` there
-    /// is no undo to put away.
-    pub fn close_notice(&self, app: Option<&Rc<App>>, notice: Notice) {
+    /// A notice's X (`notices::Close::Session`): the card is closed until
+    /// the window is opened again or its words change.
+    pub fn close_notice(&self, notice: Notice) {
         let Some(slot) = self.notice_slots.iter().find(|slot| slot.notice == notice) else {
             return;
         };
-        match notice.close() {
-            notices::Close::Session => {
-                self.state
-                    .closed
-                    .borrow_mut()
-                    .close(notice, card_text(&slot.card));
-                (self.refresh_notices)();
-            }
-            notices::Close::LetItSend => {
-                if let Some(app) = app {
-                    app.dismiss_undo();
-                }
-            }
-            notices::Close::Own => {}
+        if notice.close() == notices::Close::Session {
+            self.state
+                .closed
+                .borrow_mut()
+                .close(notice, card_text(&slot.card));
+            (self.refresh_notices)();
         }
     }
 
@@ -1122,7 +1113,7 @@ pub fn wire(app: &Rc<App>) {
         let notice = slot.notice;
         slot.close.connect_clicked(move |_| {
             if let Some(app) = weak.upgrade() {
-                app.shell.close_notice(Some(&app), notice);
+                app.shell.close_notice(notice);
             }
         });
     }
@@ -1751,9 +1742,9 @@ mod tests {
 
     /// The Mac's X: it closes the card until the window is opened again;
     /// the same card re-shown stays closed, new words or the card going
-    /// and coming back show it again. The consent and account cards, and
-    /// the Private AI offer, carry their own Acknowledge, Dismiss or Not
-    /// now and no extra X.
+    /// and coming back show it again. The undo, the consent and account
+    /// cards and the Private AI offer carry their own Dismiss, Acknowledge
+    /// or Not now and no extra X.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_a_notices_x_closes_that_card() {
@@ -1786,7 +1777,7 @@ mod tests {
         assert_eq!(update.close.tooltip_text().as_deref(), Some(words.close));
         assert!(frame.is_visible());
         // Not wired without an `App`: apply the press as its handler would.
-        shell.close_notice(None, Notice::Update);
+        shell.close_notice(Notice::Update);
         assert!(!frame.is_visible(), "the X did not close the card");
         // Only that card.
         let health = slot(shell, Notice::Health);
@@ -1795,7 +1786,7 @@ mod tests {
         update.card.set_visible(false);
         update.card.set_visible(true);
         assert!(frame.is_visible(), "a card that went and came back is new");
-        shell.close_notice(None, Notice::Update);
+        shell.close_notice(Notice::Update);
         assert!(!frame.is_visible());
         shell.apply();
         assert!(!frame.is_visible(), "a redraw reopened a closed card");
@@ -1809,7 +1800,7 @@ mod tests {
         update.card.remove_css_class(notices::STAYS_CLASS);
         assert!(update.close.get_visible());
         // Opening the window again shows every closed card.
-        shell.close_notice(None, Notice::Update);
+        shell.close_notice(Notice::Update);
         assert!(!frame.is_visible());
         mounted.window.set_visible(false);
         mounted.window.set_visible(true);

@@ -211,8 +211,16 @@ fn render(
     // the card said nothing was ever in flight even while a dozen traces
     // were.
     let waiting = rollup.all_time.submitted;
-    let stats = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
-    stats.set_homogeneous(true);
+    // Side by side where they fit, fewer to a line in a narrow pane (the
+    // Monitor's main pane is 440).
+    let stats = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(space::M as u32)
+        .row_spacing(space::M as u32)
+        .homogeneous(true)
+        .build();
     for (glyph, label, count) in [
         (
             Glyph::Accepted,
@@ -222,7 +230,7 @@ fn render(
         (Glyph::Held, copy::QUARANTINE_HEADING, rollup.quarantined),
         (Glyph::Waiting, copy::HISTORY_WAITING_TO_BE_SCORED, waiting),
     ] {
-        stats.append(&stat_card(glyph, label, count));
+        style::wrap_append(&stats, &stat_card(glyph, label, count));
     }
     content.append(&stats);
 
@@ -293,6 +301,7 @@ fn render(
             let refreshed = gtk::Label::builder()
                 .label(format!("Refreshed {}", human_when(Some(refreshed_at))))
                 .xalign(1.0)
+                .wrap(true)
                 .valign(gtk::Align::End)
                 .build();
             refreshed.add_css_class("tc-meta");
@@ -1210,9 +1219,11 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
         if index != last {
             cell.add_css_class("tc-brand-divided");
         }
+        // Wraps, so four cells fit a 440 pane.
         let caption = gtk::Label::builder()
             .label(label.to_uppercase())
             .xalign(0.0)
+            .wrap(true)
             .build();
         caption.add_css_class("tc-brand-label");
         cell.append(&caption);
@@ -1224,7 +1235,7 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
     panel.append(&strip);
 
     // 3. What the figures are figures of. Stated, never assumed.
-    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+    let meta = style::wrap_row(18);
     let mut facts = vec![format!("Window {}", window_label(standing))];
     if let Some(since) = standing.public_since {
         facts.push(format!("Public since {}", since.format("%B %-d, %Y")));
@@ -1235,7 +1246,7 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
     for fact in facts {
         let label = gtk::Label::builder().label(fact.to_uppercase()).build();
         label.add_css_class("tc-brand-label");
-        meta.append(&label);
+        style::wrap_append(&meta, &label);
     }
     panel.append(&meta);
 
