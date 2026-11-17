@@ -123,6 +123,15 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let collected: String
     public let keptHereOne: String
     public let keptHere: String
+    /// The same five lines in words for every computer but a Mac
+    /// (`legend_memory_computer` and its siblings). The Linux shell draws
+    /// them; this shell decodes them so the export and the decoder agree,
+    /// and draws its own "this Mac" lines above.
+    public let legendMemoryComputer: String
+    public let memoryStaysComputer: String
+    public let transferKeepNoteComputer: String
+    public let keptHereOneComputer: String
+    public let keptHereComputer: String
     /// The Traces map's style switch in Settings, General: its card's
     /// title, the switch, and what it does.
     public let styleTitle: String
@@ -181,6 +190,11 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case collected
         case keptHereOne = "kept_here_one"
         case keptHere = "kept_here"
+        case legendMemoryComputer = "legend_memory_computer"
+        case memoryStaysComputer = "memory_stays_computer"
+        case transferKeepNoteComputer = "transfer_keep_note_computer"
+        case keptHereOneComputer = "kept_here_one_computer"
+        case keptHereComputer = "kept_here_computer"
         case styleTitle = "style_title"
         case styleToggle = "style_toggle"
         case styleCaption = "style_caption"
