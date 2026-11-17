@@ -3463,6 +3463,86 @@ mod tests {
         });
     }
 
+    /// The terminal each [`record_choice`] launch was asked to open in.
+    static LAUNCHED_IN: std::sync::Mutex<Vec<(Uuid, TerminalSetting)>> =
+        std::sync::Mutex::new(vec![]);
+
+    /// Records the terminal it was asked to open in, and refuses one that
+    /// is not installed, as [`terminal::launch`] does.
+    fn record_choice(
+        choice: TerminalSetting,
+        installed: &[TerminalApp],
+        config: &std::path::Path,
+        cwd: &std::path::Path,
+        session: Uuid,
+        ticket: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        LAUNCHED_IN.lock().unwrap().push((session, choice));
+        match choice.app() {
+            Some(app) if installed.contains(&app) => {
+                record_launch(choice, installed, config, cwd, session, ticket)
+            }
+            _ => Err(ManagedError::TerminalNotFound),
+        }
+    }
+
+    /// A launch through the daemon, with no terminal chosen and the default
+    /// missing, opens the first installed terminal; once the person has
+    /// chosen the missing default, the launch is refused, never moved.
+    #[test]
+    fn a_launch_with_a_missing_unchosen_default_opens_the_first_installed_terminal() {
+        let (home, shared) = launching(record_choice);
+        let others = || -> Vec<TerminalApp> {
+            TerminalApp::offered()
+                .iter()
+                .copied()
+                .filter(|app| Some(*app) != TerminalSetting::default().app())
+                .collect()
+        };
+        let Some(first) = others().first().copied() else {
+            // One offered terminal here (Windows): nothing to fall back to.
+            return;
+        };
+        locked(&shared, |service| service.installed_terminals = others);
+        let in_terminal = |session: Uuid| {
+            LAUNCHED_IN
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session)
+                .map(|(_, choice)| *choice)
+        };
+        {
+            let settings = shared.settings.lock().unwrap();
+            assert!(!settings.managed_terminal_chosen);
+            assert_eq!(settings.managed_terminal, TerminalSetting::default());
+        }
+        let unchosen = prepared(&shared, home.path());
+        let id = unchosen.session_id;
+        assert!(
+            terminal(
+                &shared,
+                json!({"session_id":id,"ticket":unchosen.ticket.unwrap()})
+            )
+            .is_ok()
+        );
+        assert_eq!(in_terminal(id), Some(TerminalSetting::from(first)));
+        // Not saved: the setting still names the default, unchosen.
+        assert!(!shared.settings.lock().unwrap().managed_terminal_chosen);
+
+        shared.settings.lock().unwrap().managed_terminal_chosen = true;
+        let chosen = prepared(&shared, home.path());
+        let id = chosen.session_id;
+        assert_eq!(
+            terminal(
+                &shared,
+                json!({"session_id":id,"ticket":chosen.ticket.unwrap()})
+            ),
+            Err(label(ManagedError::TerminalNotFound).to_string())
+        );
+        assert_eq!(in_terminal(id), Some(TerminalSetting::default()));
+    }
+
     /// The sessions [`record_opened`] was asked to open.
     static OPENED: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(vec![]);
 

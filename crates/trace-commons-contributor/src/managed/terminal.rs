@@ -1163,9 +1163,11 @@ fn program_plan(
     {
         return Err(ManagedError::InvalidRequest);
     }
-    // Ptyxis makes its folder `file://` and the path, unescaped, and reads
-    // it back as a URI (src/ptyxis-application.c): `%41` becomes `A`, and
-    // `#` or `?` ends the path. Refused rather than opened elsewhere.
+    // Ptyxis makes its folder `file://` and the path, unescaped
+    // (src/ptyxis-application.c), and reads it back with
+    // `g_file_new_for_uri` (src/ptyxis-client.c): `%41` becomes `A`, and a
+    // `#` is not part of a local path; `?` as a precaution. Refused rather
+    // than opened elsewhere.
     if app == TerminalApp::Ptyxis
         && cwd
             .as_os_str()
@@ -1499,7 +1501,7 @@ fn setup_argv(body: &str) -> Result<Vec<std::ffi::OsString>, ManagedError> {
 /// How a Linux terminal opens tool setup: its own arguments with no
 /// folder, then `/bin/bash -lc` and the script, each one argv element.
 /// Windows Terminal is refused: setup is not offered there.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn setup_plan(app: TerminalApp, program: &Path, body: &str) -> Result<Plan, ManagedError> {
     if !program.is_absolute() || app == TerminalApp::WindowsTerminal {
         return Err(ManagedError::InvalidRequest);
@@ -2285,7 +2287,15 @@ mod tests {
         let command = setup_shell_command("printf '%s\\n' 'quoted $HOME `not-code`'").unwrap();
         assert!(command.starts_with("/bin/bash -lc '"));
         assert!(command.contains("$HOME/.local/bin:$HOME/.opencode/bin:$PATH"));
-        assert!(command.contains("exec \"${SHELL:-/bin/zsh}\" -l"));
+        assert!(command.contains(&format!("exec \"${{SHELL:-{SETUP_FALLBACK_SHELL}}}\" -l")));
+        assert_eq!(
+            SETUP_FALLBACK_SHELL,
+            if cfg!(target_os = "macos") {
+                "/bin/zsh"
+            } else {
+                "/bin/bash"
+            }
+        );
         for app in [
             TerminalApp::Terminal,
             TerminalApp::Ghostty,
@@ -3116,7 +3126,8 @@ mod tests {
 
     /// Ptyxis turns its working directory into `file://` and the folder
     /// with nothing escaped, then reads it back as a URI: `%41` would
-    /// become `A`, and `#` or `?` would end the path. A folder holding any
+    /// become `A`, and a `#` is not part of a local path (`?` is refused
+    /// as a precaution). A folder holding any
     /// of the three is refused for Ptyxis rather than opened somewhere
     /// else, as a `;` is for Windows Terminal; every other terminal takes it.
     #[cfg(unix)]
