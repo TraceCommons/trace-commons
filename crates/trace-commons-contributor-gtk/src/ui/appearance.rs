@@ -86,19 +86,23 @@ pub fn env_override(value: Option<&str>) -> Option<Appearance> {
     (value == Some("omarchy")).then_some(Appearance::Omarchy)
 }
 
-/// What to watch so a theme switch, an edit to the palette, or an Omarchy
-/// installed after launch is noticed: each candidate's `current/` directory
+/// What to watch so a theme switch, an edit to the palette, or a first
+/// theme set after launch is noticed: each candidate's `current/` directory
 /// -- the theme directory itself is deleted and replaced on a switch, so a
 /// monitor on it would die with it -- or, while that does not exist yet, its
-/// nearest existing ancestor up to the candidate's base directory; and each
-/// theme directory that exists now, for edits in place. That covers a
+/// `omarchy/` directory, and nothing above that (an Omarchy installed after
+/// launch, where not even `omarchy/` existed, is read at the next launch or
+/// the next time the choice is made); and each theme directory that exists
+/// now, for edits in place. That covers a
 /// palette that read cleanly and one that did not: a broken, deleted or
 /// never-shipped `colors.toml` fixed without a theme switch is noticed too.
 pub fn watch_targets(dirs: &[PathBuf], exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = Vec::new();
     for theme in dirs {
-        // theme = <base>/omarchy/current/theme: try current, omarchy, base.
-        let found = theme.ancestors().skip(1).take(3).find(|dir| exists(dir));
+        // theme = <base>/omarchy/current/theme: try current, then omarchy.
+        // Never <base> itself: a desktop without Omarchy would otherwise
+        // watch the top of ~/.config or ~/.local/state.
+        let found = theme.ancestors().skip(1).take(2).find(|dir| exists(dir));
         if let Some(dir) = found {
             let dir = dir.to_path_buf();
             if !targets.contains(&dir) {
@@ -528,15 +532,21 @@ mod tests {
             watch_targets(&dirs, exists),
             vec![
                 PathBuf::from("/h/.local/state/omarchy/current"),
-                PathBuf::from("/h/.config"),
                 PathBuf::from("/h/.local/state/omarchy/current/theme"),
             ]
         );
+        // `omarchy/` without `current/` yet: watch `omarchy/`.
+        let bare = |p: &Path| p == Path::new("/h/.config/omarchy") || p == Path::new("/h/.config");
+        assert_eq!(
+            watch_targets(&dirs, bare),
+            vec![PathBuf::from("/h/.config/omarchy")]
+        );
         // Nothing installed and no base directories: nothing to watch.
         assert!(watch_targets(&dirs, |_| false).is_empty());
-        // The watch never climbs above a candidate's base directory.
-        let only_home = |p: &Path| p == Path::new("/h");
-        assert!(watch_targets(&dirs, only_home).is_empty());
+        // The watch never climbs above `<base>/omarchy`: a desktop without
+        // Omarchy watches neither ~/.config nor ~/.local/state.
+        let no_omarchy = |p: &Path| !p.to_string_lossy().contains("omarchy");
+        assert!(watch_targets(&dirs, no_omarchy).is_empty());
     }
 
     /// A palette that failed to read -- broken, deleted, or a theme that

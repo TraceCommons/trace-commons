@@ -128,12 +128,36 @@ pub struct Palette {
     pub selection_ink: Rgb,
     pub redaction_bg: Rgb,
     pub redaction_ink: Rgb,
-    /// Drawn at [`HIGHLIGHT_ALPHA`].
+    /// The search hit's wash, drawn at [`HIGHLIGHT_ALPHA`]: the theme's
+    /// yellow, unmoved wherever an ink can be solved on it, so the hit
+    /// stays marked.
     pub highlight: Rgb,
+    /// The hit's text on that wash: the ink, moved until it clears 4.5:1 on
+    /// the wash over every ground, bare and under each kept overlay.
+    pub highlight_ink: Rgb,
 }
 
 /// The highlighted excerpt's wash, as Pango's `bgalpha`.
 pub const HIGHLIGHT_ALPHA: &str = "30%";
+/// [`HIGHLIGHT_ALPHA`] as a fraction, for CSS and for the contrast check.
+pub const HIGHLIGHT_WASH: f64 = 0.30;
+/// The least the wash must stand off its ground, so the hit stays marked.
+/// Measured: the fixtures' own yellows at 30% clear it on every ground and
+/// overlay (Rose Pine's scene under `tc_selected` is 1.12:1), the standard
+/// gold 1.32-1.96:1, and a yellow darkened until a light ink cleared 4.5:1
+/// on it 1.01-1.14:1 on Tokyo Night, where the hit no longer showed.
+pub const HIGHLIGHT_VISIBLE: f64 = 1.1;
+
+/// The standard sheet's neutral translucent overlays, kept in the skin:
+/// `tc_scrim` (the `.tc-code` recess, among others) and `tc_selected`, as
+/// (tint, alpha) for the token block `mode` chooses. A test in `ui::style`
+/// pins them to the sheet.
+pub fn overlays(mode: Mode) -> [(Rgb, f64); 2] {
+    match mode {
+        Mode::Light => [(Rgb::BLACK, 0.06), (Rgb::BLACK, 0.07)],
+        Mode::Dark => [(Rgb::WHITE, 0.08), (Rgb::WHITE, 0.10)],
+    }
+}
 
 /// Why a palette was not accepted. The variants carry no file content.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,15 +195,14 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
     };
     // The canonical name first, then upstream's legacy aliases for it.
     let pick = |keys: &[&str]| keys.iter().find_map(|key| colour(key));
-    let word = |key: &str| {
-        table
-            .get(key)
-            .and_then(toml::Value::as_str)
-            .and_then(|value| match value {
-                "light" => Some(Mode::Light),
-                "dark" => Some(Mode::Dark),
-                _ => None,
-            })
+    // Upstream keeps any non-empty value and stops there, and its consumers
+    // read only "light" as light: an unknown value (or a non-string one,
+    // which upstream reads as its bare text) is dark.
+    let word = |key: &str| match table.get(key) {
+        None => None,
+        Some(toml::Value::String(value)) if value.is_empty() => None,
+        Some(toml::Value::String(value)) if value == "light" => Some(Mode::Light),
+        Some(_) => Some(Mode::Dark),
     };
 
     let bg = pick(&["background", "bg", "color0"]).ok_or(PaletteError::Missing("background"))?;
@@ -242,6 +265,34 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
     let selection_ink = need("selection", strong, &[(selection, TEXT)])?;
     let redaction_bg = bg.mix(yellow, 0.25);
     let redaction_ink = need("redaction", ink, &[(redaction_bg, TEXT)])?;
+    // The search hit: the theme's yellow, unmoved, washed at its alpha, and
+    // the hit's own ink solved on that wash over every ground, bare and
+    // under each kept overlay, as the redaction ink is on its wash. Where
+    // no ink clears every wash (a palette with no yellow, whose fallback hue
+    // sits mid-way), the ink stays and the wash colour moves instead.
+    let bases: Vec<Rgb> = grounds
+        .iter()
+        .flat_map(|g| {
+            std::iter::once(*g).chain(overlays(mode).map(|(tint, alpha)| g.mix(tint, alpha)))
+        })
+        .collect();
+    let washes: Vec<(Rgb, f64)> = bases
+        .iter()
+        .map(|base| (base.mix(yellow, HIGHLIGHT_WASH), TEXT))
+        .collect();
+    let (highlight, highlight_ink) = match nearest_passing(ink, &washes) {
+        Some((solved, _)) => (yellow, solved),
+        None => {
+            let moved = nearest_by(yellow, |c| {
+                bases
+                    .iter()
+                    .map(|base| contrast(ink, base.mix(c, HIGHLIGHT_WASH)) / TEXT)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .ok_or(PaletteError::Unreachable("yellow"))?;
+            (moved.0, ink)
+        }
+    };
 
     Ok(Palette {
         mode,
@@ -273,7 +324,8 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
         selection_ink,
         redaction_bg,
         redaction_ink,
-        highlight: yellow,
+        highlight,
+        highlight_ink,
     })
 }
 
@@ -285,12 +337,17 @@ const STEPS: u32 = 50;
 /// Unmoved when it already clears them, so a theme's own colour survives
 /// wherever it can.
 fn nearest_passing(colour: Rgb, needs: &[(Rgb, f64)]) -> Option<(Rgb, u32)> {
-    let worst = |c: Rgb| {
+    nearest_by(colour, |c| {
         needs
             .iter()
             .map(|(against, floor)| contrast(c, *against) / floor)
             .fold(f64::INFINITY, f64::min)
-    };
+    })
+}
+
+/// [`nearest_passing`] for any measure: `worst` is the smallest
+/// ratio-over-floor a candidate colour gives, passing at 1 or more.
+fn nearest_by(colour: Rgb, worst: impl Fn(Rgb) -> f64) -> Option<(Rgb, u32)> {
     (0..=STEPS).find_map(|step| {
         let t = f64::from(step) / f64::from(STEPS);
         [Rgb::BLACK, Rgb::WHITE]
@@ -392,19 +449,19 @@ pub fn read_dir_palette(dir: &Path) -> Result<Palette, PaletteError> {
     parse(&text, dir.join("light.mode").exists())
 }
 
-/// The first candidate with a valid palette, or the first failure's reason.
+/// The palette of the first candidate that exists, or why it failed.
+///
+/// A candidate exists when its `current/` directory does: that survives a
+/// theme switch, where the theme directory itself is removed and moved back
+/// in. The search stops there, valid or not, so a broken current palette
+/// leaves the caller keeping the last valid one rather than reading a stale
+/// legacy directory behind it.
 pub fn resolve(dirs: &[PathBuf]) -> Result<(PathBuf, Palette), PaletteError> {
-    let mut first_failure = None;
-    for dir in dirs {
-        match read_dir_palette(dir) {
-            Ok(palette) => return Ok((dir.clone(), palette)),
-            Err(PaletteError::Unreadable) => {}
-            Err(other) => {
-                first_failure.get_or_insert(other);
-            }
-        }
-    }
-    Err(first_failure.unwrap_or(PaletteError::Unreadable))
+    let dir = dirs
+        .iter()
+        .find(|dir| dir.parent().is_some_and(Path::is_dir))
+        .ok_or(PaletteError::Unreadable)?;
+    read_dir_palette(dir).map(|palette| (dir.clone(), palette))
 }
 
 /// The last valid palette, kept across failed reads.
@@ -616,6 +673,30 @@ mod tests {
                 TEXT,
             );
             need("redaction ink", p.redaction_ink, p.redaction_bg, TEXT);
+            // The search hit: its ink on the highlight at its alpha, over
+            // every ground, bare and under each kept translucent overlay
+            // (the excerpt sits in a `.tc-code` recess, which is
+            // `tc_scrim`).
+            for (i, ground) in p.grounds().into_iter().enumerate() {
+                let under = std::iter::once(ground)
+                    .chain(overlays(p.mode).map(|(tint, alpha)| ground.mix(tint, alpha)));
+                for (j, base) in under.enumerate() {
+                    let wash = base.mix(p.highlight, HIGHLIGHT_WASH);
+                    need(
+                        &format!("ink on highlight {i}/{j}"),
+                        p.highlight_ink,
+                        wash,
+                        TEXT,
+                    );
+                    // ...and the wash still marks the hit.
+                    need(
+                        &format!("highlight wash {i}/{j}"),
+                        wash,
+                        base,
+                        HIGHLIGHT_VISIBLE,
+                    );
+                }
+            }
             assert!(failures.is_empty(), "{failures:#?}");
         }
     }
@@ -673,9 +754,17 @@ mod tests {
         assert_eq!(parse(&typed, true).unwrap().mode, Mode::Dark);
         let moded = format!("{typed}mode = \"light\"\n");
         assert_eq!(parse(&moded, false).unwrap().mode, Mode::Light);
-        // An invalid mode value is not a mode: fall through to luminance.
-        let odd = format!("{dark_ground}mode = \"sepia\"\n");
-        assert_eq!(parse(&odd, false).unwrap().mode, Mode::Dark);
+        // As upstream, any non-empty `mode` stops the search, and only
+        // "light" is light: an unknown value is dark, even on a light ground
+        // with the marker file beside it.
+        let light_ground = "background = \"#ffffff\"\nforeground = \"#000000\"\n";
+        let odd = format!("{light_ground}mode = \"sepia\"\n");
+        assert_eq!(parse(&odd, true).unwrap().mode, Mode::Dark);
+        let odd_type = format!("{light_ground}theme_type = \"Light\"\n");
+        assert_eq!(parse(&odd_type, true).unwrap().mode, Mode::Dark);
+        // An empty value is absent: the search goes on.
+        let empty = format!("{dark_ground}mode = \"\"\ntheme_type = \"light\"\n");
+        assert_eq!(parse(&empty, false).unwrap().mode, Mode::Light);
     }
 
     #[test]
@@ -773,22 +862,32 @@ mod tests {
     }
 
     #[test]
-    fn resolve_takes_the_first_directory_with_a_valid_palette() {
+    fn resolve_stops_at_the_first_candidate_that_exists() {
         let root = scratch("resolve");
-        let missing = root.join("missing");
-        let broken = root.join("broken");
-        let good = root.join("good");
+        // Each candidate is <base>/omarchy/current/theme.
+        let theme = |base: &str| root.join(base).join("omarchy/current/theme");
+        let (missing, broken, good) = (theme("missing"), theme("broken"), theme("good"));
         std::fs::create_dir_all(&broken).unwrap();
         std::fs::create_dir_all(&good).unwrap();
         std::fs::write(broken.join("colors.toml"), "not toml [").unwrap();
         std::fs::write(good.join("colors.toml"), GRUVBOX).unwrap();
-        let (dir, palette) = resolve(&[missing.clone(), broken.clone(), good.clone()]).unwrap();
+        // A candidate that does not exist is passed over.
+        let (dir, palette) = resolve(&[missing.clone(), good.clone()]).unwrap();
         assert_eq!(dir, good);
         assert_eq!(palette, parse(GRUVBOX, false).unwrap());
-        // Nothing valid: the first failure that is not "absent" is reported.
+        // A broken palette in the first one that exists is that one's
+        // answer: the caller keeps the last valid palette, and a stale
+        // legacy directory behind it is never read instead.
         assert_eq!(
-            resolve(&[missing.clone(), broken.clone()]),
+            resolve(&[missing.clone(), broken.clone(), good.clone()]),
             Err(PaletteError::NotToml)
+        );
+        // So is the gap of a theme switch: `current/` is there, the theme
+        // directory is not (yet).
+        std::fs::remove_dir_all(&broken).unwrap();
+        assert_eq!(
+            resolve(&[broken.clone(), good.clone()]),
+            Err(PaletteError::Unreadable)
         );
         assert_eq!(resolve(&[missing]), Err(PaletteError::Unreadable));
         std::fs::remove_dir_all(root).unwrap();

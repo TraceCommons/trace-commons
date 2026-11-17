@@ -560,9 +560,12 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
 /// The value the skin gives a `@define-color` that the standard sheet
 /// defines as a literal. `None` keeps the standard value; only the neutral
 /// translucent overlays are kept (`tc_scrim`, and `tc_selected` under
-/// selected rows), since they darken or lighten whatever ground they sit on
-/// and every ink keeps its contrast through them. The theme's `selection`
-/// colour is used for selected text, in the scoped rule.
+/// selected rows), since they darken or lighten whatever ground they sit on.
+/// They are not neutral for contrast: an ink checked on a bare ground can
+/// lose some through them (measured in the spec). The search highlight is
+/// checked through them; the other inks are checked on the bare grounds.
+/// The theme's `selection` colour is used for selected text, in the scoped
+/// rule.
 fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
     let hex = |c: omarchy::Rgb| Some(c.hex());
     match name {
@@ -609,7 +612,8 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_blue_text" | "tc_blue_icon" => hex(p.held_text),
         "tc_gold_highlight" => {
             let omarchy::Rgb(r, g, b) = p.highlight;
-            Some(format!("rgba({r}, {g}, {b}, 0.3)"))
+            let alpha = omarchy::HIGHLIGHT_WASH;
+            Some(format!("rgba({r}, {g}, {b}, {alpha})"))
         }
         "tc_redaction_bg" => hex(p.redaction_bg),
         "tc_redaction_fg" => hex(p.redaction_ink),
@@ -726,6 +730,9 @@ pub struct Inks {
     /// The preview's highlighted excerpt: a colour and Pango `bgalpha`.
     pub highlight: String,
     pub highlight_alpha: String,
+    /// The hit's own text colour, set only in the skin; the standard look
+    /// keeps the label's ink.
+    pub highlight_ink: Option<String>,
 }
 
 impl Inks {
@@ -753,6 +760,7 @@ impl Inks {
                 redaction_fg: s("#F0EBDD"),
                 highlight: s("#DCAA43"),
                 highlight_alpha: s("32%"),
+                highlight_ink: None,
             }
         } else {
             use brand_tokens::light as t;
@@ -774,6 +782,7 @@ impl Inks {
                 redaction_fg: s("#202426"),
                 highlight: s("#B9821F"),
                 highlight_alpha: s("28%"),
+                highlight_ink: None,
             }
         }
     }
@@ -797,6 +806,7 @@ impl Inks {
             redaction_fg: p.redaction_ink.hex(),
             highlight: p.highlight.hex(),
             highlight_alpha: omarchy::HIGHLIGHT_ALPHA.to_string(),
+            highlight_ink: Some(p.highlight_ink.hex()),
         }
     }
 }
@@ -1519,6 +1529,8 @@ mod tests {
             (dark.highlight.as_str(), dark.highlight_alpha.as_str()),
             ("#DCAA43", "32%")
         );
+        // The standard look keeps the label's own ink on the wash.
+        assert_eq!((light.highlight_ink, dark.highlight_ink), (None, None));
     }
 
     /// In the skin every drawing ink is the palette's.
@@ -1543,10 +1555,34 @@ mod tests {
             assert_eq!(inks.redaction_fg, p.redaction_ink.hex(), "{name}");
             assert_eq!(inks.highlight, p.highlight.hex(), "{name}");
             assert_eq!(inks.highlight_alpha, omarchy::HIGHLIGHT_ALPHA, "{name}");
+            assert_eq!(inks.highlight_ink, Some(p.highlight_ink.hex()), "{name}");
             // The mark's open bracket on its own frame, as the standard
             // mark is held to.
             let ratio = omarchy::contrast(p.accent_line, p.surface);
             assert!(ratio >= 3.0, "{name}: {ratio:.2}:1");
+        }
+    }
+
+    /// The overlays the adapter checks the highlight through are the ones
+    /// the token blocks define, and the skin keeps them.
+    #[test]
+    fn the_adapters_overlays_are_the_sheets() {
+        let rgba = |(tint, alpha): (omarchy::Rgb, f64)| {
+            let omarchy::Rgb(r, g, b) = tint;
+            format!("rgba({r}, {g}, {b}, {alpha})")
+        };
+        for (mode, block) in [
+            (omarchy::Mode::Light, super::LIGHT_TOKENS),
+            (omarchy::Mode::Dark, super::DARK_TOKENS),
+        ] {
+            let [scrim, selected] = omarchy::overlays(mode);
+            for (name, value) in [("tc_scrim", rgba(scrim)), ("tc_selected", rgba(selected))] {
+                let line = block
+                    .lines()
+                    .find(|l| l.starts_with(&format!("@define-color {name} ")))
+                    .unwrap_or_else(|| panic!("{name}"));
+                assert!(line.contains(&value), "{mode:?}: {line} vs {value}");
+            }
         }
     }
 }
