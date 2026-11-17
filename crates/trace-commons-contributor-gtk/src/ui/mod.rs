@@ -408,6 +408,11 @@ impl App {
                 mission_drafts: mission_drafts.as_ref().map(|view| &view.root),
                 settings: &settings.root,
                 notices: vec![
+                    // First: the one card with a clock on it.
+                    (
+                        monitor::notices::Notice::Undo,
+                        queue.undo_notice.clone().upcast(),
+                    ),
                     (
                         monitor::notices::Notice::Update,
                         update.root.clone().upcast(),
@@ -427,10 +432,6 @@ impl App {
                     (
                         monitor::notices::Notice::ArmingOffer,
                         queue.arming_notice.clone().upcast(),
-                    ),
-                    (
-                        monitor::notices::Notice::Undo,
-                        queue.undo_notice.clone().upcast(),
                     ),
                 ],
             },

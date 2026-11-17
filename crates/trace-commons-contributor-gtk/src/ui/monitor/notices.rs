@@ -18,7 +18,9 @@
 //! - No card gains a close button. The Mac's X closes a card until the
 //!   window is opened again; here each card keeps exactly the buttons it
 //!   had, so nothing that had to be acknowledged can now be put away.
-//! - The cards are a column, not the Mac's peeking stack.
+//! - The cards are a column, not the Mac's peeking stack. The column is
+//!   never taller than the tab's own area and scrolls past that, so every
+//!   card's buttons stay reachable; with no card showing it is hidden.
 
 use super::tabs::Place;
 
@@ -40,13 +42,15 @@ pub enum Notice {
 }
 
 impl Notice {
+    /// In the order they are stacked: the undo first, because it is the
+    /// one card with a clock on it.
     pub const ALL: [Notice; 6] = [
+        Notice::Undo,
         Notice::Update,
         Notice::Health,
         Notice::Consent,
         Notice::PrivateAiOffer,
         Notice::ArmingOffer,
-        Notice::Undo,
     ];
 }
 

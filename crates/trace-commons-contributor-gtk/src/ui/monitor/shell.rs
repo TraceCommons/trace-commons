@@ -245,18 +245,61 @@ impl Shell {
             .child(&content)
             .build();
 
+        // The notices float over the top of the tab and push nothing down.
+        // The column is never taller than the tab's own area: past that it
+        // scrolls, so a card's Undo or acknowledge button can always be
+        // reached. With no card showing it is hidden, and takes no room and
+        // no click from the screen under it.
         let notice_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        notice_column.set_valign(gtk::Align::Start);
+        let notice_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .valign(gtk::Align::Start)
+            .visible(false)
+            .child(&notice_column)
+            .build();
         let mut notice_slots = Vec::new();
         for (notice, card) in pages.notices {
             let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
             slot.append(&card);
             notice_column.append(&slot);
-            notice_slots.push((notice, slot));
+            notice_slots.push((notice, slot, card));
         }
+        // Each card shows and hides itself; the column follows them.
+        let follow = {
+            let scroller = notice_scroller.downgrade();
+            let cards: Vec<(
+                gtk::glib::WeakRef<gtk::Box>,
+                gtk::glib::WeakRef<gtk::Widget>,
+            )> = notice_slots
+                .iter()
+                .map(|(_, slot, card)| (slot.downgrade(), card.downgrade()))
+                .collect();
+            Rc::new(move || {
+                let Some(scroller) = scroller.upgrade() else {
+                    return;
+                };
+                scroller.set_visible(cards.iter().any(|(slot, card)| {
+                    slot.upgrade().is_some_and(|slot| slot.is_visible())
+                        && card.upgrade().is_some_and(|card| card.is_visible())
+                }));
+            })
+        };
+        for (_, slot, card) in &notice_slots {
+            for widget in [slot.upcast_ref::<gtk::Widget>(), card] {
+                let follow = follow.clone();
+                widget.connect_visible_notify(move |_| follow());
+            }
+        }
+        follow();
+        let notice_slots: Vec<(Notice, gtk::Box)> = notice_slots
+            .into_iter()
+            .map(|(notice, slot, _)| (notice, slot))
+            .collect();
         let over_content = gtk::Overlay::new();
         over_content.set_child(Some(&content_scroller));
-        over_content.add_overlay(&notice_column);
+        over_content.add_overlay(&notice_scroller);
         over_content.set_vexpand(true);
 
         let graph = GraphFooter::new();
@@ -1192,9 +1235,16 @@ mod tests {
         );
         assert!(shell.inference_dot.is_ancestor(&shell.tabs[1].1));
         assert!(!shell.inference_dot.is_visible(), "no report is no dot");
-        shell.render_inference_state("serving");
-        assert!(shell.inference_dot.is_visible());
-        assert!(shell.inference_dot.tooltip_text().is_some());
+        // Every state the daemon reports has a dot and the core's sentence.
+        for state in trace_commons_contributor::private_inference_copy::STATE_LABELS {
+            shell.render_inference_state(state);
+            assert!(shell.inference_dot.is_visible(), "{state}");
+            assert_eq!(
+                shell.inference_dot.tooltip_text().as_deref(),
+                Some(crate::copy::private_inference_state_line(state)),
+                "{state}"
+            );
+        }
         shell.render_inference_state("");
         assert!(!shell.inference_dot.is_visible());
 
@@ -1364,6 +1414,45 @@ mod tests {
                 slot.ancestor(gtk::Overlay::static_type()).is_some(),
                 "{notice:?} pushes the content down"
             );
+        }
+        // The undo comes first: it is the one card with a clock on it.
+        assert_eq!(shell.notice_slots[0].0, Notice::Undo);
+        let scroller = shell.notice_slots[0]
+            .1
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+            .expect("the notices are in a column that scrolls");
+        // Empty cards are showing here, so the column is too; with every
+        // card hidden it is gone, and takes no click from the tab under it.
+        assert!(scroller.is_visible());
+        for (_, card) in &mounted.notices {
+            card.set_visible(false);
+        }
+        assert!(
+            !scroller.is_visible(),
+            "an empty notice column still covers the tab"
+        );
+        // Cards taller than the tab scroll inside it; none is pushed out of
+        // reach under the graph footer.
+        shell.pick_tab(Tab::Traces);
+        for (_, card) in &mounted.notices {
+            card.set_size_request(-1, 400);
+            card.set_visible(true);
+        }
+        pump();
+        let overlay = scroller.parent().expect("the column is laid over the tab");
+        assert!(scroller.is_visible());
+        assert!(
+            scroller.height() <= overlay.height(),
+            "the notices run past the tab's own area"
+        );
+        let scroll = scroller.vadjustment();
+        assert!(
+            scroll.upper() > scroll.page_size(),
+            "the cards that do not fit cannot be scrolled to"
+        );
+        for (_, card) in &mounted.notices {
+            card.set_size_request(-1, -1);
         }
         for tab in Tab::ALL {
             shell.pick_tab(tab);

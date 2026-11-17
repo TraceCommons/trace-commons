@@ -234,10 +234,12 @@ impl QueueView {
             .sync_create()
             .build();
 
-        // The offer to answer model calls on this computer, drawn where the
-        // contributor already looks. Settings is where this switch LIVES;
-        // Settings alone is the failure this whole design exists to fix,
-        // because nobody who did not already know about it went there.
+        // The offer to answer model calls on this computer. Settings is
+        // where this switch LIVES; Settings alone is the failure this whole
+        // design exists to fix, because nobody who did not already know
+        // about it went there. It was drawn above the queue; since the
+        // Monitor shell it is a notice over the Inference tab, as on the Mac
+        // (`monitor::notices`), and no longer over Traces.
         //
         // Built here and left hidden. Whether to show it is not this view's
         // decision -- see `render_private_inference_offer`, which asks the
