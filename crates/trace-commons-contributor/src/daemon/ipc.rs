@@ -4272,6 +4272,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
+                (super::service::HELLO_SERVICE_LEVEL_KEY): super::service::SERVICE_LEVEL,
             }),
         ),
         "feature_flags_snapshot" => Response::ok(
@@ -16334,6 +16335,24 @@ mod tests {
         let result = r.result.unwrap();
         assert_eq!(result["schema_version"], IPC_SCHEMA);
         assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
+    }
+
+    /// The background service's level, which every shell compares with its
+    /// minimum (`daemon::service`): this daemon meets its own shells.
+    #[test]
+    fn hello_reports_the_service_level() {
+        let s = shared();
+        let result = handle_request(&s, &req("hello", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            result[super::super::service::HELLO_SERVICE_LEVEL_KEY],
+            super::super::service::SERVICE_LEVEL
+        );
+        assert_eq!(
+            super::super::service::answer_from_hello(Some(&result)),
+            super::super::service::DaemonAnswer::Meets
+        );
     }
 
     #[test]

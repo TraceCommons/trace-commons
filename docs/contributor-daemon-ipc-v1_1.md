@@ -639,7 +639,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 
 | Method | Params | Result | Notes |
 |---|---|---|---|
-| `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
+| `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes`, `service_level` | additive: `service_level` (integer, 2026-11-17) is what this daemon offers a shell using it as its background service; a shell below whose minimum it is, or a daemon that omits it, reads as "too old" (`daemon::service`) |
 | `status` | — | see below | |
 | `list_pending` | `project_id` (optional); `filter` (optional); `order` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. `order: "suggested"` (nudge value addendum, section 2) sorts the selected entries by mission fit, then estimate tier (skipped for a one-tier table), then the `user_turns` bucket, then newest write, then insertion order; absent, `null` or `"queue"` is queue insertion order, as before. Any other `order` string is refused with `order-unrecognized`, a non-string with `order-invalid`. The parameters combine: filters select first, `order` sorts second. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status). An entry with recorded features carries `credit_estimate`, a band; absent otherwise; see ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
@@ -6296,6 +6296,12 @@ reads it; a daemon that omits it is treated as `false`. It gates nothing:
 Launch still follows `terminal_launch`, which the daemon computes from its
 own environment. The host link speaks this same contract and version; each
 connection must come from the daemon's own uid (`SO_PEERCRED`).
+
+`hello`'s `service_level` is how a shell tells a background service that is
+too old for it: `daemon::service::MIN_SERVICE_LEVEL` is the shell's minimum,
+and an absent level is below every minimum. The daemon reports no build
+version on the wire, and none is added: a shell compares what it needs, not
+release numbers.
 
 With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
 within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`

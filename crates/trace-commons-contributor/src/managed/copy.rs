@@ -382,8 +382,105 @@ pub fn copy() -> serde_json::Value {
     }"#).expect("static managed copy is valid JSON")
 }
 
+/// The background-service dialogs (`daemon::service`): what a shell shows
+/// when the host contributor daemon is not installed, not running, or too
+/// old for it. Words approved by the owner 2026-11-17, together with the
+/// flow: shown during first setup and when the person does something that
+/// needs the service, never on an ordinary start, and quiet after "Not now"
+/// except for the "Set up" button beside the Private AI start area's
+/// unavailable line. Constants rather than keys in [`copy`]: a shell needs
+/// them exactly when no daemon is there to send a snapshot. The app's name is
+/// `app_name!`, as on every other surface. The commands the dialogs show are
+/// `daemon::service::SERVICE_INSTALL_COMMAND` and `SERVICE_STATUS_COMMAND`.
+pub mod background_service {
+    use crate::app_name;
+
+    /// Not installed: the title.
+    pub const NOT_INSTALLED_TITLE: &str = concat!("Finish setting up ", app_name!());
+    /// Not installed: the body, followed by the install command.
+    pub const NOT_INSTALLED_BODY: &str = concat!(
+        "To open Private AI sessions and keep watching for traces when this window is closed, ",
+        app_name!(),
+        " needs its background service on this computer. Run this in a terminal to install it:"
+    );
+    /// Copies the install command to the clipboard. Never runs it.
+    pub const COPY_COMMAND: &str = "Copy command";
+    /// Opens `daemon::service::SERVICE_INSTALL_GUIDE_URL`.
+    pub const OPEN_INSTALL_GUIDE: &str = "Open install guide";
+    /// Closes a dialog; it then stays quiet for the rest of the run.
+    pub const NOT_NOW: &str = "Not now";
+    /// While the not-installed dialog watches for the service to appear.
+    pub const WAITING: &str = "Waiting for the install to finish\u{2026}";
+    /// Installed but not running: the title.
+    pub const NOT_RUNNING_TITLE: &str = "The background service isn't running";
+    /// Installed but not running: the body.
+    pub const NOT_RUNNING_BODY: &str = concat!(
+        app_name!(),
+        " can't open sessions or watch for traces until it starts."
+    );
+    /// Asks the systemd user manager to start the unit.
+    pub const START_IT: &str = "Start it";
+    /// After "Start it" did not bring the service up, followed by the
+    /// status command.
+    pub const START_FAILED: &str = "It didn't start. To see why, run this in a terminal:";
+    /// Too old: the title.
+    pub const TOO_OLD_TITLE: &str = "Update the background service";
+    /// Too old: the body, followed by the install command.
+    pub const TOO_OLD_BODY: &str = concat!(
+        "This version of ",
+        app_name!(),
+        " needs a newer background service. Run the install command again to update it."
+    );
+    /// Beside the Private AI start area's unavailable line; reopens the
+    /// dialog after "Not now".
+    pub const SET_UP: &str = "Set up";
+}
+
 #[cfg(test)]
 mod tests {
+    /// The owner's approved words (2026-11-17), with the app's name where
+    /// they say it. Exact, so a changed word fails here.
+    #[test]
+    fn the_background_service_words_are_the_approved_ones() {
+        use super::background_service as words;
+        let named = |text: &str| text.replace("{app}", crate::brand::APP_NAME);
+        assert_eq!(words::NOT_INSTALLED_TITLE, named("Finish setting up {app}"));
+        assert_eq!(
+            words::NOT_INSTALLED_BODY,
+            named(
+                "To open Private AI sessions and keep watching for traces when this window is \
+                 closed, {app} needs its background service on this computer. Run this in a \
+                 terminal to install it:"
+            )
+        );
+        assert_eq!(words::COPY_COMMAND, "Copy command");
+        assert_eq!(words::OPEN_INSTALL_GUIDE, "Open install guide");
+        assert_eq!(words::NOT_NOW, "Not now");
+        assert_eq!(words::WAITING, "Waiting for the install to finish\u{2026}");
+        assert_eq!(
+            words::NOT_RUNNING_TITLE,
+            "The background service isn't running"
+        );
+        assert_eq!(
+            words::NOT_RUNNING_BODY,
+            named("{app} can't open sessions or watch for traces until it starts.")
+        );
+        assert_eq!(words::START_IT, "Start it");
+        assert_eq!(
+            words::START_FAILED,
+            "It didn't start. To see why, run this in a terminal:"
+        );
+        assert_eq!(words::TOO_OLD_TITLE, "Update the background service");
+        assert_eq!(
+            words::TOO_OLD_BODY,
+            named(
+                "This version of {app} needs a newer background service. Run the install \
+                 command again to update it."
+            )
+        );
+        assert_eq!(words::SET_UP, "Set up");
+    }
+
     /// The unshown 2026-11-17 draft offer to install the host part was
     /// replaced by the approved background-service dialogs
     /// (`background_service`); neither its module nor its words remain.

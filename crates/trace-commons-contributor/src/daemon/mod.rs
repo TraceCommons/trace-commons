@@ -118,6 +118,7 @@ pub mod public_run;
 pub mod queue;
 pub mod referral;
 pub mod second_look;
+pub mod service;
 pub mod settings;
 pub mod settlement_estimate;
 pub mod settlement_scan;
