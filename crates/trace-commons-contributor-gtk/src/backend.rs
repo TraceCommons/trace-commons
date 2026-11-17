@@ -206,10 +206,45 @@ impl Backend {
                 })))
             }
             // Somebody took the lock in between. That is not an error: it is
-            // the other half of the arbitration. In a sandbox the somebody
-            // may be the host daemon, which took the watcher lock between
-            // the probe above and this start.
-            Err(_) => Ok(host().unwrap_or(Backend::Attached { socket: local })),
+            // the other half of the arbitration. The somebody may hold this
+            // state directory's lock, or only the watcher lock: the host
+            // daemon (from a sandbox), or a daemon in the sandbox (from the
+            // host).
+            Err(_) => Ok(Self::attach_after_lost_start(
+                local,
+                host_socket.as_deref(),
+                sandboxed,
+            )),
+        }
+    }
+
+    /// Where to attach after this process lost the start to another daemon:
+    /// whichever socket answers, else this state directory's socket, which
+    /// shows the window's existing not-running state.
+    pub fn attach_after_lost_start(
+        local: std::path::PathBuf,
+        host_socket: Option<&std::path::Path>,
+        sandboxed: bool,
+    ) -> Self {
+        // In a sandbox, the host part comes first, as in `open_with`.
+        if let daemon::host_link::Route::Host(socket) =
+            daemon::host_link::route(sandboxed, host_socket, daemon::host_link::probe)
+        {
+            return Backend::Attached { socket };
+        }
+        if daemon::client::is_running_at(&local) {
+            return Backend::Attached { socket: local };
+        }
+        // On the host: a daemon that holds the watcher lock but not this
+        // state directory's lock serves the host link, so reach it there.
+        // A daemon in the sandbox serves no host link and nothing here can
+        // reach it; the local socket then gives the window its existing
+        // not-running state.
+        match host_socket {
+            Some(socket) if daemon::client::is_running_at(socket) => Backend::Attached {
+                socket: socket.to_path_buf(),
+            },
+            _ => Backend::Attached { socket: local },
         }
     }
 
@@ -295,6 +330,19 @@ impl Backend {
     /// see [`DaemonEvent`] -- and never a payload the shell would have to
     /// trust as current state; the shell re-reads state itself, exactly as
     /// `resync_required` requires it to be able to do anyway.
+    /// The socket an attached window talks to; `None` while hosting.
+    pub fn attached_socket(&self) -> Option<&std::path::Path> {
+        match self {
+            Backend::Attached { socket } => Some(socket),
+            Backend::Hosting(_) => None,
+        }
+    }
+
+    /// A subscription over a socket named directly.
+    pub fn events_at(socket: &std::path::Path) -> Result<Box<dyn EventStream>> {
+        Ok(Box::new(SocketEvents::open(socket)?))
+    }
+
     pub fn events(&self) -> Result<Box<dyn EventStream>> {
         match self {
             Backend::Attached { socket } => Ok(Box::new(SocketEvents::open(socket)?)),
@@ -697,9 +745,64 @@ mod roots_tests {
         // not-running state reports this instead.
         let (state, _run, sock) = host_link_fixture("hl2");
         drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        // The systemd unit's marker: the host part is installed.
+        std::fs::write(
+            sock.with_file_name(
+                trace_commons_contributor::daemon::host_link::HOST_UNIT_MARKER_FILE,
+            ),
+            b"",
+        )
+        .unwrap();
         let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
             .expect("attached, not an error that would end the process");
         assert_eq!(attached_socket(&backend), sock);
+        assert_eq!(
+            backend
+                .call("status", serde_json::json!({}))
+                .unwrap_err()
+                .to_string(),
+            "daemon-not-running"
+        );
+    }
+
+    #[test]
+    fn in_a_sandbox_a_socket_some_other_host_daemon_left_is_not_a_host_part() {
+        // A one-off `daemon run` that crashed, with no unit marker: the
+        // window runs its own daemon, here refused only on its roots.
+        let (state, _run, sock) = host_link_fixture("hl6");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        let message = match Backend::open_with(state.path().to_path_buf(), true, Some(sock)) {
+            Ok(_) => panic!("no unit marker: the in-sandbox path"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn a_lost_start_on_the_host_attaches_to_a_listening_host_link() {
+        // The window on the host lost the start to a daemon that took the
+        // watcher lock and serves the host link but not this state
+        // directory's socket.
+        let (state, _run, sock) = host_link_fixture("hl7");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let local = state.path().join("daemon.sock");
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), sock);
+
+        // This state directory's own daemon, when it answers, comes first.
+        let _own = std::os::unix::net::UnixListener::bind(&local).unwrap();
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), local);
+    }
+
+    #[test]
+    fn a_lost_start_with_nothing_reachable_shows_not_running() {
+        // A daemon in the Flatpak sandbox holds the watcher lock and serves
+        // no host link: nothing here can reach it.
+        let (state, _run, sock) = host_link_fixture("hl8");
+        let local = state.path().join("daemon.sock");
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), local);
         assert_eq!(
             backend
                 .call("status", serde_json::json!({}))

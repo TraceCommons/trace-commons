@@ -563,16 +563,21 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     );
     let a = Rc::clone(app);
     let generations = snapshot["generations"].clone();
+    // A folder from the sandboxed chooser is a document-portal path; a
+    // daemon on the host gets the folder it stands for, or no launch.
+    let daemon_on_host = snapshot["capabilities"]["daemon_on_host"] == true;
     let w = window.clone();
     content.append(&button("launch_short", move || {
         let Some(account) = accounts.get(picker.selected() as usize) else { return; };
         let opencode = account["tool"] == "opencode";
         if opencode && model.text().trim().is_empty() { a.toast(&text("model_required")); return; }
-        let request = json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":folder.text().as_str(),"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()});
+        let cwd = folder.text().to_string();
+        let mut request = json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":cwd,"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()});
         // The picked terminal is saved before the launch; a refused save
         // stops the launch.
         let picked = terminal_picker.as_ref().map_or(0, |d| d.selected());
-        match terminal_to_save(terminal_choices.as_deref(), picked) {
+        let terminal = terminal_to_save(terminal_choices.as_deref(), picked);
+        let launch = move |a: &Rc<App>, request: Value| match terminal {
             Some(terminal) => a.call(
                 "set_managed_terminal",
                 json!({ "terminal": terminal }),
@@ -584,7 +589,29 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
                     action(app, "managed_launch_prepare", request, true);
                 },
             ),
-            None => action(&a, "managed_launch_prepare", request, true),
+            None => action(a, "managed_launch_prepare", request, true),
+        };
+        if crate::document_portal::needs_mapping(std::path::Path::new(&cwd), daemon_on_host) {
+            // One D-Bus round trip, off the GTK thread.
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(crate::document_portal::host_path(
+                    std::path::Path::new(&cwd),
+                    true,
+                ));
+            });
+            let a = Rc::clone(&a);
+            gtk::glib::spawn_future_local(async move {
+                match rx.recv().await {
+                    Ok(Ok(host)) => {
+                        request["cwd"] = json!(host.to_string_lossy());
+                        launch(&a, request);
+                    }
+                    _ => a.toast(&text("action_failed")),
+                }
+            });
+        } else {
+            launch(&a, request);
         }
         w.close();
     }));

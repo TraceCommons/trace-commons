@@ -127,14 +127,28 @@ impl Worker {
                 return;
             }
 
-            if let Ok(mut stream) = backend.events() {
-                std::thread::spawn(move || {
-                    while let Some(event) = stream.next() {
-                        if event_tx.send_blocking(event).is_err() {
-                            return;
-                        }
+            match backend.attached_socket().map(std::path::Path::to_path_buf) {
+                Some(socket) => {
+                    std::thread::spawn(move || {
+                        pump_events(
+                            || Backend::events_at(&socket),
+                            &event_tx,
+                            Some(EVENTS_RECONNECT),
+                        )
+                    });
+                }
+                None => {
+                    if let Ok(stream) = backend.events() {
+                        let mut stream = Some(stream);
+                        std::thread::spawn(move || {
+                            pump_events(
+                                || stream.take().ok_or_else(|| anyhow::anyhow!("opened once")),
+                                &event_tx,
+                                None,
+                            )
+                        });
                     }
-                });
+                }
             }
 
             for (id, job) in job_rx {
@@ -207,5 +221,149 @@ impl Worker {
             entry_id: entry_id.to_string(),
             needle: needle.to_string(),
         })
+    }
+}
+
+/// How long the event thread waits before opening the subscription again
+/// after it could not, or after the daemon it was attached to went away.
+const EVENTS_RECONNECT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Feed daemon events into `tx` until its receiver is gone.
+///
+/// `reconnect` is `Some` for a window attached over a socket: the daemon
+/// there can stop and come back -- the host daemon a Flatpak window attached
+/// to while it was down, or a unit restarting -- so a failed open or an ended
+/// stream is retried after that wait. Every subscription opened after the
+/// first attempt starts with `resync_required`, because events were missed
+/// in between. `None` (hosting the loop in-process) opens once: that stream
+/// ends only when this process stops the daemon.
+pub(crate) fn pump_events(
+    mut open: impl FnMut() -> Result<Box<dyn crate::backend::EventStream>>,
+    tx: &async_channel::Sender<DaemonEvent>,
+    reconnect: Option<std::time::Duration>,
+) {
+    let mut first = true;
+    loop {
+        if let Ok(mut stream) = open() {
+            if !first {
+                let resync = DaemonEvent {
+                    name: "resync_required".to_string(),
+                    entry_id: None,
+                    digest: None,
+                };
+                if tx.send_blocking(resync).is_err() {
+                    return;
+                }
+            }
+            while let Some(event) = stream.next() {
+                if tx.send_blocking(event).is_err() {
+                    return;
+                }
+            }
+        }
+        first = false;
+        let Some(wait) = reconnect else {
+            return;
+        };
+        if tx.is_closed() {
+            return;
+        }
+        std::thread::sleep(wait);
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use crate::backend::EventStream;
+
+    struct Scripted(std::vec::IntoIter<&'static str>);
+
+    impl EventStream for Scripted {
+        fn next(&mut self) -> Option<DaemonEvent> {
+            self.0.next().map(|name| DaemonEvent {
+                name: name.to_string(),
+                entry_id: None,
+                digest: None,
+            })
+        }
+    }
+
+    fn stream(names: &[&'static str]) -> Result<Box<dyn EventStream>> {
+        Ok(Box::new(Scripted(names.to_vec().into_iter())))
+    }
+
+    #[test]
+    fn an_attached_window_picks_events_up_again_when_its_daemon_returns() {
+        // Attached while the host daemon was down; it comes up, runs, stops,
+        // and comes up again.
+        let (tx, rx) = async_channel::unbounded();
+        let mut attempt = 0;
+        let pump = std::thread::spawn(move || {
+            pump_events(
+                move || {
+                    attempt += 1;
+                    match attempt {
+                        1 | 3 => Err(anyhow::anyhow!("daemon-not-running")),
+                        2 => stream(&["queue_changed"]),
+                        4 => stream(&["status_changed"]),
+                        _ => Err(anyhow::anyhow!("daemon-not-running")),
+                    }
+                },
+                &tx,
+                Some(std::time::Duration::ZERO),
+            )
+        });
+        let got: Vec<String> = (0..4).map(|_| rx.recv_blocking().unwrap().name).collect();
+        drop(rx);
+        pump.join().unwrap();
+        assert_eq!(
+            got,
+            [
+                "resync_required",
+                "queue_changed",
+                "resync_required",
+                "status_changed"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_first_subscription_needs_no_resync() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut opened = false;
+        let pump = std::thread::spawn(move || {
+            pump_events(
+                move || {
+                    if opened {
+                        return Err(anyhow::anyhow!("daemon-not-running"));
+                    }
+                    opened = true;
+                    stream(&["queue_changed"])
+                },
+                &tx,
+                Some(std::time::Duration::ZERO),
+            )
+        });
+        assert_eq!(rx.recv_blocking().unwrap().name, "queue_changed");
+        drop(rx);
+        pump.join().unwrap();
+    }
+
+    #[test]
+    fn hosting_opens_once_and_stops_with_its_stream() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut opens = 0;
+        pump_events(
+            || {
+                opens += 1;
+                stream(&["queue_changed"])
+            },
+            &tx,
+            None,
+        );
+        assert_eq!(opens, 1);
+        assert_eq!(rx.recv_blocking().unwrap().name, "queue_changed");
+        assert!(rx.try_recv().is_err());
     }
 }
