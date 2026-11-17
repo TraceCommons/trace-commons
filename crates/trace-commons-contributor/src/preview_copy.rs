@@ -2365,8 +2365,6 @@ mod tests {
         }
     }
 
-    /// Ron's #1146 graph footer and flow map words, verbatim, with his
-    /// numbers as holes and a singular of its own wherever he pluralised.
     /// The map's words that name the Mac have a variant for every other
     /// computer, in the owner's approved words (2026-11-17), and the Mac's
     /// own are unchanged.
@@ -2404,6 +2402,8 @@ mod tests {
         }
     }
 
+    /// Ron's #1146 graph footer and flow map words, verbatim, with his
+    /// numbers as holes and a singular of its own wherever he pluralised.
     #[test]
     fn the_graph_and_map_words_are_rons() {
         let screens = monitor_screens_copy();
