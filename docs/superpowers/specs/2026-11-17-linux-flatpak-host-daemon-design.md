@@ -230,7 +230,12 @@ button that reopens the dialog. A headless driver run (`--exit-after-realize`,
   after 30 s (longer than the 20 s wait, so a unit still starting is not
   restarted under itself), at most three times in all; the dialog keeps its
   waiting line meanwhile. Once the service answers, the dialog closes with
-  nothing else shown.
+  nothing else shown. When the third try has not brought it up (owner,
+  2026-11-17), the dialog shows, in place of its waiting line, the
+  not-running dialog's "It didn't start. To see why, run this in a
+  terminal:" and the status command -- no other words, no new notice --
+  and keeps watching, so a service that comes up later still closes it.
+  The too-old dialog keeps waiting; the line was approved for this one.
 - Installed but not running: "Start it" does the same switch-over (the same
   `RestartUnit`; the button still says "Start it"). If the service still does
   not answer, the dialog shows "It didn't start. To see why, run this in a
@@ -253,6 +258,12 @@ while first run is open, whose own Tools step asks the same; sign-in and
 enrollment stay with their existing flows. No new words. The managed-session
 revision the window last drew is forgotten on every reopen and on
 `resync_required`: the sandbox's and the host's daemons count separately.
+A folder picked there in the Flatpak's chooser outside the app's grants is
+a document-portal path (`$XDG_RUNTIME_DIR/doc/<id>/<name>`); for the host
+daemon it is mapped to the host folder through the document portal's
+`GetHostPaths`, bounded and off the GTK thread, as Launch does. If it cannot
+be mapped, or the host path is not UTF-8, nothing is sent and the screen
+shows its existing "couldn't be saved" line.
 
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the
