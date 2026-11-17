@@ -35,12 +35,25 @@ struct InsightsSkillsTab: View {
         _selectedSection = State(initialValue: initialSection)
     }
 
+    private var followFailureIsInline: Bool {
+        guard let failed = model.followFailurePublisherID,
+              let snapshot = model.shown, snapshot.enabled else { return false }
+        switch selectedSection {
+        case .home:
+            return InsightsSkillsHome.make(snapshot, model: model).defaultCreators.contains { $0.id == failed }
+        case .catalog:
+            return selectedCatalogID == nil && snapshot.catalog.publishers.contains { $0.id == failed }
+        case .inventory, .usage, .following:
+            return false
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             HStack(spacing: GlassTokens.Space.s4) {
                 Text(model.text("skills_title")).insightsHeading()
                 Spacer(minLength: 0)
-                if model.busy || model.shown?.refreshing == true {
+                if (model.busy && model.pendingFollowPublisherID == nil) || model.shown?.refreshing == true {
                     GlassSpinner().accessibilityLabel(model.text("skills_loading"))
                 }
                 Button(model.text("skills_refresh")) { Task { await model.load(refresh: true) } }
@@ -77,7 +90,10 @@ struct InsightsSkillsTab: View {
                     }
                 } else { Text(model.text("skills_loading")).insightsNote() }
             }
-            if let failure = model.failureKey { Text(model.text(failure)).insightsError() }
+            if let failure = model.failureKey,
+               failure != "skills_follow_failed" || !followFailureIsInline {
+                Text(model.text(failure)).insightsError()
+            }
             InsightsTabPage(getStarted: nil) {
                 if let snapshot = model.shown {
                     if snapshot.enabled {
@@ -469,18 +485,11 @@ struct InsightsSkillsTab: View {
 
     private func publisherRow(_ publisher: DaemonData.SkillsPublisher,
                               snapshot: DaemonData.SkillsSnapshot) -> some View {
-        let followed = snapshot.followedPublishers.contains(publisher.id)
-        return VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
             HStack(alignment: .firstTextBaseline) {
                 Text(publisher.name).insightsHeading()
                 Spacer(minLength: 0)
-                Toggle(model.text(followed ? "skills_unfollow" : "skills_follow"), isOn: Binding(
-                    get: { model.shown?.followedPublishers.contains(publisher.id) == true },
-                    set: { value in Task { await model.setFollow(publisherID: publisher.id, followed: value) } }))
-                    .accessibilityLabel(model.text(followed ? "skills_unfollow_accessibility" : "skills_follow_accessibility",
-                                                   values: ["publisher": publisher.name]))
-                    .disabled(!model.canFollow)
-                    .fixedSize()
+                SkillsCreatorFollowButton(publisher: publisher, model: model)
             }
             Text(publisher.repository).insightsMono()
             if let state = snapshot.catalog.publisherStates.first(where: { $0.publisherID == publisher.id }) {
