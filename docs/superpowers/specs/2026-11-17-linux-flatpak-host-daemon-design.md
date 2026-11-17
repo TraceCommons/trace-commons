@@ -91,15 +91,29 @@ is added, widened or skipped.
    one in-process.
 2. In a Flatpak, and the host link socket accepts a connection: attach to the
    host daemon.
-3. In a Flatpak, and the host link socket file exists but nothing listens:
-   the host daemon is installed and down (crashed, restarting, or stopped).
-   Attach to it anyway. Calls fail with the existing `daemon-not-running`
-   label and the window shows its existing not-running state; no new text.
-   The host daemon deliberately leaves its host-link socket file in place on
-   a clean stop so that this state is recognisable. `/run/user/<uid>` is
-   cleared at logout, so the marker never outlives the login.
-4. In a Flatpak, and no host link socket file: the host part is not
-   installed. Today's in-sandbox path runs unchanged (roots screen, hosting).
+3. In a Flatpak, nothing listens, and the marker file `host-unit` is in the
+   runtime directory: the host daemon is installed and down (crashed,
+   restarting, or stopped). Attach to it anyway. Calls fail with the existing
+   `daemon-not-running` label and the window shows its existing not-running
+   state; no new text. Its event stream is reopened every 2 s while the
+   daemon is down, and the first events after it returns start with
+   `resync_required`.
+4. In a Flatpak, nothing listens and no marker: the host part is not
+   installed, or a daemon that is not the unit left a socket. Today's
+   in-sandbox path runs unchanged (roots screen, hosting).
+
+Only the systemd user unit's daemon writes `host-unit`, at start, and it
+leaves it when it stops. It knows it is the unit by `INVOCATION_ID` together
+with `/proc/self/cgroup` naming the unit (`.../trace-commons-contributor.service`;
+the staging unit for a staging build): `INVOCATION_ID` alone is inherited by
+anything a service spawns. Every daemon -- the unit too -- removes its
+host-link socket on close, so a one-off `daemon run`, or a GTK window on the
+host hosting its own, leaves nothing that reads as "installed". A daemon that
+dies without closing leaves a dead socket, which without the marker reads as
+absent. `daemon uninstall` removes the marker; `/run/user/<uid>` is cleared at
+logout, so it never outlives the login either way. The marker is written by
+unlinking the name and creating it with `O_EXCL`, so a symlink planted there
+(the sandbox can write the directory) is replaced, never followed.
 
 ### Never two daemons over the same sessions
 
@@ -110,7 +124,23 @@ the host's is `~/.config/trace-commons`, and they hold two different locks.
 So a second lock, `watcher.lock` in the same runtime directory, is taken by
 every daemon on its default state directory, on the host and in the sandbox,
 for its whole life, after `daemon.lock`. Whoever holds it watches; a second
-start fails with the existing `StartFailure::AlreadyRunning`:
+start fails with the existing `StartFailure::AlreadyRunning` (so the FFI label
+stays `already-running`), whose message says that another daemon on this login
+watches the session folders, not that the state directory's lock is held.
+
+Only `WouldBlock` from the lock means "held". Any other lock error, or a
+`watcher.lock` that is not a regular file this daemon opened itself (a
+symlink, a directory, a file swapped in between the checks), refuses the start
+with an unnamed error (the FFI's generic `daemon-start-failed`) rather than
+running unarbitrated. With no `libc` in the crate there is no `O_NOFOLLOW`:
+the file is made with `create_new` (`O_EXCL`, which refuses any existing name,
+a dangling symlink included), or an existing name is opened without `create`
+and its `fstat` dev/inode must equal the name's `lstat` and be a regular file.
+
+On the host, a window whose start loses the watcher lock attaches to
+whichever socket answers: its own state directory's, then the host link. A
+daemon in the sandbox serves no host link and nothing on the host can reach
+it, so the window then shows its existing not-running state.
 
 - Window hosting in the sandbox, then the host daemon starts: the host start
   fails, systemd retries every 30 s (`Restart=on-failure`, `RestartSec=30`),
@@ -168,12 +198,15 @@ Flatpak does not update it and cannot.
   sandbox, these read and write the sandbox's copy, which the host daemon
   never reads. Fixing it needs IPC methods for both; granting the host state
   directory would expose the device key and is rejected.
-- **Folder chooser paths.** `gtk::FileChooserNative` in a sandbox goes through
-  the document portal and can return a `/run/user/<uid>/doc/...` path rather
-  than the host path. The host daemon would then launch in the FUSE view of
-  the folder. A follow-up should map the result through
-  `org.freedesktop.portal.Documents.GetHostPaths`. A typed path is passed as
-  typed.
+- **Folder chooser paths, outside Launch.** The Private AI launch maps a
+  `$XDG_RUNTIME_DIR/doc/<id>/<name>` folder through
+  `org.freedesktop.portal.Documents.GetHostPaths` (interface version 5)
+  before sending it to a host daemon, and refuses the launch with the
+  existing "action failed" toast when it cannot (`document_portal.rs`). It
+  checks the path being sent, so a typed portal path is mapped too. The
+  Insights evidence chooser (`ui/insights.rs`) is not mapped yet. The roots
+  chooser is reached only on the in-sandbox path, where the portal path is
+  the right one.
 - **Staging Flatpak.** The manifest is production-only; a staging Flatpak
   would need `xdg-run/trace-commons-staging:create`.
 
@@ -189,7 +222,7 @@ needs them:
   Notifications, the StatusNotifierWatcher and `portal.Flatpak`, plus
   `org.freedesktop.secrets` only while the sandbox still hosts. Risky without
   a Linux run: the tray and update monitor must be re-tested.
-- `--share=network` should not be added; the host daemon does the network.
+- `--share=network` is added by its own PR (owner, 2026-11-17), not here.
 
 ## Owner review points
 
@@ -213,6 +246,9 @@ needs them:
   grant hosts without taking `watcher.lock`, so a host daemon cannot see it.
 - After `close`, the host-link listener stops when the runtime retires its
   aborted task; `daemon run` exits right after, so in practice at once.
+- A crashed one-off host daemon leaves a dead socket and no marker; a
+  Flatpak window started then runs its own daemon. That is the intended
+  fallback, not a second watcher: the dead daemon holds no lock.
 
 ## Linux checklist
 
@@ -225,17 +261,22 @@ needs them:
 3. Start the Flatpak: it shows the host daemon's queue, not a roots screen.
    `ls $XDG_RUNTIME_DIR/trace-commons` inside `flatpak run --command=sh`
    lists the same socket.
-4. Stop the unit, start the Flatpak with no host-link socket file present
+4. Stop the unit, start the Flatpak with no `host-unit` marker present
    (log out and in first, so the runtime directory is empty) so the window
    hosts its own daemon, then `systemctl --user start` the unit: the unit
    fails with "already running" and retries every 30 s; quitting the window
    lets it start, and the next window attaches to it.
 5. `systemctl --user stop` the unit with the window open: the window shows
-   its not-running state; start it again: calls succeed.
+   its not-running state, `daemon.sock` is gone and `host-unit` stays; start
+   it again: calls succeed and the queue refreshes by itself within a few
+   seconds (the event stream reopened).
 6. Private AI: Launch is enabled, the terminal picker lists host terminals,
    a session opens in a host terminal, in the folder chosen.
-7. Pick the folder with the chooser: record whether the path the daemon gets
-   is the host path or a `/run/user/<uid>/doc/` path.
+7. Pick a folder outside the app's grants with the chooser (one that comes
+   back as `/run/user/<uid>/doc/<id>/<name>`), launch: the session opens in
+   the host folder, not under `/run/user/<uid>/doc/`. Then revoke the
+   document (`flatpak document-unexport`) and launch with the same path
+   typed in: the launch is refused with the "action failed" toast.
 8. Uninstall the host part, log out and in, start the app: it runs in the
    sandbox as before (roots screen), Launch off with the existing line.
 9. Another local user (or `sudo -u nobody socat - UNIX-CONNECT:...`) cannot
@@ -247,3 +288,13 @@ needs them:
     host daemon (item 4).
 12. Run `scripts/flatpak/check-host-link.sh`; it covers items 1-3 and
     the `daemon_on_host` capability from both sides of the sandbox.
+13. `cat /proc/<unit daemon pid>/cgroup` ends with
+    `/trace-commons-contributor.service`, and `host-unit` exists while the
+    unit runs. Run `trace-commons-contributor daemon run` by hand instead
+    (unit stopped): no `host-unit` is written, and after Ctrl-C no
+    `daemon.sock` is left.
+14. `daemon uninstall` removes `host-unit`; a Flatpak window started next
+    runs its own daemon.
+15. With the unit stopped and no window open, replace `watcher.lock` with a
+    symlink (`ln -sf /tmp/x $XDG_RUNTIME_DIR/trace-commons/watcher.lock`):
+    starting the unit fails and `/tmp/x` is not created.

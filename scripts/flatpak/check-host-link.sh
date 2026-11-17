@@ -43,6 +43,11 @@ fi
 
 [ -S "$SOCK" ] && pass "host link socket exists" || fail "no host link socket"
 [ -e "$RUN_DIR/watcher.lock" ] && pass "watcher lock exists" || fail "no watcher lock"
+if [ -f "$RUN_DIR/host-unit" ] && [ ! -L "$RUN_DIR/host-unit" ]; then
+  pass "host-unit marker exists (written only by the unit's daemon)"
+else
+  fail "no host-unit marker: the unit's daemon did not recognise itself (check /proc/<pid>/cgroup)"
+fi
 
 probe='import socket,sys,json
 s=socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(sys.argv[1])
