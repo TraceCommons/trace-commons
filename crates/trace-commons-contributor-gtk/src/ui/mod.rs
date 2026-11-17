@@ -27,6 +27,7 @@ pub mod preview;
 pub mod private_inference;
 pub mod queue;
 pub mod roots;
+pub mod service_dialog;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
