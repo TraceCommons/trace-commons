@@ -1116,6 +1116,20 @@ mod tests {
         }
     }
 
+    /// Runs the main loop until `done`, for at most five seconds: a layout
+    /// waits for the frame clock, so what is pending now is not all there
+    /// will be.
+    fn pump_until(done: impl Fn() -> bool) {
+        let context = gtk::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() && std::time::Instant::now() < deadline {
+            if !context.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        pump();
+    }
+
     struct Mounted {
         window: adw::ApplicationWindow,
         shell: Shell,
@@ -1467,14 +1481,14 @@ mod tests {
             card.set_size_request(-1, 400);
             card.set_visible(true);
         }
-        pump();
+        let scroll = scroller.vadjustment();
+        pump_until(|| scroll.upper() > 400.0);
         let overlay = scroller.parent().expect("the column is laid over the tab");
         assert!(scroller.is_visible());
         assert!(
             scroller.height() <= overlay.height(),
             "the notices run past the tab's own area"
         );
-        let scroll = scroller.vadjustment();
         assert!(
             scroll.upper() > scroll.page_size(),
             "the cards that do not fit cannot be scrolled to"
