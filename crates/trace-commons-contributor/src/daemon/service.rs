@@ -88,6 +88,10 @@ pub struct ServiceFacts {
     /// file on the host, systemd's `GetUnitFileState` from a sandbox).
     /// `None` when it cannot.
     pub unit_installed: Option<bool>,
+    /// Whether systemd reports the unit `active` (its `ActiveState`), when
+    /// the shell can ask. A unit held off by this window's lock is
+    /// restarting (`activating`), not active.
+    pub unit_active: Option<bool>,
     /// `hello` from a daemon outside this window: the one it is attached
     /// to, or one listening on the host link.
     pub answer: DaemonAnswer,
@@ -98,6 +102,14 @@ pub fn classify(facts: &ServiceFacts) -> ServiceState {
     match facts.answer {
         DaemonAnswer::Meets => ServiceState::Running,
         DaemonAnswer::TooOld => ServiceState::TooOld,
+        // The unit runs and nobody answers on the host link: a daemon from
+        // before the host link (and `service_level`), unreachable from a
+        // sandbox. Running the install command again replaces it.
+        DaemonAnswer::NoAnswer
+            if facts.unit_active == Some(true) && facts.link != LinkState::Listening =>
+        {
+            ServiceState::TooOld
+        }
         DaemonAnswer::NoAnswer => {
             let installed = facts.unit_installed == Some(true)
                 || facts.link == LinkState::Down
@@ -126,8 +138,38 @@ mod tests {
             link,
             hosting,
             unit_installed: unit,
+            unit_active: None,
             answer,
         }
+    }
+
+    #[test]
+    fn an_active_unit_nobody_reaches_on_the_host_link_is_too_old() {
+        // From a sandbox: an older host daemon runs and serves no host link.
+        for hosting in [false, true] {
+            let mut seen = facts(
+                LinkState::Absent,
+                hosting,
+                Some(true),
+                DaemonAnswer::NoAnswer,
+            );
+            seen.unit_active = Some(true);
+            assert_eq!(classify(&seen), ServiceState::TooOld);
+        }
+        // Not active (held off by this window's lock, restarting): not too
+        // old, just not running.
+        let mut seen = facts(LinkState::Absent, true, Some(true), DaemonAnswer::NoAnswer);
+        seen.unit_active = Some(false);
+        assert_eq!(classify(&seen), ServiceState::InstalledNotRunning);
+        // Active and listening but not answering yet: starting.
+        let mut seen = facts(
+            LinkState::Listening,
+            false,
+            Some(true),
+            DaemonAnswer::NoAnswer,
+        );
+        seen.unit_active = Some(true);
+        assert_eq!(classify(&seen), ServiceState::InstalledNotRunning);
     }
 
     #[test]

@@ -195,10 +195,12 @@ pub fn present(
                 DISMISSED.with(|d| d.set(true));
             }
             OPEN.with(|open| *open.borrow_mut() = None);
+            // What comes next opens first, so the application never has no
+            // window (first setup holds nothing else).
+            on_end(how);
             if let Some(window) = window.upgrade() {
                 window.close();
             }
-            on_end(how);
         })
     };
     {

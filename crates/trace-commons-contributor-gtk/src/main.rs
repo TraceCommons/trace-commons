@@ -373,7 +373,12 @@ fn finish_start(
                 std::rc::Rc::new(ui::service_dialog::FirstSetupHost { local });
             let application = application.clone();
             let ask_with = host.clone();
+            // No window is open while the service is classified off-thread:
+            // hold the application until the dialog or the folders screen
+            // is up, or its run loop would end here.
+            let hold = application.hold();
             host.state(Box::new(move |state| {
+                let _hold = hold;
                 let prompt = trace_commons_contributor_gtk::service::prompt(
                     trace_commons_contributor_gtk::service::Trigger::FirstSetup,
                     state,

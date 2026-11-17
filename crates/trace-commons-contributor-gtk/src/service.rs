@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use trace_commons_contributor::daemon::host_link::{self, LinkState};
-use trace_commons_contributor::daemon::service::{
-    DaemonAnswer, ServiceFacts, ServiceState, answer_from_hello,
-};
+use trace_commons_contributor::daemon::service::{ServiceFacts, ServiceState, answer_from_hello};
 
 /// The three dialogs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +131,12 @@ pub enum WatchStep {
 pub fn watch_step(open: Dialog, state: ServiceState, switched: bool) -> WatchStep {
     match (open, state) {
         (_, ServiceState::Running) => WatchStep::Close,
-        (Dialog::Install, ServiceState::InstalledNotRunning) if !switched => WatchStep::SwitchOver,
+        // After the command ran: this window's daemon may hold the new
+        // unit off (the update case too, where an older daemon ran beside
+        // a sandboxed one).
+        (Dialog::Install | Dialog::Update, ServiceState::InstalledNotRunning) if !switched => {
+            WatchStep::SwitchOver
+        }
         _ => WatchStep::Keep,
     }
 }
@@ -203,10 +206,47 @@ pub fn unit_file_installed() -> Option<bool> {
             "GetUnitFileState",
             &(trace_commons_contributor::channel::SYSTEMD_UNIT_NAME,),
         ) {
-            Ok(_) => Some(true),
+            // The reference does not say whether a missing file is an error
+            // or a state; read both as not installed.
+            Ok(state) => Some(!matches!(state.as_str(), "" | "invalid" | "not-found")),
             Err(zbus::Error::MethodError(..)) => Some(false),
             Err(_) => None,
         }
+    })
+    .flatten()
+}
+
+/// Whether systemd reports the unit `active`: `GetUnit`, then the unit's
+/// `ActiveState` (org.freedesktop.systemd1(5)). `Some(false)` when the unit
+/// is not loaded or in any other state (`activating` while it restarts);
+/// `None` when the bus cannot be asked.
+pub fn unit_active() -> Option<bool> {
+    bounded(|| {
+        let connection = zbus::blocking::Connection::session().ok()?;
+        let manager = zbus::blocking::Proxy::new(
+            &connection,
+            SYSTEMD_DESTINATION,
+            SYSTEMD_PATH,
+            SYSTEMD_MANAGER,
+        )
+        .ok()?;
+        let path: zbus::zvariant::OwnedObjectPath = match manager.call(
+            "GetUnit",
+            &(trace_commons_contributor::channel::SYSTEMD_UNIT_NAME,),
+        ) {
+            Ok(path) => path,
+            Err(zbus::Error::MethodError(..)) => return Some(false),
+            Err(_) => return None,
+        };
+        let unit = zbus::blocking::Proxy::new(
+            &connection,
+            SYSTEMD_DESTINATION,
+            path,
+            "org.freedesktop.systemd1.Unit",
+        )
+        .ok()?;
+        let state: String = unit.get_property("ActiveState").ok()?;
+        Some(state == "active")
     })
     .flatten()
 }
@@ -237,20 +277,26 @@ pub fn hello_at(socket: &Path) -> Option<Value> {
         .and_then(|response| response.result)
 }
 
-/// The daemon to ask `hello`: the one this window is attached to, else one
-/// listening on the host link -- never this window's own daemon.
-pub fn hello_target(
+/// The daemons to ask `hello`, in order: the one this window is attached
+/// to, then one listening on the host link -- never this window's own
+/// daemon. The first that answers counts: in a sandbox at first setup the
+/// "attached" socket is the sandbox's own, where nobody listens.
+pub fn hello_targets(
     hosting: bool,
     attached: Option<&Path>,
     link: LinkState,
     link_socket: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Vec<PathBuf> {
     if hosting {
-        return None;
+        return Vec::new();
     }
-    attached
-        .or(link_socket.filter(|_| link == LinkState::Listening))
-        .map(Path::to_path_buf)
+    let mut targets: Vec<PathBuf> = attached.map(Path::to_path_buf).into_iter().collect();
+    if let Some(link_socket) = link_socket.filter(|_| link == LinkState::Listening)
+        && attached != Some(link_socket)
+    {
+        targets.push(link_socket.to_path_buf());
+    }
+    targets
 }
 
 /// Wait at most `bound` for the service to answer: on the host link, or,
@@ -288,15 +334,15 @@ pub fn gather(hosting: bool, attached: Option<&Path>) -> ServiceFacts {
             .flatten()
             .map(|file| file.exists())
     });
-    let answer = match hello_target(hosting, attached, link, link_socket.as_deref()) {
-        Some(socket) => answer_from_hello(hello_at(&socket).as_ref()),
-        None => DaemonAnswer::NoAnswer,
-    };
+    let hello = hello_targets(hosting, attached, link, link_socket.as_deref())
+        .iter()
+        .find_map(|socket| hello_at(socket));
     ServiceFacts {
         link,
         hosting,
         unit_installed,
-        answer,
+        unit_active: unit_active(),
+        answer: answer_from_hello(hello.as_ref()),
     }
 }
 
@@ -304,6 +350,7 @@ pub fn gather(hosting: bool, attached: Option<&Path>) -> ServiceFacts {
 mod tests {
     use super::*;
     use serde_json::json;
+    use trace_commons_contributor::daemon::service::DaemonAnswer;
 
     const STATES: [ServiceState; 4] = [
         ServiceState::Running,
@@ -427,6 +474,15 @@ mod tests {
             watch_step(Dialog::Update, ServiceState::TooOld, false),
             WatchStep::Keep
         );
+        // Updated, but held off by this window's own daemon.
+        assert_eq!(
+            watch_step(Dialog::Update, ServiceState::InstalledNotRunning, false),
+            WatchStep::SwitchOver
+        );
+        assert_eq!(
+            watch_step(Dialog::Start, ServiceState::InstalledNotRunning, false),
+            WatchStep::Keep
+        );
     }
 
     #[test]
@@ -437,19 +493,46 @@ mod tests {
         assert!(!first_setup_asks(true, true));
     }
 
-    /// Every way a dialog can come up, named. There is no app-start
-    /// trigger: an ordinary start never shows one (owner, 2026-11-17). A new
-    /// variant has to be added here, on purpose.
+    /// A dialog comes up from exactly two places: first setup's roots
+    /// branch in `main.rs`, and `offer_service` (Launch and "Set up") in
+    /// the Private AI start area. Never from an ordinary start (owner,
+    /// 2026-11-17). A new call site has to be added here, on purpose.
     #[test]
-    fn no_trigger_is_an_ordinary_app_start() {
-        for trigger in [Trigger::FirstSetup, Trigger::Launch, Trigger::SetUp] {
-            let named = match trigger {
-                Trigger::FirstSetup => "first setup, before the folders are declared",
-                Trigger::Launch => "Launch pressed",
-                Trigger::SetUp => "Set up pressed",
-            };
-            assert!(!named.contains("start of the app"));
+    fn dialogs_are_presented_only_from_first_setup_and_private_ai() {
+        // Split, so this file does not match itself.
+        const CALL: &str = concat!("service_dialog::", "present(");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let calls = text.matches(CALL).count();
+                if calls > 0 {
+                    let name = path.strip_prefix(&root).unwrap().display().to_string();
+                    found.push((name, calls));
+                }
+            }
         }
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("main.rs".to_string(), 1),
+                ("ui/managed_sessions.rs".to_string(), 1)
+            ]
+        );
+        // The one in main.rs is inside the roots-not-declared branch.
+        let main = std::fs::read_to_string(root.join("main.rs")).unwrap();
+        let branch = main.find("ERR_ROOTS_NOT_DECLARED =>").unwrap();
+        let call = main.find(CALL).unwrap();
+        let after = main[branch..].find("Err(error) =>").unwrap() + branch;
+        assert!(branch < call && call < after);
     }
 
     #[test]
@@ -479,24 +562,28 @@ mod tests {
     fn hello_goes_to_the_attached_daemon_then_a_listening_link_never_our_own() {
         let attached = Path::new("/state/daemon.sock");
         let link = Path::new("/run/user/1/trace-commons/daemon.sock");
+        // The attached socket first, then the listening link: in a sandbox
+        // at first setup the attached socket is the sandbox's own, empty.
         assert_eq!(
-            hello_target(false, Some(attached), LinkState::Listening, Some(link)),
-            Some(attached.to_path_buf())
+            hello_targets(false, Some(attached), LinkState::Listening, Some(link)),
+            vec![attached.to_path_buf(), link.to_path_buf()]
         );
         assert_eq!(
-            hello_target(false, None, LinkState::Listening, Some(link)),
-            Some(link.to_path_buf())
+            hello_targets(false, None, LinkState::Listening, Some(link)),
+            vec![link.to_path_buf()]
         );
-        assert_eq!(hello_target(false, None, LinkState::Down, Some(link)), None);
+        // Attached over the link: asked once.
         assert_eq!(
-            hello_target(false, None, LinkState::Absent, Some(link)),
-            None
+            hello_targets(false, Some(link), LinkState::Listening, Some(link)),
+            vec![link.to_path_buf()]
+        );
+        assert!(hello_targets(false, None, LinkState::Down, Some(link)).is_empty());
+        assert_eq!(
+            hello_targets(false, Some(attached), LinkState::Absent, Some(link)),
+            vec![attached.to_path_buf()]
         );
         // A hosting window's host link is its own daemon.
-        assert_eq!(
-            hello_target(true, Some(attached), LinkState::Listening, Some(link)),
-            None
-        );
+        assert!(hello_targets(true, Some(attached), LinkState::Listening, Some(link)).is_empty());
     }
 
     #[test]

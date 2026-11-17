@@ -186,7 +186,11 @@ crate) turns four facts into `Running`, `NotInstalled`,
 whether the unit's file is installed (systemd's `GetUnitFileState` on the
 session bus; on the host, also the file `daemon install` writes), and
 `hello`'s new `service_level` from a daemon outside the window, compared with
-the shell's `MIN_SERVICE_LEVEL` (absent reads as too old). The daemon reports
+the shell's `MIN_SERVICE_LEVEL` (absent reads as too old), and whether systemd
+reports the unit `active` (`GetUnit`, then the unit's `ActiveState`). An
+active unit that nobody reaches on the host link is a daemon from before the
+host link, so it reads as too old; a unit held off by the window's own lock
+is restarting (`activating`), so it reads as installed but not running. The daemon reports
 no build version on the wire and none is added. Only the Linux GTK shell draws
 it in this change; the Mac dialog for its rare case is a later follow-up.
 
@@ -214,6 +218,8 @@ button that reopens the dialog. A headless driver run (`--exit-after-realize`,
   why, run this in a terminal:" and the status command.
 - Too old: the same install command. Its last step is `systemctl --user
   restart`, so running it again replaces an older daemon that is running.
+  While open it watches and switches over the same way when the updated unit
+  is held off by the window's own daemon.
 
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the
@@ -273,7 +279,9 @@ needs them:
   in-sandbox daemon reads sessions. If the in-sandbox daemon is retired,
   both go.
 - `--socket=session-bus` could narrow to `--talk-name` entries for
-  Notifications, the StatusNotifierWatcher and `portal.Flatpak`, plus
+  Notifications, the StatusNotifierWatcher, `portal.Flatpak` and
+  `org.freedesktop.systemd1` (the background-service dialogs' `StartUnit`,
+  `GetUnitFileState`, `GetUnit` and `ActiveState`), plus
   `org.freedesktop.secrets` only while the sandbox still hosts. Risky without
   a Linux run: the tray and update monitor must be re-tested.
 - `--share=network` is added by its own PR (owner, 2026-11-17), not here.
