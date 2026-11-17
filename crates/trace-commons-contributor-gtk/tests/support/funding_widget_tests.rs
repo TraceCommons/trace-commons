@@ -146,7 +146,9 @@ impl Fixture {
                 // line.
                 | "route_disclosure"
                 // Private AI's saved-account panel; refused, it stays empty.
-                | "managed_snapshot" => {
+                | "managed_snapshot"
+                // The Traces map's tool read; refused, it draws no tools.
+                | "tool_destinations" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),
