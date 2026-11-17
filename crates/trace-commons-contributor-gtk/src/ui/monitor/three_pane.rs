@@ -407,6 +407,21 @@ mod tests {
         }
     }
 
+    /// Runs the main loop until `done`, for at most five seconds: a
+    /// compositor answers `present` and a resize request asynchronously, and
+    /// a layout waits for the frame clock, so what is pending now is not all
+    /// there will be.
+    fn pump_until(done: impl Fn() -> bool) {
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() && std::time::Instant::now() < deadline {
+            if !context.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        pump();
+    }
+
     fn mounted(width: i32) -> (gtk::Window, ThreePane, [gtk::Box; 3]) {
         let panes = [
             gtk::Box::new(gtk::Orientation::Vertical, 0),
@@ -420,7 +435,7 @@ mod tests {
             .child(&pane)
             .build();
         window.present();
-        pump();
+        pump_until(|| pane.laid_out_width() > 0.0);
         (window, pane, panes)
     }
 
@@ -453,7 +468,7 @@ mod tests {
                 pane.kept_map(),
             ))
         );
-        pump();
+        pump_until(|| !map.is_child_visible());
         assert!(!map.is_child_visible(), "a hidden map is still drawn");
         let after = PaneLayout::new(
             pane.laid_out_width(),
