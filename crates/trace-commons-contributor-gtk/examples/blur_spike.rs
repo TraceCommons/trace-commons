@@ -258,7 +258,7 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
     enum Backend {
         Wayland(Box<wayland::Blur>),
         WaylandNoBlur,
-        X11(x11::Blur),
+        X11(Box<x11::Blur>),
         X11NoBlur,
         Other,
     }
@@ -273,7 +273,7 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
             }
             if display.downcast_ref::<gdk4_x11::X11Display>().is_some() {
                 return match x11::Blur::connect() {
-                    Some(blur) => Backend::X11(blur),
+                    Some(blur) => Backend::X11(Box::new(blur)),
                     None => Backend::X11NoBlur,
                 };
             }
