@@ -460,6 +460,11 @@ mod tests {
             glyph.size.1.round() as i32 * 4,
         );
         let (full_w, full_h) = (w + 2 * margin, h + 2 * margin);
+        // A stroked outline inside the viewBox may reach half a stroke past
+        // it (the Mac's rounded boxes sit 0.5 in with a 1.3 stroke), and no
+        // further; a filled glyph may not reach past it at all.
+        let scale = f64::from(w) / glyph.view_box.0;
+        let reach = (glyph.stroke.unwrap_or(0.0) / 2.0 * scale).ceil() as i32;
         let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, full_w, full_h)
             .expect("an image surface");
         {
@@ -476,8 +481,8 @@ mod tests {
             for x in 0..full_w {
                 let alpha = data[y as usize * stride + x as usize * 4 + 3];
                 if alpha > 32 {
-                    let in_frame =
-                        (margin..margin + w).contains(&x) && (margin..margin + h).contains(&y);
+                    let in_frame = (margin - reach..margin + w + reach).contains(&x)
+                        && (margin - reach..margin + h + reach).contains(&y);
                     if in_frame {
                         inside += 1;
                     } else {
@@ -494,7 +499,7 @@ mod tests {
         for (name, svg) in glyph::ALL {
             let (inside, outside) = painted(svg, 8);
             assert!(inside > 0, "{name} painted nothing");
-            // Half a stroke past the outline is the most it may reach; the
+            // `painted` counts ink beyond half a stroke past the frame; the
             // frame is four times the Mac's size, so a margin of eight is
             // wider than that for every stroke here.
             assert_eq!(outside, 0, "{name} painted outside its frame");
