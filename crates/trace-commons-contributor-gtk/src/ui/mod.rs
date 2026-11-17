@@ -802,7 +802,11 @@ impl App {
         // Only `contributable_count` is read from here: the folder's total
         // stays the rows on screen.
         self.call("list_projects", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_projects_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let projects: Vec<crate::model::Project> =
                 serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
                     .unwrap_or_default();

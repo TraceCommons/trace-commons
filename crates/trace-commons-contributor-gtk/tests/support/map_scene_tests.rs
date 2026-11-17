@@ -1013,3 +1013,83 @@ fn a_tool_without_artwork_is_two_letters_of_its_name() {
     assert_eq!(initials("Codex"), "Co");
     assert_eq!(initials(""), "?");
 }
+
+fn pending(id: &str, project: &str, source: &str) -> QueueEntry {
+    QueueEntry {
+        entry_id: id.into(),
+        project_id: project.into(),
+        // Every folder named alike: identity is the id, never the label.
+        project_label: "same label".into(),
+        source: source.into(),
+        state: "pending".into(),
+        ..QueueEntry::default()
+    }
+}
+
+fn folder_ids(scene: &Scene) -> Vec<String> {
+    let mut ids: Vec<String> = scene
+        .nodes
+        .iter()
+        .filter(|n| n.id.starts_with("folder:"))
+        .map(|n| n.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The map's folders are the queue's folders by id: two folders with the
+/// same label are two nodes, each waiting session is counted once, and an
+/// entry that is not pending draws nothing (carried over from the old
+/// map's `pending_relationships_use_ids_and_count_each_entry_once`).
+#[test]
+fn folders_are_drawn_by_id_and_count_each_pending_entry_once() {
+    let entries = vec![
+        pending("a", "p1", "codex"),
+        pending("b", "p1", "claude-code"),
+        pending("c", "p2", "codex"),
+        QueueEntry {
+            state: "approved".into(),
+            ..pending("d", "p3", "codex")
+        },
+    ];
+    let tree = TracesTree::build(&entries, &[], None);
+    let scene = traces(&tree, &CommonsGate::with_state(ScreenState::Ready));
+    assert_eq!(folder_ids(&scene), ["folder:p1", "folder:p2"]);
+    let waiting = tree.tools.iter().map(ToolNode::waiting).sum::<usize>()
+        + tree
+            .unplaced
+            .iter()
+            .map(|f| f.sessions.len())
+            .sum::<usize>();
+    assert_eq!(waiting, 3);
+    let p1 = node(&scene, "folder:p1").unwrap();
+    assert!(p1.detail.contains("2 traces waiting"), "{}", p1.detail);
+    // Both tools carry p1, so selecting either keeps it lit.
+    let carriers: Vec<_> = Scene::carriers(&tree.folders[0], &tree)
+        .iter()
+        .map(|t| t.id())
+        .collect();
+    assert!(
+        carriers.contains(&"codex") && carriers.contains(&"claude-code"),
+        "{carriers:?}"
+    );
+}
+
+/// The same entries in another order draw the same nodes, and a folder
+/// whose last entry leaves is no longer drawn (carried over from the old
+/// map's `selection_follows_identity_after_reordering_and_removal`).
+#[test]
+fn nodes_follow_identity_after_reordering_and_removal() {
+    let mut entries = vec![pending("a", "p1", "codex"), pending("b", "p2", "codex")];
+    let gate = CommonsGate::with_state(ScreenState::Ready);
+    let before = folder_ids(&traces(&TracesTree::build(&entries, &[], None), &gate));
+    entries.reverse();
+    let after = folder_ids(&traces(&TracesTree::build(&entries, &[], None), &gate));
+    assert_eq!(before, after);
+    entries.retain(|e| e.entry_id != "a");
+    let removed = traces(&TracesTree::build(&entries, &[], None), &gate);
+    assert_eq!(folder_ids(&removed), ["folder:p2"]);
+    // Nothing pending still draws the map: this computer and the library.
+    let empty = traces(&TracesTree::build(&[], &[], None), &gate);
+    assert!(node(&empty, "hub").is_some() && node(&empty, "library").is_some());
+}

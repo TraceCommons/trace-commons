@@ -1289,6 +1289,9 @@ struct Reads {
     /// `None` before `list_pending` first answers; `Some(false)` after a
     /// failed read.
     pending: Option<bool>,
+    /// The same for `list_projects`: the Mac's Traces store fails its whole
+    /// load when either read fails, since a folder's rule comes from it.
+    projects: Option<bool>,
 }
 
 pub struct TraceMap {
@@ -1474,12 +1477,19 @@ impl TraceMap {
         self.reads.borrow_mut().pending = Some(answered);
     }
 
+    /// Whether the last `list_projects` read answered. A failed one leaves
+    /// the window's last rows in place, so the map is then not current and
+    /// a stale Automatic rule draws no flow.
+    pub fn set_projects_read(&self, answered: bool) {
+        self.reads.borrow_mut().projects = Some(answered);
+    }
+
     /// The map's screen state, by the Mac's precedence.
     fn state(&self) -> ScreenState {
         let reads = self.reads.borrow();
         ScreenState::resolve(
-            reads.pending == Some(false),
-            reads.pending.is_some(),
+            reads.pending == Some(false) || reads.projects == Some(false),
+            reads.pending.is_some() && reads.projects.is_some(),
             reads.status.as_ref().and_then(|status| status.paused),
             reads.status.is_some(),
         )
@@ -1591,12 +1601,25 @@ mod tests {
         }
     }
 
+    /// Iterates the main loop until `done` holds, or half a second passes:
+    /// allocation and a keyboard activation's `clicked` both land a few
+    /// iterations after the call that causes them.
+    fn settle_until(done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !done() && std::time::Instant::now() < deadline {
+            settle();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        settle();
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_map_preserves_identity_and_accessibility() {
         gtk::init().expect("GTK display");
         let map = TraceMap::new();
         map.set_pending_read(true);
+        map.set_projects_read(true);
         let entries: Vec<_> = (0..40)
             .map(|i| entry(&format!("e{i}"), &format!("p{i}"), "codex"))
             .collect();
@@ -1612,7 +1635,8 @@ mod tests {
             .child(&map.root)
             .build();
         window.present();
-        settle();
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
 
         // Ten folders, then the pill; every tool a coin; this computer and
         // the library.
@@ -1649,7 +1673,8 @@ mod tests {
         settle();
         assert_eq!(map.canvas.card_node().as_deref(), Some(id.as_str()));
         assert!(node.activate());
-        settle();
+        let clicked = selected.clone();
+        settle_until(move || !clicked.borrow().is_empty());
         assert_eq!(Some(selected.borrow().as_str()), map_scene::folder_id(&id));
 
         // The pill draws six more, and the focused folder keeps its button.
@@ -1698,6 +1723,7 @@ mod tests {
         gtk::init().expect("GTK display");
         let map = TraceMap::new();
         map.set_pending_read(true);
+        map.set_projects_read(true);
         let entries = vec![entry("a", "p", "codex")];
         let window = gtk::Window::builder()
             .default_width(480)
@@ -1707,7 +1733,8 @@ mod tests {
         window.present();
         map.canvas
             .set_inputs(map.inputs(&entries, &[], None, Some("codex".into()), None));
-        settle();
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
         let whole = map.canvas.imp().geometry();
         map.canvas.set_inputs(map.inputs(
             &entries,
