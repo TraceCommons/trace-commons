@@ -129,8 +129,10 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
     // Lowered from 206 (first-run parity, 2026-11-17): the roots and
-    // Connect screens' own words left with them.
-    ("copy.rs", 193),
+    // Connect screens' own words left with them. Then to 177: the legacy
+    // Welcome, Consent, Watch and Done pages' words, and the tools' names,
+    // now `source_copy`'s.
+    ("copy.rs", 177),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
