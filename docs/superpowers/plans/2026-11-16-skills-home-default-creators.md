@@ -18,3 +18,7 @@
 - Retained replay: 3 default creators, 9 existing public catalog examples, 5 actual recorded changes. Explicit follows remain empty and partial usage does not create weekly totals/trends.
 - Clippy on both changed Rust packages/all targets, Rust formatting and diff whitespace pass. No dependencies changed. Independent review found no blockers.
 - Source implementation only: no app installation, relaunch, release publication or account/feature-flag changes. The installed staging app still needs a build containing this change.
+
+## Catalog-budget review follow-up
+
+A regression with sixteen valid 16 KiB Obra descriptions reproduced the review finding: Poteto was omitted by the 180 KiB bound. Oversized responses now reserve one real example per default creator before the remaining rows; catalogs that fit preserve their original active/installed ordering. The same byte budget and explicit follow state are retained. All 63 Skills daemon tests pass, one live-network test remains ignored; the existing server-catalog ordering case passes as well.

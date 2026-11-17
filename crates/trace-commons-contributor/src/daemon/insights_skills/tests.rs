@@ -1764,3 +1764,43 @@ async fn home_defaults_refresh_public_sources_without_explicit_follows() {
     assert!(runtime.public.followed.is_empty());
     assert!(runtime.last_attempt.is_some());
 }
+
+#[test]
+fn home_defaults_keep_each_creator_when_the_catalog_is_bounded() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    for publisher in publishers()
+        .iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+    {
+        let count = if publisher.id == "obra" { 16 } else { 1 };
+        let skills = (0..count)
+            .map(|index| {
+                let path = format!("{}/example-{index:02}/SKILL.md", publisher.skills_root);
+                let mut skill = catalog_skill(publisher.id, &path, "a");
+                skill.repository = publisher.repository.into();
+                skill.source_url = source_url(publisher, &skill.revision, &path);
+                skill.instructions_url = publisher.instructions_url.into();
+                skill.description = "x".repeat(16 * 1024);
+                skill
+            })
+            .collect();
+        state.accept(publisher.id, skills, Utc::now());
+    }
+    validate_state(&state).unwrap();
+    persist(store.dir(), &state).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let value = snapshot(&shared);
+    let rows = value["catalog"]["skills"].as_array().unwrap();
+    for publisher in DEFAULT_HOME_PUBLISHERS {
+        assert!(
+            rows.iter().any(|row| row["publisher_id"] == publisher),
+            "missing default creator {publisher}"
+        );
+    }
+    assert_eq!(value["catalog"]["partial"], true);
+    assert!(serde_json::to_vec(rows).unwrap().len() <= 180 * 1024);
+    assert_eq!(value["followed_publishers"], json!([]));
+    assert_eq!(value["home_feed"], json!([]));
+}
