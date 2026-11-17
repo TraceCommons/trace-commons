@@ -268,8 +268,8 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
     // The search hit: the theme's yellow, unmoved, washed at its alpha, and
     // the hit's own ink solved on that wash over every ground, bare and
     // under each kept overlay, as the redaction ink is on its wash. Where
-    // no ink clears every wash (a palette with no yellow, whose fallback hue
-    // sits mid-way), the ink stays and the wash colour moves instead.
+    // no ink clears every wash, or the unmoved wash would not stand
+    // out from its ground (a pale yellow on a light one), the ink stays and the wash colour moves instead.
     let bases: Vec<Rgb> = grounds
         .iter()
         .flat_map(|g| {
@@ -280,9 +280,12 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
         .iter()
         .map(|base| (base.mix(yellow, HIGHLIGHT_WASH), TEXT))
         .collect();
+    let unmoved_visible = bases
+        .iter()
+        .all(|base| contrast(base.mix(yellow, HIGHLIGHT_WASH), *base) >= HIGHLIGHT_VISIBLE);
     let (highlight, highlight_ink) = match nearest_passing(ink, &washes) {
-        Some((solved, _)) => (yellow, solved),
-        None => {
+        Some((solved, _)) if unmoved_visible => (yellow, solved),
+        _ => {
             let moved =
                 moved_wash(ink, yellow, &bases).ok_or(PaletteError::Unreachable("yellow"))?;
             (moved.0, ink)
@@ -721,6 +724,31 @@ mod tests {
         let wash = Rgb::BLACK.mix(c, HIGHLIGHT_WASH);
         assert!(contrast(wash, Rgb::BLACK) >= HIGHLIGHT_VISIBLE);
         assert!(contrast(Rgb::WHITE, wash) >= TEXT);
+    }
+
+    /// A pale yellow on a light ground passes the ink test unmoved, but its
+    /// wash vanishes off the ground; the highlight must still be visible.
+    #[test]
+    fn pale_yellow_on_light_ground_keeps_a_visible_wash() {
+        for yellow in ["#f9e2af", "#ffff00"] {
+            let text = format!(
+                "mode = \"light\"\nbackground = \"#eff1f5\"\nforeground = \"#4c4f69\"\nyellow = \"{yellow}\"\n"
+            );
+            let p = parse(&text, false).unwrap();
+            for ground in p.grounds() {
+                let under = std::iter::once(ground)
+                    .chain(overlays(p.mode).map(|(tint, alpha)| ground.mix(tint, alpha)));
+                for base in under {
+                    let wash = base.mix(p.highlight, HIGHLIGHT_WASH);
+                    assert!(
+                        contrast(wash, base) >= HIGHLIGHT_VISIBLE,
+                        "{yellow}: wash {:.3}:1",
+                        contrast(wash, base)
+                    );
+                    assert!(contrast(p.highlight_ink, wash) >= TEXT);
+                }
+            }
+        }
     }
 
     /// The Pango alpha string and the CSS/contrast fraction are one value.
