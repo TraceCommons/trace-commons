@@ -277,6 +277,8 @@ pub fn present(
     // terminal) or start by itself.
     {
         let ended = Rc::clone(&ended);
+        let failed = parts.failed.clone();
+        let waiting = parts.waiting.clone();
         let host = Rc::clone(&host);
         let finish = Rc::clone(&finish);
         gtk::glib::timeout_add_local(WATCH_INTERVAL, move || {
@@ -288,6 +290,8 @@ pub fn present(
             }
             let host_next = Rc::clone(&host);
             let busy = Rc::clone(&busy);
+            let failed = failed.clone();
+            let waiting = waiting.clone();
             let tries = Rc::clone(&tries);
             let last_ended = Rc::clone(&last_ended);
             let finish = Rc::clone(&finish);
@@ -308,13 +312,32 @@ pub fn present(
                             busy.set(false);
                         }));
                     }
-                    WatchStep::Keep => busy.set(false),
+                    step @ (WatchStep::Failed | WatchStep::Keep) => {
+                        // Dialog B's line answers its own "Start it".
+                        if dialog != Dialog::Start {
+                            show_step(&failed, &waiting, step);
+                        }
+                        busy.set(false);
+                    }
                 }
             }));
             gtk::glib::ControlFlow::Continue
         });
     }
     window.present();
+}
+
+/// What a look shows in the not-installed and too-old dialogs: after the
+/// last automatic switch-over failed, dialog B's failure line and status
+/// command in place of the waiting line ("Waiting for the install to
+/// finish" no longer holds once it has); otherwise not that line. Dialog B
+/// shows its own after "Start it" and is left alone here.
+fn show_step(failed: &gtk::Box, waiting: &gtk::Label, step: WatchStep) {
+    let show = step == WatchStep::Failed;
+    failed.set_visible(show);
+    if show {
+        waiting.set_visible(false);
+    }
 }
 
 /// Run `work` off the GTK thread and hand its result to `done` on it.
@@ -462,6 +485,36 @@ mod tests {
         assert!(shown.iter().any(|s| s == words::START_FAILED));
         assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND));
         assert!(!shown.iter().any(|s| s == SERVICE_INSTALL_COMMAND));
+    }
+
+    /// Once its automatic switch-overs are spent, the not-installed dialog
+    /// shows dialog B's failure line and status command in place of its
+    /// waiting line, with no other words.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_not_installed_dialog_shows_the_status_command_after_its_last_try() {
+        let (parts, shown) = mounted(Dialog::Install);
+        assert!(shown.iter().any(|s| s == words::START_FAILED));
+        assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND));
+        parts.waiting.set_visible(true);
+        show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
+        assert!(!parts.failed.is_visible());
+        assert!(parts.waiting.is_visible());
+        show_step(&parts.failed, &parts.waiting, WatchStep::Failed);
+        assert!(parts.failed.is_visible());
+        assert!(!parts.waiting.is_visible());
+        let mut failed = Vec::new();
+        labels(parts.failed.upcast_ref(), &mut failed);
+        assert_eq!(
+            failed,
+            vec![
+                words::START_FAILED.to_string(),
+                SERVICE_STATUS_COMMAND.to_string()
+            ]
+        );
+        // The service gone again: the line goes with it.
+        show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
+        assert!(!parts.failed.is_visible());
     }
 
     #[test]
