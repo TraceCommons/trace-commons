@@ -81,7 +81,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{Glass, Mode, Rect, content_rect, glass_for, parse_mode, x11_blur_cardinals};
+    use super::{Glass, Rect, content_rect, glass_for, parse_mode, x11_blur_cardinals};
     use adw::prelude::*;
     use gtk::{gdk, glib};
     use std::cell::RefCell;
@@ -119,7 +119,7 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
     fn activate(app: &adw::Application) {
         let display = gdk::Display::default().expect("display");
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(CSS);
+        provider.load_from_data(CSS);
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
@@ -175,7 +175,7 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
         }
         let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
         pane.add_css_class("pane");
-        pane.set_size_request(320, -1);
+        pane.set_size_request(640, -1);
         pane.set_visible(false);
         row.append(&sidebar);
         row.append(&main);
@@ -210,7 +210,8 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
 
     /// Spike S2: grow at the right edge after map, then shrink back.
     /// `TC_BLUR_SPIKE_GROW=default-size` calls set_default_size on the mapped
-    /// window; `size-request` shows a 320 px pane, raising the minimum width.
+    /// window; `size-request` shows a 640 px pane, raising the minimum width past the
+    /// current width. Both then shrink back to the first width.
     fn schedule_s2(window: &gtk::ApplicationWindow, pane: &gtk::Box) {
         let Some(method) = env("TC_BLUR_SPIKE_GROW") else {
             return;
@@ -249,8 +250,7 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
             if method == "size-request" {
                 p2.set_visible(false);
             }
-            let (w, h) = (w2.width(), w2.height());
-            w2.set_default_size((w - 320).max(360), h);
+            w2.set_default_size(760, w2.height());
         });
         glib::timeout_add_local_once(step * 3, move || report("shrunk", &w3));
     }
@@ -339,7 +339,6 @@ window.blur-spike-painted .pane { background-color: rgb(250, 249, 253); }
         use super::Rect;
         use gdk4_wayland::prelude::*;
         use gtk::gdk;
-        use gtk::prelude::*;
         use wayland_client::globals::{GlobalListContents, registry_queue_init};
         use wayland_client::protocol::{wl_compositor, wl_region, wl_registry, wl_surface};
         use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
