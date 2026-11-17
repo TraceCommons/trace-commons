@@ -32,3 +32,5 @@ The extra local-gpu-models Clippy run reports `await_holding_lock` in unchanged 
 The normal CI server/ingest Clippy command passed with the existing allow-list. Required license boundary: four passed. No suppression was added for the separately reproduced, pre-existing feature-only lint.
 
 Final independent review found no remaining material issues. Hosted CI results belong to the resulting PR and are separate from the local evidence above.
+
+The existing non-CUDA local-model CI job also runs the two request-restriction contract tests; they construct requests without loading a model or using a GPU.

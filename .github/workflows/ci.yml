@@ -1809,6 +1809,13 @@ jobs:
       # the CUDA toolkit and a GPU runtime, and is operator-tested on GPU
       # hosts only.
       - run: cargo check -p trace-commons-server -p trace-commons-ingest --bins --features local-gpu-models
+      - name: Test raw-logits request restrictions
+        # These contract tests construct requests only; no model or GPU is used.
+        run: >-
+          cargo test --locked -p trace-commons-gate-enclave --lib
+          --features local-gpu-models --
+          'perplexity_local::local_impl::tests::raw_logits_request_'
+          --test-threads=2
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
