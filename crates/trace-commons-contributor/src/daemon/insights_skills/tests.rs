@@ -823,24 +823,29 @@ fn initial_catalog_is_a_baseline_and_later_new_skills_are_added() {
 }
 
 #[test]
-fn background_refresh_requires_follow_but_opening_tab_can_fetch() {
+fn background_defaults_and_opening_tab_share_refresh_throttles() {
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
     set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = true;
     maybe_refresh_public(&shared);
+    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
+    assert!(attempt.is_some());
     assert!(
         shared
             .insights_skills
             .runtime
             .lock()
             .unwrap()
-            .last_attempt
-            .is_none()
+            .public
+            .followed
+            .is_empty()
     );
     shared.insights_skills.start_refresh(&shared, false);
-    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
-    assert!(attempt.is_some());
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().last_attempt,
+        attempt
+    );
     shared.insights_skills.start_refresh(&shared, true);
     assert_eq!(
         shared.insights_skills.runtime.lock().unwrap().last_attempt,
@@ -1653,4 +1658,109 @@ async fn the_server_catalog_replaces_github_only_when_enabled_pinned_and_valid()
         choice(stale.path(), true, &pinned, Err(())).await,
         (true, true, None, 1)
     );
+}
+
+#[test]
+fn home_defaults_show_real_changes_without_following_creators() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    let at = Utc::now();
+    for publisher in publishers()
+        .iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+    {
+        let path = format!("{}/one/SKILL.md", publisher.skills_root);
+        let mut skill = catalog_skill(publisher.id, &path, "a");
+        skill.repository = publisher.repository.into();
+        skill.source_url = source_url(publisher, &skill.revision, &path);
+        skill.instructions_url = publisher.instructions_url.into();
+        state.accept(publisher.id, vec![skill.clone()], at);
+        skill.sha256 = "b".repeat(64);
+        state.accept(publisher.id, vec![skill], at + chrono::Duration::seconds(1));
+    }
+    validate_state(&state).unwrap();
+    persist(store.dir(), &state).unwrap();
+    let before = std::fs::read(store.dir().join(STATE_FILE)).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let value = snapshot(&shared);
+    assert_eq!(
+        value["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(value["followed_publishers"], json!([]));
+    assert_eq!(value["feed"], json!([]), "Following remains explicit");
+    assert_eq!(value["home_feed"].as_array().unwrap().len(), 3);
+    assert!(
+        value["home_feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "updated")
+    );
+    assert_eq!(
+        std::fs::read(shared.store.dir().join(STATE_FILE)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn home_defaults_do_not_invent_first_visit_updates_or_override_follows() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    let at = Utc::now();
+    state.accept(
+        "obra",
+        vec![catalog_skill("obra", "skills/one/SKILL.md", "a")],
+        at,
+    );
+    persist(store.dir(), &state).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let first = snapshot(&shared);
+    assert_eq!(
+        first["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(first["home_feed"], json!([]));
+    {
+        let mut runtime = shared.insights_skills.state(shared.store.dir()).unwrap();
+        runtime.public.follow("obra", true).unwrap();
+        runtime.public.accept(
+            "obra",
+            vec![catalog_skill("obra", "skills/one/SKILL.md", "b")],
+            at + chrono::Duration::seconds(1),
+        );
+    }
+    let chosen = snapshot(&shared);
+    assert_eq!(chosen["followed_publishers"], json!(["obra"]));
+    assert_eq!(chosen["default_publishers"], json!([]));
+    assert_eq!(chosen["home_feed"], json!([]));
+    assert_eq!(chosen["feed"].as_array().unwrap().len(), 1);
+    set_skills_flag(&shared, 2, false);
+    assert!(snapshot(&shared).get("home_feed").is_none());
+    assert!(snapshot(&shared).get("default_publishers").is_none());
+}
+
+#[tokio::test]
+async fn home_defaults_refresh_public_sources_without_explicit_follows() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = false;
+    maybe_refresh_public(&shared);
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .last_attempt
+            .is_none()
+    );
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    maybe_refresh_public(&shared);
+    let runtime = shared.insights_skills.runtime.lock().unwrap();
+    assert!(runtime.public.followed.is_empty());
+    assert!(runtime.last_attempt.is_some());
 }

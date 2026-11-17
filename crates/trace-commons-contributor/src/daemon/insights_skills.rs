@@ -49,6 +49,9 @@ struct Publisher {
     instructions_url: &'static str,
 }
 
+// Curated Home suggestions, not implicit follows or an activity ranking.
+const DEFAULT_HOME_PUBLISHERS: [&str; 3] = ["obra", "poteto", "slack"];
+
 fn publishers() -> [Publisher; 4] {
     [
         Publisher {
@@ -898,19 +901,13 @@ impl SkillsService {
     }
 }
 
-/// Daemon polling refreshes only after the user follows a publisher. Opening
-/// the Skills tab remains an explicit catalog request, subject to throttling.
+/// Keep the default Home creators and explicit follows current. The feature,
+/// analysis, dry-run and six-hour throttle gates remain in the refresh path.
 pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
     if !enabled(shared) {
         return;
     }
-    let followed = shared
-        .insights_skills
-        .state(shared.store.dir())
-        .is_ok_and(|runtime| !runtime.public.followed.is_empty());
-    if followed {
-        shared.insights_skills.start_refresh(shared, false);
-    }
+    shared.insights_skills.start_refresh(shared, false);
     suggestions::maybe_send(shared);
 }
 
@@ -1216,6 +1213,21 @@ fn snapshot(shared: &DaemonShared) -> Value {
         updates_with_server(&inventory, &runtime.public, server, now),
         64 * 1024,
     );
+    let defaults = if runtime.public.followed.is_empty() {
+        DEFAULT_HOME_PUBLISHERS.as_slice()
+    } else {
+        &[]
+    };
+    // Home's default news is separate from Following. Only one feed can be
+    // nonempty, so the existing combined response budget does not grow.
+    let (home_feed, home_feed_partial) = bounded_rows(
+        runtime
+            .public
+            .feed
+            .iter()
+            .filter(|item| defaults.contains(&item.publisher_id.as_str())),
+        48 * 1024,
+    );
     let (feed, feed_partial) = bounded_rows(
         runtime
             .public
@@ -1234,6 +1246,7 @@ fn snapshot(shared: &DaemonShared) -> Value {
             "active_publishers": active_rows},
         "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
         "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
+        "default_publishers":defaults,"home_feed":home_feed,"home_feed_partial":home_feed_partial,
         "usage":usage,
         "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
     });

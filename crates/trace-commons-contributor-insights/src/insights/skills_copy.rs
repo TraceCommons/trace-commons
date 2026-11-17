@@ -14,6 +14,7 @@ pub const COPY: &[(&str, &str)] = &[
     ("skills_home_story_updated", "{name} was updated"),
     ("skills_home_trend_period", "Past 7 days"),
     ("skills_home_empty", "No updates yet."),
+    ("skills_home_creators", "Creators"),
     ("skills_home_view", "View"),
     ("skills_home_browse", "Browse"),
     ("skills_home_index", "Installed skills"),
