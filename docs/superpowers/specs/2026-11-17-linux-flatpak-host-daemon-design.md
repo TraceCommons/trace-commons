@@ -187,10 +187,16 @@ whether the unit's file is installed (systemd's `GetUnitFileState` on the
 session bus; on the host, also the file `daemon install` writes), and
 `hello`'s new `service_level` from a daemon outside the window, compared with
 the shell's `MIN_SERVICE_LEVEL` (absent reads as too old), and whether systemd
-reports the unit `active` (`GetUnit`, then the unit's `ActiveState`). An
-active unit that nobody reaches on the host link is a daemon from before the
-host link, so it reads as too old; a unit held off by the window's own lock
-is restarting (`activating`), so it reads as installed but not running. The daemon reports
+reports the unit `active` (`GetUnit`, then the unit's `ActiveState`) and
+since when (`ActiveEnterTimestamp`). Too old needs positive evidence of an
+old daemon: one that answers `hello` without `service_level`, or a unit
+active for at least `TOO_OLD_GRACE` (15 s) with nobody on the host link and
+no `host-unit` marker. A current unit daemon writes the marker as soon as it
+takes `watcher.lock` (so one that could not bind the link reads `Down`, not
+too old), and one that loses the lock -- right after the install command,
+while the window's own daemon runs -- is `active` (`Type=simple`) only until
+it exits, well inside the grace. A unit held off by the window's own lock is
+restarting (`activating`), so it reads as installed but not running. The daemon reports
 no build version on the wire and none is added. Only the Linux GTK shell draws
 it in this change; the Mac dialog for its rare case is a later follow-up.
 
@@ -207,19 +213,46 @@ button that reopens the dialog. A headless driver run (`--exit-after-realize`,
 - Not installed: the install command with "Copy command" (clipboard only;
   the app never runs it), "Open install guide", "Not now". While open the
   window looks again every 2 s. When the unit's file appears it switches
-  over once: stops a daemon it runs itself (`Backend::stop`: shutdown, wait
-  for the pass, close, so the state directory's lock and `watcher.lock` are
-  released), asks systemd to `StartUnit` the fixed unit (no 30 s wait for
-  `RestartSec`), waits up to 20 s for it to answer, and opens again by the
-  usual order, which attaches. Once the service answers, the dialog closes
-  with nothing else shown.
-- Installed but not running: "Start it" does the same switch-over. If the
-  service still does not answer, the dialog shows "It didn't start. To see
-  why, run this in a terminal:" and the status command.
+  over: stops a daemon it runs itself (`Backend::stop`: shutdown, wait for
+  the pass, then let the runtime end -- its `spawn_blocking` work included --
+  before closing, so the state directory's lock and `watcher.lock` are
+  released only once nothing of that daemon can still write), asks systemd
+  to `RestartUnit` the fixed unit, waits up to 20 s for it to answer, and
+  opens again by the usual order, which attaches. Restart, not start (owner,
+  2026-11-17): the unit's first start failed on the window's lock, so it
+  sits in `auto-restart` waiting out `RestartSec=30`, and before systemd
+  v257 a `StartUnit` job queued then waits for that timer (per the review:
+  `service_start` returns `-EAGAIN` in that state); a restart job starts it
+  at once, so there is no 30 s wait. 20 s covers only the daemon's own start
+  (`Type=simple`, no `ExecStartPre`). If the stop does not finish within its
+  bound, the locks stay held until the old runtime ends and the restart is
+  skipped. A switch-over that does not bring the service up is tried again
+  after 30 s (longer than the 20 s wait, so a unit still starting is not
+  restarted under itself), at most three times in all; the dialog keeps its
+  waiting line meanwhile. Once the service answers, the dialog closes with
+  nothing else shown.
+- Installed but not running: "Start it" does the same switch-over (the same
+  `RestartUnit`; the button still says "Start it"). If the service still does
+  not answer, the dialog shows "It didn't start. To see why, run this in a
+  terminal:" and the status command. When the window is attached over the
+  host link to a stopped unit, `managed_snapshot` fails with
+  `daemon-not-running`; the Private AI start area still draws its
+  unavailable line and "Set up", so this dialog stays reachable.
 - Too old: the same install command. Its last step is `systemctl --user
   restart`, so running it again replaces an older daemon that is running.
   While open it watches and switches over the same way when the updated unit
   is held off by the window's own daemon.
+
+**After switching over** (owner, 2026-11-17): when the daemon the window
+now attaches to -- after a switch-over, or any attach to the background
+service -- has no session folders declared (`get_settings`: `claude_source`
+or `codex_source` null), the window shows the existing folders screen (the
+Tools step first run uses), answering to that daemon over `set_settings`.
+Once per attachment, never while the window hosts its own daemon, and not
+while first run is open, whose own Tools step asks the same; sign-in and
+enrollment stay with their existing flows. No new words. The managed-session
+revision the window last drew is forgotten on every reopen and on
+`resync_required`: the sandbox's and the host's daemons count separately.
 
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the
@@ -280,8 +313,8 @@ needs them:
   both go.
 - `--socket=session-bus` could narrow to `--talk-name` entries for
   Notifications, the StatusNotifierWatcher, `portal.Flatpak` and
-  `org.freedesktop.systemd1` (the background-service dialogs' `StartUnit`,
-  `GetUnitFileState`, `GetUnit` and `ActiveState`), plus
+  `org.freedesktop.systemd1` (the background-service dialogs' `RestartUnit`,
+  `GetUnitFileState`, `GetUnit`, `ActiveState` and `ActiveEnterTimestamp`), plus
   `org.freedesktop.secrets` only while the sandbox still hosts. Risky without
   a Linux run: the tray and update monitor must be re-tested.
 - `--share=network` is added by its own PR (owner, 2026-11-17), not here.
