@@ -18,11 +18,16 @@
 //! different `daemon.lock` files; this lock is what keeps two daemons from
 //! watching the same sessions.
 //!
-//! On a clean stop the host daemon leaves its host-link socket file behind.
-//! A socket file nobody listens on tells a sandboxed window "the host part is
-//! installed and down", which must not start a second daemon in the sandbox.
-//! `/run/user/<uid>` is cleared at logout, so the marker never outlives the
-//! login.
+//! "The host part is installed" is a separate file, `host-unit`, which only
+//! the systemd user unit's daemon writes ([`runs_as_host_unit`]) and which it
+//! leaves behind when it stops. A window in the sandbox that finds it, with
+//! nobody listening on the socket, reports the host daemon as not running
+//! rather than starting a second daemon in the sandbox. Every other daemon --
+//! a one-off `daemon run`, a GTK window hosting its own on the host -- writes
+//! no marker and removes its socket on close, so a stale socket alone never
+//! reads as "installed". `daemon uninstall` removes the marker;
+//! `/run/user/<uid>` is cleared at logout, so it never outlives the login
+//! either way.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +37,56 @@ pub const FLATPAK_INFO_PATH: &str = "/.flatpak-info";
 pub const HOST_LINK_SOCK_FILE: &str = "daemon.sock";
 /// The cross-sandbox watcher lock, inside the runtime directory.
 pub const WATCHER_LOCK_FILE: &str = "watcher.lock";
+/// "The host part is installed", inside the runtime directory. Written only
+/// by the systemd user unit's daemon; see the module doc.
+pub const HOST_UNIT_MARKER_FILE: &str = "host-unit";
+
+/// Whether a process with this `INVOCATION_ID` and this `/proc/self/cgroup`
+/// text is the daemon systemd started for `unit`.
+///
+/// `INVOCATION_ID` alone is not enough: every process a service spawns
+/// inherits it. The cgroup names the unit the process actually runs in --
+/// `0::/user.slice/user-1000.slice/user@1000.service/app.slice/<unit>` under
+/// cgroup v2, one `<n>:<controllers>:<path>` line each under v1 -- and a
+/// process started from a terminal or a desktop launcher runs in a scope or
+/// another service instead.
+pub fn is_host_unit(invocation_id: Option<&std::ffi::OsStr>, cgroup: &str, unit: &str) -> bool {
+    if invocation_id.is_none_or(|id| id.is_empty()) {
+        return false;
+    }
+    let suffix = format!("/{unit}");
+    cgroup.lines().any(|line| {
+        // `<hierarchy-id>:<controllers>:<path>`; the path may hold colons.
+        line.splitn(3, ':')
+            .nth(2)
+            .is_some_and(|path| path.ends_with(&suffix))
+    })
+}
+
+/// Whether this process is the systemd user unit's daemon.
+pub fn runs_as_host_unit() -> bool {
+    if !cfg!(target_os = "linux") || runs_sandboxed() {
+        return false;
+    }
+    let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return false;
+    };
+    is_host_unit(
+        std::env::var_os("INVOCATION_ID").as_deref(),
+        &cgroup,
+        crate::channel::SYSTEMD_UNIT_NAME,
+    )
+}
+
+/// Remove the "host part is installed" marker from a runtime directory, for
+/// `daemon uninstall`. A missing marker is not an error. Never follows a
+/// symlink: `remove_file` unlinks the link itself.
+pub fn forget_host_unit(runtime: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(runtime.join(HOST_UNIT_MARKER_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
 
 /// Whether this process runs inside a Flatpak sandbox.
 pub fn runs_sandboxed() -> bool {
@@ -67,22 +122,26 @@ pub fn socket_path() -> Option<PathBuf> {
 pub enum LinkState {
     /// A daemon accepts connections there.
     Listening,
-    /// A socket file is there and nobody listens: the host part is installed
-    /// and stopped, crashed, or restarting.
+    /// Nobody listens, and the systemd unit's marker is there: the host part
+    /// is installed and stopped, crashed, or restarting.
     Down,
-    /// Nothing is there: no host part has run this login.
+    /// Nobody listens and no marker: no installed host part has run this
+    /// login. A socket file some other daemon left does not change that.
     Absent,
 }
 
-/// Look at the host link's socket. Never creates anything.
+/// Look at the host link's socket, and beside it the unit's marker. Never
+/// creates anything.
 #[cfg(unix)]
 pub fn probe(sock: &Path) -> LinkState {
-    if std::fs::symlink_metadata(sock).is_err() {
-        return LinkState::Absent;
+    if std::fs::symlink_metadata(sock).is_ok()
+        && std::os::unix::net::UnixStream::connect(sock).is_ok()
+    {
+        return LinkState::Listening;
     }
-    match std::os::unix::net::UnixStream::connect(sock) {
-        Ok(_) => LinkState::Listening,
-        Err(_) => LinkState::Down,
+    match std::fs::symlink_metadata(sock.with_file_name(HOST_UNIT_MARKER_FILE)) {
+        Ok(_) => LinkState::Down,
+        Err(_) => LinkState::Absent,
     }
 }
 
@@ -114,10 +173,19 @@ pub fn route(sandboxed: bool, sock: Option<&Path>, probe: impl Fn(&Path) -> Link
     }
 }
 
-/// Another daemon on this login already holds `watcher.lock`.
+/// Why a daemon may not watch.
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct WatcherHeld;
+pub(crate) enum ClaimError {
+    /// Another daemon on this login already holds `watcher.lock`.
+    WatcherHeld,
+    /// `watcher.lock` is not a regular file this daemon opened itself (a
+    /// symlink, a directory, a file swapped in under it), or locking it
+    /// failed for a reason other than another holder. The sandbox can write
+    /// this directory, so this is refused rather than followed, and the
+    /// daemon does not start unarbitrated.
+    LockUnusable,
+}
 
 /// A daemon's hold on the runtime directory, for its whole life.
 #[cfg(unix)]
@@ -149,7 +217,8 @@ pub(crate) fn claim(
     platform_default: &Path,
     runtime: Option<PathBuf>,
     sandboxed: bool,
-) -> Result<Option<Claim>, WatcherHeld> {
+    host_unit: bool,
+) -> Result<Option<Claim>, ClaimError> {
     let Some(runtime) = runtime else {
         return Ok(None);
     };
@@ -164,22 +233,78 @@ pub(crate) fn claim(
         tracing::warn!("host link runtime directory unavailable");
         return Ok(None);
     }
-    let Ok(lock) = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(runtime.join(WATCHER_LOCK_FILE))
-    else {
-        tracing::warn!("watcher lock unavailable");
-        return Ok(None);
-    };
-    if lock.try_lock().is_err() {
-        return Err(WatcherHeld);
+    let lock = open_lock(&runtime.join(WATCHER_LOCK_FILE))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Err(ClaimError::WatcherHeld),
+        Err(std::fs::TryLockError::Error(_)) => {
+            tracing::warn!("watcher lock could not be taken");
+            return Err(ClaimError::LockUnusable);
+        }
+    }
+    if host_unit && !sandboxed && write_marker(&runtime.join(HOST_UNIT_MARKER_FILE)).is_err() {
+        // Costs only the "installed" signal while this daemon is down; the
+        // link itself still serves.
+        tracing::warn!("host unit marker could not be written");
     }
     Ok(Some(Claim {
         _lock: lock,
         socket: (!sandboxed).then(|| runtime.join(HOST_LINK_SOCK_FILE)),
     }))
+}
+
+/// Open `watcher.lock` without following a symlink, in a directory the
+/// sandbox can write. No `O_NOFOLLOW` without `libc`, so: create it with
+/// `create_new` (`O_CREAT | O_EXCL`, which refuses any existing name,
+/// a dangling symlink included), or else open the existing name without
+/// `create` and require that what was opened is a regular file and the very
+/// file the name holds now, not one a symlink led to.
+#[cfg(unix)]
+fn open_lock(path: &Path) -> Result<std::fs::File, ClaimError> {
+    use std::os::unix::fs::MetadataExt;
+    let unusable = |label: &str| {
+        tracing::warn!("watcher lock unusable: {label}");
+        ClaimError::LockUnusable
+    };
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => return Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(unusable("not-created")),
+    }
+    let named = std::fs::symlink_metadata(path).map_err(|_| unusable("vanished"))?;
+    if !named.file_type().is_file() {
+        return Err(unusable("not-a-regular-file"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|_| unusable("not-opened"))?;
+    let opened = file.metadata().map_err(|_| unusable("not-stated"))?;
+    let named = std::fs::symlink_metadata(path).map_err(|_| unusable("vanished"))?;
+    if !opened.file_type().is_file()
+        || !named.file_type().is_file()
+        || (opened.dev(), opened.ino()) != (named.dev(), named.ino())
+    {
+        return Err(unusable("replaced"));
+    }
+    Ok(file)
+}
+
+/// Write the empty "host part is installed" marker. Whatever is at the name
+/// is unlinked first and the file made with `create_new`, so a symlink
+/// planted there is replaced, never followed.
+#[cfg(unix)]
+fn write_marker(path: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(drop)
 }
 
 /// Whether two paths name one directory. Canonical when both resolve, as
@@ -248,6 +373,17 @@ pub(crate) async fn serve(
         tracing::warn!("host link closed: own uid unknown");
         return;
     };
+    serve_as(listener, shared, uid).await
+}
+
+/// [`serve`] admitting only peers running as `uid`. A test passes a uid no
+/// peer has, to see a refused connection get no answer.
+#[cfg(unix)]
+pub(crate) async fn serve_as(
+    listener: tokio::net::UnixListener,
+    shared: std::sync::Arc<super::ipc::DaemonShared>,
+    uid: u32,
+) {
     loop {
         let Ok((stream, _addr)) = listener.accept().await else {
             continue;
@@ -293,13 +429,18 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         assert_eq!(probe(&sock), LinkState::Listening);
 
-        // A stopped daemon's socket file, nobody accepting.
+        // A socket file some daemon left, nobody accepting, and no unit
+        // marker: no installed host part. Reading this as "down" is what
+        // kept a Flatpak attached to a dead socket for a whole login.
         drop(listener);
+        assert_eq!(probe(&sock), LinkState::Absent);
+
+        // The unit's marker is what says "installed": with it, down.
+        std::fs::write(dir.path().join(HOST_UNIT_MARKER_FILE), b"").unwrap();
         assert_eq!(probe(&sock), LinkState::Down);
 
-        // Any file there reads as down, not as absent.
+        // Installed and stopped, its socket already removed: still down.
         std::fs::remove_file(&sock).unwrap();
-        std::fs::write(&sock, b"").unwrap();
         assert_eq!(probe(&sock), LinkState::Down);
     }
 
@@ -352,9 +493,15 @@ mod tests {
         let run = tempfile::tempdir().unwrap();
         let runtime = run.path().join("trace-commons");
 
-        let claim = claim(state.path(), state.path(), Some(runtime.clone()), false)
-            .unwrap()
-            .expect("claimed");
+        let claim = claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("claimed");
         assert_eq!(claim.socket, Some(runtime.join(HOST_LINK_SOCK_FILE)));
         assert_eq!(mode(&runtime), 0o700);
         assert!(runtime.join(WATCHER_LOCK_FILE).exists());
@@ -374,6 +521,7 @@ mod tests {
             sandbox_state.path(),
             Some(runtime.clone()),
             true,
+            false,
         )
         .unwrap()
         .expect("sandbox claimed");
@@ -384,13 +532,20 @@ mod tests {
 
         // The host daemon, on its own state directory, is refused.
         assert_eq!(
-            claim(state.path(), state.path(), Some(runtime.clone()), false).unwrap_err(),
-            WatcherHeld
+            claim(
+                state.path(),
+                state.path(),
+                Some(runtime.clone()),
+                false,
+                false
+            )
+            .unwrap_err(),
+            ClaimError::WatcherHeld
         );
 
         drop(sandboxed);
         assert!(
-            claim(state.path(), state.path(), Some(runtime), false)
+            claim(state.path(), state.path(), Some(runtime), false, false)
                 .unwrap()
                 .is_some()
         );
@@ -403,9 +558,15 @@ mod tests {
         let run = tempfile::tempdir().unwrap();
         let runtime = run.path().join("trace-commons");
         assert!(
-            claim(state.path(), default.path(), Some(runtime.clone()), false)
-                .unwrap()
-                .is_none()
+            claim(
+                state.path(),
+                default.path(),
+                Some(runtime.clone()),
+                false,
+                false
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(!runtime.exists());
     }
@@ -414,7 +575,7 @@ mod tests {
     fn no_runtime_dir_means_no_claim() {
         let state = tempfile::tempdir().unwrap();
         assert!(
-            claim(state.path(), state.path(), None, false)
+            claim(state.path(), state.path(), None, false, false)
                 .unwrap()
                 .is_none()
         );
@@ -426,9 +587,15 @@ mod tests {
         let run = tempfile::tempdir().unwrap();
         let runtime = run.path().join("trace-commons");
         assert!(
-            claim(state.path(), state.path(), Some(runtime.clone()), true)
-                .unwrap()
-                .is_none()
+            claim(
+                state.path(),
+                state.path(),
+                Some(runtime.clone()),
+                true,
+                false
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(!runtime.exists());
     }
@@ -440,9 +607,15 @@ mod tests {
         let runtime = run.path().join("trace-commons");
         std::fs::create_dir(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
-        claim(state.path(), state.path(), Some(runtime.clone()), false)
-            .unwrap()
-            .expect("claimed");
+        claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("claimed");
         assert_eq!(mode(&runtime), 0o700);
     }
 
@@ -461,5 +634,174 @@ mod tests {
         std::fs::write(&sock, b"").unwrap();
         let _listener = bind(&sock).unwrap();
         assert_eq!(probe(&sock), LinkState::Listening);
+    }
+
+    const UNIT: &str = "trace-commons-contributor.service";
+
+    #[test]
+    fn the_unit_is_recognised_from_its_cgroup_under_v2_and_v1() {
+        let id = Some(OsStr::new("0123456789abcdef0123456789abcdef"));
+        let v2 = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trace-commons-contributor.service\n";
+        assert!(is_host_unit(id, v2, UNIT));
+        let v1 = "12:pids:/user.slice/user-1000.slice/user@1000.service\n\
+                  1:name=systemd:/user.slice/user-1000.slice/user@1000.service/trace-commons-contributor.service\n";
+        assert!(is_host_unit(id, v1, UNIT));
+    }
+
+    #[test]
+    fn anything_but_the_unit_itself_is_not_the_unit() {
+        let id = Some(OsStr::new("0123456789abcdef0123456789abcdef"));
+        let unit_cgroup = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trace-commons-contributor.service\n";
+        // No INVOCATION_ID, or an empty one: not started by systemd.
+        assert!(!is_host_unit(None, unit_cgroup, UNIT));
+        assert!(!is_host_unit(Some(OsStr::new("")), unit_cgroup, UNIT));
+        // A terminal, a desktop launcher, another service that inherited an
+        // INVOCATION_ID, a unit whose name only ends the same way.
+        for cgroup in [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1.scope\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/other.service\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/x-trace-commons-contributor.service\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trace-commons-contributor.service/child\n",
+            "",
+        ] {
+            assert!(!is_host_unit(id, cgroup, UNIT), "{cgroup}");
+        }
+    }
+
+    #[test]
+    fn only_the_unit_writes_the_installed_marker() {
+        let state = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+
+        let one_off = claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("claimed");
+        assert!(!runtime.join(HOST_UNIT_MARKER_FILE).exists());
+        drop(one_off);
+
+        let _unit = claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            false,
+            true,
+        )
+        .unwrap()
+        .expect("claimed");
+        assert!(runtime.join(HOST_UNIT_MARKER_FILE).is_file());
+    }
+
+    #[test]
+    fn a_sandboxed_daemon_never_writes_the_installed_marker() {
+        let state = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+        std::fs::create_dir(&runtime).unwrap();
+        let _claim = claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            true,
+            true,
+        )
+        .unwrap()
+        .expect("claimed");
+        assert!(!runtime.join(HOST_UNIT_MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn writing_the_marker_replaces_a_symlink_without_following_it() {
+        let state = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+        std::fs::create_dir(&runtime).unwrap();
+        let target = run.path().join("victim");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, runtime.join(HOST_UNIT_MARKER_FILE)).unwrap();
+
+        let _unit = claim(
+            state.path(),
+            state.path(),
+            Some(runtime.clone()),
+            false,
+            true,
+        )
+        .unwrap()
+        .expect("claimed");
+        let marker = std::fs::symlink_metadata(runtime.join(HOST_UNIT_MARKER_FILE)).unwrap();
+        assert!(marker.file_type().is_file());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn uninstall_forgets_the_marker_and_never_follows_a_link() {
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join(HOST_UNIT_MARKER_FILE), b"").unwrap();
+        forget_host_unit(&runtime).unwrap();
+        assert!(!runtime.join(HOST_UNIT_MARKER_FILE).exists());
+        // Nothing there, nothing to do.
+        forget_host_unit(&runtime).unwrap();
+        forget_host_unit(&run.path().join("missing")).unwrap();
+
+        let target = run.path().join("victim");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, runtime.join(HOST_UNIT_MARKER_FILE)).unwrap();
+        forget_host_unit(&runtime).unwrap();
+        assert!(std::fs::symlink_metadata(runtime.join(HOST_UNIT_MARKER_FILE)).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_symlinked_watcher_lock_is_refused_and_its_target_untouched() {
+        let state = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+        std::fs::create_dir(&runtime).unwrap();
+        // A link to a file that exists, and one to a file that does not:
+        // following the second would create it.
+        let existing = run.path().join("existing");
+        std::fs::write(&existing, b"keep").unwrap();
+        let missing = run.path().join("created-through-link");
+        for target in [&existing, &missing] {
+            let lock = runtime.join(WATCHER_LOCK_FILE);
+            let _ = std::fs::remove_file(&lock);
+            std::os::unix::fs::symlink(target, &lock).unwrap();
+            assert_eq!(
+                claim(
+                    state.path(),
+                    state.path(),
+                    Some(runtime.clone()),
+                    false,
+                    false
+                )
+                .unwrap_err(),
+                ClaimError::LockUnusable,
+                "{}",
+                target.display()
+            );
+        }
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn a_watcher_lock_that_is_not_a_regular_file_is_refused() {
+        let state = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("trace-commons");
+        std::fs::create_dir_all(runtime.join(WATCHER_LOCK_FILE)).unwrap();
+        assert_eq!(
+            claim(state.path(), state.path(), Some(runtime), false, false).unwrap_err(),
+            ClaimError::LockUnusable
+        );
     }
 }

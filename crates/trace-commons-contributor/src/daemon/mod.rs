@@ -286,6 +286,10 @@ struct HostLinkRuntime {
     /// Dropped last in `close`: releasing it lets another daemon watch.
     _claim: host_link::Claim,
     server: Option<tokio::task::JoinHandle<()>>,
+    /// The host-link socket this daemon bound, removed when it stops. "The
+    /// host part is installed" is the unit's marker file, not this socket,
+    /// so no daemon leaves its socket behind (`host_link`).
+    socket: Option<std::path::PathBuf>,
 }
 
 /// Stops serving the host link however the daemon ends, including a start
@@ -296,6 +300,9 @@ impl Drop for HostLinkRuntime {
     fn drop(&mut self) {
         if let Some(server) = self.server.take() {
             server.abort();
+        }
+        if let Some(socket) = self.socket.take() {
+            let _ = std::fs::remove_file(socket);
         }
     }
 }
@@ -322,9 +329,8 @@ impl EmbeddedDaemon {
             worker.abort();
         }
         let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
-        // The host-link socket file stays: to a sandboxed window it means
-        // "the host part is installed and down", which must not start a
-        // second daemon there (`host_link`).
+        // Stops the host link and removes its socket. The systemd unit's
+        // "installed" marker, if this is the unit, stays (`host_link`).
         #[cfg(unix)]
         drop(self.host_link);
         drop(self.lock);
@@ -588,17 +594,33 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     }
 }
 
+/// What a start refused on the watcher lock says. `StartFailure::AlreadyRunning`
+/// underneath keeps the FFI label; its own words name the state directory's
+/// lock, which is not the one held here.
+#[cfg(unix)]
+const WATCHER_HELD_TEXT: &str = "another trace-commons-contributor daemon on this login already watches \
+     the session folders, in the Flatpak sandbox or on the host";
+
 /// Claim the runtime directory and, on the host, serve the host link.
 ///
 /// Refuses the start with [`StartFailure::AlreadyRunning`] when another
 /// daemon on this login holds the watcher lock -- the Flatpak window hosting
-/// one in its sandbox, or the host part. Everything else that goes wrong
+/// one in its sandbox, or the host part -- with [`WATCHER_HELD_TEXT`] as its
+/// words. Refuses it with an unnamed error when the watcher lock itself is
+/// unusable (`host_link::ClaimError::LockUnusable`): running unarbitrated
+/// could watch beside a daemon in the sandbox. Anything else that goes wrong
 /// here costs only the host link, never the daemon.
 #[cfg(unix)]
 fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRuntime>> {
     #[cfg(test)]
-    if let Some((runtime, sandboxed)) = host_link_test_runtime(shared.store.dir()) {
-        return start_host_link_with(shared, shared.store.dir(), Some(runtime), sandboxed);
+    if let Some(test) = host_link_test_runtime(shared.store.dir()) {
+        return start_host_link_with(
+            shared,
+            shared.store.dir(),
+            Some(test.runtime),
+            test.sandboxed,
+            test.unit,
+        );
     }
     if !cfg!(target_os = "linux") {
         return Ok(None);
@@ -611,6 +633,7 @@ fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRun
         &platform_default,
         host_link::runtime_dir(),
         host_link::runs_sandboxed(),
+        host_link::runs_as_host_unit(),
     )
 }
 
@@ -618,17 +641,25 @@ fn start_host_link(shared: &Arc<ipc::DaemonShared>) -> Result<Option<HostLinkRun
 /// real embedded daemon as the host part (or as a sandboxed one) without
 /// touching the real `XDG_RUNTIME_DIR` or the real default state directory.
 #[cfg(all(test, unix))]
-fn host_link_test_runtimes() -> &'static std::sync::Mutex<
-    std::collections::HashMap<std::path::PathBuf, (std::path::PathBuf, bool)>,
-> {
+#[derive(Clone)]
+struct HostLinkTestRuntime {
+    runtime: std::path::PathBuf,
+    sandboxed: bool,
+    /// Whether the daemon plays the systemd user unit's.
+    unit: bool,
+}
+
+#[cfg(all(test, unix))]
+fn host_link_test_runtimes()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HostLinkTestRuntime>> {
     static RUNTIMES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (std::path::PathBuf, bool)>>,
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HostLinkTestRuntime>>,
     > = std::sync::OnceLock::new();
     RUNTIMES.get_or_init(Default::default)
 }
 
 #[cfg(all(test, unix))]
-fn host_link_test_runtime(dir: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+fn host_link_test_runtime(dir: &std::path::Path) -> Option<HostLinkTestRuntime> {
     host_link_test_runtimes().lock().unwrap().get(dir).cloned()
 }
 
@@ -638,25 +669,42 @@ fn start_host_link_with(
     platform_default: &std::path::Path,
     runtime: Option<std::path::PathBuf>,
     sandboxed: bool,
+    host_unit: bool,
 ) -> Result<Option<HostLinkRuntime>> {
-    let claim = match host_link::claim(shared.store.dir(), platform_default, runtime, sandboxed) {
+    let claim = match host_link::claim(
+        shared.store.dir(),
+        platform_default,
+        runtime,
+        sandboxed,
+        host_unit,
+    ) {
         Ok(Some(claim)) => claim,
         Ok(None) => return Ok(None),
-        Err(host_link::WatcherHeld) => {
-            return Err(anyhow::Error::new(StartFailure::AlreadyRunning));
+        Err(host_link::ClaimError::WatcherHeld) => {
+            return Err(anyhow::Error::new(StartFailure::AlreadyRunning).context(WATCHER_HELD_TEXT));
+        }
+        // Not "already running": nobody else may be. Refused rather than run
+        // unarbitrated beside a daemon in the sandbox; the FFI reports the
+        // generic start failure for an error it cannot name.
+        Err(host_link::ClaimError::LockUnusable) => {
+            anyhow::bail!("the watcher lock in the runtime directory is unusable");
         }
     };
-    let server = match claim.socket.as_deref().map(host_link::bind) {
-        Some(Ok(listener)) => Some(tokio::spawn(host_link::serve(listener, Arc::clone(shared)))),
+    let (server, socket) = match claim.socket.as_deref().map(host_link::bind) {
+        Some(Ok(listener)) => (
+            Some(tokio::spawn(host_link::serve(listener, Arc::clone(shared)))),
+            claim.socket.clone(),
+        ),
         Some(Err(_)) => {
             tracing::warn!("host link could not be bound");
-            None
+            (None, None)
         }
-        None => None,
+        None => (None, None),
     };
     Ok(Some(HostLinkRuntime {
         _claim: claim,
         server,
+        socket,
     }))
 }
 
@@ -7663,6 +7711,7 @@ mod tests {
     #[cfg(unix)]
     fn host_link_store(
         sandboxed: bool,
+        unit: bool,
     ) -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -7676,55 +7725,186 @@ mod tests {
             std::fs::create_dir(&runtime).unwrap();
         }
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        host_link_test_runtimes()
-            .lock()
-            .unwrap()
-            .insert(store.dir().to_path_buf(), (runtime.clone(), sandboxed));
+        host_link_test_runtimes().lock().unwrap().insert(
+            store.dir().to_path_buf(),
+            HostLinkTestRuntime {
+                runtime: runtime.clone(),
+                sandboxed,
+                unit,
+            },
+        );
         (dir, run, store, runtime)
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn the_host_part_answers_over_the_host_link_and_leaves_its_marker() {
-        let (_dir, _run, store, runtime) = host_link_store(false);
-        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
-        let embedded = start_embedded(store.clone()).await.unwrap();
+    fn store_dir_text(dir: &tempfile::TempDir) -> &str {
+        dir.path().to_str().unwrap()
+    }
 
-        let answer = tokio::task::spawn_blocking({
-            let sock = sock.clone();
-            move || client::try_call_at(&sock, "status", &serde_json::json!({}))
+    /// Ask `status` over a socket named directly, off the runtime thread.
+    #[cfg(unix)]
+    async fn status_at(sock: &std::path::Path) -> Option<ipc::Response> {
+        let sock = sock.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            client::try_call_at(&sock, "status", &serde_json::json!({}))
         })
         .await
         .unwrap()
         .unwrap()
-        .expect("the host link answered");
+    }
+
+    /// `close` aborts the serving task; the listener closes when the runtime
+    /// next retires it, which needs this task to yield. A process that ends
+    /// after `close` (`daemon run`) gets there at once.
+    #[cfg(unix)]
+    async fn until_not_listening(sock: &std::path::Path) {
+        for _ in 0..200 {
+            if !client::is_running_at(sock) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_unit_answers_over_the_host_link_and_leaves_its_marker() {
+        let (_dir, _run, store, runtime) = host_link_store(false, true);
+        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
+        let embedded = start_embedded(store.clone()).await.unwrap();
+
+        let answer = status_at(&sock).await.expect("the host link answered");
         assert!(answer.error.is_none(), "{:?}", answer.error);
         assert!(answer.result.is_some());
 
         embedded.close();
         assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
         assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
-        // `close` aborts the serving task; the listener closes when the
-        // runtime next retires it, which needs this task to yield. A
-        // process that ends after `close` (`daemon run`) gets there at once.
-        for _ in 0..200 {
-            if host_link::probe(&sock) != host_link::LinkState::Listening {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        until_not_listening(&sock).await;
+        assert!(runtime.join(host_link::HOST_UNIT_MARKER_FILE).is_file());
         assert_eq!(
             host_link::probe(&sock),
             host_link::LinkState::Down,
-            "a stopped host part leaves its socket file, so a sandboxed \
-             window attaches to it rather than starting a second daemon"
+            "a stopped host unit leaves its marker, so a sandboxed window \
+             attaches to it rather than starting a second daemon"
         );
     }
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn any_other_host_daemon_serves_the_link_and_leaves_nothing() {
+        // A one-off `daemon run`, or a GTK window on the host hosting its
+        // own: it serves the host link while it runs, and when it stops a
+        // sandboxed window must fall back to its own daemon.
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
+        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
+        let embedded = start_embedded(store.clone()).await.unwrap();
+        assert!(status_at(&sock).await.is_some(), "the host link answered");
+        assert!(!runtime.join(host_link::HOST_UNIT_MARKER_FILE).exists());
+
+        embedded.close();
+        until_not_listening(&sock).await;
+        assert!(
+            std::fs::symlink_metadata(&sock).is_err(),
+            "a daemon that is not the unit removes its host-link socket"
+        );
+        assert_eq!(host_link::probe(&sock), host_link::LinkState::Absent);
+        assert_eq!(
+            host_link::route(true, Some(&sock), host_link::probe),
+            host_link::Route::Local
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_link_answers_nobody_its_peer_check_refuses() {
+        let (_dir, _run, store, _runtime) = host_link_store(false, false);
+        let embedded = start_embedded(store).await.unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let sock = scratch.path().join("refusing.sock");
+        let listener = host_link::bind(&sock).unwrap();
+        let own = ironwire_pointer::current_uid().unwrap();
+        let server = tokio::spawn(host_link::serve_as(
+            listener,
+            Arc::clone(&embedded.shared),
+            own.wrapping_add(1),
+        ));
+
+        let reply = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let _ = stream.write_all(b"{\"id\":1,\"method\":\"status\",\"params\":{}}\n");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).map(|_| buf)
+        })
+        .await
+        .unwrap();
+        server.abort();
+        embedded.close();
+        assert_eq!(
+            reply.expect("closed, not timed out"),
+            Vec::<u8>::new(),
+            "a refused peer gets no answer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_refused_on_the_watcher_lock_says_so() {
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
+        std::fs::create_dir(&runtime).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runtime.join(host_link::WATCHER_LOCK_FILE))
+            .unwrap();
+        held.try_lock().unwrap();
+        let err = match start_embedded(store).await {
+            Ok(_) => panic!("another daemon on this login watches"),
+            Err(e) => e,
+        };
+        // The FFI label stays `already-running`; the words say which lock.
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::AlreadyRunning)
+        );
+        assert_eq!(
+            err.to_string(),
+            "another trace-commons-contributor daemon on this login already watches \
+             the session folders, in the Flatpak sandbox or on the host"
+        );
+        assert!(!format!("{err:#}").contains(store_dir_text(&_dir)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_watcher_lock_refuses_the_start_as_unusable() {
+        let (_dir, run, store, runtime) = host_link_store(false, false);
+        std::fs::create_dir(&runtime).unwrap();
+        let target = run.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, runtime.join(host_link::WATCHER_LOCK_FILE)).unwrap();
+        let err = match start_embedded(store.clone()).await {
+            Ok(_) => panic!("an unusable watcher lock must not run unarbitrated"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            None,
+            "not `already running`: nobody else may be"
+        );
+        assert!(!target.exists());
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_start_refused_on_the_watcher_lock_leaves_nothing_behind() {
-        let (_dir, _run, store, runtime) = host_link_store(false);
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
         std::fs::create_dir(&runtime).unwrap();
         let held = std::fs::OpenOptions::new()
             .create(true)
@@ -7753,19 +7933,26 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_sandboxed_daemon_holds_the_watcher_lock_and_serves_no_host_link() {
-        let (_dir, _run, store, runtime) = host_link_store(true);
+        let (_dir, _run, store, runtime) = host_link_store(true, false);
         let embedded = start_embedded(store).await.unwrap();
         assert!(!runtime.join(host_link::HOST_LINK_SOCK_FILE).exists());
 
         let host = tempfile::tempdir().unwrap();
         assert_eq!(
-            host_link::claim(host.path(), host.path(), Some(runtime.clone()), false).unwrap_err(),
-            host_link::WatcherHeld,
+            host_link::claim(
+                host.path(),
+                host.path(),
+                Some(runtime.clone()),
+                false,
+                false
+            )
+            .unwrap_err(),
+            host_link::ClaimError::WatcherHeld,
             "the host part must not start while the sandbox watches"
         );
         embedded.close();
         assert!(
-            host_link::claim(host.path(), host.path(), Some(runtime), false)
+            host_link::claim(host.path(), host.path(), Some(runtime), false, false)
                 .unwrap()
                 .is_some()
         );
