@@ -31,16 +31,18 @@ fail() {
 # that bar entirely, so the tab names are read word by word instead of as
 # one line. The selected tab (Overview, white on the accent) is not read
 # even then -- not inverted, thresholded or upscaled either -- so the check
-# asks for two unselected tabs: "Breakdown", and "Analyze" as a whole,
-# case-sensitive word ("analyzed" is in the page's own text). Every label
-# and the switching itself are asserted by the mounted
+# asks for two unselected tabs: "Breakdown", and "Benchmarks" as a whole
+# word. The main pane is 440 wide and never narrower, and the switcher
+# scrolls sideways inside it, so Analyze, the last tab, is off the edge of
+# the frame; it is not asked for here. Every label and the switching itself
+# are asserted by the mounted
 # `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
 # run above. Tesseract has misread tab names before ("Details" as "Deta"),
 # so only Breakdown's first letters are required. The capture loop below
 # retries while the body loads.
 insights_frame() {
   grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
-    grep -qE '(^|[[:space:]])Analyze([[:space:]]|$)' <<< "$1" &&
+    grep -qE '(^|[[:space:]])Benchmarks([[:space:]]|$)' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
