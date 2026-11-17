@@ -74,8 +74,8 @@ mod tests {
     /// EMPTY, and it should stay that way. It held ten entries for one round:
     /// six were this check's own blindness to compound selectors (see
     /// `is_defined`) and were never defects at all, and the remaining four
-    /// were real, all in `onboarding.rs`, all fixed by photographing the pages
-    /// under Xvfb -- `scripts/linux-build.sh --onboarding-shots` -- and moving
+    /// were real, all in the old `onboarding.rs` pages, all fixed by
+    /// photographing the pages under Xvfb and moving
     /// each name onto the class the surrounding code already used for that
     /// job.
     ///

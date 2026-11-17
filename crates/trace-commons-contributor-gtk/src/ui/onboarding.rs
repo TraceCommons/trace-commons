@@ -1,100 +1,32 @@
-//! Onboarding: the six screens from the shared design spec.
+//! Onboarding's entry points: whether the first run is needed, the
+//! invite a deep link hands over, and the screens a health banner opens.
 //!
-//! Until this existed the Linux app could not enroll anyone. It detected the
-//! unenrolled state and said so -- [`copy::UNENROLLED_PREVIEW`] -- and then
-//! offered no way to leave it, so an app-only contributor was stuck and had
-//! to be sent to the CLI. macOS is the reference implementation
-//! (`OnboardingCoordinatorView`); the copy for every shell is specified in
-//! `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`,
-//! "## Onboarding".
+//! The first run itself is `first_run.rs`, ported from the Mac
+//! (`OnboardingCoordinatorView`); the GTK-authored Welcome, Consent, Watch
+//! and Done pages that lived here are gone with it. What stays here:
 //!
-//! None of this is new protocol. Every method called here is already in
-//! `daemon::ipc::METHODS`, and the GTK backend has been able to reach all of
-//! them the whole time. What was missing was the window.
+//! 1. **`logged_in` is not "onboarded".** Completion is the daemon's shared
+//!    `setup_complete`, or, for a device finished before that existed, the
+//!    per-tenant marker this shell wrote then ([`is_complete`]).
 //!
-//! ## Three things here are contract, not styling
+//! 2. **A deep link fills Join and stops there.** An invite handed to this
+//!    process waits for the first run's Join, after Terms
+//!    ([`take_pending_invite`]).
 //!
-//! 1. **Joining is the first run's.** The Connect screen that enrolled an
-//!    invite, with its near.ai and wallet cards, was replaced by the first
-//!    run's Join (`first_run.rs`), as on the Mac; wallet sign-in is not
-//!    offered on Linux (owner, 2026-11-17). Get started here opens it.
-//!
-//! 2. **Scope rows come from `consent_options`.** The list and the
-//!    descriptions are the daemon's, never a hardcoded table here, so an
-//!    operator who changes them changes what this screen says. Only the
-//!    short title is mapped locally, and unknown scopes still render.
-//!
-//! 3. **`logged_in` is not "onboarded".** `enroll` flips it on screen 2,
-//!    before consent is chosen on screen 3. Resuming on `logged_in` would
-//!    drop someone who quit mid-flow into the main window carrying
-//!    `enroll`'s floor-only default -- silently narrower consent than they
-//!    were in the middle of choosing. Completion is recorded per tenant
-//!    instead; see [`mark_complete`] and [`is_complete`].
+//! 3. **The banner's two actions open something.** `not-logged-in` opens
+//!    the first run; `near-ai-notice-not-acknowledged` opens the extra
+//!    privacy scan's notice ([`present_scan_recovery`]), in the core's words
+//!    (`privacy_scan_copy`), which is the only thing in this application
+//!    that calls `acknowledge_near_ai_notice`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[cfg(test)]
 use crate::copy;
-use crate::model::{Project, Status};
+use crate::model::Status;
 use crate::ui::App;
-use crate::ui::style::{self, space};
 use adw::prelude::*;
-
-/// Where a run of onboarding has got to.
-///
-/// `Scan` is skipped unless the operator offers the second scanner, which
-/// the shell learns from `get_settings` rather than assuming.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Step {
-    Welcome,
-    Consent,
-    Scan,
-    Watch,
-    Done,
-}
-
-impl Step {
-    fn page_name(self) -> &'static str {
-        match self {
-            Step::Welcome => "welcome",
-            Step::Consent => "consent",
-            Step::Scan => "scan",
-            Step::Watch => "watch",
-            Step::Done => "done",
-        }
-    }
-}
-
-/// One consent scope as `consent_options` describes it.
-#[derive(Clone, Debug, serde::Deserialize)]
-struct ScopeOption {
-    name: String,
-    /// The core's title for the scope. Required, with no default: a list
-    /// carrying a scope without one does not parse, so no row is drawn under
-    /// words this shell made up (owner ruling, 2026-10-06).
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    always_on: bool,
-    #[serde(default)]
-    grants_data_use: bool,
-}
-
-/// The live onboarding window.
-pub struct Onboarding {
-    pub(super) window: adw::Window,
-    stack: gtk::Stack,
-    /// Checkboxes for the optional scopes, in wire-name order. The floor
-    /// scope is not in here: it is drawn but never toggleable.
-    scope_checks: RefCell<Vec<(String, gtk::CheckButton)>>,
-    consent_body: gtk::Box,
-    scan_local_only: gtk::CheckButton,
-    /// Whether the operator offers the second scanner. Decided from
-    /// `get_settings` before Consent hands off, so the flow can skip a
-    /// screen that would otherwise offer a choice that does not exist.
-    scan_offered: std::cell::Cell<bool>,
-}
 
 /// Whether onboarding has been walked to the end for the currently enrolled
 /// tenant.
@@ -108,24 +40,6 @@ pub fn is_complete(tenant_id: Option<&str>) -> bool {
         return false;
     };
     completed_tenants().iter().any(|t| t == tenant)
-}
-
-fn mark_complete(tenant_id: Option<&str>) {
-    let Some(tenant) = tenant_id else { return };
-    let mut tenants = completed_tenants();
-    if tenants.iter().any(|t| t == tenant) {
-        return;
-    }
-    tenants.push(tenant.to_string());
-    let Some(path) = completion_file() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_vec(&tenants) {
-        let _ = std::fs::write(&path, json);
-    }
 }
 
 fn completed_tenants() -> Vec<String> {
@@ -259,204 +173,132 @@ pub(super) fn take_pending_invite() -> Option<String> {
     PENDING_INVITE.with(|pending| pending.borrow_mut().take())
 }
 
-/// Build and show the window, optionally opening on a specific screen.
-fn present_at(app: &Rc<App>, start: Option<Step>) {
-    // Same reason the roots screen does it: this window wears `tc-brand-*`
-    // classes, and on an install whose roots are already declared it can be
-    // the first window opened -- the roots screen never shows, and neither
-    // history nor settings has run. `install()` is idempotent, so the cost of
-    // calling it on a path that already has the provider is a bool check.
-    // BOTH sheets, the way roots.rs does it. This window mixes the two
-    // vocabularies -- `tc-brand-*` for its frame and type, `tc-refused` and
-    // `tc-meta` for the states that have an established treatment elsewhere --
-    // and it is reachable as the first window on an install whose roots are
-    // already declared. Installing one and using names from the other is how
-    // four classes came to render as nothing at all. Both are idempotent.
-    super::style::install();
-    super::community_brand::install();
-
-    let window = adw::Window::builder()
-        .transient_for(&app.window)
-        .modal(true)
-        .default_width(560)
-        .default_height(620)
-        .resizable(false)
-        .build();
-
-    let stack = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::SlideLeft)
-        .vexpand(true)
-        .build();
-
-    let consent_body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::M)
-        .build();
-
-    let scan_local_only = gtk::CheckButton::builder()
-        .label(copy::ONBOARD_SCAN_LOCAL_ONLY)
-        .active(true)
-        .build();
-
-    let onboarding = Rc::new(Onboarding {
-        window: window.clone(),
-        stack: stack.clone(),
-        scope_checks: RefCell::new(Vec::new()),
-        consent_body: consent_body.clone(),
-        scan_local_only: scan_local_only.clone(),
-        scan_offered: std::cell::Cell::new(false),
-    });
-
-    stack.add_named(
-        &welcome_page(app, &onboarding),
-        Some(Step::Welcome.page_name()),
-    );
-    stack.add_named(
-        &consent_page(app, &onboarding),
-        Some(Step::Consent.page_name()),
-    );
-    stack.add_named(&scan_page(app, &onboarding), Some(Step::Scan.page_name()));
-    stack.add_named(&watch_page(app, &onboarding), Some(Step::Watch.page_name()));
-    stack.add_named(&done_page(app, &onboarding), Some(Step::Done.page_name()));
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.add_css_class("tc-root");
-    // No close button: onboarding is a sequence with an exit at the end of
-    // it. A half-enrolled device with floor-only scopes is exactly the
-    // state the per-tenant completion flag exists to avoid resuming into.
-    content.append(
-        &adw::HeaderBar::builder()
-            .show_end_title_buttons(false)
-            .title_widget(&adw::WindowTitle::new(copy::APP_NAME, ""))
-            .build(),
-    );
-    content.append(&stack);
-    window.set_content(Some(&content));
-
-    // Consent fills itself from `consent_options`; nothing else leads to it
-    // now that joining is the first run's, so it asks when opened directly.
-    if start == Some(Step::Consent) {
-        load_consent_options(app, &onboarding);
-    }
-    onboarding.go(start.unwrap_or(Step::Welcome));
-    if start.is_none() {
-        register_automatic_window(&window);
-    }
-    window.present();
-}
-
-/// Open onboarding at the screen that answers a health banner's action.
-///
-/// The banner's button used to be drawn, labelled, and wired to nothing: it
-/// appeared, invited a click, and did nothing at all. Both labels that carry
-/// an action resolve on a screen this window already has, so the button now
-/// opens that screen.
-///
-/// `not-logged-in` is answered by Connect. `near-ai-notice-not-acknowledged`
-/// is answered by the privacy screen, whose choice is the only thing in this
-/// application that calls `acknowledge_near_ai_notice` -- without that call
-/// the daemon refuses the filter indefinitely, which is precisely the state
-/// the banner is reporting.
+/// Open the screen that answers a health banner's action.
 ///
 /// Deliberately not routed through [`present_if_needed`]: that function
 /// decides whether to interrupt someone at launch, and its "already
 /// complete, do nothing" answer is right there and wrong here. Someone who
-/// has just clicked the banner's only button has asked for the screen, and
-/// silently doing nothing would leave it the dead button it has been.
+/// has just clicked the banner's only button has asked for the screen.
 ///
 /// A label with no action never reaches this, because the button is hidden
 /// for those -- but an unknown label returning early is the safe direction
 /// rather than opening a screen that answers nothing.
-/// Open onboarding directly on a named page, for the camera.
-///
-/// `--start-page` drives the MAIN window's stack; onboarding is a separate
-/// modal with its own steps, so it had no way to be photographed past its
-/// first screen. That is how four class names no stylesheet defines reached
-/// pages nobody had ever seen. Returns false for an unknown name rather than
-/// guessing a page.
-pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
-    let step = match page {
-        "welcome" => Step::Welcome,
-        "consent" => Step::Consent,
-        "scan" => Step::Scan,
-        "watch" => Step::Watch,
-        "done" => Step::Done,
-        _ => return false,
-    };
-    present_at(app, Some(step));
-    true
-}
-
 pub fn present_for_health(app: &Rc<App>, label: &str) {
-    if label == "not-logged-in" {
-        present(app);
-        return;
+    match health_screen(label) {
+        Some(HealthScreen::FirstRun) => present(app),
+        Some(HealthScreen::ScanRecovery) => present_scan_recovery(app),
+        None => {}
     }
-    let Some(step) = health_step(label) else {
-        return;
-    };
-    present_at(app, Some(step));
 }
 
-/// The screen that answers a health label, if this window has one.
+/// Where a health label's action goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthScreen {
+    /// The first run, whose Join signs in again.
+    FirstRun,
+    /// The extra privacy scan's notice.
+    ScanRecovery,
+}
+
+/// The screen that answers a health label, if there is one.
 ///
 /// Separate from [`present_for_health`] so the mapping can be tested
 /// against `copy::health_action` without standing up a window: the property
 /// worth holding is that the set of labels offering a button and the set
 /// with somewhere to send someone are the same set.
-fn health_step(label: &str) -> Option<Step> {
+fn health_screen(label: &str) -> Option<HealthScreen> {
     match label {
-        // Answered by the first run's Join; `present_for_health` opens it
-        // before this is asked.
-        "not-logged-in" => Some(Step::Welcome),
-        "near-ai-notice-not-acknowledged" => Some(Step::Scan),
+        "not-logged-in" => Some(HealthScreen::FirstRun),
+        "near-ai-notice-not-acknowledged" => Some(HealthScreen::ScanRecovery),
         _ => None,
     }
 }
 
-impl Onboarding {
-    pub(super) fn go(self: &Rc<Self>, step: Step) {
-        self.stack.set_visible_child_name(step.page_name());
-    }
-
-    /// Leave Consent for whichever screen is actually next.
-    ///
-    /// Screen 4 exists only where the operator offers the second scanner.
-    /// Showing it otherwise would present a choice between one option and
-    /// an option that does not exist.
-    fn after_consent(self: &Rc<Self>) {
-        if self.scan_offered.get() {
-            self.go(Step::Scan);
-        } else {
-            self.go(Step::Watch);
-        }
-    }
-}
-
-/// A page shell: heading, then whatever the screen is, then its buttons.
-fn page(title: &str) -> (gtk::Box, gtk::Box) {
-    let outer = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::L)
-        .margin_top(space::XL)
-        .margin_bottom(space::XL)
-        .margin_start(space::XL)
-        .margin_end(space::XL)
+/// The extra privacy scan's notice, while the daemon holds uploads for
+/// `near-ai-notice-not-acknowledged`: the whole disclosure, then Not now or
+/// Confirm, which records the acknowledgement. Every word is the core's
+/// (`privacy_scan_copy`), laid out as the Tauri shell's recovery prompt is.
+/// A failed acknowledgement says uploads stay paused, and Confirm stays.
+pub fn present_scan_recovery(app: &Rc<App>) {
+    super::style::install();
+    let copy = trace_commons_contributor::privacy_scan_copy::privacy_scan_copy();
+    let window = adw::Window::builder()
+        .transient_for(&app.window)
+        .modal(true)
+        .default_width(560)
+        .title(copy.title)
         .build();
-    let heading = gtk::Label::builder()
-        .label(title)
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    body.set_margin_top(24);
+    body.set_margin_bottom(24);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    let title = gtk::Label::builder()
+        .label(copy.title)
         .xalign(0.0)
         .wrap(true)
         .build();
-    heading.add_css_class("tc-flow-title");
-    outer.append(&heading);
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::M)
-        .vexpand(true)
-        .build();
-    outer.append(&body);
-    (outer, body)
+    title.add_css_class("tc-flow-title");
+    body.append(&title);
+    body.append(&body_label(copy.local_always));
+    body.append(&body_label(copy.offer));
+    let disclosure = body_label(copy.disclosure);
+    disclosure.add_css_class("tc-flow-emphasis");
+    body.append(&disclosure);
+    let failed = body_label(copy.recovery_failed);
+    failed.add_css_class("tc-refused");
+    failed.set_visible(false);
+    body.append(&failed);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label(copy.recovery_cancel);
+    let confirm = gtk::Button::with_label(copy.recovery_confirm);
+    confirm.add_css_class("suggested-action");
+    cancel.connect_clicked({
+        let window = window.downgrade();
+        move |_| {
+            if let Some(window) = window.upgrade() {
+                window.close();
+            }
+        }
+    });
+    confirm.connect_clicked({
+        let app = app.clone();
+        let window = window.downgrade();
+        let failed = failed.clone();
+        move |button| {
+            button.set_sensitive(false);
+            button.set_label(copy.recovery_working);
+            failed.set_visible(false);
+            let window = window.clone();
+            let failed = failed.clone();
+            let button = button.clone();
+            app.call(
+                "acknowledge_near_ai_notice",
+                serde_json::json!({}),
+                move |_, result| {
+                    if result.is_ok() {
+                        if let Some(window) = window.upgrade() {
+                            window.close();
+                        }
+                        return;
+                    }
+                    failed.set_visible(true);
+                    button.set_label(copy.recovery_confirm);
+                    button.set_sensitive(true);
+                },
+            );
+        }
+    });
+    actions.append(&cancel);
+    actions.append(&confirm);
+    body.append(&actions);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("tc-root");
+    content.append(&adw::HeaderBar::new());
+    content.append(&body);
+    window.set_content(Some(&content));
+    window.present();
 }
 
 pub(super) fn body_label(text: &str) -> gtk::Label {
@@ -467,690 +309,6 @@ pub(super) fn body_label(text: &str) -> gtk::Label {
         .build();
     label.add_css_class("tc-flow-body");
     label
-}
-
-/// The "What gets removed?" disclosure.
-///
-/// The list is GENERATED from the protocol's detector table, never
-/// transcribed. A hand-written list of what this product scrubs is a privacy
-/// claim that stops being true the day a detector is added, and nobody would
-/// notice: the sentence would still read correctly.
-///
-/// A dialog rather than a page or an inline expander. The flow is six screens
-/// and this is reference material read once, not a decision; an expander would
-/// also have to push the promise and `Get started` down a page that does not
-/// scroll.
-fn present_what_gets_removed(parent: &adw::Window) {
-    let dialog = adw::MessageDialog::new(
-        Some(parent),
-        Some(copy::ONBOARD_WHAT_REMOVED_HEADING),
-        Some(copy::ONBOARD_WHAT_REMOVED_INTRO),
-    );
-
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::M)
-        .build();
-    let list = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::XXS)
-        .build();
-    for slug in trace_commons_protocol::trace_contribution::secret_leak_pattern_names() {
-        style::append_body(&list, copy::scrub_detector_label(slug));
-    }
-    content.append(&list);
-
-    // The list and its limit travel together. A list on its own reads as a
-    // guarantee, and this one is not: the same concession the preview sheet
-    // makes before every decision.
-    style::append_meta(&content, copy::RESIDUAL_RISK);
-
-    dialog.set_extra_child(Some(&content));
-    dialog.add_response("close", copy::CLOSE);
-    dialog.present();
-}
-
-/// Reference material only: opening and copying the prompt never changes setup.
-fn present_agent_configuration(parent: &adw::Window) {
-    let copy = trace_commons_contributor::first_run_copy::first_run_copy().agent_configuration;
-    let dialog = adw::Window::builder()
-        .title(copy.title)
-        .transient_for(parent)
-        .modal(true)
-        .default_width(680)
-        .default_height(600)
-        .build();
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::M)
-        .margin_top(space::L)
-        .margin_bottom(space::L)
-        .margin_start(space::L)
-        .margin_end(space::L)
-        .build();
-    let heading = gtk::Label::builder()
-        .label(copy.title)
-        .xalign(0.0)
-        .wrap(true)
-        .build();
-    heading.add_css_class("tc-flow-title");
-    content.append(&heading);
-    content.append(&body_label(copy.body));
-    content.append(&body_label(copy.prerequisite));
-
-    let prompt = gtk::TextView::builder()
-        .editable(false)
-        .cursor_visible(false)
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .monospace(true)
-        .left_margin(space::M)
-        .right_margin(space::M)
-        .top_margin(space::M)
-        .bottom_margin(space::M)
-        .build();
-    prompt.buffer().set_text(copy.prompt);
-    prompt.update_property(&[gtk::accessible::Property::Label(copy.title)]);
-    let scroll = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&prompt)
-        .build();
-    content.append(&scroll);
-
-    let close = gtk::Button::with_label(copy.close);
-    close.connect_clicked({
-        let dialog = dialog.downgrade();
-        move |_| {
-            if let Some(dialog) = dialog.upgrade() {
-                dialog.close();
-            }
-        }
-    });
-    let copy_prompt = gtk::Button::with_label(copy.copy);
-    copy_prompt.add_css_class("suggested-action");
-    copy_prompt.connect_clicked(move |button| {
-        button.clipboard().set_text(copy.prompt);
-        button.set_label(copy.copied);
-    });
-    let actions = button_row(&close);
-    actions.append(&copy_prompt);
-    content.append(&actions);
-    dialog.set_content(Some(&content));
-    dialog.present();
-}
-
-fn button_row(button: &gtk::Button) -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .halign(gtk::Align::End)
-        .spacing(space::S)
-        .build();
-    row.append(button);
-    row
-}
-
-fn welcome_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_WELCOME_TITLE);
-
-    // The mark, on the one screen whose job is to introduce the product.
-    // `mark::framed` documents 84 as a size for "the larger surfaces" and
-    // nothing had ever asked for one: the two call sites are header bars
-    // taking 20. A cover is what a large mark is for, and this page had a
-    // heading, four paragraphs and then a quarter of the window left empty.
-    //
-    // Left-aligned, not centred. Every other element on this page -- heading,
-    // prose, notice -- hangs off the same left edge, and a centred mark would
-    // be the only thing on screen not doing so.
-    //
-    // Prepended rather than passed through `page()`, because the other five
-    // onboarding screens are not covers and should not grow one.
-    let mark = super::mark::framed(84);
-    mark.set_halign(gtk::Align::Start);
-    outer.prepend(&mark);
-
-    body.append(&body_label(copy::ONBOARD_WELCOME_BODY_1));
-    body.append(&body_label(copy::ONBOARD_WELCOME_BODY_2));
-    body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
-    // Directly under the sentence that raises the question, not beside
-    // `Get started` where the shared spec puts it. See the note on the
-    // notice box below: the promise is the terminal beat on this page, and a
-    // second button in the footer competes with it from the one position that
-    // should be uncontested. Here it is answerable where it is asked.
-    let removed = gtk::Button::with_label(copy::ONBOARD_WHAT_REMOVED);
-    removed.add_css_class("tc-flow-link");
-    removed.set_halign(gtk::Align::Start);
-    removed.connect_clicked({
-        let onboarding = onboarding.clone();
-        move |_| present_what_gets_removed(&onboarding.window)
-    });
-    body.append(&removed);
-    // The promise gets the notice box, not a heavier weight of the same
-    // prose. `roots.rs` reached this conclusion first for the sentence that
-    // makes its own screen mean anything: "leave it as prose and it reads as
-    // the third paragraph of an intro nobody finishes". That is exactly what
-    // the first photograph of this page showed -- `tc-brand-emphasis` was
-    // rendering, and a bolder paragraph in a stack of four still reads as a
-    // paragraph. The two screens a contributor sees first should state their
-    // load-bearing promise the same way.
-    //
-    // It comes LAST, after the scrubbing paragraph rather than before it, so
-    // the promise is the final beat before `Get started` instead of landing
-    // mid-prose. It also makes the page an argument in order: here is what
-    // this machine does mechanically, here is the limit of it, therefore you
-    // are the one who decides. NOTE this is a different order from the shared
-    // spec's screen 1, which runs the promise inline in paragraph 2 and ends
-    // on scrubbing.
-    //
-    // `tc-brand-emphasis` keeps its other call site in `render_scopes`, so
-    // the rule stays live.
-    let decides = body_label(copy::ONBOARD_WELCOME_DECIDES);
-    decides.add_css_class("tc-brand-notice");
-    body.append(&decides);
-
-    let next = gtk::Button::with_label(copy::ONBOARD_GET_STARTED);
-    next.add_css_class("suggested-action");
-    // Joining is the first run's now: Get started hands over to it.
-    next.connect_clicked({
-        let onboarding = onboarding.clone();
-        let app = Rc::downgrade(app);
-        move |_| {
-            onboarding.window.close();
-            if let Some(app) = app.upgrade() {
-                present(&app);
-            }
-        }
-    });
-    let agent = gtk::Button::with_label(
-        trace_commons_contributor::first_run_copy::first_run_copy()
-            .agent_configuration
-            .action,
-    );
-    agent.connect_clicked({
-        let window = onboarding.window.downgrade();
-        move |_| {
-            if let Some(window) = window.upgrade() {
-                present_agent_configuration(&window);
-            }
-        }
-    });
-    let actions = button_row(&agent);
-    actions.append(&next);
-    outer.append(&actions);
-    outer
-}
-
-/// Fill the consent screen from `consent_options`, and decide on the way
-/// past whether screen 4 has anything to offer.
-pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
-    app.call("consent_options", serde_json::json!({}), {
-        let onboarding = onboarding.clone();
-        move |_app, result| {
-            let Ok(value) = result else { return };
-            let scopes: Vec<ScopeOption> =
-                serde_json::from_value(value.get("scopes").cloned().unwrap_or_default())
-                    .unwrap_or_default();
-            render_scopes(&onboarding, &scopes);
-        }
-    });
-    app.call("get_settings", serde_json::json!({}), {
-        let onboarding = onboarding.clone();
-        move |_app, result| {
-            let offered = result
-                .ok()
-                .and_then(|v| {
-                    v.get("near_ai_configured")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                .unwrap_or(false);
-            onboarding.scan_offered.set(offered);
-        }
-    });
-}
-
-/// Draw the scope rows in the spec's three groups.
-///
-/// Two visually distinct groups because they are two different kinds of
-/// decision, and `public_attribution` sits in its own because it grants no
-/// data use at all -- `grants_data_use` is the daemon's word for that, and
-/// putting it beside four real data-use scopes with equal weight would
-/// mislead in both directions.
-fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
-    while let Some(child) = onboarding.consent_body.first_child() {
-        onboarding.consent_body.remove(&child);
-    }
-    onboarding.scope_checks.borrow_mut().clear();
-
-    let section = |title: &str, rows: Vec<&ScopeOption>| {
-        if rows.is_empty() {
-            return;
-        }
-        let heading = gtk::Label::builder()
-            .label(title)
-            .xalign(0.0)
-            .wrap(true)
-            .build();
-        // A heading over a group of scope rows. `tc-card-title` is the
-        // existing 14px/700 group heading; `tc-section-header` was defined by
-        // no stylesheet, so these three group headings -- including the one
-        // that is a whole sentence -- set at body weight and disappeared into
-        // the rows beneath them.
-        heading.add_css_class("tc-card-title");
-        onboarding.consent_body.append(&heading);
-        for scope in rows {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-            let check = gtk::CheckButton::builder()
-                .active(scope.always_on)
-                .sensitive(!scope.always_on)
-                .build();
-            check.set_valign(gtk::Align::Start);
-            let text = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
-            let title_label = gtk::Label::builder()
-                .label(if scope.always_on {
-                    format!("{}  {}", scope.title, copy::ONBOARD_ALWAYS_ON_TAG)
-                } else {
-                    scope.title.clone()
-                })
-                .xalign(0.0)
-                .wrap(true)
-                .build();
-            title_label.add_css_class("tc-flow-emphasis");
-            text.append(&title_label);
-            // The description is the daemon's, verbatim.
-            text.append(&body_label(&scope.description));
-            row.append(&check);
-            row.append(&text);
-            onboarding.consent_body.append(&row);
-            if !scope.always_on {
-                onboarding
-                    .scope_checks
-                    .borrow_mut()
-                    .push((scope.name.clone(), check));
-            }
-        }
-    };
-
-    section(
-        copy::ONBOARD_CONSENT_ALWAYS,
-        scopes.iter().filter(|s| s.always_on).collect(),
-    );
-    section(
-        copy::ONBOARD_CONSENT_OPTIONAL,
-        scopes
-            .iter()
-            .filter(|s| !s.always_on && s.grants_data_use)
-            .collect(),
-    );
-    section(
-        copy::ONBOARD_CONSENT_CREDIT,
-        scopes
-            .iter()
-            .filter(|s| !s.always_on && !s.grants_data_use)
-            .collect(),
-    );
-}
-
-/// A failed consent write stays on the same page and may be retried.
-#[derive(Default)]
-struct ConsentSubmission {
-    pending: bool,
-}
-
-impl ConsentSubmission {
-    fn begin(&mut self) -> bool {
-        if self.pending {
-            return false;
-        }
-        self.pending = true;
-        true
-    }
-
-    fn finish<T, E>(&mut self, result: &Result<T, E>) -> bool {
-        let pending = std::mem::take(&mut self.pending);
-        pending && result.is_ok()
-    }
-}
-
-fn consent_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_CONSENT_TITLE);
-    body.append(&body_label(copy::ONBOARD_CONSENT_SUBTITLE));
-
-    let scroller = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&onboarding.consent_body)
-        .build();
-    body.append(&scroller);
-
-    let error = body_label(
-        trace_commons_contributor::first_run_copy::first_run_copy()
-            .uses
-            .scopes_failed,
-    );
-    error.add_css_class("tc-refused");
-    error.set_visible(false);
-    body.append(&error);
-    let submission = Rc::new(RefCell::new(ConsentSubmission::default()));
-    let next = gtk::Button::with_label(copy::ONBOARD_CONTINUE);
-    next.add_css_class("suggested-action");
-    next.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        move |button| {
-            if !submission.borrow_mut().begin() {
-                return;
-            }
-            button.set_sensitive(false);
-            error.set_visible(false);
-            // The floor scope is not sent: it is not optional, and
-            // `set_consent_scopes` validates against the same VALID_SCOPES
-            // the options came from.
-            let chosen: Vec<String> = onboarding
-                .scope_checks
-                .borrow()
-                .iter()
-                .filter(|(_, check)| check.is_active())
-                .map(|(name, _)| name.clone())
-                .collect();
-            app.call(
-                "set_consent_scopes",
-                serde_json::json!({ "scopes": chosen }),
-                {
-                    let onboarding = onboarding.clone();
-                    let submission = submission.clone();
-                    let button = button.clone();
-                    let error = error.clone();
-                    move |_app, result| {
-                        let saved = submission.borrow_mut().finish(&result);
-                        button.set_sensitive(true);
-                        error.set_visible(!saved);
-                        if saved {
-                            onboarding.after_consent();
-                        }
-                    }
-                },
-            );
-        }
-    });
-    outer.append(&button_row(&next));
-    outer
-}
-
-fn scan_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_SCAN_TITLE);
-    body.append(&body_label(copy::ONBOARD_SCAN_LOCAL_ALWAYS));
-    body.append(&body_label(copy::ONBOARD_SCAN_OFFER));
-    let disclosure = body_label(copy::ONBOARD_SCAN_DISCLOSURE);
-    disclosure.add_css_class("tc-brand-notice");
-    body.append(&disclosure);
-
-    body.append(&onboarding.scan_local_only);
-    let with_near = gtk::CheckButton::builder()
-        .label(copy::ONBOARD_SCAN_WITH_NEAR)
-        .group(&onboarding.scan_local_only)
-        .build();
-    body.append(&with_near);
-
-    let next = gtk::Button::with_label(copy::ONBOARD_CONTINUE);
-    next.add_css_class("suggested-action");
-    next.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        let with_near = with_near.clone();
-        move |_| {
-            if with_near.is_active() {
-                // Without this the daemon refuses the filter forever and
-                // the contributor experiences unexplained paralysis. It is
-                // the only way an app-only contributor clears the notice,
-                // because they never see the CLI's stdout version.
-                app.call("acknowledge_near_ai_notice", serde_json::json!({}), {
-                    let onboarding = onboarding.clone();
-                    move |_app, _result| onboarding.go(Step::Watch)
-                });
-            } else {
-                onboarding.go(Step::Watch);
-            }
-        }
-    });
-    outer.append(&button_row(&next));
-    outer
-}
-
-fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_WATCH_TITLE);
-    // The screen had a title and then a list, and said nowhere what the list
-    // was or what `Ignore` did to a row of it -- on the screen that decides
-    // which repositories are eligible to leave this machine.
-    body.append(&body_label(copy::ONBOARD_WATCH_SUBTITLE));
-    // The eyebrow-and-hairline that every other surface in this application
-    // uses to say a different kind of thing starts here. This page was built
-    // from bare boxes and used none of it.
-    body.append(&super::style::section(copy::ONBOARD_WATCH_SECTION));
-
-    // A card, so the list is a bounded region rather than labels floating on
-    // the window. Spacing 0 because the rules between rows do the separating,
-    // which is the same construction `roots.rs` uses between its two sources.
-    let list = super::style::card(gtk::Orientation::Vertical, 0);
-    // The card hugs its rows. The scroller vexpands so `Continue` stays at
-    // the foot of the window, and without this the card inherited that
-    // stretch: one project drew as a single row at the top of a card-shaped
-    // box of white, which points at the emptiness harder than plain space
-    // does.
-    list.set_valign(gtk::Align::Start);
-    let scroller = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&list)
-        .build();
-    body.append(&scroller);
-
-    let next = gtk::Button::with_label(copy::ONBOARD_CONTINUE);
-    next.add_css_class("suggested-action");
-    next.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        move |_| {
-            app.call("status", serde_json::json!({}), {
-                let onboarding = onboarding.clone();
-                move |_app, result| {
-                    let tenant = result.ok().and_then(|v| {
-                        v.get("tenant_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    });
-                    mark_complete(tenant.as_deref());
-                    onboarding.go(Step::Done);
-                }
-            });
-        }
-    });
-    outer.append(&button_row(&next));
-
-    // Everything discovered starts at ask-first. `Ignore` is offered here
-    // and `auto_upload` deliberately is not: excluding the client repo is a
-    // live thought at this moment and never returns, whereas arming
-    // automation before a single preview has been seen is asking for trust
-    // that has not been earned yet.
-    app.call("list_projects", serde_json::json!({}), {
-        let app = app.clone();
-        move |_a, result| {
-            let Ok(value) = result else { return };
-            // Deserialised into `Project` rather than read field by field out
-            // of raw JSON. The hand-rolled version asked for `local_path`,
-            // which `list_projects` does not send and never did: every row
-            // failed the lookup, every iteration skipped, and this screen has
-            // shown an empty list on every machine since it shipped. A typed
-            // model cannot miss a field the wire does not have.
-            let projects: Vec<Project> =
-                serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
-                    .unwrap_or_default();
-            // The state this screen was in on every machine until the
-            // `local_path` deserialisation bug was fixed, and it drew as a
-            // title above nothing. An empty screen is an invitation to act,
-            // or at minimum an explanation -- never a blank.
-            if projects.is_empty() {
-                style::append_meta(&list, copy::ONBOARD_WATCH_EMPTY);
-                return;
-            }
-            for (index, project) in projects.into_iter().enumerate() {
-                // A hairline ahead of every row but the first: the same rule
-                // the history cells and the roots sources use, so a list of
-                // projects looks like every other list in the application.
-                if index > 0 {
-                    let rule = gtk::Box::builder()
-                        .orientation(gtk::Orientation::Horizontal)
-                        .margin_top(space::S)
-                        .margin_bottom(space::S)
-                        .build();
-                    rule.add_css_class("tc-rule");
-                    list.append(&rule);
-                }
-                // The bucket for sessions whose working directory the daemon
-                // could not name. The daemon marks it, which is cheaper and
-                // more honest than the id comparison this used to do: that
-                // re-derived `project_id_for`'s hash to learn something the
-                // wire already states.
-                let unresolvable = project.is_unresolved_bucket;
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-                // Name over state, in a column, so the row reads as one thing
-                // with a property rather than two peers.
-                let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
-                column.set_hexpand(true);
-                // The label, never a path. `list_projects` names a project by
-                // `project_id` on the wire and `project_label` on screen, and
-                // a path appears in neither direction -- the same rule
-                // `settings::render_projects` states where it draws the same
-                // list.
-                let label = gtk::Label::builder()
-                    // The wire carries the slug `unknown-project` for the
-                    // bucket, which is an identifier and not a name. Every
-                    // other row's label is already a display name.
-                    .label(if unresolvable {
-                        copy::ONBOARD_WATCH_UNKNOWN_LABEL
-                    } else {
-                        project.project_label.as_str()
-                    })
-                    .xalign(0.0)
-                    .hexpand(true)
-                    .wrap(true)
-                    .build();
-                // It wore no class at all and rendered at GTK's default body
-                // size, which is why a project name looked like debug output
-                // beside a button twice its weight.
-                label.add_css_class("tc-card-title");
-                column.append(&label);
-                // What will happen to this project, stated rather than left to
-                // be inferred from the absence of a control. Ask-first is the
-                // outcome for every row a contributor never touches.
-                //
-                // The unresolvable bucket says why it can never be anything
-                // else, which is the note the shared spec asks for. It stands
-                // in place of the state line rather than adding a third: the
-                // note ends "you'll always be asked", which is what the state
-                // line would have said.
-                let state = style::meta(if unresolvable {
-                    copy::ONBOARD_WATCH_UNKNOWN_NOTE
-                } else {
-                    copy::ONBOARD_WATCH_ASK_FIRST
-                });
-                column.append(&state);
-                let ignore = gtk::Button::with_label(copy::ONBOARD_IGNORE);
-                // An outlined chip, centred against the two-line column.
-                //
-                // The raised grey button this replaced outranked the project
-                // it acts on. `flat` corrected that and overshot: with no
-                // border, no fill and no surface, it photographed as plain
-                // bold text and did not read as clickable at all. The cost of
-                // that is asymmetric -- a contributor who does not notice they
-                // can exclude a repository leaves a client repo at ask-first
-                // rather than ignored, which is a privacy outcome and not an
-                // aesthetic one.
-                //
-                // `tc-chip` is the button treatment `preview.rs` already uses
-                // for its recent searches: a hairline pill at 12px/600, so it
-                // stays subordinate to the 14px/700 project name above it,
-                // and its `:hover` turns the border green, which is the
-                // affordance a static frame cannot show.
-                ignore.add_css_class("tc-chip");
-                ignore.set_valign(gtk::Align::Center);
-                ignore.connect_clicked({
-                    let app = app.clone();
-                    let project_id = project.project_id.clone();
-                    let row_label = label.clone();
-                    let row_state = state.clone();
-                    move |button| {
-                        button.set_sensitive(false);
-                        // Greying an ignored row is a colour change, not a
-                        // size change, so `tc-neutral` rather than `tc-meta`.
-                        row_label.add_css_class("tc-neutral");
-                        // The state line says what the row now is: the
-                        // mode's one name, the word the button that produced
-                        // it said -- one name for the mode, through the whole
-                        // flow.
-                        row_state.set_label(copy::ONBOARD_WATCH_IGNORED);
-                        app.call(
-                            "set_project_mode",
-                            // `project_id`, which is what the daemon accepts:
-                            // it answers `project_id-or-project_key-required`
-                            // to anything else.
-                            serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
-                            {
-                                let row_label = row_label.clone();
-                                let row_state = row_state.clone();
-                                move |app, result| {
-                                    if result.is_err() {
-                                        // Put the row back rather than leave
-                                        // it greyed. The old code discarded
-                                        // this result, so a refusal looked
-                                        // exactly like success -- on a
-                                        // control whose whole purpose is
-                                        // excluding a project someone did not
-                                        // want watched.
-                                        row_label.remove_css_class("tc-neutral");
-                                        // And put the state back with it, or
-                                        // the row would claim to be ignored
-                                        // while the daemon still offers it.
-                                        // The unresolvable bucket goes back to
-                                        // its note, not to the state line it
-                                        // never had.
-                                        row_state.set_label(if unresolvable {
-                                            copy::ONBOARD_WATCH_UNKNOWN_NOTE
-                                        } else {
-                                            copy::ONBOARD_WATCH_ASK_FIRST
-                                        });
-                                        app.toast(copy::PROJECT_MODE_FAILED);
-                                    }
-                                }
-                            },
-                        );
-                    }
-                });
-                row.append(&column);
-                row.append(&ignore);
-                list.append(&row);
-            }
-        }
-    });
-
-    outer
-}
-
-fn done_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_DONE_TITLE);
-    body.append(&body_label(copy::ONBOARD_DONE_BODY));
-
-    let finish = gtk::Button::with_label(copy::ONBOARD_DONE_BUTTON);
-    finish.add_css_class("suggested-action");
-    finish.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        move |_| {
-            onboarding.window.close();
-            app.refresh();
-        }
-    });
-    outer.append(&button_row(&finish));
-    outer
 }
 
 #[cfg(test)]
@@ -1222,25 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_consent_stays_put_and_retry_advances_only_after_success() {
-        let mut submission = ConsentSubmission::default();
-        let saved: Result<(), &str> = Ok(());
-        assert!(
-            !submission.finish(&saved),
-            "unsolicited completion cannot advance"
-        );
-        assert!(submission.begin());
-        assert!(
-            !submission.begin(),
-            "duplicate clicks cannot submit another write"
-        );
-        assert!(!submission.finish(&Err::<(), _>("offline")));
-        assert!(submission.begin(), "a failed write remains retryable");
-        assert!(submission.finish(&saved));
-        assert!(!submission.finish(&saved), "a completion is consumed once");
-    }
-
-    #[test]
     fn no_tenant_is_never_complete() {
         // Before `enroll` there is no tenant, so there is nothing to have
         // finished -- and onboarding must run rather than be skipped.
@@ -1287,10 +426,15 @@ mod tests {
                 "{label} should offer an action"
             );
             assert!(
-                health_step(label).is_some(),
+                health_screen(label).is_some(),
                 "{label} offers an action but has no screen to open"
             );
         }
+        assert_eq!(health_screen("not-logged-in"), Some(HealthScreen::FirstRun));
+        assert_eq!(
+            health_screen("near-ai-notice-not-acknowledged"),
+            Some(HealthScreen::ScanRecovery)
+        );
     }
 
     #[test]
@@ -1299,46 +443,8 @@ mod tests {
         // returning early is the safe direction if one ever reaches it.
         for label in ["upload-failed", "", "something-this-build-never-heard-of"] {
             assert!(copy::health_action(label).is_none());
-            assert!(health_step(label).is_none());
+            assert!(health_screen(label).is_none());
         }
-    }
-
-    /// The watch screen reads what `list_projects` actually sends.
-    ///
-    /// It used to ask for `local_path`, a field the daemon has never sent.
-    /// Every row failed that lookup and was skipped, so the screen rendered
-    /// an empty list on every machine while looking like a project list with
-    /// nothing in it. Deserialising into `Project` is what makes that
-    /// impossible; this pins the shape so a hand-rolled reader cannot come
-    /// back.
-    #[test]
-    fn the_watch_screen_parses_a_real_list_projects_row() {
-        let wire = serde_json::json!([{
-            "project_id": "p-1",
-            "project_label": "trace-commons-server",
-            "mode": "notify_only",
-            "configured": true
-        }]);
-
-        let projects: Vec<Project> = serde_json::from_value(wire).expect("parses");
-        assert_eq!(projects.len(), 1, "a real row must survive parsing");
-        assert_eq!(projects[0].project_id, "p-1");
-        assert_eq!(projects[0].project_label, "trace-commons-server");
-    }
-
-    /// What the row sends back is the id, not a path.
-    ///
-    /// `set_project_mode` answers `project_id-or-project_key-required` to
-    /// anything else, so the old `local_path` payload could only ever be
-    /// refused -- silently, because the result was discarded.
-    #[test]
-    fn ignoring_a_project_sends_the_id() {
-        let params = serde_json::json!({ "project_id": "p-1", "mode": "ignore" });
-        assert!(params.get("project_id").is_some());
-        assert!(
-            params.get("local_path").is_none(),
-            "a path must not cross this boundary in either direction"
-        );
     }
 
     /// `logged_in` alone must never stand in for "onboarded". `enroll`

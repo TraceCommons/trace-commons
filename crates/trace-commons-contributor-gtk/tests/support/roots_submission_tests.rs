@@ -203,7 +203,7 @@ fn pending_submission_is_single_and_failure_allows_retry() {
         .collect();
     // One check per found tool, unticked.
     assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].label().as_deref(), Some(copy::ROOTS_CLAUDE));
+    assert_eq!(checks[0].label().as_deref(), Some("Claude Code"));
     assert!(!checks[0].is_active());
     let failure = || {
         descendants(window.upcast_ref())

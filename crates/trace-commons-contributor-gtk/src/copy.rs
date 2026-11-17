@@ -1389,37 +1389,7 @@ pub const UPDATE_UNMANAGED_BODY: &str = "This copy was built from source, so upd
 pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this desktop's Flatpak service did not answer. Use your \
      software centre, or run flatpak update, to move to a newer version.";
 
-// --- Onboarding --------------------------------------------------------
-//
-// Six screens, one decision each. Every string below is verbatim from
-// `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`,
-// "## Onboarding" -- that document specifies the copy for every shell, so
-// this is transcription, not authorship. If a sentence here reads oddly,
-// change it there first.
-
-pub const ONBOARD_WELCOME_TITLE: &str = APP_NAME;
-pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts \
-     to learn from. Almost all of that data is locked inside companies. Your traces go to a shared \
-     pool that isn't.";
-/// The bold half of screen 1. Split from the paragraph around it because it
-/// is the promise the whole product is judged against.
-pub const ONBOARD_WELCOME_DECIDES: &str =
-    "You decide what gets contributed. Nothing is sent unless you say so.";
-pub const ONBOARD_WELCOME_BODY_2: &str = trace_commons_contributor::onboarding_copy::WELCOME_BODY;
-/// "Good and it is not perfect" is load-bearing: a developer knows automatic
-/// redaction is imperfect, and conceding it first is what makes the rest
-/// credible. Do not soften it into "thorough" or drop the second clause.
-pub const ONBOARD_WELCOME_SCRUB: &str = "Before anything leaves this machine it is scrubbed locally for secrets, keys, and tokens. \
-     That scrubbing is good and it is not perfect — which is why you get to look first.";
-pub const ONBOARD_GET_STARTED: &str = "Get started";
-
-/// The second button the shared spec gives screen 1 and the shell never had.
-pub const ONBOARD_WHAT_REMOVED: &str = "What gets removed?";
-pub const ONBOARD_WHAT_REMOVED_HEADING: &str = "What gets removed";
-/// The list is generated from `trace_commons_protocol::secret_leak_pattern_names`,
-/// so this sentence introduces it without claiming to enumerate it.
-pub const ONBOARD_WHAT_REMOVED_INTRO: &str =
-    "Before a trace leaves this machine, these are found and replaced:";
+// What each scrub detector is called, in words.
 
 /// A named detector, in words. `slug` is a name from the protocol's table.
 ///
@@ -1450,68 +1420,6 @@ pub fn scrub_detector_label(slug: &str) -> String {
     }
 }
 
-pub const ONBOARD_CONSENT_TITLE: &str = "How may your traces be used?";
-pub const ONBOARD_CONSENT_SUBTITLE: &str =
-    "You can change this later. It applies to traces you send from now on.";
-pub const ONBOARD_CONSENT_ALWAYS: &str = "Always included";
-pub const ONBOARD_CONSENT_OPTIONAL: &str = "Optional — each one lets your traces do more";
-pub const ONBOARD_CONSENT_CREDIT: &str = "Credit";
-pub const ONBOARD_ALWAYS_ON_TAG: &str = "always on";
-
-// The scan screen's words live in `trace_commons_contributor::privacy_scan_copy`,
-// where the Tauri shell's recovery prompt reads the same disclosure.
-// COPY-MIGRATED-BEGIN
-pub use trace_commons_contributor::privacy_scan_copy::{
-    DISCLOSURE as ONBOARD_SCAN_DISCLOSURE, LOCAL_ALWAYS as ONBOARD_SCAN_LOCAL_ALWAYS,
-    LOCAL_ONLY as ONBOARD_SCAN_LOCAL_ONLY, OFFER as ONBOARD_SCAN_OFFER,
-    TITLE as ONBOARD_SCAN_TITLE, WITH_NEAR as ONBOARD_SCAN_WITH_NEAR,
-};
-// COPY-MIGRATED-END
-
-pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
-
-// ---------------------------------------------------------------------------
-// NOT YET IN THE SHARED SPEC. The five strings below are new product copy, not
-// transcription: `### 5. What to watch` specifies the screen's BEHAVIOUR (all
-// projects at ask-first, `Ignore` offered and `auto_upload` withheld) and
-// gives it no words at all. The screen therefore shipped as a bare title over
-// an unlabelled list, which says neither what the list is nor what `Ignore`
-// does -- on the one screen that decides which of a contributor's repositories
-// are eligible to leave the machine.
-//
-// They must land in `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`
-// before macOS and Windows transcribe them, or the three shells will describe
-// the same decision differently. Flagged for approval rather than quietly
-// adopted.
-// ---------------------------------------------------------------------------
-
-/// The subtitle screen 5 never had. States the default first, because the
-/// default is what happens to a contributor who reads nothing and clicks
-/// Continue -- which is most of them.
-pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you see each trace before anything is sent. Ignore a \
-     project to leave it out entirely.";
-
-/// The eyebrow over the list. `style::section` uppercases it.
-pub const ONBOARD_WATCH_SECTION: &str = "Projects";
-
-/// The per-row state: the core's one name for the mode
-/// (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`), which `settings.rs`'s
-/// dropdown and the pill read too. Two screens that set the same field must
-/// not name it two ways.
-pub const ONBOARD_WATCH_ASK_FIRST: &str =
-    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
-
-/// The state after the button that sets `ignore`: the core's one name for
-/// that mode, the same word the button says.
-pub const ONBOARD_WATCH_IGNORED: &str =
-    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
-
-/// Shown when `list_projects` returns nothing. This was the state of the
-/// screen on EVERY machine until the `local_path` deserialisation bug was
-/// fixed, and it rendered as a title above nothing at all.
-pub const ONBOARD_WATCH_EMPTY: &str =
-    "No projects yet. Traces you run later will appear here, and in Settings.";
-
 /// The human name for `policy::UNKNOWN_PROJECT_KEY`. The wire carries the
 /// slug `unknown-project` as this row's `project_label`, because
 /// `project_label_for` deliberately returns the constant rather than risk
@@ -1538,35 +1446,12 @@ pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
      You'll always be asked."
 );
 
-/// The per-project control on screen 5. `ignore` is offered here and
-/// `auto_upload` is not, per the shared spec: excluding a repository is a
-/// live thought at this moment and never returns, whereas arming automation
-/// before a single preview has been seen asks for trust not yet earned. It
-/// names the mode it sets, by the core's one name.
-pub const ONBOARD_IGNORE: &str =
-    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
-
-/// Shown when `set_project_mode` refuses. The same sentence the settings
-/// screen uses for the same refusal, so the two places that change a
-/// project's mode cannot describe the same failure differently.
-pub const PROJECT_MODE_FAILED: &str =
-    "That couldn't be changed just now. Nothing else changed either.";
-pub const ONBOARD_CONTINUE: &str = "Continue";
-
-pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";
-pub const ONBOARD_DONE_BODY: &str = trace_commons_contributor::onboarding_copy::DONE_BODY;
-pub const ONBOARD_DONE_BUTTON: &str = "Finish";
-
 // The first run's Tools, before the daemon starts. Its words are the core's
-// (`first_run_copy`); these are the tools' names, which the Mac also keeps
-// in its shell (`SourceKind.displayName`), and the one failure line for a
-// declaration the settings file would not take.
+// (`first_run_copy`, and `source_copy` for the tools' names). These two have
+// no Mac counterpart: a store this build has no name for (the Mac lists only
+// the tools it knows), and the failure line for a declaration the settings
+// file would not take, which the Mac never writes before its daemon runs.
 
-pub const ROOTS_CLAUDE: &str = "Claude Code";
-pub const ROOTS_CODEX: &str = "Codex";
-pub const ROOTS_GEMINI: &str = "Gemini CLI";
-pub const ROOTS_CLINE: &str = "Cline";
-pub const ROOTS_OPENCODE: &str = "OpenCode";
 /// Shown when a store arrives that this build has no name for -- a newer
 /// contributor library discovering a source this shell predates. Deliberately
 /// not one of the named titles: a row must never claim to be a product it is
@@ -2176,19 +2061,6 @@ mod tests {
     use super::*;
 
     use crate::model::human_bytes;
-
-    /// Onboarding names a project's mode by the core's one name, the words
-    /// Settings and the pill use (owner decision, 2026-10-02), and its
-    /// button names the mode it sets.
-    #[test]
-    fn onboarding_names_each_mode_by_the_cores_name() {
-        use trace_commons_contributor::project_copy::{
-            CONTRIBUTION_MODE_ASK_LABEL, CONTRIBUTION_MODE_NEVER_LABEL,
-        };
-        assert_eq!(ONBOARD_WATCH_ASK_FIRST, CONTRIBUTION_MODE_ASK_LABEL);
-        assert_eq!(ONBOARD_WATCH_IGNORED, CONTRIBUTION_MODE_NEVER_LABEL);
-        assert_eq!(ONBOARD_IGNORE, CONTRIBUTION_MODE_NEVER_LABEL);
-    }
 
     /// The correction disclosure, character for character, and then in the
     /// other two shells' actual sources.

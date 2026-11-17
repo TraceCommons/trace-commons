@@ -2073,10 +2073,10 @@ mod dark_tests {
             return root.style_context().lookup_color("tc_bg").expect("tc_bg");
         }
         let probe = gtk::Label::new(Some("probe"));
-        probe.add_css_class("tc-test-ground-probe");
+        probe.set_widget_name("tc-test-ground-probe");
         root.append(&probe);
         let provider = gtk::CssProvider::new();
-        provider.load_from_data(".tc-test-ground-probe { color: var(--window-bg-color); }");
+        provider.load_from_data("#tc-test-ground-probe { color: var(--window-bg-color); }");
         gtk::style_context_add_provider_for_display(
             &gtk::gdk::Display::default().unwrap(),
             &provider,

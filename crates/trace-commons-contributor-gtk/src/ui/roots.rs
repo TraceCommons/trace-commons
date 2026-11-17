@@ -245,14 +245,17 @@ pub(super) fn source_title(source: &str) -> &'static str {
     use trace_commons_contributor::source::{
         SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
     };
-    match source {
-        SOURCE_CLAUDE_CODE => copy::ROOTS_CLAUDE,
-        SOURCE_CODEX => copy::ROOTS_CODEX,
-        SOURCE_GEMINI_CLI => copy::ROOTS_GEMINI,
-        SOURCE_CLINE => copy::ROOTS_CLINE,
-        SOURCE_OPENCODE => copy::ROOTS_OPENCODE,
-        _ => copy::ROOTS_UNKNOWN_SOURCE,
-    }
+    use trace_commons_contributor::source_copy::SourceTool;
+    let tool = match source {
+        SOURCE_CLAUDE_CODE => SourceTool::Claude,
+        SOURCE_CODEX => SourceTool::Codex,
+        SOURCE_GEMINI_CLI => SourceTool::Gemini,
+        SOURCE_CLINE => SourceTool::Cline,
+        SOURCE_OPENCODE => SourceTool::OpenCode,
+        _ => return copy::ROOTS_UNKNOWN_SOURCE,
+    };
+    // The core's one name for each tool (`source_copy`).
+    tool.name()
 }
 
 #[cfg(test)]
@@ -307,10 +310,12 @@ mod tests {
 
     #[test]
     fn each_source_gets_its_own_title() {
-        assert_eq!(source_title("codex"), copy::ROOTS_CODEX);
-        assert_eq!(source_title("claude-code"), copy::ROOTS_CLAUDE);
-        assert_eq!(source_title("gemini-cli"), copy::ROOTS_GEMINI);
-        assert_eq!(source_title("cline"), copy::ROOTS_CLINE);
+        // The Mac's `SourceKind.displayName`, in the core's words.
+        assert_eq!(source_title("codex"), "Codex");
+        assert_eq!(source_title("claude-code"), "Claude Code");
+        assert_eq!(source_title("gemini-cli"), "Gemini CLI");
+        assert_eq!(source_title("cline"), "Cline");
+        assert_eq!(source_title("opencode"), "OpenCode");
     }
 
     /// Titles must be distinct, because this label is the only thing naming
