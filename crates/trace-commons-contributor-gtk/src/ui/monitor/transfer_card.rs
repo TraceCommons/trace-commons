@@ -100,21 +100,29 @@ pub fn card(
         // The tool's memory files, and that they stay on this computer,
         // above the note, for one tool's trace (`TraceTransferCard`).
         if let Some((files, stays)) = transfers::card_memory(transfer, &words) {
-            let memory = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            // The Mac's lock sits beside the files and the line.
+            let memory = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             memory.add_css_class("tc-map-transfer-memory");
+            let lock = super::map::lock_icon();
+            lock.set_valign(gtk::Align::Start);
+            lock.set_margin_top(2);
+            memory.append(&lock);
+            let lines = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            lines.set_hexpand(true);
             if let Some(files) = files {
                 let names = gtk::Label::new(Some(files));
                 names.add_css_class("monospace");
                 names.set_xalign(0.0);
                 names.set_wrap(true);
-                memory.append(&names);
+                lines.append(&names);
             }
             let line = gtk::Label::new(Some(stays));
             line.add_css_class("caption");
             line.add_css_class("dim-label");
             line.set_xalign(0.0);
             line.set_wrap(true);
-            memory.append(&line);
+            lines.append(&line);
+            memory.append(&lines);
             body.append(&memory);
         }
         let text = gtk::Label::new(Some(&note));
@@ -126,4 +134,37 @@ pub fn card(
         card.append(&details);
     }
     card
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::monitor::transfers::Action;
+
+    fn descendants(root: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            out.push(widget.clone());
+            descendants(&widget, out);
+        }
+    }
+
+    /// The memory well in Details carries the Mac's lock beside the files.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_memory_well_has_the_lock() {
+        gtk::init().expect("GTK display");
+        let transfer = MapTransfer::new("t1", "folder", "claude-code", Action::Contribute);
+        let card = card(&transfer, None, || {});
+        let mut all = Vec::new();
+        descendants(card.upcast_ref(), &mut all);
+        let well = all
+            .iter()
+            .find(|w| w.has_css_class("tc-map-transfer-memory"))
+            .expect("the memory well");
+        let first = well.first_child().expect("the well's first child");
+        assert!(first.has_css_class("tc-map-lock"), "{:?}", first.css_classes());
+        assert!(first.is::<gtk::DrawingArea>());
+    }
 }

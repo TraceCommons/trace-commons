@@ -3326,7 +3326,7 @@ mod tests {
             .default_height(720)
             .build();
         let store = std::env::temp_dir().join(format!("tc-insights-fit-{}", uuid::Uuid::new_v4()));
-        let view = InsightsView::with_store(&window, Some(store));
+        let view = InsightsView::with_store(&window, Some(store.clone()));
         let page = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&view.root)
@@ -3393,5 +3393,6 @@ mod tests {
             page.width()
         );
         window.close();
+        let _ = std::fs::remove_dir_all(&store);
     }
 }
