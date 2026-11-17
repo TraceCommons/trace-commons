@@ -132,6 +132,9 @@ pub struct PendingUndo {
     /// assuming there is only ever one.
     pub entry_ids: Vec<String>,
     pub project_label: String,
+    /// The folder whose Submit all this is; `None` for one trace's Submit.
+    /// The inspector's demand tells the two apart (`monitor::demand`).
+    pub folder: Option<String>,
     /// When this window offered the undo, which is what the bar's "held 41s"
     /// counts up from. It counts *up* on purpose: the app cannot see the
     /// watcher's sweep, so a countdown would be a promise it cannot keep.
@@ -198,6 +201,8 @@ pub struct App {
     /// health banner rather than in it: the health slot carries one label,
     /// and a void must neither hide an outage nor be hidden by one.
     void_notices: gtk::Box,
+    /// The account's notices: the legacy invite move and its notice.
+    account_notices: gtk::Box,
     /// The move to a NEAR AI account for a device that joined with an
     /// invite: its state, and the dismissible offer card that sits first in
     /// the notices column (Settings holds the other set of controls).
@@ -227,6 +232,9 @@ pub struct App {
     pub rollup: RefCell<HistoryRollup>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The folder whose Submit all is waiting on the daemon's answer, as
+    /// the Mac's `TracesStore.submittingFolder`: a demand on the inspector.
+    pub submitting_folder: RefCell<Option<String>>,
     /// The handle for the once-a-second tick that moves the undo bar's
     /// elapsed figure, held so a second approval can stop the first one's
     /// timer instead of leaving it running. Approving is a loop -- the sheet
@@ -350,11 +358,9 @@ impl App {
         health_banner.append(&health_button);
         health_banner.add_css_class("tc-banner");
 
-        // The banner is a notice over every tab rather than a card inside
-        // the queue, so a contributor reading another tab still learns that
-        // contributions are held up (`monitor::notices`; the Mac shows it on
-        // Traces alone, and this window keeps the wider rule it always
-        // had). Settings is its own window now and does not carry it.
+        // The banner is a notice over the Traces tab and its History page,
+        // as on the Mac (`monitor::notices`). Settings is its own window now
+        // and does not carry it.
         //
         // It is clamped to the same column as the screens below it, which is
         // the only reason this is a clamp and not a bare margin: an
@@ -371,21 +377,36 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
-        // Every void notice, in the same column as the health banner and for
-        // the same reason: a void changes what the contributor agreed to,
-        // and they learn it on whichever screen they are reading.
+        // Every consent notice about folders (grant voids, arming
+        // rewordings, a gate hold), in the same column as the health banner
+        // and over the same tabs, as on the Mac (`monitor::notices`).
         let void_notices = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(style::space::M)
             .build();
-        // The offer card is built once and kept first in the column, so a
-        // refresh never replaces a half-pasted invite.
-        let legacy_card = legacy_move::Controls::new(true);
-        void_notices.append(&legacy_card.root);
         let void_column = adw::Clamp::builder()
             .maximum_size(COLUMN_MAX)
             .tightening_threshold(COLUMN_TIGHTEN)
             .child(&void_notices)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
+        // The account's notices, the legacy invite move and its notice, are
+        // about the account rather than a tab, and are shown over every tab
+        // as on the Mac. The offer card is built once and kept first in the
+        // column, so a refresh never replaces a half-pasted invite.
+        let account_notices = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::M)
+            .build();
+        let legacy_card = legacy_move::Controls::new(true);
+        account_notices.append(&legacy_card.root);
+        let account_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&account_notices)
             .visible(false)
             .margin_top(style::space::L)
             .margin_start(style::space::XL)
@@ -416,6 +437,10 @@ impl App {
                     (
                         monitor::notices::Notice::Update,
                         update.root.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Account,
+                        account_column.clone().upcast(),
                     ),
                     (
                         monitor::notices::Notice::Health,
@@ -459,6 +484,7 @@ impl App {
             health_label,
             health_button,
             void_notices,
+            account_notices,
             legacy_move: legacy_move::MoveState::default(),
             legacy_card,
             callbacks: RefCell::new(HashMap::new()),
@@ -469,6 +495,7 @@ impl App {
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
+            submitting_folder: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
             previews_too_large: RefCell::new(HashMap::new()),
@@ -1058,32 +1085,33 @@ impl App {
     /// acknowledged would say something stopped that this window has no
     /// record of anymore.
     fn render_grant_voids(self: &Rc<Self>, status: &Status) {
-        // Every card but the offer, which is built once.
-        let mut child = self.void_notices.first_child();
+        while let Some(card) = self.void_notices.first_child() {
+            self.void_notices.remove(&card);
+        }
+        // Every account card but the offer, which is built once.
+        let mut child = self.account_notices.first_child();
         while let Some(card) = child {
             child = card.next_sibling();
             if card != self.legacy_card.root {
-                self.void_notices.remove(&card);
+                self.account_notices.remove(&card);
             }
         }
         let offer_shown = legacy_move::repaint_for(self, status);
         let notices = status.grant_void_notices();
         // The switch-on notices share the column: a folder whose arming was
-        // reworded (K5), and armed folders the gate is holding. So does the
-        // legacy invite migration notice: it changes what the contributor's
-        // sessions go under, and they are told on whichever screen they are
-        // reading (the consent spec requires it in every shell).
+        // reworded (K5), and armed folders the gate is holding.
         let rewordings = status.arming_rewording_notices();
         let held = status.gate_held_notice();
+        // The legacy invite migration notice is the account's: it changes
+        // what the contributor's sessions go under, and they are told on
+        // whichever screen they are reading (the consent spec requires it in
+        // every shell).
         let migration = status.legacy_migration_notice();
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(
-                !notices.is_empty()
-                    || !rewordings.is_empty()
-                    || held.is_some()
-                    || migration.is_some()
-                    || offer_shown,
-            );
+            column.set_visible(!notices.is_empty() || !rewordings.is_empty() || held.is_some());
+        }
+        if let Some(column) = self.account_notices.parent() {
+            column.set_visible(migration.is_some() || offer_shown);
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
@@ -1095,7 +1123,7 @@ impl App {
             self.void_notices.append(&self.gate_held_card(&held));
         }
         if let Some(notice) = &migration {
-            self.void_notices
+            self.account_notices
                 .append(&self.legacy_migration_card(notice));
         }
     }
@@ -1495,6 +1523,7 @@ impl App {
             label.push_str(&format!(" {}", style::Tone::Attention.glyph()));
         }
         self.shell.traces_badge.set_label(&label);
+        self.shell.describe_traces_badge(decisions_owed);
         self.shell.traces_badge.set_visible(!label.is_empty());
         // The core's words for an unknown count, as the other shells say it.
         self.shell.traces_badge.set_tooltip_text(
@@ -1530,6 +1559,7 @@ impl App {
         approve: &ApproveResult,
         entry_ids: Vec<String>,
         project_label: &str,
+        folder: Option<String>,
     ) {
         let skipped: Vec<&str> = approve
             .skipped
@@ -1567,7 +1597,7 @@ impl App {
         // half of the same rule here.
         if approve.offers_undo() {
             if let Some(hold_until) = approve.hold_until {
-                self.offer_undo(entry_ids, project_label, hold_until);
+                self.offer_undo(entry_ids, project_label, folder, hold_until);
             }
         }
     }
@@ -1586,11 +1616,13 @@ impl App {
         self: &Rc<Self>,
         entry_ids: Vec<String>,
         project_label: &str,
+        folder: Option<String>,
         hold_until: chrono::DateTime<chrono::Utc>,
     ) {
         *self.undo.borrow_mut() = Some(PendingUndo {
             entry_ids,
             project_label: project_label.to_string(),
+            folder,
             approved_at: chrono::Utc::now(),
             hold_until,
         });

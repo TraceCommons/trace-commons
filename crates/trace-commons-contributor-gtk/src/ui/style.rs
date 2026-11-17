@@ -635,6 +635,31 @@ pub fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
     card
 }
 
+/// A row of controls or figures that wraps onto further lines when its
+/// column is narrower than the row, so it never makes the column wider
+/// than the Monitor window's 440 main pane. Fill it with [`wrap_append`].
+pub fn wrap_row(spacing: i32) -> gtk::FlowBox {
+    gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(false)
+        .min_children_per_line(1)
+        .max_children_per_line(8)
+        .column_spacing(spacing as u32)
+        .row_spacing(spacing as u32)
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .build()
+}
+
+/// Appends to a [`wrap_row`]. The flow box's own child wrapper takes no
+/// focus, so the keyboard reaches the control itself in one step.
+pub fn wrap_append(row: &gtk::FlowBox, widget: &impl IsA<gtk::Widget>) {
+    row.insert(widget, -1);
+    if let Some(child) = widget.parent() {
+        child.set_focusable(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Contrast, measured from the values this file actually loads.

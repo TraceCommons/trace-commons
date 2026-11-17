@@ -395,12 +395,16 @@ mod tests {
     }
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
-    // The reduced-motion half of this test was about the map's own slide-down
-    // revealer, which went with its Show/Hide button. What still animates
-    // near it is the graph footer, whose reduced-motion assertion is
+    // Reduced motion: the map's slide-down revealer went with its Show/Hide
+    // button, and this pane has nothing left that moves. Under reduced motion
+    // it is drawn whole at once, and nothing in it waits on a transition.
+    // The graph footer's half is
     // `graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion`.
     fn mounted_map_preserves_identity_and_accessibility() {
         gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let animations = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(false);
         let map = TraceMap::new();
         let entries: Vec<_> = (0..40)
             .map(|i| entry(&format!("e{i}"), &format!("p{i}"), "codex", "pending"))
@@ -420,6 +424,21 @@ mod tests {
         while context.pending() {
             context.iteration(false);
         }
+        // Nothing in it waits on a transition.
+        fn moving(widget: &gtk::Widget) -> bool {
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                let stack_slides = next
+                    .downcast_ref::<gtk::Stack>()
+                    .is_some_and(|stack| stack.transition_duration() > 0);
+                if next.is::<gtk::Revealer>() || stack_slides || moving(&next) {
+                    return true;
+                }
+                child = next.next_sibling();
+            }
+            false
+        }
+        assert!(!moving(map.root.upcast_ref()), "something in the map moves");
         TraceMap::orient(&map.body, 480);
         assert_eq!(map.body.orientation(), gtk::Orientation::Vertical);
         TraceMap::orient(&map.body, 800);
@@ -460,6 +479,7 @@ mod tests {
         // The map is drawn with nothing pending too (spec, "No hiding").
         map.populate(&Scene::default(), Rc::new(|_| {}));
         assert!(map.root.is_visible());
+        settings.set_gtk_enable_animations(animations);
         window.close();
     }
 }

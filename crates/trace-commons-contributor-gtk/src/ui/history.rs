@@ -627,13 +627,11 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
         );
         open.add_css_class("tc-quiet");
         open.set_halign(gtk::Align::Start);
-        open.update_property(&[gtk::accessible::Property::Label(&format!(
-            "{} \u{2014} {}",
-            trace_commons_contributor::preview_copy::monitor_screens_copy()
-                .shell
-                .open,
-            record.project_label
-        ))]);
+        // The core's word is its name; which record it opens is its
+        // description, the record's own label, so no name is composed here.
+        open.update_property(&[gtk::accessible::Property::Description(
+            &record.project_label,
+        )]);
         let weak = Rc::downgrade(app);
         let id = record.submission_id.clone();
         open.connect_clicked(move |_| {
