@@ -1,22 +1,24 @@
 # Linux app: Omarchy skin
 
-Date: 2026-11-17. Status: draft for owner review. Base: `linux-mac-look`
+Date: 2026-11-17. Status: decisions recorded 2026-11-17 (owner: "go with
+your recommendations on the decisions"). Base: `linux-mac-look`
 (the Mac-style window stack, #2160-#2165). Input: the owner's design
 excerpt of 2026-11-17 (Omarchy integration, approaches, touchpoints,
 acceptance criteria) and the owner's request for "an omarchy skin version of
 the app as part of the linux portfolio", tested against an Omarchy instance.
 
-## Decisions to confirm
+## Decisions
 
-Each is a default chosen for this draft. None is approved yet.
+Decided by the owner on 2026-11-17: D2, D3 and D4 as written below, and the
+defaults for D1 and D5-D9 stand.
 
-| # | Decision | Default in this PR | Alternatives |
+| # | Decision | Decided | Alternatives |
 | --- | --- | --- | --- |
 | D1 | Integration approach | App-owned Omarchy mode: the app reads the active `colors.toml` itself, the excerpt's recommendation | An Omarchy template (`trace-commons.css.tpl`) generating a CSS fragment; generic light/dark only |
-| D2 | Where the choice lives | A new Appearance card at the end of the Startup section of Settings. `Section::ALL` is pinned to the macOS groups by a test, so no new navigation entry | A new Settings section (needs a shared nav label and a macOS counterpart) |
-| D3 | When the choice is offered | Always, on every Linux desktop. Choosing Omarchy where no Omarchy theme exists shows the fallback line and keeps the standard look | Offer it only when an Omarchy state directory exists |
-| D4 | Flatpak | **No new filesystem access in this PR.** In the Flatpak the palette is unreadable, so Omarchy mode shows the fallback line. See "Flatpak options" for the owner's pick | See below |
-| D5 | Words | New UI text lives in a const-only shared module, `trace_commons_contributor::appearance_copy`, every entry marked DRAFT, NEEDS APPROVAL. It is outside `ShellWordsCopy` and the C ABI, so the Swift and C# fixtures do not move | Add the fields to `SettingsWords` once macOS or Windows want them |
+| D2 | Where the choice lives | Decided 2026-11-17: a new Appearance card at the end of the Startup section of Settings. `Section::ALL` is pinned to the macOS groups by a test, so no new navigation entry | A new Settings section (needs a shared nav label and a macOS counterpart) |
+| D3 | When the choice is offered | Decided 2026-11-17: always, on every Linux desktop. Choosing Omarchy where no Omarchy theme exists shows the fallback line and keeps the standard look | Offer it only when an Omarchy state directory exists |
+| D4 | Flatpak | Decided 2026-11-17: **no palette access for now.** In the Flatpak the palette is unreadable, so Omarchy mode shows the fallback line. Options 1 (import) and 2 (read-only grant) under "Flatpak options" stay open as later possibilities | See below |
+| D5 | Words | New UI text lives in a const-only shared module, `trace_commons_contributor::appearance_copy`; all four entries approved 2026-11-17 (see "Words"). It is outside `ShellWordsCopy` and the C ABI, so the Swift and C# fixtures do not move | Add the fields to `SettingsWords` once macOS or Windows want them |
 | D6 | The fallback line | One caption under the choice, shown only while Omarchy is chosen and no valid palette has been read since launch. It is the "concise explanation in Appearance settings" the excerpt asks for; no banner, toast, notification or status channel | Show nothing and only keep the standard look |
 | D7 | Fonts | Not changed. `colors.toml` carries no font; Omarchy's font is a system-wide monospace choice the app already inherits through fontconfig | Read Omarchy's font setting |
 | D8 | Brand panel and illustration | The community-site brand panel (`community_brand.rs`, the public profile in the site's own visual language) and the map's fixed illustration colours (rocket flame, smoke, the white cores of transfer orbs) stay as they are in Omarchy mode | Recolour them too |
@@ -81,8 +83,12 @@ Assumed, to be checked on the VM:
 
 ## Resolution
 
-Candidates for the theme directory, first with a readable `colors.toml`
-wins:
+Candidates for the theme directory, in order. The first that exists (its
+`current/` directory is there) is the one read, valid or not: a broken
+palette there leaves the last valid one showing, and a stale pre-4.x
+directory behind it is never read instead. `current/` survives a theme
+switch's `rm`/`mv` of the theme directory, so the gap of a switch is also
+a failed read of the right candidate, not a fall-through.
 
 1. `$XDG_STATE_HOME/omarchy/current/theme`, when `XDG_STATE_HOME` is set and
    absolute (the excerpt's XDG convention);
@@ -124,12 +130,36 @@ without both the palette is invalid.
 | held (`tc_blue`, `tc_blue_text`, `tc_blue_icon`) | `blue` | accent | 3 / 4.5 |
 | `tc_on_status` | background | | 4.5 against each status fill |
 | text selection background (scoped rule only) | `selection` | mix(bg, accent, 25%) | ink 4.5 on it |
-| `tc_selected` (selected rows), `tc_scrim` | kept: the standard neutral translucent overlays | | every ink keeps its contrast through them |
+| `tc_selected` (selected rows), `tc_scrim` | kept: the standard neutral translucent overlays | | not held to a floor; see "Overlays" below |
 | selection text | `bright_foreground` | | 4.5 on selection |
 | redaction wash / ink | mix(bg, yellow, 25%) / ink | | 4.5 |
-| gold highlight (preview excerpt) | yellow at 30% alpha | | |
+| gold highlight (preview excerpt) | `yellow` at 30% alpha, unmoved; the hit's ink is solved on it | accent | hit ink 4.5 on the wash over every ground, bare and under each overlay; wash 1.1 against its ground |
 
 "Every ground" is bg, surface, inset, scene and the two hover tiers.
+
+**Overlays.** The kept overlays are not contrast-neutral. Measured over
+every ground of each fixture, where an ink falls below 4.5: under
+`tc_selected` the body ink drops to 4.34:1 on Tokyo Night, and the body
+and strong ink to 4.03:1 on Gruvbox (above 4.5 on the other four), and the secondary
+inks (muted, tertiary, the text-safe accent, status and held hues) to
+3.28-4.18:1; under `tc_scrim` the body and strong ink drop to 4.27:1 on
+Gruvbox and the secondary inks to 3.50-4.27:1. On the bare grounds every
+one of them clears 4.5. Only the search highlight is checked through the
+overlays today, because it is drawn inside a `.tc-code` recess
+(`tc_scrim`); the unhighlighted excerpt text in that recess is the body
+ink above, a known follow-up.
+
+**Search highlight.** The wash is the theme's yellow at 30%, unmoved, so
+the hit stays marked; the hit's own text colour is what is solved, as the
+redaction ink is: the ink, stepped toward black or white until it clears
+4.5:1 on the wash over every ground, bare and under each overlay. The
+markup sets that `foreground` only in the skin; the standard markup is
+unchanged. A first attempt moved the wash instead and darkened Tokyo
+Night's to a brown that stood 1.01-1.14:1 off its ground, so the hit no
+longer showed; the wash is now held to 1.1:1 against its ground (the
+fixtures' own yellows clear it, Rose Pine's scene under `tc_selected` at
+1.12:1). Only where no ink can clear every wash (a palette with no yellow
+whose fallback hue sits mid-way) does the wash colour move instead.
 
 **Contrast derivation.** WCAG 2.1 relative luminance. A colour that misses
 its floor is moved toward black and toward white in 2% steps; the smaller
@@ -149,7 +179,11 @@ ground but not the hovered control (4.1:1) and is lifted a few steps; Rose
 Pine's accent is darkened for text on its light ground.
 
 **Mode.** `mode`, else `theme_type`, else a `light.mode` file, else the
-luminance rule, as upstream. While Omarchy mode is on, libadwaita's
+luminance rule, as upstream (`resolve_theme_mode` in
+`bin/omarchy-theme-color`): a non-empty `mode` or `theme_type` value is kept
+and stops the search, and only `light` is light, as upstream's GNOME hook
+reads it, so an unknown value (or a non-string one) is dark. An empty
+string counts as absent. While Omarchy mode is on, libadwaita's
 `StyleManager` is forced to that scheme (so stock widgets follow), and the
 stylesheet's structure is chosen by it (the dark or light token block).
 Switching back to Standard restores `ColorScheme::Default`, or the
@@ -195,8 +229,9 @@ the skin off and on again with an unchanged theme loads it again.
 
 ## Live reload
 
-A `gio::FileMonitor` on each candidate's `current/` directory (or its
-nearest existing ancestor, so a later Omarchy install is noticed) and one on
+A `gio::FileMonitor` on each candidate's `current/` directory (or, while
+that is missing, its `omarchy/` directory, and never higher, so a desktop
+without Omarchy watches neither `~/.config` nor `~/.local/state`) and one on
 each candidate theme directory that exists, so an edit in place is noticed
 whether or not the last read succeeded. Watching only the palette that read
 cleanly missed a broken or deleted `colors.toml` fixed without a theme
@@ -234,16 +269,17 @@ Ordered from narrowest:
    daemon, which the excerpt rules out ("keep theme logic in the Linux
    shell").
 
-This PR does none of them.
+This PR does none of them. Decided 2026-11-17 (D4): no palette access for
+now; options 1 and 2 remain later possibilities.
 
-## Words (DRAFT, NEEDS APPROVAL)
+## Words (approved by the owner, 2026-11-17)
 
 In `trace_commons_contributor::appearance_copy`:
 
 - `APPEARANCE_HEADING`: "Appearance"
 - `APPEARANCE_STANDARD`: "Standard"
 - `APPEARANCE_OMARCHY`: "Omarchy"
-- `APPEARANCE_OMARCHY_UNAVAILABLE`: "No Omarchy theme found. Using the standard appearance."
+- `APPEARANCE_OMARCHY_UNAVAILABLE`: "No usable Omarchy theme found. Using the standard appearance." (shown for a missing theme and for a malformed one)
 
 ## Where it lives
 
