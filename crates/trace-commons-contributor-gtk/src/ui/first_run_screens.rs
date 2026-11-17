@@ -197,6 +197,16 @@ fn route_diagram(names: &[&'static str], destination: &str) -> gtk::Box {
     row
 }
 
+/// The first run's one column: every step at the same width, at most the
+/// Mac frame's 560 points (`FirstRunFrame`), centred in a wider window.
+pub(super) fn column(child: &impl IsA<gtk::Widget>) -> adw::Clamp {
+    adw::Clamp::builder()
+        .maximum_size(560)
+        .tightening_threshold(560)
+        .child(child)
+        .build()
+}
+
 /// The Uses flow: this machine, a dashed line through the review gate to
 /// the commons. The gate reads the core's "You review" on Ask and the mode
 /// table's Automatic on Automatic. The Mac's caption under this machine is

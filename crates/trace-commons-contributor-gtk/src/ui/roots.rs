@@ -180,15 +180,16 @@ fn present_mode<F>(
     let tools_page = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&built.root)
+        .child(&super::first_run_screens::column(&built.root))
         .build();
     if welcome {
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
         stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
+        // Back at the bar's left, as on the Mac (`FirstRunFrame.actionBar`).
         let back = gtk::Button::with_label(words.frame.back);
-        back.set_halign(gtk::Align::End);
-        back.set_margin_end(24);
+        back.set_halign(gtk::Align::Start);
+        back.set_margin_start(24);
         back.set_margin_bottom(16);
         back.set_visible(false);
         let intro = super::first_run_screens::welcome(
@@ -211,8 +212,8 @@ fn present_mode<F>(
             let stack = stack.clone();
             move || stack.set_visible_child_name("welcome")
         });
-        stack.add_named(&intro, Some("welcome"));
-        stack.add_named(&agent, Some("agent"));
+        stack.add_named(&super::first_run_screens::column(&intro), Some("welcome"));
+        stack.add_named(&super::first_run_screens::column(&agent), Some("agent"));
         stack.add_named(&tools_page, Some("tools"));
         back.connect_clicked({
             let stack = stack.clone();

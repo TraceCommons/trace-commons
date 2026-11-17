@@ -41,7 +41,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(application: &adw::Application) -> Self {
-        let dir = std::env::temp_dir().join(format!("tc-settings-sign-in-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("tc-settings-sign-in-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let (worker, jobs, results) = Worker::fixture(dir.clone());
         Self {

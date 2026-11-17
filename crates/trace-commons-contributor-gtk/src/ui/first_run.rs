@@ -228,21 +228,24 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("tc-root");
     content.append(&adw::HeaderBar::builder().title_widget(&heading).build());
+    // Every step the same width, as the Mac's frame holds its content to
+    // one column (`FirstRunFrame`).
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
-        .child(&stack)
+        .child(&super::first_run_screens::column(&stack))
         .build();
     content.append(&scroll);
+    // Back at the bar's left, as on the Mac (`FirstRunFrame.actionBar`).
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 16);
     footer.set_margin_start(24);
     footer.set_margin_end(24);
     footer.set_margin_top(12);
     footer.set_margin_bottom(16);
     error.set_hexpand(true);
-    back.set_halign(gtk::Align::End);
-    footer.append(&error);
+    back.set_halign(gtk::Align::Start);
     footer.append(&back);
+    footer.append(&error);
     content.append(&footer);
     window.set_content(Some(&content));
     window.connect_close_request({
