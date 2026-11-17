@@ -634,6 +634,14 @@ window.tc-glass-window {
   background-color: @tc_bg;
 }
 
+/* In a glass pane the screens' ground is the pane's fill
+   (`.tc-glass-pane .tc-root` is transparent), and the stack takes it too:
+   the shell's ground drew a warm band in light and an olive one in dark
+   across the cool pane. */
+.tc-glass-pane .tc-notice-backdrop {
+  background-color: @tc_glass_pane;
+}
+
 /* A card behind the front one, peeking out under it
    (`GlassPopoverStack`'s plates). */
 .tc-notice-plate {

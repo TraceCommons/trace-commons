@@ -2465,4 +2465,32 @@ mod tests {
             "every card nested in a closable notice gets the X's room"
         );
     }
+
+    /// In the glass window the screens' `.tc-root` is transparent and the
+    /// ground under the tab is the pane's own fill (`@tc_glass_pane`), not
+    /// the shell's `@tc_bg`: with `@tc_bg` the stack was a warm band over
+    /// the cool pane in light (#F6F7F4 on #f2f3f6) and an olive one over
+    /// navy in dark (#23251D on #0d1124), on the Ubuntu 24.04 and 26.04
+    /// captures. The stack in a glass pane takes the pane's fill.
+    #[test]
+    fn the_notice_stacks_ground_in_the_glass_pane_is_the_panes_fill() {
+        let css = include_str!("../style.css");
+        let rule = |sheet: &str, selector: &str| {
+            sheet
+                .split(&format!("{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        for sheet in [brand_tokens::GLASS_LIGHT_CSS, brand_tokens::GLASS_DARK_CSS] {
+            assert!(rule(sheet, ".tc-glass-pane").contains("background-color: @tc_glass_pane;"));
+        }
+        assert!(rule(css, ".tc-glass-pane .tc-root").contains("background-color: transparent;"));
+        assert!(
+            rule(css, &format!(".tc-glass-pane .{NOTICE_BACKDROP_CLASS}"))
+                .contains("background-color: @tc_glass_pane;"),
+            "the stack's ground in a glass pane is not the pane's fill"
+        );
+    }
 }
