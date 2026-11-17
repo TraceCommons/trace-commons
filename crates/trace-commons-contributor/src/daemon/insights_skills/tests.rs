@@ -823,24 +823,29 @@ fn initial_catalog_is_a_baseline_and_later_new_skills_are_added() {
 }
 
 #[test]
-fn background_refresh_requires_follow_but_opening_tab_can_fetch() {
+fn background_defaults_and_opening_tab_share_refresh_throttles() {
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
     set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = true;
     maybe_refresh_public(&shared);
+    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
+    assert!(attempt.is_some());
     assert!(
         shared
             .insights_skills
             .runtime
             .lock()
             .unwrap()
-            .last_attempt
-            .is_none()
+            .public
+            .followed
+            .is_empty()
     );
     shared.insights_skills.start_refresh(&shared, false);
-    let attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
-    assert!(attempt.is_some());
+    assert_eq!(
+        shared.insights_skills.runtime.lock().unwrap().last_attempt,
+        attempt
+    );
     shared.insights_skills.start_refresh(&shared, true);
     assert_eq!(
         shared.insights_skills.runtime.lock().unwrap().last_attempt,
@@ -1652,5 +1657,346 @@ async fn the_server_catalog_replaces_github_only_when_enabled_pinned_and_valid()
     assert_eq!(
         choice(stale.path(), true, &pinned, Err(())).await,
         (true, true, None, 1)
+    );
+}
+
+#[test]
+fn home_defaults_show_real_changes_without_following_creators() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    let at = Utc::now();
+    for publisher in publishers()
+        .iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+    {
+        let path = format!("{}/one/SKILL.md", publisher.skills_root);
+        let mut skill = catalog_skill(publisher.id, &path, "a");
+        skill.repository = publisher.repository.into();
+        skill.source_url = source_url(publisher, &skill.revision, &path);
+        skill.instructions_url = publisher.instructions_url.into();
+        state.accept(publisher.id, vec![skill.clone()], at);
+        skill.sha256 = "b".repeat(64);
+        state.accept(publisher.id, vec![skill], at + chrono::Duration::seconds(1));
+    }
+    validate_state(&state).unwrap();
+    persist(store.dir(), &state).unwrap();
+    let before = std::fs::read(store.dir().join(STATE_FILE)).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let value = snapshot(&shared);
+    assert_eq!(
+        value["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(value["followed_publishers"], json!([]));
+    assert_eq!(value["feed"], json!([]), "Following remains explicit");
+    assert_eq!(value["home_feed"].as_array().unwrap().len(), 3);
+    assert!(
+        value["home_feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "updated")
+    );
+    assert_eq!(
+        std::fs::read(shared.store.dir().join(STATE_FILE)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn home_defaults_do_not_invent_first_visit_updates_and_remain_after_following() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    let at = Utc::now();
+    state.accept(
+        "obra",
+        vec![catalog_skill("obra", "skills/one/SKILL.md", "a")],
+        at,
+    );
+    persist(store.dir(), &state).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let first = snapshot(&shared);
+    assert_eq!(
+        first["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(first["home_feed"], json!([]));
+    {
+        let mut runtime = shared.insights_skills.state(shared.store.dir()).unwrap();
+        runtime.public.follow("obra", true).unwrap();
+        runtime.public.accept(
+            "obra",
+            vec![catalog_skill("obra", "skills/one/SKILL.md", "b")],
+            at + chrono::Duration::seconds(1),
+        );
+    }
+    let chosen = snapshot(&shared);
+    assert_eq!(chosen["followed_publishers"], json!(["obra"]));
+    assert_eq!(
+        chosen["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(chosen["home_feed"], json!([]));
+    assert_eq!(chosen["feed"].as_array().unwrap().len(), 1);
+    set_skills_flag(&shared, 2, false);
+    assert!(snapshot(&shared).get("home_feed").is_none());
+    assert!(snapshot(&shared).get("default_publishers").is_none());
+}
+
+#[tokio::test]
+async fn home_defaults_refresh_public_sources_without_explicit_follows() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = false;
+    maybe_refresh_public(&shared);
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .last_attempt
+            .is_none()
+    );
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    maybe_refresh_public(&shared);
+    let runtime = shared.insights_skills.runtime.lock().unwrap();
+    assert!(runtime.public.followed.is_empty());
+    assert!(runtime.last_attempt.is_some());
+}
+
+#[test]
+fn home_defaults_keep_each_creator_when_the_catalog_is_bounded() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    for publisher in publishers()
+        .iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+    {
+        let count = if publisher.id == "obra" { 16 } else { 1 };
+        let skills = (0..count)
+            .map(|index| {
+                let path = format!("{}/example-{index:02}/SKILL.md", publisher.skills_root);
+                let mut skill = catalog_skill(publisher.id, &path, "a");
+                skill.repository = publisher.repository.into();
+                skill.source_url = source_url(publisher, &skill.revision, &path);
+                skill.instructions_url = publisher.instructions_url.into();
+                skill.description = "x".repeat(16 * 1024);
+                skill
+            })
+            .collect();
+        state.accept(publisher.id, skills, Utc::now());
+    }
+    validate_state(&state).unwrap();
+    persist(store.dir(), &state).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    let value = snapshot(&shared);
+    let rows = value["catalog"]["skills"].as_array().unwrap();
+    for publisher in DEFAULT_HOME_PUBLISHERS {
+        assert!(
+            rows.iter().any(|row| row["publisher_id"] == publisher),
+            "missing default creator {publisher}"
+        );
+    }
+    assert_eq!(value["catalog"]["partial"], true);
+    assert!(serde_json::to_vec(rows).unwrap().len() <= 180 * 1024);
+    assert_eq!(value["followed_publishers"], json!([]));
+    assert_eq!(value["home_feed"], json!([]));
+}
+
+fn home_news_item(publisher: &str, index: usize, at: DateTime<Utc>, padded: bool) -> FeedItem {
+    FeedItem {
+        id: format!(
+            "{publisher}:{index:03}:{}",
+            if padded {
+                "\t".repeat(400)
+            } else {
+                String::new()
+            }
+        ),
+        publisher_id: publisher.into(),
+        skill_id: format!("{publisher}:skills/example-{index:03}/SKILL.md"),
+        kind: "updated".into(),
+        observed_at: at,
+    }
+}
+
+fn home_news_snapshot(feed: Vec<FeedItem>, followed: &[&str]) -> Value {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    {
+        let mut runtime = shared.insights_skills.state(shared.store.dir()).unwrap();
+        runtime.public.feed = feed;
+        runtime.public.followed = followed.iter().map(|id| (*id).to_owned()).collect();
+    }
+    snapshot(&shared)
+}
+
+#[test]
+fn home_news_mixes_defaults_with_follows_without_duplicates_or_implicit_follows() {
+    let at = Utc::now();
+    let mut items: Vec<_> = ["obra", "poteto", "slack", "rex"]
+        .into_iter()
+        .map(|publisher| home_news_item(publisher, 0, at, false))
+        .collect();
+    items.push(items[0].clone());
+    let value = home_news_snapshot(items, &["obra"]);
+    assert_eq!(
+        value["default_publishers"],
+        json!(["obra", "poteto", "slack"])
+    );
+    assert_eq!(value["followed_publishers"], json!(["obra"]));
+    let following = value["feed"].as_array().unwrap();
+    let discovery = value["home_feed"].as_array().unwrap();
+    assert_eq!(following.len(), 1);
+    assert_eq!(following[0]["publisher_id"], "obra");
+    assert_eq!(
+        discovery
+            .iter()
+            .map(|row| row["publisher_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["poteto", "slack"]
+    );
+    let ids: BTreeSet<_> = following
+        .iter()
+        .chain(discovery)
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), following.len() + discovery.len());
+    assert_eq!(value["feed_partial"], false);
+    assert_eq!(value["home_feed_partial"], false);
+}
+
+#[test]
+fn home_news_shares_one_encoded_budget_and_gives_every_publisher_an_opportunity() {
+    let at = Utc::now();
+    let mut items = Vec::new();
+    for publisher in ["obra", "poteto", "slack"] {
+        for index in 0..80 {
+            items.push(home_news_item(
+                publisher,
+                index,
+                at + chrono::Duration::seconds(index as i64),
+                true,
+            ));
+        }
+    }
+    let value = home_news_snapshot(items, &["obra"]);
+    let following = value["feed"].as_array().unwrap();
+    let discovery = value["home_feed"].as_array().unwrap();
+    assert!(!following.is_empty());
+    assert!(!discovery.is_empty());
+    assert!(
+        serde_json::to_vec(following).unwrap().len() + serde_json::to_vec(discovery).unwrap().len()
+            <= 48 * 1024
+    );
+    for publisher in ["obra", "poteto", "slack"] {
+        assert!(
+            following
+                .iter()
+                .chain(discovery)
+                .any(|row| row["publisher_id"] == publisher),
+            "missing creator {publisher}"
+        );
+    }
+    let counts: Vec<_> = ["obra", "poteto", "slack"]
+        .into_iter()
+        .map(|publisher| {
+            following
+                .iter()
+                .chain(discovery)
+                .filter(|row| row["publisher_id"] == publisher)
+                .count()
+        })
+        .collect();
+    assert!(
+        counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1,
+        "a burst must not consume another creator's turns: {counts:?}"
+    );
+    assert!(
+        following[0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("obra:079:")
+    );
+    assert!(
+        discovery[0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("poteto:079:")
+    );
+    assert_eq!(value["feed_partial"], true);
+    assert_eq!(value["home_feed_partial"], true);
+}
+
+#[test]
+fn home_news_partial_flags_describe_only_the_partition_that_was_cut() {
+    let at = Utc::now();
+    for followed_is_large in [false, true] {
+        let mut items = vec![home_news_item(
+            if followed_is_large { "poteto" } else { "obra" },
+            0,
+            at,
+            false,
+        )];
+        items.extend((0..100).map(|index| {
+            home_news_item(
+                if followed_is_large { "obra" } else { "poteto" },
+                index,
+                at,
+                true,
+            )
+        }));
+        let value = home_news_snapshot(items, &["obra"]);
+        assert_eq!(value["feed_partial"], followed_is_large);
+        assert_eq!(value["home_feed_partial"], !followed_is_large);
+        assert!(!value["feed"].as_array().unwrap().is_empty());
+        assert!(!value["home_feed"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn home_news_returns_each_partition_newest_first_with_stable_id_ties() {
+    let at = Utc::now();
+    let old = at - chrono::Duration::days(1);
+    let mut items = vec![
+        home_news_item("poteto", 2, old, false),
+        home_news_item("obra", 2, old, false),
+        home_news_item("slack", 0, at, false),
+        home_news_item("poteto", 1, at, false),
+        home_news_item("obra", 1, at, false),
+        home_news_item("obra", 0, at, false),
+    ];
+    let first = home_news_snapshot(items.clone(), &["obra"]);
+    items.reverse();
+    let second = home_news_snapshot(items, &["obra"]);
+    for key in ["feed", "home_feed"] {
+        assert_eq!(
+            first[key], second[key],
+            "input order must not select a different feed"
+        );
+    }
+    assert_eq!(
+        first["feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["obra:000:", "obra:001:", "obra:002:"]
+    );
+    assert_eq!(
+        first["home_feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["poteto:001:", "slack:000:", "poteto:002:"]
     );
 }

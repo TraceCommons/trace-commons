@@ -716,6 +716,26 @@ An earlier version let these fall through a catch-all arm and vanish without
 appearing in the dropped report at all, which made this document's own promise
 false for exactly the case where it mattered most.
 
+### Model image inputs
+
+Image support is read from the selected model's explicit provider catalogue
+modalities. The backend's generic Chat profile stays text-only; missing,
+malformed or conflicting declarations never grant image input. A successful
+refresh with no usable declaration revokes earlier image support. Pins, sticky
+sessions and model changes are checked against the model actually served, even
+when continuing a translated tool loop.
+
+Inline image encodings are transport bytes, not text tokens. Text-context and
+cached-text estimates exclude only those encodings in typed protocol content;
+ordinary text, tool arguments, output reserves and body-size limits remain.
+The provider enforces the model-specific visual token budget.
+
+Images inside tool outputs are preserved whole on their native wire. The
+current text-only tool-result IR cannot express them on another wire, so those
+translations are refused rather than flattened into text or moved into a user
+message. Direct image attachments remain representable and preserve their
+source through supported translations.
+
 ### Admission metadata compatibility
 
 An explicitly registered session requires its registered backend and an OpenAI

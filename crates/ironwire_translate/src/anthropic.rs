@@ -155,6 +155,24 @@ fn parse_block(block: &Value) -> Block {
                 .to_string(),
             input: block.get("input").cloned().unwrap_or_else(|| json!({})),
         },
+        // The text-only ToolResult IR cannot carry an image. Keep the whole
+        // result so a native emit can replay it and a foreign emit refuses it.
+        Some("tool_result")
+            if block
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part.get("type").and_then(Value::as_str) == Some("image"))
+                }) =>
+        {
+            Block::Unknown {
+                origin: ME,
+                kind: "images in tool output".into(),
+                raw: block.clone(),
+            }
+        }
         Some("tool_result") => Block::ToolResult {
             id: tool_ids::decode(
                 block
@@ -759,5 +777,21 @@ mod tests {
         assert!(
             matches!(&ir.turns[0].blocks[0], Block::Unknown { kind, .. } if kind == "document")
         );
+    }
+    #[test]
+    fn image_tool_outputs_round_trip_but_refuse_a_foreign_wire() {
+        let output = json!({"type":"tool_result","tool_use_id":"toolu_pixel","is_error":false,
+            "content":[{"type":"text","text":"synthetic screenshot"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]});
+        let ir = parse_request(&json!({"messages":[{"role":"user","content":[output.clone()]}]}));
+        assert!(
+            matches!(&ir.turns[0].blocks[0], Block::Unknown { origin, kind, raw }
+            if *origin == ME && kind == "images in tool output" && raw == &output)
+        );
+        let (native, dropped) = emit_request(&ir, "fixture/vision");
+        assert_eq!(native["messages"][0]["content"][0], output);
+        assert!(dropped.unknown_blocks.is_empty());
+        let (_, dropped) = crate::chat::emit_request(&ir, "fixture/vision");
+        assert_eq!(dropped.unknown_blocks, ["images in tool output"]);
     }
 }

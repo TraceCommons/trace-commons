@@ -75,10 +75,9 @@ struct SkillsHomeMotion: Equatable {
     var grow: Animation? { reduce ? nil : .easeOut(duration: 0.5) }
 }
 
-/// Skills Home: one column of stories, newest first, under the period each
-/// falls in. The first story today is drawn tall under its cover; a usage
-/// change carries its fourteen days; several changes from one publisher are
-/// one card.
+/// Skills Home: a locally ranked column of useful stories. Individual cards
+/// retain their observed dates or comparison windows; creator introductions
+/// follow the stories rather than displacing them.
 struct InsightsSkillsHomeView: View {
     let feed: InsightsSkillsHome.Snapshot
     let model: InsightsSkillsModel
@@ -99,10 +98,10 @@ struct InsightsSkillsHomeView: View {
     private var moves: SkillsHomeMotion { motion ?? SkillsHomeMotion(reduce: reduceMotion) }
 
     var body: some View {
-        let groups = feed.timeline(now: now, calendar: calendar)
-        let hero = InsightsSkillsHome.Snapshot.heroID(in: groups)
+        let stories = feed.rankedStories(now: now, calendar: calendar)
+        let hero = InsightsSkillsHome.Snapshot.rankedHeroID(in: stories)
         VStack(alignment: .leading, spacing: GlassTokens.Space.s10) {
-            if feed.isEmpty {
+            if stories.isEmpty && feed.defaultCreators.isEmpty {
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                     Text(model.text("skills_home_empty")).insightsNote()
                     HStack {
@@ -113,16 +112,20 @@ struct InsightsSkillsHomeView: View {
                     }
                 }.insightsCard()
             }
-            ForEach(groups) { group in
+            ForEach(stories) { story in
+                SkillsHomeCard(motion: moves) { card(story, hero: story.id == hero) }
+            }
+            if !feed.defaultCreators.isEmpty {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    Text(model.text(group.period.copyKey)).insightsCaption()
+                    Text(model.text("skills_home_creators")).insightsCaption()
                         .padding(.leading, GlassTokens.Space.cardPaddingHorizontal)
                         .accessibilityAddTraits(.isHeader)
-                    ForEach(group.stories) { story in
-                        SkillsHomeCard(motion: moves) { card(story, hero: story.id == hero) }
+                    ForEach(feed.defaultCreators) { creator in
+                        SkillsHomeCard(motion: moves) { defaultCreator(creator) }
                     }
                 }
             }
+
         }
         .frame(maxWidth: Self.columnMaximum, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .center)
@@ -256,6 +259,26 @@ struct InsightsSkillsHomeView: View {
                 .help(skill.name)
             }
         }
+    }
+
+    // MARK: Default creators
+
+    private func defaultCreator(_ creator: InsightsSkillsHome.DefaultCreator) -> some View {
+        let publisher = creator.publisher
+        return HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            SkillCover(spec: .init(skillID: "", publisherID: publisher.id), initials: SkillCoverArt.initials(publisher.name))
+                .frame(width: markSize, height: markSize)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                    Text(publisher.name).insightsHeading().lineLimit(1)
+                    Spacer(minLength: 0)
+                    SkillsCreatorFollowButton(publisher: publisher, model: model)
+                }
+                Text(publisher.repository).insightsCaption().lineLimit(1).truncationMode(.middle)
+                coverStrip(creator.skills, publisher: publisher.name)
+            }
+        }
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: Publishers with recent public activity
