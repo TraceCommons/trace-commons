@@ -225,6 +225,11 @@ impl Tools {
         roots.retain(|_, a| *a != ToolAnswer::Undecided);
         roots
     }
+    /// Tools' Continue: something watched, no tool in two rows, and a
+    /// declaration the daemon would take.
+    pub fn can_continue(&self) -> bool {
+        self.watches_anything() && self.watched_twice().is_empty() && self.session_roots().is_some()
+    }
     pub fn watches_anything(&self) -> bool {
         self.declarations()
             .values()

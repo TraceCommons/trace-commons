@@ -60,6 +60,33 @@ pub fn can_start(state: &State, required_known: bool, committing: bool) -> bool 
     ready.can_continue(required_known)
 }
 
+/// How the near.ai browser login stands (`NearAILoginPoll.verdict`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginPoll {
+    SignedIn,
+    Waiting,
+    /// Ended by the person: not a failure, nothing said.
+    Cancelled,
+    Ended,
+}
+
+/// A `near_ai_credential_status` answer as a verdict.
+pub fn login_verdict(status: &serde_json::Value) -> LoginPoll {
+    if status["session_state"].as_str()
+        == Some(trace_commons_contributor::daemon::nearai_credential::LABEL_CREDENTIAL_PRESENT)
+    {
+        return LoginPoll::SignedIn;
+    }
+    match status["attempt_status"].as_str() {
+        None | Some("waiting_for_browser") => LoginPoll::Waiting,
+        Some("cancelled") => LoginPoll::Cancelled,
+        Some(_) => LoginPoll::Ended,
+    }
+}
+
+/// How long the first run waits on the browser (`NearAILoginPoll.limit`).
+pub const LOGIN_LIMIT_SECS: u64 = 600;
+
 #[cfg(test)]
 mod tests {
     use super::*;

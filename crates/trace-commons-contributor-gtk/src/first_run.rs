@@ -118,6 +118,8 @@ impl Action {
             Self::SetSourceSettings(roots) => ("set_settings", json!(roots)),
             Self::LookupInvite(invite) => ("invite_lookup", json!({"code":invite})),
             Self::Enroll(invite) => ("enroll", json!({"invite":invite})),
+            Self::SignInNearAi => ("account_sign_in", json!({})),
+            Self::EnrollNearAi => ("near_ai_account_enroll", json!({})),
             Self::SetAskEachTime => (
                 "withdraw_automatic_grant",
                 json!({"return_folders_to_ask":true}),
@@ -224,6 +226,11 @@ pub fn acknowledged(action: &Action, value: &Value) -> bool {
         Action::MarkComplete | Action::MarkWatchOnlyComplete => {
             value.get("complete").and_then(Value::as_bool) == Some(true)
         }
+        Action::LookupInvite(_) => value.get("valid").and_then(Value::as_bool) == Some(true),
+        Action::Enroll(_) | Action::EnrollNearAi => {
+            value.get("enrolled").and_then(Value::as_bool) == Some(true)
+        }
+        Action::SignInNearAi => value.get("signed_in").and_then(Value::as_bool) == Some(true),
         _ => false,
     }
 }
@@ -271,11 +278,7 @@ impl State {
     pub fn can_continue(&self, required_scope_known: bool) -> bool {
         match self.step {
             Step::Welcome | Step::PrivateAi | Step::Traces | Step::Terms => true,
-            Step::Tools => {
-                self.tools.watches_anything()
-                    && self.tools.watched_twice().is_empty()
-                    && self.tools.session_roots().is_some()
-            }
+            Step::Tools => self.tools.can_continue(),
             Step::Uses => required_scope_known,
             Step::Join => {
                 required_scope_known
@@ -743,6 +746,102 @@ mod tests {
             fresh.plan(Commit::Roots).as_slice(),
             [Action::StartDaemon(_)]
         ));
+    }
+
+    #[test]
+    fn sign_in_actions_have_a_wire_and_a_real_acknowledgement() {
+        assert_eq!(
+            Action::SignInNearAi.ipc(),
+            Some(("account_sign_in", json!({})))
+        );
+        assert_eq!(
+            Action::EnrollNearAi.ipc(),
+            Some(("near_ai_account_enroll", json!({})))
+        );
+        let lookup = Action::LookupInvite("i".into());
+        assert!(acknowledged(&lookup, &json!({"valid":true})));
+        assert!(!acknowledged(
+            &lookup,
+            &json!({"valid":false,"reason_label":"expired"})
+        ));
+        assert!(!acknowledged(&lookup, &json!({"ok":true})));
+        let enroll = Action::Enroll("i".into());
+        assert!(acknowledged(
+            &enroll,
+            &json!({"enrolled":true,"tenant_id":"t"})
+        ));
+        assert!(!acknowledged(&enroll, &json!({"enrolled":false})));
+        assert!(acknowledged(
+            &Action::SignInNearAi,
+            &json!({"signed_in":true})
+        ));
+        assert!(!acknowledged(
+            &Action::SignInNearAi,
+            &json!({"signed_in":null})
+        ));
+        assert!(acknowledged(
+            &Action::EnrollNearAi,
+            &json!({"enrolled":true})
+        ));
+        assert!(!acknowledged(
+            &Action::EnrollNearAi,
+            &json!({"enrolled":"true"})
+        ));
+        // The browser login has its own adapter; no JSON acknowledges it.
+        assert_eq!(Action::NearAiLogin.ipc(), None);
+        assert!(!acknowledged(&Action::NearAiLogin, &json!({"ok":true})));
+    }
+
+    #[test]
+    fn the_login_poll_reads_the_session_then_the_attempt() {
+        use join::{LoginPoll, login_verdict};
+        assert_eq!(
+            login_verdict(&json!({"session_state":"present"})),
+            LoginPoll::SignedIn
+        );
+        assert_eq!(
+            login_verdict(
+                &json!({"session_state":"absent","attempt_status":"waiting_for_browser"})
+            ),
+            LoginPoll::Waiting
+        );
+        assert_eq!(
+            login_verdict(&json!({"session_state":"absent"})),
+            LoginPoll::Waiting
+        );
+        assert_eq!(
+            login_verdict(&json!({"attempt_status":"cancelled"})),
+            LoginPoll::Cancelled
+        );
+        assert_eq!(
+            login_verdict(&json!({"attempt_status":"failed"})),
+            LoginPoll::Ended
+        );
+    }
+
+    #[test]
+    fn a_dead_invite_returns_to_join_and_a_failed_login_clears_near_ai() {
+        let mut state = State {
+            account: Account::NearAi,
+            invite: "i".into(),
+            roots: ready().roots,
+            committed_roots: Some(ready().roots),
+            daemon_started: true,
+            step: Step::Join,
+            ..Default::default()
+        };
+        let mut runner = Runner::default();
+        let ticket = runner.begin(&state, Commit::SignIn).unwrap();
+        assert_eq!(ticket.action, Action::LookupInvite("i".into()));
+        runner.resolve(&ticket, &mut state, Outcome::Failure("dead".into()));
+        assert_eq!(state.step, Step::Join);
+        assert_eq!(state.account, Account::NearAi, "the near.ai choice stays");
+        state.invite.clear();
+        let ticket = runner.begin(&state, Commit::SignIn).unwrap();
+        assert_eq!(ticket.action, Action::NearAiLogin);
+        runner.resolve(&ticket, &mut state, Outcome::Failure("ended".into()));
+        assert_eq!(state.account, Account::None);
+        assert!(!state.signed_in);
     }
 
     #[test]
