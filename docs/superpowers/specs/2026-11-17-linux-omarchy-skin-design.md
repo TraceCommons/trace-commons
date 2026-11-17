@@ -164,7 +164,10 @@ colour definition and every literal colour in a rule rewritten from the
 resolved palette, by role name. A test pins that the Omarchy sheet defines
 exactly the same `@define-color` names as the standard one, and that no
 literal from the standard palette survives. Rules that only make sense in
-the skin (text selection colours) are scoped under `.tc-omarchy`, a class
+the skin (text selection colours, and `.dim-label` as the opaque tertiary
+ink, because libadwaita's 55% opacity on a theme's own foreground fell to
+2.5:1 on Rose Pine and Catppuccin Latte on the Omarchy box) are scoped under
+`.tc-omarchy`, a class
 the shell puts on every toplevel window while Omarchy mode is on (including
 windows opened later). With Standard chosen the stylesheet is byte-identical
 to today's, which a test pins.

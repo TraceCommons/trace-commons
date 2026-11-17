@@ -541,9 +541,11 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
     let skin = super::appearance::SKIN_CLASS;
     let scoped = format!(
         ".{skin} textview text selection, .{skin} label selection, \
-         .{skin} entry text selection {{ background-color: {}; color: {}; }}\n",
+         .{skin} entry text selection {{ background-color: {}; color: {}; }}\n\
+         .{skin} .dim-label {{ color: {}; opacity: 1; }}\n",
         palette.selection.hex(),
         palette.selection_ink.hex(),
+        palette.tertiary.hex(),
     );
     format!(
         "{}\n{}\n{}\n{}\n{}\n{scoped}",
@@ -1431,6 +1433,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}: no scoped selection rule"));
             assert!(scoped.contains(&p.selection.hex()), "{name}");
             assert!(scoped.contains(&p.selection_ink.hex()), "{name}");
+        }
+    }
+
+    /// libadwaita draws `.dim-label` as the text colour at 55% opacity. On a
+    /// theme's own foreground that fell to 2.5:1 on Rose Pine and Catppuccin
+    /// Latte (measured on the Omarchy box: the map legend). Under the skin a
+    /// dim label is the palette's tertiary ink, opaque, which clears 4.5:1 on
+    /// every ground.
+    #[test]
+    fn skin_dim_labels_are_the_opaque_tertiary_ink() {
+        for (name, p, css) in omarchy_sheets() {
+            let rule = css
+                .split('}')
+                .find(|rule| rule.contains(".tc-omarchy .dim-label"))
+                .unwrap_or_else(|| panic!("{name}: no scoped dim-label rule"));
+            assert!(rule.contains(&p.tertiary.hex()), "{name}: {rule}");
+            assert!(rule.contains("opacity: 1"), "{name}: {rule}");
         }
     }
 
