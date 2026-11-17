@@ -6,6 +6,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{Value, json};
 
+pub mod join;
+pub mod org;
+pub mod tools;
+pub mod uses;
+
 pub type Roots = BTreeMap<String, Value>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -228,6 +233,13 @@ pub struct State {
     pub step: Step,
     pub account: Account,
     pub sharing: Sharing,
+    /// The person picked a Sharing choice on Uses. Neither is chosen for
+    /// them (owner, 2026-10-27); unchosen, Start still sends Ask.
+    pub sharing_chosen: bool,
+    /// Tools' answers; `roots` is what they declare (`sync_roots`).
+    pub tools: tools::Tools,
+    /// The accepted terms were handed to the daemon (`take_terms_handoff`).
+    pub terms_handed_over: bool,
     /// Only validated explicit source declarations are placed here by Tools.
     pub roots: Roots,
     pub committed_roots: Option<Roots>,
@@ -250,6 +262,33 @@ pub struct State {
     pub completed: bool,
 }
 impl State {
+    /// Put what Tools declares in `roots`, which `Commit::Roots` sends.
+    pub fn sync_roots(&mut self) {
+        self.roots = self.tools.session_roots().unwrap_or_default();
+    }
+    /// Whether the current step's Continue (Start sharing, on Join) is
+    /// enabled (`FirstRunNavigation.canContinue`).
+    pub fn can_continue(&self, required_scope_known: bool) -> bool {
+        match self.step {
+            Step::Welcome | Step::PrivateAi | Step::Traces | Step::Terms => true,
+            Step::Tools => {
+                self.tools.watches_anything()
+                    && self.tools.watched_twice().is_empty()
+                    && self.tools.session_roots().is_some()
+            }
+            Step::Uses => required_scope_known,
+            Step::Join => {
+                required_scope_known
+                    && ((self.account == Account::WatchOnly && !self.daemon_holds_enrollment())
+                        || self.holds_enrollment())
+            }
+        }
+    }
+    /// Hand the accepted terms over once, at the first commit after they
+    /// were accepted; a refusal is logged, never retried here.
+    pub fn take_terms_handoff(&mut self) -> bool {
+        !std::mem::replace(&mut self.terms_handed_over, true)
+    }
     pub fn next(&mut self) {
         self.step = self.step.next();
     }
@@ -623,6 +662,97 @@ mod tests {
             ..Default::default()
         }
     }
+    fn discovered_tools() -> tools::Tools {
+        let mut t = tools::Tools::default();
+        // Discovery reports every known store, found or not.
+        t.record_discovery(vec![
+            tools::Found {
+                source: "claude-code".into(),
+                path: "/home/x/.claude/projects".into(),
+                exists: true,
+                session_count: 4,
+                total_bytes: None,
+            },
+            tools::Found {
+                source: "codex".into(),
+                path: "/home/x/.codex/sessions".into(),
+                exists: false,
+                session_count: 0,
+                total_bytes: None,
+            },
+        ]);
+        t
+    }
+
+    #[test]
+    fn continue_follows_the_mac_rules_per_step() {
+        let mut state = State::default();
+        for step in [Step::Welcome, Step::PrivateAi, Step::Traces, Step::Terms] {
+            state.step = step;
+            assert!(state.can_continue(false), "{step:?} is always enabled");
+        }
+        state.step = Step::Tools;
+        assert!(!state.can_continue(true), "discovery has not answered");
+        state.tools = discovered_tools();
+        assert!(!state.can_continue(true), "nothing watched");
+        let claude = state.tools.listed()[0].clone();
+        state.tools.set_watched(&claude, true);
+        assert!(state.can_continue(true));
+        state.tools.add(tools::AddedFolder::new(
+            tools::FolderKind::Source("claude-code".into()),
+            "/moved",
+        ));
+        state.tools.answer_added("/moved", Some(true));
+        assert!(!state.can_continue(true), "one folder per tool");
+        state.step = Step::Uses;
+        assert!(!state.can_continue(false), "required use not known");
+        assert!(state.can_continue(true));
+        state.step = Step::Join;
+        assert!(!state.can_continue(true), "no enrollment held");
+        state.account = Account::NearAi;
+        state.near_ai_enrolled = true;
+        assert!(state.can_continue(true));
+        assert!(!state.can_continue(false));
+    }
+
+    #[test]
+    fn tools_answers_become_the_roots_commit() {
+        let mut state = State {
+            daemon_started: true,
+            tools: discovered_tools(),
+            ..Default::default()
+        };
+        state.sync_roots();
+        let claude = state.tools.listed()[0].clone();
+        state.tools.set_watched(&claude, true);
+        state.sync_roots();
+        assert_eq!(
+            state.roots.get("claude_source"),
+            Some(&json!({"mode":"watch","path":"/home/x/.claude/projects"}))
+        );
+        assert!(matches!(
+            state.plan(Commit::Roots).as_slice(),
+            [Action::SetSourceSettings(changes)] if changes.contains_key("claude_source")
+        ));
+        let mut fresh = State {
+            tools: discovered_tools(),
+            ..Default::default()
+        };
+        fresh.sync_roots();
+        assert!(matches!(
+            fresh.plan(Commit::Roots).as_slice(),
+            [Action::StartDaemon(_)]
+        ));
+    }
+
+    #[test]
+    fn terms_are_handed_over_once() {
+        let mut state = State::default();
+        assert!(state.take_terms_handoff());
+        assert!(!state.take_terms_handoff());
+        assert!(!state.take_terms_handoff());
+    }
+
     #[test]
     fn successful_regrant_clears_prior_refusal() {
         let mut state = ready();
