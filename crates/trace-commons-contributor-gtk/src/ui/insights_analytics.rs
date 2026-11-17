@@ -1204,10 +1204,13 @@ impl AnalyticsTabs {
         for line in feed_lines(patterns.feed) {
             body.append(&small(&line));
         }
-        let cards = gtk::Box::new(gtk::Orientation::Horizontal, metrics::HEADING_GAP);
-        cards.set_homogeneous(true);
+        // Wraps as the pane narrows (the Monitor's main pane is 440).
+        let cards = summary_grid();
         for card in &patterns.cards {
-            cards.append(&self.pattern_card(card, patterns.long_context_threshold));
+            cards.insert(
+                &self.pattern_card(card, patterns.long_context_threshold),
+                -1,
+            );
         }
         body.append(&cards);
         if let Some(line) = claude_only_line(patterns) {
