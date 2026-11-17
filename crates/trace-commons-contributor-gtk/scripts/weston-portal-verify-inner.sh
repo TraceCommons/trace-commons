@@ -191,6 +191,7 @@ else
     ui::monitor::shell::tests::mounted_a_notice_never_covers_the_tabs_first_heading \
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
+    ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \

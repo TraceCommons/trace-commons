@@ -1853,4 +1853,32 @@ mod tests {
         );
         mounted.window.close();
     }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_hidden_graph_leaves_the_tab_the_whole_pane() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        // Off Traces the graph is hidden, and the tab's screen runs down to
+        // the pane's bottom edge: a hidden footer takes none of the height
+        // a screen could scroll in.
+        for tab in [Tab::Home, Tab::Inference, Tab::Insights] {
+            shell.pick_tab(tab);
+            pump_until(|| shell.graph.root.height() == 0);
+            assert!(!shell.graph.root.reveals_child(), "{tab:?}");
+            assert_eq!(shell.graph.root.height(), 0, "{tab:?}");
+            let scroller = shell.content_scroller();
+            let main = scroller
+                .parent()
+                .and_then(|over_content| over_content.parent())
+                .expect("the screens are in the main pane");
+            let bounds = scroller.compute_bounds(&main).expect("placed");
+            assert_eq!(
+                (bounds.y() + bounds.height()).round() as i32,
+                main.height(),
+                "{tab:?}: the screen stops short of the pane's bottom"
+            );
+        }
+        mounted.window.close();
+    }
 }
