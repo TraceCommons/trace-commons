@@ -241,8 +241,10 @@ impl Navigation {
         // Activating the already-selected section still returns to it after
         // manual scrolling; selection-changed alone would leave a dead row.
         list.connect_row_activated(move |_, row| navigate(row.index() as usize));
-        // GTK 4 / libadwaita 1.2 has no Breakpoint. Allocation is checked at
-        // frame time and only visibility changes; fields are never rebuilt.
+        // Written when the libadwaita floor was 1.2, which has no
+        // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
+        // been moved to one. Allocation is checked at frame time and only
+        // visibility changes; fields are never rebuilt.
         root.add_tick_callback({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();

@@ -62,7 +62,10 @@ trace-commons-mark = { path = "../trace-commons-mark" }
 
 # Keep these on the same gtk-rs generation: glib >=0.20 fixes
 # RUSTSEC-2024-0429 (VariantStrIter out-argument mutability).
-adw = { package = "libadwaita", version = "0.7", features = ["v1_2"] }
+# libadwaita 1.4 is the floor (owner, 2026-11-16, spec
+# 2026-11-16-linux-mac-window-and-map-design.md): it was 1.2, which predates
+# AdwBreakpoint. Ubuntu 24.04 ships 1.5 and Debian 13 ships 1.7.
+adw = { package = "libadwaita", version = "0.7", features = ["v1_4"] }
 gtk = { package = "gtk4", version = "0.9" }
 glib = "0.20"
 
