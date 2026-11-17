@@ -90,16 +90,92 @@ pub fn needs_mapping(path: &Path, daemon_on_host: bool) -> bool {
 /// trip, so callers run it off the GTK thread.
 pub fn host_path(path: &Path, daemon_on_host: bool) -> Result<PathBuf, Unmapped> {
     let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
-    host_path_with(path, daemon_on_host, root.as_deref(), |id| {
-        // Bounded, as `portal::spawn_request` bounds its call: a bus that
-        // never answers is a refusal, not a launch window that waits forever.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let id = id.to_string();
-        std::thread::spawn(move || {
-            let _ = tx.send(get_host_path(&id).ok().flatten());
-        });
-        rx.recv_timeout(PORTAL_TIMEOUT).ok().flatten()
-    })
+    host_path_with(path, daemon_on_host, root.as_deref(), portal_lookup)
+}
+
+/// The host folder the portal gives for document `id`, or `None`.
+fn portal_lookup(id: &str) -> Option<PathBuf> {
+    // Bounded, as `portal::spawn_request` bounds its call: a bus that
+    // never answers is a refusal, not a launch window that waits forever.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(get_host_path(&id).ok().flatten());
+    });
+    rx.recv_timeout(PORTAL_TIMEOUT).ok().flatten()
+}
+
+/// The folders a `set_settings` declaration (`{"<tool>_source": {"mode":
+/// "watch", "path": ...}}`) would watch, in order.
+pub fn watched_paths(params: &serde_json::Value) -> Vec<PathBuf> {
+    params
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.values())
+        .filter(|value| value["mode"] == "watch")
+        .filter_map(|value| value["path"].as_str().map(PathBuf::from))
+        .collect()
+}
+
+/// Whether any folder `params` declares lies in the portal's mount at
+/// `doc_root`, and so must be mapped before it goes to a daemon on the host.
+pub fn declarations_need_mapping_in(
+    params: &serde_json::Value,
+    daemon_on_host: bool,
+    doc_root: Option<&Path>,
+) -> bool {
+    let Some(root) = doc_root.filter(|_| daemon_on_host) else {
+        return false;
+    };
+    watched_paths(params)
+        .iter()
+        .any(|path| split_doc_path(path, root).is_some())
+}
+
+/// [`declarations_need_mapping_in`] for this process's portal mount.
+pub fn declarations_need_mapping(params: &serde_json::Value, daemon_on_host: bool) -> bool {
+    let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+    declarations_need_mapping_in(params, daemon_on_host, root.as_deref())
+}
+
+/// `params` as a daemon on the host must be sent it: each watched folder in
+/// the portal's mount at `doc_root` replaced by the host folder `lookup`
+/// gives for its document id. `None`, and nothing may be sent, when one
+/// cannot be mapped, its mapping is not UTF-8, or any folder left in the
+/// declaration is still in the portal's mount.
+pub fn host_declarations_with(
+    mut params: serde_json::Value,
+    doc_root: Option<&Path>,
+    mut lookup: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<serde_json::Value> {
+    for value in params.as_object_mut()?.values_mut() {
+        if value["mode"] != "watch" {
+            continue;
+        }
+        let path = PathBuf::from(value["path"].as_str()?);
+        let host = host_path_with(&path, true, doc_root, &mut lookup).ok()?;
+        value["path"] = serde_json::Value::from(host.to_str()?);
+    }
+    // Whatever the declaration still names must be outside the portal's
+    // mount: a mapping that lands back in it, or a folder in some other
+    // shape, is not sent.
+    let still_in_portal = |value: &serde_json::Value| {
+        value["path"]
+            .as_str()
+            .zip(doc_root)
+            .is_some_and(|(path, root)| split_doc_path(Path::new(path), root).is_some())
+    };
+    if params.as_object()?.values().any(still_in_portal) {
+        return None;
+    }
+    Some(params)
+}
+
+/// [`host_declarations_with`] against the real portal. Blocking: one bounded
+/// D-Bus round trip per folder, so callers run it off the GTK thread.
+pub fn host_declarations(params: serde_json::Value) -> Option<serde_json::Value> {
+    let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+    host_declarations_with(params, root.as_deref(), portal_lookup)
 }
 
 /// How long a `GetHostPaths` answer may take.
@@ -224,6 +300,95 @@ mod tests {
         assert_eq!(
             host_path_with(Path::new("/home/u/project"), true, None, never),
             Ok(PathBuf::from("/home/u/project"))
+        );
+    }
+
+    /// A folder picked or dropped in the sandbox outside the app's grants
+    /// is a document-portal path; the host daemon is sent the folder it
+    /// stands for, as Launch does, and an Off answer or an ordinary path is
+    /// sent as it is.
+    #[test]
+    fn a_portal_folder_declared_to_the_host_daemon_is_sent_as_its_host_path() {
+        use serde_json::json;
+        let root = Path::new("/run/user/1000/doc");
+        let params = json!({
+            "claude_source": {"mode": "watch", "path": "/run/user/1000/doc/a1b2/projects"},
+            "codex_source": {"mode": "off"},
+            "gemini_source": {"mode": "watch", "path": "/home/u/.gemini/tmp"},
+        });
+        assert_eq!(
+            watched_paths(&params),
+            vec![
+                PathBuf::from("/run/user/1000/doc/a1b2/projects"),
+                PathBuf::from("/home/u/.gemini/tmp")
+            ]
+        );
+        assert!(declarations_need_mapping_in(&params, true, Some(root)));
+        // A daemon in the sandbox opens the portal path itself.
+        assert!(!declarations_need_mapping_in(&params, false, Some(root)));
+        let mapped = host_declarations_with(params, Some(root), |id| {
+            assert_eq!(id, "a1b2");
+            Some(PathBuf::from("/home/u/.claude/projects"))
+        });
+        assert_eq!(
+            mapped,
+            Some(json!({
+                "claude_source": {"mode": "watch", "path": "/home/u/.claude/projects"},
+                "codex_source": {"mode": "off"},
+                "gemini_source": {"mode": "watch", "path": "/home/u/.gemini/tmp"},
+            }))
+        );
+    }
+
+    /// Ordinary folders need no portal call and are sent unchanged.
+    #[test]
+    fn ordinary_folders_need_no_mapping() {
+        use serde_json::json;
+        let root = Path::new("/run/user/1000/doc");
+        let params = json!({
+            "claude_source": {"mode": "watch", "path": "/home/u/.claude/projects"},
+            "codex_source": {"mode": "off"},
+        });
+        assert!(!declarations_need_mapping_in(&params, true, Some(root)));
+        assert_eq!(
+            host_declarations_with(params.clone(), Some(root), |_| panic!("no portal call")),
+            Some(params)
+        );
+    }
+
+    /// Nothing is sent when the portal cannot say where a folder is, names
+    /// one that is not UTF-8, or names one still inside its own mount: the
+    /// host daemon would otherwise watch the portal path as an empty mount,
+    /// or a mangled path.
+    #[test]
+    fn a_portal_folder_that_cannot_be_mapped_is_not_declared() {
+        use serde_json::json;
+        use std::os::unix::ffi::OsStrExt;
+        let root = Path::new("/run/user/1000/doc");
+        let params = json!({
+            "claude_source": {"mode": "watch", "path": "/run/user/1000/doc/a1b2/projects"},
+            "codex_source": {"mode": "off"},
+        });
+        assert_eq!(
+            host_declarations_with(params.clone(), Some(root), |_| None),
+            None
+        );
+        assert_eq!(
+            host_declarations_with(params.clone(), Some(root), |_| {
+                Some(PathBuf::from(OsStr::from_bytes(b"/home/u/\xff")))
+            }),
+            None
+        );
+        assert_eq!(
+            host_declarations_with(params, Some(root), |_| {
+                Some(PathBuf::from("/run/user/1000/doc/c3d4/projects"))
+            }),
+            None
+        );
+        // A declaration that is not an object is not sent either.
+        assert_eq!(
+            host_declarations_with(json!([]), Some(root), |_| None),
+            None
         );
     }
 }

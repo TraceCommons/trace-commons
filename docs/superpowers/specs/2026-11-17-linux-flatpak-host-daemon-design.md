@@ -258,12 +258,20 @@ while first run is open, whose own Tools step asks the same; sign-in and
 enrollment stay with their existing flows. No new words. The managed-session
 revision the window last drew is forgotten on every reopen and on
 `resync_required`: the sandbox's and the host's daemons count separately.
-A folder picked there in the Flatpak's chooser outside the app's grants is
-a document-portal path (`$XDG_RUNTIME_DIR/doc/<id>/<name>`); for the host
-daemon it is mapped to the host folder through the document portal's
-`GetHostPaths`, bounded and off the GTK thread, as Launch does. If it cannot
-be mapped, or the host path is not UTF-8, nothing is sent and the screen
-shows its existing "couldn't be saved" line.
+A folder picked in the Flatpak's chooser, or dropped, outside the app's
+grants is a document-portal path (`$XDG_RUNTIME_DIR/doc/<id>/<name>`). For
+the host daemon it is mapped to the host folder through the document
+portal's `GetHostPaths`, bounded and off the GTK thread, as Launch does. The
+mapping sits in the one path every folder declaration takes to a running
+daemon (`ui::roots::declare_to_daemon`): the folders screen above and the
+first run's Roots commit (`Commit::Roots`, `set_settings`), whichever way
+the folder came in. The daemon's answer is checked against what was sent.
+If a folder cannot be mapped, its host path is not UTF-8, or anything sent
+would still be in the portal's mount, nothing is sent and the screen shows
+its existing "couldn't be saved" line. The first run before any daemon runs
+writes the sandbox's own settings file, where the portal path is right; if
+that start then attaches to the host daemon instead, the first run opens at
+Tools rather than taking those answers as sent.
 
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the
@@ -308,9 +316,8 @@ Flatpak does not update it and cannot.
   before sending it to a host daemon, and refuses the launch with the
   existing "action failed" toast when it cannot (`document_portal.rs`). It
   checks the path being sent, so a typed portal path is mapped too. The
-  Insights evidence chooser (`ui/insights.rs`) is not mapped yet. The roots
-  chooser is reached only on the in-sandbox path, where the portal path is
-  the right one.
+  Insights evidence chooser (`ui/insights.rs`) is not mapped yet. Folder
+  declarations are mapped too (see "After switching over").
 - **Staging Flatpak.** The manifest is production-only; a staging Flatpak
   would need `xdg-run/trace-commons-staging:create`.
 

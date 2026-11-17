@@ -55,11 +55,48 @@ final class InsightsSkillsDefaultCreatorsTests: XCTestCase {
         XCTAssertTrue(snapshot.feed.isEmpty, "Following does not inherit default Home news")
     }
 
-    func testExplicitFollowsReplaceDefaultsAndKeepFollowingFeed() throws {
+    func testExplicitFollowsPersonalizeMixedHomeAndKeepFollowingFeed() throws {
         let snapshot = try snapshot(followed: ["obra"], homeFeed: [event("default")], feed: [event("followed")])
         XCTAssertEqual(project(snapshot).creators.map(\.id), ["followed"])
-        XCTAssertTrue(project(snapshot).defaultCreators.isEmpty)
+        XCTAssertEqual(project(snapshot).defaultCreators.map(\.id), ["obra"])
         XCTAssertEqual(snapshot.feed.map(\.id), ["followed"])
+    }
+
+    func testFollowingOneCreatorKeepsOtherDefaultNewsOnHome() throws {
+        // The follow can name another creator even when this fixture only has
+        // the curated creator's catalog. Home must still retain discovery.
+        let snapshot = try snapshot(followed: ["other"], homeFeed: [event()])
+        XCTAssertEqual(project(snapshot).creators.map(\.id), ["recorded"])
+        XCTAssertEqual(project(snapshot).defaultCreators.map(\.id), ["obra"])
+        XCTAssertTrue(snapshot.feed.isEmpty)
+    }
+
+    func testCreatorBurstDoesNotCrowdOutAnotherPublisherBeforeRanking() throws {
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(try snapshot(defaults: ["obra", "slack"]))) as? [String: Any])
+        var catalog = try XCTUnwrap(raw["catalog"] as? [String: Any])
+        var otherPublisher = try XCTUnwrap((catalog["publishers"] as? [[String: Any]])?.first)
+        otherPublisher["id"] = "slack"
+        var publishers = try XCTUnwrap(catalog["publishers"] as? [[String: Any]])
+        publishers.append(otherPublisher)
+        catalog["publishers"] = publishers
+        let seed = try XCTUnwrap((catalog["skills"] as? [[String: Any]])?.first)
+        var skills = (0..<20).map { index in
+            var row = seed
+            row["id"] = "burst-\(index)"
+            return row
+        }
+        var other = seed
+        other["id"] = "slack-skill"
+        other["publisher_id"] = "slack"
+        skills.append(other)
+        catalog["skills"] = skills
+        raw["catalog"] = catalog
+        let burst = (0..<20).map { event("burst-\($0)", skill: "burst-\($0)") }
+        raw["home_feed"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(burst + [event("slack-news", publisher: "slack", skill: "slack-skill")]))
+        let snapshot = try JSONDecoder().decode(DaemonData.SkillsSnapshot.self, from: JSONSerialization.data(withJSONObject: raw))
+        let candidates = project(snapshot).creators
+        XCTAssertTrue(candidates.contains { $0.publisher.id == "slack" })
+        XCTAssertLessThanOrEqual(candidates.filter { $0.publisher.id == "obra" }.count, 8)
     }
 
     func testMissingCatalogAndDisabledAnalysisDoNotInventDefaultContent() throws {
@@ -112,9 +149,9 @@ final class InsightsSkillsDefaultCreatorsTests: XCTestCase {
         }
     }
 
-    func testFollowActionReplacesDefaultsOnlyAfterConfirmedWrite() async throws {
+    func testFollowActionKeepsDiscoveryAfterConfirmedWrite() async throws {
         let initial = try snapshot()
-        let confirmed = try snapshot(defaults: [], followed: ["obra"], feed: [event()])
+        let confirmed = try snapshot(followed: ["obra"], feed: [event()])
         let calls = FollowCalls()
         let model = InsightsSkillsModel(reader: { _ in initial }, writer: { publisher, followed in
             await calls.record(publisher, followed)
@@ -127,7 +164,7 @@ final class InsightsSkillsDefaultCreatorsTests: XCTestCase {
         XCTAssertEqual(requests, ["obra:true"])
         let shown = try XCTUnwrap(model.shown)
         XCTAssertEqual(shown.followedPublishers, ["obra"])
-        XCTAssertTrue(project(shown).defaultCreators.isEmpty)
+        XCTAssertEqual(project(shown).defaultCreators.map(\.id), ["obra"])
         XCTAssertEqual(project(shown).creators.map(\.id), ["recorded"])
     }
 
@@ -162,8 +199,8 @@ final class InsightsSkillsDefaultCreatorsTests: XCTestCase {
         }
     }
 
-    /// Opt-in replay of a retained local snapshot after adding the new IPC
-    /// fields from its existing public catalog cache. No network or app writes.
+    /// Opt-in replay of current retained data. Coverage varies by agent and
+    /// date; ordinary fixtures separately prove incomplete windows fail closed.
     func testRetainedSnapshotProjection() throws {
         guard let path = ProcessInfo.processInfo.environment["TC_SKILLS_DEFAULT_REPLAY"] else {
             throw XCTSkip("Set TC_SKILLS_DEFAULT_REPLAY to replay the retained local snapshot")
@@ -178,8 +215,11 @@ final class InsightsSkillsDefaultCreatorsTests: XCTestCase {
         XCTAssertTrue(snapshot.feed.isEmpty)
         let recorded = Set(snapshot.homeFeed.map(\.id))
         XCTAssertTrue(home.creators.allSatisfy { recorded.contains($0.id) })
-        XCTAssertTrue(home.week.isEmpty, "Existing partial usage gates remain in effect")
-        XCTAssertTrue(home.trends.isEmpty)
+        XCTAssertTrue(home.week.allSatisfy { $0.uses > 0 })
+        let stories = home.rankedStories()
+        XCTAssertLessThanOrEqual(stories.count, 12)
+        XCTAssertEqual(Set(stories.map(\.id)).count, stories.count)
+        print("Ranked retained Home: " + stories.map(\.id).joined(separator: ", "))
         print("Retained Home replay: \(home.defaultCreators.count) creators, \(home.defaultCreators.flatMap(\.skills).count) catalog examples, \(home.creators.count) real changes; explicit follows remain empty")
     }
 }

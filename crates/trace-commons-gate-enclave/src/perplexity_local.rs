@@ -193,13 +193,30 @@ mod local_impl {
     use crate::perplexity::{PerplexityResult, PerplexityScorer};
     use anyhow::Context;
     use mistralrs::{
-        Constraint, MistralRs, Model, ModelBuilder, NormalRequest, Request, RequestMessage,
+        MistralRs, Model, ModelBuilder, NormalRequest, Request, RequestMessage, Response,
         ResponseOk, SamplingParams,
     };
     use std::path::Path;
     use std::sync::Mutex;
     use std::thread;
-    use tokio::sync::mpsc::channel;
+    use tokio::sync::mpsc::{Sender, channel};
+
+    /// Build a prefill-only request without enabling agent actions or session state.
+    fn raw_logits_request(input_tokens: Vec<u32>, response: Sender<Response>) -> NormalRequest {
+        let mut request = NormalRequest::new_simple(
+            RequestMessage::CompletionTokens(input_tokens),
+            SamplingParams {
+                max_len: Some(0),
+                ..SamplingParams::deterministic()
+            },
+            response,
+            0,
+            None,
+            None,
+        );
+        request.return_raw_logits = true;
+        request
+    }
 
     /// mistralrs-backed perplexity scorer. Holds the loaded model (wrapped
     /// in a `Mutex` because mistralrs's forward path mutates internal KV
@@ -446,28 +463,7 @@ mod local_impl {
             //    no token generation happens.
             let inner: &MistralRs = model_guard.inner();
             let (tx, mut rx) = channel(1);
-            let request = Request::Normal(Box::new(NormalRequest {
-                messages: RequestMessage::CompletionTokens(input_tokens.clone()),
-                sampling_params: SamplingParams {
-                    max_len: Some(0),
-                    ..SamplingParams::deterministic()
-                },
-                response: tx,
-                return_logprobs: false,
-                is_streaming: false,
-                id: 0,
-                constraint: Constraint::None,
-                suffix: None,
-                tools: None,
-                tool_choice: None,
-                logits_processors: None,
-                return_raw_logits: true,
-                web_search_options: None,
-                model_id: None,
-                max_tool_rounds: None,
-                tool_dispatch_url: None,
-                truncate_sequence: false,
-            }));
+            let request = Request::Normal(Box::new(raw_logits_request(input_tokens, tx)));
             inner
                 .get_sender(None)
                 .map_err(|e| {
@@ -622,6 +618,70 @@ mod local_impl {
         let mut h = Sha256::new();
         h.update(format!("{e}").as_bytes());
         format!("sha256:{:x}", h.finalize())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn raw_logits_request_scores_supplied_tokens_without_generation() {
+            let (response, _receiver) = channel(1);
+            let request = raw_logits_request(vec![11, 22, 33], response.clone());
+
+            let RequestMessage::CompletionTokens(tokens) = &request.messages else {
+                panic!("perplexity scoring must submit completion tokens");
+            };
+            assert_eq!(tokens.as_slice(), &[11, 22, 33]);
+            assert!(request.response.same_channel(&response));
+            assert!(request.return_raw_logits);
+            assert!(!request.return_logprobs);
+            assert!(!request.is_streaming);
+            assert!(!request.truncate_sequence);
+            assert!(request.logits_processors.is_none());
+            assert!(request.audio_output.is_none());
+            assert!(request.adapter.is_none());
+            assert!(request.model_id.is_none());
+            assert!(matches!(request.constraint, mistralrs::Constraint::None));
+            assert!(request.suffix.is_none());
+            assert_eq!(request.sampling_params.max_len, Some(0));
+            assert_eq!(request.sampling_params.top_k, Some(1));
+            assert_eq!(request.sampling_params.n_choices, 1);
+            assert!(request.sampling_params.temperature.is_none());
+            assert!(request.sampling_params.top_p.is_none());
+            assert!(request.sampling_params.min_p.is_none());
+            assert!(request.sampling_params.frequency_penalty.is_none());
+            assert!(request.sampling_params.presence_penalty.is_none());
+            assert!(request.sampling_params.repetition_penalty.is_none());
+            assert!(request.sampling_params.logits_bias.is_none());
+            assert!(request.sampling_params.stop_toks.is_none());
+            assert!(request.sampling_params.dry_params.is_none());
+            assert!(!request.sampling_params.ignore_eos);
+            assert!(request.seed.is_none());
+        }
+
+        #[test]
+        fn raw_logits_request_disables_external_actions_and_session_state() {
+            let (response, _receiver) = channel(1);
+            let request = raw_logits_request(vec![11, 22, 33], response);
+
+            assert!(request.tools.is_none());
+            assert!(request.tool_choice.is_none());
+            assert!(request.web_search_options.is_none());
+            assert!(request.max_tool_rounds.is_none());
+            assert!(request.tool_dispatch_url.is_none());
+            assert!(!request.enable_code_execution);
+            assert!(!request.enable_shell);
+            assert!(request.shell_options.is_none());
+            assert!(request.code_execution_permission.is_none());
+            assert!(request.code_execution_approval_notifier.is_none());
+            assert!(request.agent_permission.is_none());
+            assert!(request.agent_approval_handler.is_none());
+            assert!(request.agent_approval_notifier.is_none());
+            assert!(request.session_id.is_none());
+            assert!(request.files.is_none());
+            assert!(request.input_files.is_empty());
+        }
     }
 }
 

@@ -6,6 +6,12 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{Value, json};
 
+pub mod join;
+pub mod org;
+pub mod rules;
+pub mod tools;
+pub mod uses;
+
 pub type Roots = BTreeMap<String, Value>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -113,6 +119,8 @@ impl Action {
             Self::SetSourceSettings(roots) => ("set_settings", json!(roots)),
             Self::LookupInvite(invite) => ("invite_lookup", json!({"code":invite})),
             Self::Enroll(invite) => ("enroll", json!({"invite":invite})),
+            Self::SignInNearAi => ("account_sign_in", json!({})),
+            Self::EnrollNearAi => ("near_ai_account_enroll", json!({})),
             Self::SetAskEachTime => (
                 "withdraw_automatic_grant",
                 json!({"return_folders_to_ask":true}),
@@ -145,6 +153,29 @@ impl Action {
 /// Validate the daemon's action-specific acknowledgement before advancing.
 /// Authentication and startup use separate coordinator adapters and cannot be
 /// acknowledged by an arbitrary JSON success response.
+/// Whether the daemon refused the accepted terms handed to it
+/// (`FirstRunRunner.handOverTerms`): an error, or an answer that is not the
+/// `terms_accept` object (`DaemonClient.termsAccept`). Logged, never a
+/// failure of the first run.
+pub fn terms_handoff_refused(result: &Result<Value, String>) -> bool {
+    !result.as_ref().is_ok_and(Value::is_object)
+}
+
+/// The action as it was sent, for [`acknowledged`]: a Roots commit sent to
+/// a daemon on the host carries the host folders its portal paths stand
+/// for (`document_portal::host_declarations`), and the daemon answers with
+/// those. Every other action is sent as planned.
+pub fn sent_action(action: &Action, sent: &Value) -> Action {
+    match action {
+        Action::SetSourceSettings(_) => Action::SetSourceSettings(
+            sent.as_object()
+                .map(|fields| fields.clone().into_iter().collect())
+                .unwrap_or_default(),
+        ),
+        other => other.clone(),
+    }
+}
+
 pub fn acknowledged(action: &Action, value: &Value) -> bool {
     match action {
         Action::SetSourceSettings(roots) => {
@@ -219,6 +250,11 @@ pub fn acknowledged(action: &Action, value: &Value) -> bool {
         Action::MarkComplete | Action::MarkWatchOnlyComplete => {
             value.get("complete").and_then(Value::as_bool) == Some(true)
         }
+        Action::LookupInvite(_) => value.get("valid").and_then(Value::as_bool) == Some(true),
+        Action::Enroll(_) | Action::EnrollNearAi => {
+            value.get("enrolled").and_then(Value::as_bool) == Some(true)
+        }
+        Action::SignInNearAi => value.get("signed_in").and_then(Value::as_bool) == Some(true),
         _ => false,
     }
 }
@@ -228,6 +264,13 @@ pub struct State {
     pub step: Step,
     pub account: Account,
     pub sharing: Sharing,
+    /// The person picked a Sharing choice on Uses. Neither is chosen for
+    /// them (owner, 2026-10-27); unchosen, Start still sends Ask.
+    pub sharing_chosen: bool,
+    /// Tools' answers; `roots` is what they declare (`sync_roots`).
+    pub tools: tools::Tools,
+    /// The accepted terms were handed to the daemon (`take_terms_handoff`).
+    pub terms_handed_over: bool,
     /// Only validated explicit source declarations are placed here by Tools.
     pub roots: Roots,
     pub committed_roots: Option<Roots>,
@@ -250,6 +293,29 @@ pub struct State {
     pub completed: bool,
 }
 impl State {
+    /// Put what Tools declares in `roots`, which `Commit::Roots` sends.
+    pub fn sync_roots(&mut self) {
+        self.roots = self.tools.session_roots().unwrap_or_default();
+    }
+    /// Whether the current step's Continue (Start sharing, on Join) is
+    /// enabled (`FirstRunNavigation.canContinue`).
+    pub fn can_continue(&self, required_scope_known: bool) -> bool {
+        match self.step {
+            Step::Welcome | Step::PrivateAi | Step::Traces | Step::Terms => true,
+            Step::Tools => self.tools.can_continue(),
+            Step::Uses => required_scope_known,
+            Step::Join => {
+                required_scope_known
+                    && ((self.account == Account::WatchOnly && !self.daemon_holds_enrollment())
+                        || self.holds_enrollment())
+            }
+        }
+    }
+    /// Hand the accepted terms over once, at the first commit after they
+    /// were accepted; a refusal is logged, never retried here.
+    pub fn take_terms_handoff(&mut self) -> bool {
+        !std::mem::replace(&mut self.terms_handed_over, true)
+    }
     pub fn next(&mut self) {
         self.step = self.step.next();
     }
@@ -462,6 +528,10 @@ impl Runner {
     pub fn busy(&self) -> bool {
         self.current.is_some()
     }
+    /// The action now waiting on the daemon, if any.
+    pub fn current(&self) -> Option<&Ticket> {
+        self.current.as_ref()
+    }
     pub fn begin(&mut self, state: &State, commit: Commit) -> Option<Ticket> {
         if self.busy() {
             return None;
@@ -538,6 +608,15 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_terms_handoff_is_refused_unless_the_daemon_answers_its_object() {
+        assert!(terms_handoff_refused(&Err("terms-version-stale".into())));
+        assert!(terms_handoff_refused(&Ok(json!(null))));
+        assert!(terms_handoff_refused(&Ok(json!(false))));
+        assert!(!terms_handoff_refused(&Ok(json!({"held": true}))));
+        assert!(!terms_handoff_refused(&Ok(json!({"held": false}))));
+    }
+
     use super::*;
     #[test]
     fn acknowledgements_reject_generic_success_and_partial_results() {
@@ -623,6 +702,225 @@ mod tests {
             ..Default::default()
         }
     }
+    fn discovered_tools() -> tools::Tools {
+        let mut t = tools::Tools::default();
+        // Discovery reports every known store, found or not.
+        t.record_discovery(vec![
+            tools::Found {
+                source: "claude-code".into(),
+                path: "/home/x/.claude/projects".into(),
+                exists: true,
+                session_count: 4,
+                total_bytes: None,
+            },
+            tools::Found {
+                source: "codex".into(),
+                path: "/home/x/.codex/sessions".into(),
+                exists: false,
+                session_count: 0,
+                total_bytes: None,
+            },
+        ]);
+        t
+    }
+
+    #[test]
+    fn continue_follows_the_mac_rules_per_step() {
+        let mut state = State::default();
+        for step in [Step::Welcome, Step::PrivateAi, Step::Traces, Step::Terms] {
+            state.step = step;
+            assert!(state.can_continue(false), "{step:?} is always enabled");
+        }
+        state.step = Step::Tools;
+        assert!(!state.can_continue(true), "discovery has not answered");
+        state.tools = discovered_tools();
+        assert!(!state.can_continue(true), "nothing watched");
+        let claude = state.tools.listed()[0].clone();
+        state.tools.set_watched(&claude, true);
+        assert!(state.can_continue(true));
+        state.tools.add(tools::AddedFolder::new(
+            tools::FolderKind::Source("claude-code".into()),
+            "/moved",
+        ));
+        state.tools.answer_added("/moved", Some(true));
+        assert!(!state.can_continue(true), "one folder per tool");
+        state.step = Step::Uses;
+        assert!(!state.can_continue(false), "required use not known");
+        assert!(state.can_continue(true));
+        state.step = Step::Join;
+        assert!(!state.can_continue(true), "no enrollment held");
+        state.account = Account::NearAi;
+        state.near_ai_enrolled = true;
+        assert!(state.can_continue(true));
+        assert!(!state.can_continue(false));
+    }
+
+    #[test]
+    fn tools_answers_become_the_roots_commit() {
+        let mut state = State {
+            daemon_started: true,
+            tools: discovered_tools(),
+            ..Default::default()
+        };
+        state.sync_roots();
+        let claude = state.tools.listed()[0].clone();
+        state.tools.set_watched(&claude, true);
+        state.sync_roots();
+        assert_eq!(
+            state.roots.get("claude_source"),
+            Some(&json!({"mode":"watch","path":"/home/x/.claude/projects"}))
+        );
+        assert!(matches!(
+            state.plan(Commit::Roots).as_slice(),
+            [Action::SetSourceSettings(changes)] if changes.contains_key("claude_source")
+        ));
+        let mut fresh = State {
+            tools: discovered_tools(),
+            ..Default::default()
+        };
+        fresh.sync_roots();
+        assert!(matches!(
+            fresh.plan(Commit::Roots).as_slice(),
+            [Action::StartDaemon(_)]
+        ));
+    }
+
+    /// A Roots commit whose portal folder was sent to the host daemon as its
+    /// host folder is acknowledged by the daemon's answer naming the host
+    /// folder, not the portal path the planner holds.
+    #[test]
+    fn a_mapped_roots_commit_is_acknowledged_against_what_was_sent() {
+        let planned = Action::SetSourceSettings(Roots::from([
+            (
+                "claude_source".to_owned(),
+                json!({"mode":"watch","path":"/run/user/1000/doc/a1b2/projects"}),
+            ),
+            ("codex_source".to_owned(), json!({"mode":"off"})),
+        ]));
+        let sent = json!({
+            "claude_source": {"mode":"watch","path":"/home/u/.claude/projects"},
+            "codex_source": {"mode":"off"},
+        });
+        let answer = json!({
+            "claude_source": {"mode":"watch","path":"/home/u/.claude/projects"},
+            "codex_source": {"mode":"off"},
+            "private_inference": false,
+        });
+        assert!(!acknowledged(&planned, &answer));
+        assert!(acknowledged(&sent_action(&planned, &sent), &answer));
+        // Anything else is acknowledged as planned.
+        assert_eq!(
+            sent_action(&Action::SetAskEachTime, &sent),
+            Action::SetAskEachTime
+        );
+        // A sent declaration that is not an object acknowledges nothing.
+        assert!(!acknowledged(&sent_action(&planned, &json!([])), &answer));
+    }
+
+    #[test]
+    fn sign_in_actions_have_a_wire_and_a_real_acknowledgement() {
+        assert_eq!(
+            Action::SignInNearAi.ipc(),
+            Some(("account_sign_in", json!({})))
+        );
+        assert_eq!(
+            Action::EnrollNearAi.ipc(),
+            Some(("near_ai_account_enroll", json!({})))
+        );
+        let lookup = Action::LookupInvite("i".into());
+        assert!(acknowledged(&lookup, &json!({"valid":true})));
+        assert!(!acknowledged(
+            &lookup,
+            &json!({"valid":false,"reason_label":"expired"})
+        ));
+        assert!(!acknowledged(&lookup, &json!({"ok":true})));
+        let enroll = Action::Enroll("i".into());
+        assert!(acknowledged(
+            &enroll,
+            &json!({"enrolled":true,"tenant_id":"t"})
+        ));
+        assert!(!acknowledged(&enroll, &json!({"enrolled":false})));
+        assert!(acknowledged(
+            &Action::SignInNearAi,
+            &json!({"signed_in":true})
+        ));
+        assert!(!acknowledged(
+            &Action::SignInNearAi,
+            &json!({"signed_in":null})
+        ));
+        assert!(acknowledged(
+            &Action::EnrollNearAi,
+            &json!({"enrolled":true})
+        ));
+        assert!(!acknowledged(
+            &Action::EnrollNearAi,
+            &json!({"enrolled":"true"})
+        ));
+        // The browser login has its own adapter; no JSON acknowledges it.
+        assert_eq!(Action::NearAiLogin.ipc(), None);
+        assert!(!acknowledged(&Action::NearAiLogin, &json!({"ok":true})));
+    }
+
+    #[test]
+    fn the_login_poll_reads_the_session_then_the_attempt() {
+        use join::{LoginPoll, login_verdict};
+        assert_eq!(
+            login_verdict(&json!({"session_state":"present"})),
+            LoginPoll::SignedIn
+        );
+        assert_eq!(
+            login_verdict(
+                &json!({"session_state":"absent","attempt_status":"waiting_for_browser"})
+            ),
+            LoginPoll::Waiting
+        );
+        assert_eq!(
+            login_verdict(&json!({"session_state":"absent"})),
+            LoginPoll::Waiting
+        );
+        assert_eq!(
+            login_verdict(&json!({"attempt_status":"cancelled"})),
+            LoginPoll::Cancelled
+        );
+        assert_eq!(
+            login_verdict(&json!({"attempt_status":"failed"})),
+            LoginPoll::Ended
+        );
+    }
+
+    #[test]
+    fn a_dead_invite_returns_to_join_and_a_failed_login_clears_near_ai() {
+        let mut state = State {
+            account: Account::NearAi,
+            invite: "i".into(),
+            roots: ready().roots,
+            committed_roots: Some(ready().roots),
+            daemon_started: true,
+            step: Step::Join,
+            ..Default::default()
+        };
+        let mut runner = Runner::default();
+        let ticket = runner.begin(&state, Commit::SignIn).unwrap();
+        assert_eq!(ticket.action, Action::LookupInvite("i".into()));
+        runner.resolve(&ticket, &mut state, Outcome::Failure("dead".into()));
+        assert_eq!(state.step, Step::Join);
+        assert_eq!(state.account, Account::NearAi, "the near.ai choice stays");
+        state.invite.clear();
+        let ticket = runner.begin(&state, Commit::SignIn).unwrap();
+        assert_eq!(ticket.action, Action::NearAiLogin);
+        runner.resolve(&ticket, &mut state, Outcome::Failure("ended".into()));
+        assert_eq!(state.account, Account::None);
+        assert!(!state.signed_in);
+    }
+
+    #[test]
+    fn terms_are_handed_over_once() {
+        let mut state = State::default();
+        assert!(state.take_terms_handoff());
+        assert!(!state.take_terms_handoff());
+        assert!(!state.take_terms_handoff());
+    }
+
     #[test]
     fn successful_regrant_clears_prior_refusal() {
         let mut state = ready();

@@ -158,6 +158,16 @@ pub const COPY: &[(&str, &str)] = &[
     ),
     ("skills_partial_usage", "Some traces couldn’t be checked."),
     ("skills_follow", "Follow"),
+    ("skills_following", "Following"),
+    ("skills_following_accessibility", "Following {publisher}"),
+    (
+        "skills_follow_saving_accessibility",
+        "Saving changes for {publisher}",
+    ),
+    (
+        "skills_follow_failed_accessibility",
+        "Couldn’t save changes for {publisher}. Try again.",
+    ),
     ("skills_unfollow", "Unfollow"),
     ("skills_follow_accessibility", "Follow {publisher}"),
     ("skills_unfollow_accessibility", "Unfollow {publisher}"),

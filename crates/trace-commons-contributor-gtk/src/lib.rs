@@ -32,6 +32,7 @@ pub mod home;
 pub mod model;
 pub mod notify;
 pub mod original_search;
+pub mod payout_link;
 pub mod placeholders;
 pub mod portal;
 pub mod queue_folders;
