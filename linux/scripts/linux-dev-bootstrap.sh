@@ -31,6 +31,12 @@ install_packages() {
     apt-get install -y "$@" "${COMMON[@]}" ubuntu-desktop-minimal gnome-remote-desktop gnome-screenshot
   fi
 }
+# Google's regional Ubuntu mirror served 404s for pool files on
+# 2026-11-16 across two retries; the main archive did not.
+if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+  sed -i 's#http://[a-z0-9-]*\.gce\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+    /etc/apt/sources.list.d/ubuntu.sources
+fi
 if [ ! -f /var/lib/tc-bootstrap.done ]; then
   apt-get update
   if ! install_packages; then

@@ -8,7 +8,7 @@ from a machine that is not running Linux. They mirror the Windows dev VM
 | Box | Image | Desktop |
 |---|---|---|
 | `tc-linux-gnome` | Ubuntu 24.04 | GNOME, Wayland |
-| `tc-linux-kde` | Debian 13 | Plasma 6, Wayland |
+| `tc-linux-kde` | Ubuntu 26.04 LTS | Plasma 6, Wayland |
 
 Both are `e2-standard-4` with a 100 GB disk, in `us-central1-a` of the
 pilot project, and render in software (no GPU). The bootstrap sets the

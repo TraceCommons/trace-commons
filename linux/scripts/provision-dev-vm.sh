@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux desktop test boxes for the GTK shell: one GNOME (Ubuntu 24.04) and
-# one KDE Plasma 6 (Debian 13), both Wayland, software-rendered.
+# one KDE Plasma 6 (Ubuntu 26.04), both Wayland, software-rendered.
 #
 # Mirrors windows/scripts/provision-dev-vm.sh: no external IP, reachable only
 # through IAP TCP forwarding, egress through the existing Cloud NAT.
@@ -27,7 +27,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 case "$FLAVOR" in
   gnome) NAME=tc-linux-gnome; IMAGE_FAMILY=ubuntu-2404-lts-amd64; IMAGE_PROJECT=ubuntu-os-cloud ;;
-  kde) NAME=tc-linux-kde; IMAGE_FAMILY=debian-13; IMAGE_PROJECT=debian-cloud ;;
+  kde) NAME=tc-linux-kde; IMAGE_FAMILY=ubuntu-2604-lts-amd64; IMAGE_PROJECT=ubuntu-os-cloud ;;
   *) echo "usage: $0 <gnome|kde> <create|status|start|stop|delete|ssh|rdp>" >&2; exit 2 ;;
 esac
 
