@@ -163,7 +163,16 @@ else
   fi
 
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
+  # The background-service dialogs and the Private AI start area's "Set up"
+  # (Flatpak on the host service) are mounted tests with no display
+  # elsewhere in CI.
   for test_name in \
+    ui::service_dialog::tests::mounted_not_installed_dialog_has_the_approved_words_and_buttons \
+    ui::service_dialog::tests::mounted_not_running_dialog_has_start_it_and_the_status_command_on_failure \
+    ui::service_dialog::tests::mounted_not_installed_dialog_shows_the_status_command_after_its_last_try \
+    ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
+    ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
+    ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
