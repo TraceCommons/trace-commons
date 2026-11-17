@@ -661,6 +661,12 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The Linux app's Appearance choice (Omarchy skin spec, D2): a card
+        // of its own under Startup, since the sections are pinned to the
+        // macOS groups. It writes only the shell's own preference file.
+        sections
+            .body(Section::Startup)
+            .append(&super::appearance::settings_card());
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all

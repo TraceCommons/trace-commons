@@ -183,7 +183,11 @@ pub(super) fn start() {
             .map(|path| AppearancePrefs::load_from(&path).appearance)
             .unwrap_or_default()
     });
-    apply(choice);
+    // Standard at launch is the stylesheet `install` already loaded:
+    // nothing to change, nothing to watch.
+    if choice == Appearance::Omarchy {
+        apply(choice);
+    }
 }
 
 /// The person chose. Saved, then applied.
@@ -353,6 +357,74 @@ fn redraw_all() {
     }
 }
 
+/// The Appearance card for Settings: the choice, and the one line saying
+/// the standard look is showing because no Omarchy theme could be read.
+/// Every word is `appearance_copy`'s.
+pub fn settings_card() -> gtk::Box {
+    use trace_commons_contributor::appearance_copy as words;
+
+    use super::style::{self, space};
+
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(words::APPEARANCE_HEADING)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-body");
+    let choice =
+        gtk::DropDown::from_strings(&[words::APPEARANCE_STANDARD, words::APPEARANCE_OMARCHY]);
+    choice.set_halign(gtk::Align::End);
+    choice.update_property(&[gtk::accessible::Property::Label(words::APPEARANCE_HEADING)]);
+    row.append(&label);
+    row.append(&choice);
+    card.append(&row);
+    let fallback = style::caveat(words::APPEARANCE_OMARCHY_UNAVAILABLE);
+    card.append(&fallback);
+
+    let show = {
+        let choice = choice.downgrade();
+        let fallback = fallback.downgrade();
+        move || {
+            if let Some(choice) = choice.upgrade() {
+                let index = choice_index(chosen());
+                if choice.selected() != index {
+                    choice.set_selected(index);
+                }
+            }
+            if let Some(fallback) = fallback.upgrade() {
+                fallback.set_visible(fallback_showing());
+            }
+        }
+    };
+    show();
+    choice.connect_selected_notify(|choice| {
+        let picked = choice_at(choice.selected());
+        if picked != chosen() {
+            choose(picked);
+        }
+    });
+    connect_changed(show);
+    card
+}
+
+/// The dropdown's order: Standard, then Omarchy.
+pub fn choice_index(appearance: Appearance) -> u32 {
+    match appearance {
+        Appearance::Standard => 0,
+        Appearance::Omarchy => 1,
+    }
+}
+
+pub fn choice_at(index: u32) -> Appearance {
+    if index == 1 {
+        Appearance::Omarchy
+    } else {
+        Appearance::Standard
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +520,15 @@ mod tests {
         // The watch never climbs above a candidate's base directory.
         let only_home = |p: &Path| p == Path::new("/h");
         assert!(watch_targets(&dirs, None, only_home).is_empty());
+    }
+
+    #[test]
+    fn the_dropdown_order_maps_both_ways() {
+        for appearance in [Appearance::Standard, Appearance::Omarchy] {
+            assert_eq!(choice_at(choice_index(appearance)), appearance);
+        }
+        // GTK's "nothing selected" is not a choice of the skin.
+        assert_eq!(choice_at(gtk::INVALID_LIST_POSITION), Appearance::Standard);
     }
 
     #[test]
