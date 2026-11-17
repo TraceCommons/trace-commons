@@ -40,6 +40,12 @@ pub struct Inspector {
     selected: RefCell<Selection>,
 }
 
+impl Default for Inspector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Inspector {
     pub fn new() -> Self {
         let content = gtk::Box::builder()
