@@ -27,6 +27,45 @@ pub struct Asking<'a> {
     pub review: Option<&'a str>,
 }
 
+/// An approval this window holds open for undoing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Approval<'a> {
+    pub entry_ids: &'a [String],
+    /// When it was made.
+    pub at: i64,
+    /// The folder whose Submit all made it; `None` for a trace's own
+    /// Submit.
+    pub folder: Option<&'a str>,
+}
+
+/// What this window's state asks for: the approval it holds (the Mac's
+/// `undo` for any approval; and `folder-undo` for a folder's Submit all, or
+/// `contributed` for one trace's, as `TracesStore` keeps them), the folder
+/// whose Submit all is in flight, the trace last kept, and the selected
+/// session.
+pub fn asking<'a>(
+    approval: Option<Approval<'a>>,
+    submitting_folder: Option<&'a str>,
+    kept: Option<&'a str>,
+    review: Option<&'a str>,
+) -> Asking<'a> {
+    let contributed = approval
+        .filter(|approval| approval.folder.is_none())
+        .and_then(|approval| match approval.entry_ids {
+            [one] => Some(one.as_str()),
+            _ => None,
+        });
+    Asking {
+        approval_undo: approval.map(|approval| approval.entry_ids),
+        approval_at: approval.map(|approval| approval.at),
+        contributed,
+        kept,
+        contributed_folder: approval.and_then(|approval| approval.folder),
+        submitting_folder,
+        review,
+    }
+}
+
 pub fn keys(asking: &Asking<'_>) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     if let Some(ids) = asking.approval_undo {
@@ -142,6 +181,74 @@ mod tests {
         assert_eq!(session.into_iter().collect::<Vec<_>>(), ["review:e1"]);
         // A folder selection is carried by no field at all.
         assert!(keys(&Asking::default()).is_empty());
+    }
+
+    /// The window's own state, through `asking`: a trace's Submit is a
+    /// contribution with an undo, a folder's Submit all is in flight and
+    /// then a folder undo, a keep is a keep, and each opens the inspector
+    /// (the Mac's `InspectorDemandTests`).
+    #[test]
+    fn each_thing_this_window_holds_asks_with_the_macs_key() {
+        let one = ["e1".to_string()];
+        let row = keys(&asking(
+            Some(Approval {
+                entry_ids: &one,
+                at: 100,
+                folder: None,
+            }),
+            None,
+            None,
+            None,
+        ));
+        assert!(row.contains("contributed:e1"), "{row:?}");
+        assert!(row.contains("undo:e1"));
+        assert!(row.contains("undo:approval-at:100"));
+        assert!(!row.iter().any(|key| key.starts_with("folder-")));
+
+        let nothing = keys(&asking(None, None, None, None));
+        assert!(nothing.is_empty());
+        let submitting = keys(&asking(None, Some("p1"), None, None));
+        assert_eq!(submitting.iter().collect::<Vec<_>>(), ["folder-submit:p1"]);
+        assert!(
+            opens(&nothing, &submitting),
+            "a folder's Submit all opens it"
+        );
+
+        let ids = ["e1".to_string(), "e2".to_string()];
+        let folder = keys(&asking(
+            Some(Approval {
+                entry_ids: &ids,
+                at: 160,
+                folder: Some("p1"),
+            }),
+            None,
+            None,
+            None,
+        ));
+        assert!(folder.contains("folder-undo:p1"), "{folder:?}");
+        assert!(!folder.iter().any(|key| key.starts_with("contributed:")));
+        assert!(opens(&submitting, &folder), "its undo is new");
+
+        // A folder's Submit all of one trace is the folder's, not the
+        // trace's.
+        let single = keys(&asking(
+            Some(Approval {
+                entry_ids: &one,
+                at: 170,
+                folder: Some("p1"),
+            }),
+            None,
+            None,
+            None,
+        ));
+        assert!(!single.iter().any(|key| key.starts_with("contributed:")));
+
+        let kept = keys(&asking(None, None, Some("e3"), None));
+        assert_eq!(kept.iter().collect::<Vec<_>>(), ["kept:e3"]);
+        assert!(opens(&nothing, &kept));
+
+        let review = keys(&asking(None, None, None, Some("e4")));
+        assert_eq!(review.iter().collect::<Vec<_>>(), ["review:e4"]);
     }
 
     #[test]

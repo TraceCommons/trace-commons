@@ -347,9 +347,9 @@ fn build_undo_bar(
 
     style::append_caveat(&bar, copy::UNDO_BODY);
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-    actions.append(undo);
-    actions.append(let_it_send);
+    let actions = style::wrap_row(space::S);
+    style::wrap_append(&actions, undo);
+    style::wrap_append(&actions, let_it_send);
     bar.append(&actions);
 
     bar
@@ -632,31 +632,41 @@ fn render_week(app: &Rc<App>) {
     let rollup = app.rollup.borrow();
 
     view.week.append(&style::section(copy::THIS_WEEK));
-    let cards = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(space::M)
+    // Three figures side by side where they fit, and fewer to a line in a
+    // narrow pane (the Monitor's main pane is 440), as Home's tiles.
+    let cards = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(space::M as u32)
+        .row_spacing(space::M as u32)
         .homogeneous(true)
         .build();
     // The core's Contributed figure (accepted plus waiting to be scored),
     // the one every shell shows under this word. `submitted` alone is only
     // the waiting part of it.
-    cards.append(&stat_card(
-        Tone::Clear,
-        copy::CONTRIBUTED,
-        rollup.week.contributed,
-    ));
-    cards.append(&stat_card(
-        Tone::Held,
-        copy::QUARANTINE_HEADING,
-        rollup.week.quarantined,
-    ));
+    style::wrap_append(
+        &cards,
+        &stat_card(Tone::Clear, copy::CONTRIBUTED, rollup.week.contributed),
+    );
+    style::wrap_append(
+        &cards,
+        &stat_card(
+            Tone::Held,
+            copy::QUARANTINE_HEADING,
+            rollup.week.quarantined,
+        ),
+    );
     // All time, not this week: "in the commons" is a standing total, and a
     // weekly slice of it would read as the commons shrinking every Monday.
-    cards.append(&stat_card(
-        Tone::Neutral,
-        copy::HISTORY_IN_THE_COMMONS,
-        rollup.all_time.accepted,
-    ));
+    style::wrap_append(
+        &cards,
+        &stat_card(
+            Tone::Neutral,
+            copy::HISTORY_IN_THE_COMMONS,
+            rollup.all_time.accepted,
+        ),
+    );
     view.week.append(&cards);
 }
 
@@ -721,14 +731,14 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
         .build();
     view.arming_offer.append(&question);
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let actions = style::wrap_row(space::M);
     let decline = gtk::Button::with_label(copy::ARMING_OFFER_DECLINE);
     let arm = gtk::Button::with_label(copy::ARMING_OFFER_CONFIRM);
     // Neither is `suggested-action`. Arming is a real choice with a real
     // cost -- previews from this project stop -- and a card that leads the
     // eye to "yes" is not asking a question.
-    actions.append(&decline);
-    actions.append(&arm);
+    style::wrap_append(&actions, &decline);
+    style::wrap_append(&actions, &arm);
     view.arming_offer.append(&actions);
     view.arming_offer.set_visible(true);
 
@@ -809,14 +819,14 @@ pub fn render_private_inference_offer(app: &Rc<App>, settings: &crate::model::Se
         copy::PRIVATE_INFERENCE_OFFER_ASKED_ONCE,
     );
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let actions = style::wrap_row(space::M);
     let decline = gtk::Button::with_label(copy::PRIVATE_INFERENCE_OFFER_DECLINE);
     let accept = gtk::Button::with_label(copy::PRIVATE_INFERENCE_OFFER_ACCEPT);
     // Neither is `suggested-action`, for the reason the arming offer gives:
     // a card that leads the eye to "yes" is not asking a question, and this
     // question opens a listener anything on the machine can use.
-    actions.append(&decline);
-    actions.append(&accept);
+    style::wrap_append(&actions, &decline);
+    style::wrap_append(&actions, &accept);
     view.private_inference_offer.append(&actions);
     view.private_inference_offer.set_visible(true);
 
@@ -1064,8 +1074,10 @@ fn manifest_block(
     index: usize,
     state: CardPreview<'_>,
 ) -> gtk::Box {
+    // The facts, then the actions under them: side by side they made the
+    // row wider than the Monitor's 440 main pane.
     let block = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
+        .orientation(gtk::Orientation::Vertical)
         .spacing(space::M)
         // Flex-start: the attention variant's right-hand column is a chip
         // rather than a figure, and centring makes the pair look misaligned.
@@ -1088,22 +1100,24 @@ fn manifest_block(
         CardPreview::Ready(p) => Some(crate::redaction_labels::removed_total(&p.redactions)),
         CardPreview::TooLarge { .. } | CardPreview::Checking => None,
     };
-    let pairs = gtk::Box::new(gtk::Orientation::Horizontal, METRIC_GAP);
-    pairs.set_valign(gtk::Align::Start);
-    pairs.append(&style::manifest_field(
-        copy::WOULD_SEND,
-        // An em dash rather than a collapsed field: the rhythm is the whole
-        // point, and a strip that appears as previews land destroys it. The
-        // too-large case gets its own words rather than a number, because
-        // there never was a would-send figure to show -- see
-        // `copy::TOO_LARGE_TO_PREVIEW`.
-        &match &state {
-            CardPreview::Ready(p) => human_bytes(p.would_send_bytes),
-            CardPreview::TooLarge { .. } => copy::TOO_LARGE_TO_PREVIEW.to_string(),
-            CardPreview::Checking => "-".to_string(),
-        },
-        Tone::Neutral,
-    ));
+    let pairs = style::wrap_row(METRIC_GAP);
+    style::wrap_append(
+        &pairs,
+        &style::manifest_field(
+            copy::WOULD_SEND,
+            // An em dash rather than a collapsed field: the rhythm is the whole
+            // point, and a strip that appears as previews land destroys it. The
+            // too-large case gets its own words rather than a number, because
+            // there never was a would-send figure to show -- see
+            // `copy::TOO_LARGE_TO_PREVIEW`.
+            &match &state {
+                CardPreview::Ready(p) => human_bytes(p.would_send_bytes),
+                CardPreview::TooLarge { .. } => copy::TOO_LARGE_TO_PREVIEW.to_string(),
+                CardPreview::Checking => "-".to_string(),
+            },
+            Tone::Neutral,
+        ),
+    );
     match (&state, redactions) {
         // Scrubbing found nothing. That is the case worth weighing, so it
         // gets the chip rather than a figure reading "nothing" -- which is
@@ -1129,23 +1143,24 @@ fn manifest_block(
                     Some("search".to_string()),
                 );
             });
-            pairs.append(&button);
+            style::wrap_append(&pairs, &button);
         }
-        (CardPreview::Ready(p), _) => pairs.append(&style::manifest_field(
-            copy::REMOVED_BY_PATTERN,
-            &removed_by_pattern(p),
-            Tone::Neutral,
-        )),
-        (CardPreview::TooLarge { .. }, _) => pairs.append(&style::manifest_field(
-            copy::REMOVED_BY_PATTERN,
-            copy::NOT_PREVIEWED,
-            Tone::Neutral,
-        )),
-        (CardPreview::Checking, _) => pairs.append(&style::manifest_field(
-            copy::REMOVED_BY_PATTERN,
-            "checking",
-            Tone::Neutral,
-        )),
+        (CardPreview::Ready(p), _) => style::wrap_append(
+            &pairs,
+            &style::manifest_field(
+                copy::REMOVED_BY_PATTERN,
+                &removed_by_pattern(p),
+                Tone::Neutral,
+            ),
+        ),
+        (CardPreview::TooLarge { .. }, _) => style::wrap_append(
+            &pairs,
+            &style::manifest_field(copy::REMOVED_BY_PATTERN, copy::NOT_PREVIEWED, Tone::Neutral),
+        ),
+        (CardPreview::Checking, _) => style::wrap_append(
+            &pairs,
+            &style::manifest_field(copy::REMOVED_BY_PATTERN, "checking", Tone::Neutral),
+        ),
     }
     facts.append(&pairs);
 
@@ -1276,8 +1291,7 @@ fn manifest_block(
     }
     block.append(&facts);
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-    actions.set_valign(gtk::Align::Start);
+    let actions = style::wrap_row(space::S);
     let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
     skip.add_css_class("tc-quiet");
     skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
@@ -1308,15 +1322,15 @@ fn manifest_block(
                 .select(&app, inspector::Selection::Session(selected_id.clone()));
         }
     });
-    actions.append(&review);
-    actions.append(&skip);
-    actions.append(&look);
+    style::wrap_append(&actions, &review);
+    style::wrap_append(&actions, &skip);
+    style::wrap_append(&actions, &look);
     // `Look inside` stays on every row: a contributor may always read their
     // own session. `Submit` is the control the daemon's answer governs, and
     // it is the only one -- an ineligible row is present and unoffered, not
     // hidden and not made inert everywhere.
     if crate::eligibility::offers_send(entry) {
-        actions.append(&submit);
+        style::wrap_append(&actions, &submit);
     }
     block.append(&actions);
 
@@ -1352,6 +1366,7 @@ fn manifest_block(
             approve_params(ApproveTarget::Entry(entry_id.clone()), None, None),
             project_label.clone(),
             vec![entry_id.clone()],
+            None,
         );
     });
 
@@ -1404,6 +1419,10 @@ fn submit_group(
     // narrowed to the sendable rows so the bar does not offer to undo an
     // entry that was never sent.
     let candidates = group_candidates(app, project_id);
+    // In flight until the daemon answers: a demand on the inspector, as
+    // the Mac's `submittingFolder`.
+    *app.submitting_folder.borrow_mut() = Some(project_id.to_string());
+    app.shell.refresh_demand(app);
     submit_and_toast(
         app,
         approve_params(
@@ -1413,6 +1432,7 @@ fn submit_group(
         ),
         project_label.to_string(),
         candidates,
+        Some(project_id.to_string()),
     );
 }
 
@@ -1477,8 +1497,11 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
     let project_label = folder.project_label.as_str();
     let waiting = folder.members.len();
 
-    let bar = style::card(gtk::Orientation::Horizontal, space::M);
-    bar.set_valign(gtk::Align::Center);
+    // The folder's name and count, then its actions under them, wrapping
+    // in a narrow pane: in one line they made the row wider than the
+    // Monitor's 440 main pane.
+    let bar = style::card(gtk::Orientation::Vertical, space::S);
+    let actions = style::wrap_row(space::S);
 
     // What names the folder, and what says how much is in it. Both live
     // inside the button that opens it; the project-wide actions sit outside,
@@ -1567,6 +1590,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         render(&app_for_open);
     });
     bar.append(&open);
+    bar.append(&actions);
 
     {
         // Shown at every count, including one. The old rule hid it at one
@@ -1614,7 +1638,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // C ABI that macOS and Windows reach this through.
         let sendable = crate::eligibility::group_offers_send(waiting as u64, contributable);
         if sendable {
-            bar.append(&submit_all);
+            style::wrap_append(&actions, &submit_all);
         }
 
         let app_for_submit = Rc::clone(app);
@@ -1685,14 +1709,14 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // a second route to the same call, and a live one beside an absent
         // button would offer exactly what the missing button withheld.
         if sendable {
-            bar.append(&submit_all_as);
+            style::wrap_append(&actions, &submit_all_as);
         }
     }
 
     let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);
     ignore.add_css_class("tc-chip");
     ignore.set_tooltip_text(Some(copy::IGNORE_PROJECT_TOOLTIP));
-    bar.append(&ignore);
+    style::wrap_append(&actions, &ignore);
 
     let app_for_ignore = Rc::clone(app);
     let project_id_for_ignore = project_id.to_string();
@@ -1780,8 +1804,12 @@ fn submit_and_toast(
     params: serde_json::Value,
     project_label: String,
     candidate_entry_ids: Vec<String>,
+    folder: Option<String>,
 ) {
     app.call("approve", params, move |app, result| {
+        if folder.is_some() {
+            app.submitting_folder.borrow_mut().take();
+        }
         match result {
             Ok(value) => match serde_json::from_value::<ApproveResult>(value) {
                 Ok(approve) => {
@@ -1794,7 +1822,7 @@ fn submit_and_toast(
                         .into_iter()
                         .filter(|id| !skipped_ids.contains(id.as_str()))
                         .collect();
-                    app.render_submit_response(&approve, entry_ids, &project_label);
+                    app.render_submit_response(&approve, entry_ids, &project_label, folder);
                 }
                 Err(_) => app.toast(copy::SUBMIT_FAILED),
             },
