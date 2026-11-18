@@ -302,7 +302,7 @@ and exits non-zero unless it is `deallocated`. On Azure, "stopped" and
 "deallocated" are different states. A VM shut down from inside Windows, or
 with `az vm stop`, is *stopped*: it keeps its hardware and **still bills for
 compute**. Only *deallocated* ends the compute and licence charge. The disk
-and the public IP bill either way, about $23.50/month together. `delete`
+and the public IP bill either way, about $23.36/month together. `delete`
 removes the whole resource group.
 
 An auto-shutdown schedule deallocates the VM every night at 01:00 local time,
@@ -396,7 +396,7 @@ the Keychain over SSH:
 
 ```bash
 security find-generic-password -s tc-win-az -a tcdev -w | windows/scripts/win-exec-az.sh \
-  '$p = [Console]::In.ReadLine(); & C:\bootstrap-downloads\autologon\Autologon64.exe tcdev $env:COMPUTERNAME $p /accepteula; $p = $null'
+  '$p = [Console]::In.ReadLine(); $r = Start-Process -FilePath C:\bootstrap-downloads\autologon\Autologon64.exe -ArgumentList @("tcdev", $env:COMPUTERNAME, $p, "/accepteula") -Wait -PassThru; $p = $null; "Autologon exit: $($r.ExitCode)"'
 windows/scripts/win-exec-az.sh 'Restart-Computer -Force'
 ```
 
@@ -432,12 +432,11 @@ windows/scripts/provision-azure-vm.sh resize Standard_NV6ads_A10_v5
 
 That needs `StandardNVADSA10v5Family` vCPU quota in the region. A new
 pay-as-you-go subscription has none, and the regional `cores` total (10 by
-default) also has to cover it. The A10 also needs the NVIDIA GRID driver
-extension before it renders anything.
+default) also has to cover it. Not yet tried here: the GPU drivers an A10
+size needs on Windows, and a resize to it.
 
-**`az quota create` cannot raise this family on a pay-as-you-go
+**`az quota create` did not raise this family on this pay-as-you-go
 subscription.** On 2026-11-18 it failed in `eastus`, `westus2` and
-`southcentralus` with `QuotaNotAvailableForResource`. GPU families need a
-quota support request (Help + support, "Service and subscription limits
-(quotas)" in the portal). Quota requests are free on every support plan,
-Basic included.
+`southcentralus` with `QuotaNotAvailableForResource`. The remaining route is
+a quota request through Azure support: in the portal, Help + support, then
+"Service and subscription limits (quotas)".

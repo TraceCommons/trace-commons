@@ -81,7 +81,7 @@ if ($config -notmatch '(?m)^PasswordAuthentication no$') {
 # the TOP of the file: the stock Windows config ends in a `Match Group
 # administrators` block, so anything appended lands inside it, and for
 # duplicated keywords sshd takes the first value it reads.
-if ($config -notmatch '(?m)^AuthenticationMethods publickey$') {
+if ($config -notmatch '(?m)^AuthenticationMethods publickey\r?$') {
     $config = "AuthenticationMethods publickey`r`nKbdInteractiveAuthentication no`r`n" + $config
 }
 Set-Content -Path $sshdConfig -Value $config -Encoding ascii
