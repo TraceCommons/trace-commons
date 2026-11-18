@@ -203,7 +203,15 @@ else
     ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
     ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
     ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
-    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw; do
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
+    ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
+    ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
+    ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
+    ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_and_clears_as_the_mac_does \
+    ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

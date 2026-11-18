@@ -192,3 +192,155 @@ fn mounted_uses_sends_the_daemons_list_with_one_scope_changed() {
         crate::ui::consent_settings::consent_refusal_line()
     );
 }
+
+fn enrolled_status(override_mode: Option<&str>) -> crate::model::Status {
+    serde_json::from_value(serde_json::json!({
+        "logged_in": true, "tenant_id": "t", "setup_complete": true,
+        "account_scope": "acct-a",
+        "contribution_override": override_mode.map(|mode| serde_json::json!({
+            "mode": mode, "since": "2026-11-01T00:00:00Z",
+        })),
+    }))
+    .unwrap()
+}
+
+/// An override in force: the radios show nothing picked (never "Ask each
+/// time" while every folder sends), the card says what is in force, and
+/// its clear is the Mac's: at once under Automatic, after the core's
+/// confirmation under Ask or Never with a folder that would resume
+/// sending (F3).
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_an_override_shows_on_the_sharing_card_and_clears_as_the_mac_does() {
+    let fixture = Fixture::new(
+        "Override",
+        &["automatic_grant", "clear_contribution_override"],
+    );
+    grant_answered(&fixture, serde_json::json!({"granted": false}));
+    let card = &fixture.app.settings.sharing;
+    assert!(card.ask.is_active(), "no override: Ask each time");
+    crate::ui::consent_settings::note_status(&fixture.app, &enrolled_status(Some("auto_upload")));
+    assert!(!card.ask.is_active() && !card.automatic.is_active());
+    assert!(!card.ask.is_sensitive() && !card.automatic.is_sensitive());
+    assert!(card.clear_override.is_sensitive());
+    card.clear_override.emit_clicked();
+    fixture.drive_until(|| !fixture.calls_to("clear_contribution_override").is_empty());
+    assert!(dialogs().is_empty(), "an Automatic override clears at once");
+    fixture.answer("clear_contribution_override", Err("unavailable".into()));
+    assert!(card.refusal.is_visible());
+    assert_eq!(
+        card.refusal.text(),
+        trace_commons_contributor::project_copy::contribution_override_refusal_line("unavailable")
+    );
+
+    // Under Never, with the folders unread, clearing asks first; Cancel
+    // clears nothing.
+    crate::ui::consent_settings::note_projects(&fixture.app, None);
+    crate::ui::consent_settings::note_status(&fixture.app, &enrolled_status(Some("ignore")));
+    card.clear_override.emit_clicked();
+    fixture.drive_until(|| !dialogs().is_empty());
+    let confirm =
+        trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
+    let dialog = dialogs().remove(0);
+    assert_eq!(dialog.heading().as_deref(), Some(confirm.title));
+    dialog.response("cancel");
+    fixture.settle();
+    assert_eq!(fixture.calls_to("clear_contribution_override").len(), 1);
+}
+
+/// The bulk change asks the daemon first, asks the person in the daemon's
+/// words, sends the counts they agreed to, and plans again when the
+/// daemon says those counts went stale (Item 8).
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_bulk_change_plans_asks_and_sends_what_was_agreed() {
+    let fixture = Fixture::new("Bulk", &["plan_project_modes", "set_project_modes"]);
+    let named = || {
+        fixture
+            .calls_to("plan_project_modes")
+            .into_iter()
+            .filter(|(_, p)| p["project_ids"] == serde_json::json!(["a", "b"]))
+            .count()
+    };
+    crate::ui::projects_bulk::run(&fixture.app, vec!["a".into(), "b".into()], "ignore".into());
+    fixture.drive_until(|| named() == 1);
+    fixture.answer(
+        "plan_project_modes",
+        Ok(serde_json::json!({
+            "outcome": "confirm", "project_ids": ["a", "b"],
+            "turns_off_automatic": 1, "pending": 3,
+            "confirmation": {"title": "Heading", "body": "Body", "button": "Go",
+                             "keep": "Keep", "destructive": true},
+            "bulk_modes": ["notify_only", "ignore"],
+        })),
+    );
+    fixture.drive_until(|| !dialogs().is_empty());
+    let dialog = dialogs().remove(0);
+    assert_eq!(dialog.heading().as_deref(), Some("Heading"));
+    dialog.response("confirm");
+    fixture.drive_until(|| !fixture.calls_to("set_project_modes").is_empty());
+    assert_eq!(
+        fixture.calls_to("set_project_modes")[0].1,
+        serde_json::json!({"project_ids": ["a", "b"], "mode": "ignore",
+                           "agreed": {"turns_off_automatic": 1, "pending": 3}})
+    );
+    fixture.answer("set_project_modes", Err("bulk-confirmation-stale".into()));
+    fixture.drive_until(|| named() == 2);
+}
+
+/// Turning Train coding models on in Uses, once the daemon confirms it,
+/// offers the use on the traces already sent; Allow sends the grant for
+/// every eligible trace (Item 6).
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_turning_on_training_offers_it_on_sent_traces() {
+    let fixture = Fixture::new(
+        "TrainingOffer",
+        &[
+            "consent_options",
+            "set_consent_scopes",
+            "model_training_consent_status",
+            "model_training_consent_grant",
+        ],
+    );
+    *fixture.app.settings.uses.reported.borrow_mut() = Some((true, Vec::new()));
+    crate::ui::consent_settings::refresh(&fixture.app);
+    fixture.drive_until(|| !fixture.calls_to("consent_options").is_empty());
+    fixture.answer(
+        "consent_options",
+        Ok(serde_json::json!({"scopes": [
+            {"name": "contribution", "title": "Contribution", "always_on": true},
+            {"name": "model_training", "title": "Training", "grants_data_use": true},
+        ]})),
+    );
+    let training = descendants(fixture.app.settings.uses.root.upcast_ref())
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::CheckButton>().ok())
+        .find(|c| c.label().as_deref() == Some("Training"))
+        .expect("the optional scope is a row");
+    training.set_active(true);
+    fixture.drive_until(|| !fixture.calls_to("set_consent_scopes").is_empty());
+    fixture.answer(
+        "set_consent_scopes",
+        Ok(serde_json::json!({"consent_scopes": ["contribution", "model_training"]})),
+    );
+    fixture.drive_until(|| !fixture.calls_to("model_training_consent_status").is_empty());
+    fixture.answer(
+        "model_training_consent_status",
+        Ok(serde_json::json!({"eligible_count": 2, "submission_ids": ["s1", "s2"]})),
+    );
+    fixture.drive_until(|| !dialogs().is_empty());
+    let words = trace_commons_contributor::consent_copy::sent_traces_training_copy();
+    let dialog = dialogs().remove(0);
+    assert_eq!(dialog.heading().as_deref(), Some(words.title));
+    assert!(
+        fixture.calls_to("model_training_consent_grant").is_empty(),
+        "nothing sent before Allow"
+    );
+    dialog.response("allow");
+    fixture.drive_until(|| !fixture.calls_to("model_training_consent_grant").is_empty());
+    assert_eq!(
+        fixture.calls_to("model_training_consent_grant")[0].1,
+        serde_json::json!({"all_eligible": true})
+    );
+}

@@ -1700,6 +1700,12 @@ impl Sheet {
     /// (`approved: 0`), which renders "Nothing sent" and offers no undo --
     /// fail-closed, the same rule a genuinely skipped entry gets.
     fn approve_current(self: &Rc<Self>) {
+        // Only a preview that came back for this entry is something a
+        // Contribute can cover; the button is drawn off without one, and
+        // a press that reaches here anyway sends nothing.
+        if !self.pinned.get() {
+            return;
+        }
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
