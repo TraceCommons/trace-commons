@@ -26,6 +26,16 @@ public sealed class DaemonHost : IAsyncDisposable
     private TcDaemon? _daemon;
     private TcSubscription? _subscription;
 
+#if DEBUG
+    // Recorded sample data in place of a daemon when TRACE_COMMONS_SAMPLE is
+    // set (see SampleDaemon). Debug builds only: chosen here, before anything
+    // touches the state directory, and never started, attached or locked.
+    private readonly SampleDaemon? _sample = SampleDaemon.FromEnvironment();
+
+    /// <summary>Whether this launch reads recorded samples instead of a daemon.</summary>
+    public bool IsSample => _sample is not null;
+#endif
+
     /// <summary>
     /// Raised on the UI thread when the queue may have changed. Carries no
     /// payload deliberately: the event frame's own data is a delta, and the
@@ -85,6 +95,14 @@ public sealed class DaemonHost : IAsyncDisposable
     {
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _configDir = configDir ?? DefaultConfigDir();
+#if DEBUG
+        // The reads that take a directory rather than a handle (the witness
+        // card) see an empty, never-created one, not the contributor's own.
+        if (_sample is not null)
+        {
+            _configDir = SampleDaemon.ThrowawayConfigDir();
+        }
+#endif
     }
 
     /// <summary>
@@ -131,7 +149,11 @@ public sealed class DaemonHost : IAsyncDisposable
     public string ConfigDir => _configDir;
 
     /// <summary>Whether a daemon is currently running in this process.</summary>
+#if DEBUG
+    public bool IsRunning => _daemon is not null || _sample is not null;
+#else
     public bool IsRunning => _daemon is not null;
+#endif
 
     /// <summary>Changes whenever the running daemon connection is replaced or stopped.</summary>
     public long ConnectionGeneration { get; private set; }
@@ -179,6 +201,13 @@ public sealed class DaemonHost : IAsyncDisposable
             return;
         }
 
+#if DEBUG
+        if (_sample is not null)
+        {
+            return;
+        }
+#endif
+
         Directory.CreateDirectory(_configDir);
 
         // Nothing is watched that the contributor did not name. With no
@@ -209,6 +238,16 @@ public sealed class DaemonHost : IAsyncDisposable
         string paramsJson = "{}",
         CancellationToken cancellationToken = default)
     {
+#if DEBUG
+        if (_sample is SampleDaemon sample)
+        {
+            string recorded = await Task
+                .Run(() => sample.Call(method, paramsJson), cancellationToken)
+                .ConfigureAwait(true);
+            return DaemonResponse.Parse(recorded);
+        }
+#endif
+
         TcDaemon? daemon = _daemon;
         if (daemon is null)
         {
@@ -255,6 +294,15 @@ public sealed class DaemonHost : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entryId);
+
+#if DEBUG
+        // No transcript is recorded, and none is made up: refused, as an
+        // unrecorded method is.
+        if (_sample is not null)
+        {
+            throw new TcException(SampleDaemon.UnrecordedLabel);
+        }
+#endif
 
         TcDaemon daemon = _daemon
             ?? throw new TcException("daemon-not-started");
