@@ -359,9 +359,9 @@ mod tests {
         wait_for_layout(&navigation, false);
         assert!(!navigation.sidebar.is_visible());
         assert!(navigation.compact.is_visible());
-        navigation.compact_choices[8].emit_clicked();
+        navigation.compact_choices[9].emit_clicked();
         settle();
-        assert_eq!(navigation.list.selected_row().unwrap().index(), 8);
+        assert_eq!(navigation.list.selected_row().unwrap().index(), 9);
         assert!(navigation.scroller.vadjustment().value() > 0.0);
         let witness_scroll = navigation.scroller.vadjustment().value();
         navigation.scroller.vadjustment().set_value(0.0);
@@ -371,7 +371,7 @@ mod tests {
             navigation.compact.label().as_deref(),
             Some(Section::Witness.title())
         );
-        navigation.compact_choices[8].emit_clicked();
+        navigation.compact_choices[9].emit_clicked();
         settle();
         assert_eq!(navigation.scroller.vadjustment().value(), witness_scroll);
         window.set_default_size(1000, 600);
