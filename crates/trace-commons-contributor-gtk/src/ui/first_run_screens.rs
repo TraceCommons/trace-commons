@@ -425,13 +425,23 @@ mod mounted_tests {
         let context = init();
         let _owner = context.acquire().unwrap();
         let mut tools = Tools::default();
-        tools.record_discovery(vec![Found {
-            source: "claude-code".into(),
-            path: "/home/x/.claude/projects".into(),
-            exists: true,
-            session_count: 1,
-            total_bytes: None,
-        }]);
+        // Discovery reports every known store, found or not.
+        tools.record_discovery(vec![
+            Found {
+                source: "claude-code".into(),
+                path: "/home/x/.claude/projects".into(),
+                exists: true,
+                session_count: 1,
+                total_bytes: None,
+            },
+            Found {
+                source: "codex".into(),
+                path: "/home/x/.codex/sessions".into(),
+                exists: false,
+                session_count: 0,
+                total_bytes: None,
+            },
+        ]);
         let tools = Rc::new(RefCell::new(tools));
         let window = gtk::Window::new();
         let screen = super::super::first_run_tools::build(tools.clone(), &window, || {});
