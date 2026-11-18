@@ -719,12 +719,53 @@ impl App {
     /// including plain GNOME) never reaches this at all.
     fn wire_tray(self: &Rc<Self>) {
         let rx = crate::tray::spawn(self.tray.clone());
+        // The icon is drawn in the desktop's ink; draw it again when that
+        // flips. The tray lives as long as the process, as the window does.
+        let tray = self.tray.clone();
+        adw::StyleManager::default()
+            .connect_dark_notify(move |_| tray.redraw(self::mark::current_scheme()));
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             while let Ok(request) = rx.recv().await {
                 apply_tray_request(&app, request);
             }
         });
+    }
+
+    /// Draw the tray icon from a status reply, or from its absence: a
+    /// status that did not answer or could not be read is unavailable,
+    /// never the last state as current (`MenuBarStripInputs.of`).
+    fn render_tray(self: &Rc<Self>, status: Option<&Status>) {
+        use crate::tray_icon as icon;
+        let available = status.is_some();
+        let (condition, badge, nudge) = match status {
+            Some(status) => (
+                icon::condition(
+                    status.decisions_owed,
+                    status.unhealthy(),
+                    status.paused,
+                    true,
+                    false,
+                    true,
+                ),
+                icon::badge(status.decisions_owed),
+                status.nudge.as_ref(),
+            ),
+            None => (
+                icon::condition(None, false, false, false, false, true),
+                None,
+                None,
+            ),
+        };
+        let words = icon::mark_words(nudge, available, badge, condition)
+            .map(|words| words.tooltip.as_str())
+            .unwrap_or_default();
+        let strip = icon::Strip {
+            condition,
+            badge,
+            mark: icon::lit_mark(nudge, available),
+        };
+        self.tray.show(strip, self::mark::current_scheme(), words);
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
@@ -803,6 +844,7 @@ impl App {
             let result = result.map(serde_json::from_value::<Status>);
             app.home
                 .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+            app.render_tray(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
             if let Ok(Ok(status)) = result {
                 app.render_health(&status);
                 app.render_grant_voids(&status);

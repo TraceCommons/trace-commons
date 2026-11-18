@@ -44,6 +44,7 @@ pub mod shield;
 pub mod toast;
 pub mod transcript_paging;
 pub mod tray;
+pub mod tray_icon;
 pub mod ui;
 pub mod update;
 pub mod worker;
