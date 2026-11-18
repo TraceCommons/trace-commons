@@ -75,26 +75,33 @@ fn ellipse(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64) {
 
 /// Draws the orb at `angle` into a frame `width` by `height` at the
 /// context's origin; dimmer while nothing has been contributed.
+///
+/// Unlit, every drawing operation is faded to 0.6 on its own, as the Mac
+/// sets `opacity` on its `GraphicsContext` copy: the sphere shows through
+/// the mark, and the lines (one layer there, one group here) through
+/// nothing but their own fade. Not the orb faded as one group.
 pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: bool) {
     let r = radius(width, height);
     let (cx, cy) = (width / 2.0, height / 2.0);
     let [br, bg, bb] = BRAND_BLUE;
     let [dr, dg, db] = DEEP_BLUE;
+    let a = if lit { 1.0 } else { 0.6 };
     let _ = cr.save();
-    cr.push_group();
 
     // The glass: deep at the rim, bright toward the light above left.
     let (lx, ly) = (cx - r * 0.35, cy - r * 0.4);
     let glass = gtk::cairo::RadialGradient::new(lx, ly, 0.0, lx, ly, r * 1.5);
-    glass.add_color_stop_rgba(0.0, br, bg, bb, 0.95);
-    glass.add_color_stop_rgba(0.5, dr, dg, db, 0.95);
-    glass.add_color_stop_rgba(1.0, dr, dg, db, 1.0);
+    glass.add_color_stop_rgba(0.0, br, bg, bb, 0.95 * a);
+    glass.add_color_stop_rgba(0.5, dr, dg, db, 0.95 * a);
+    glass.add_color_stop_rgba(1.0, dr, dg, db, a);
     cr.new_path();
     ellipse(cr, cx - r, cy - r, r * 2.0, r * 2.0);
     let _ = cr.set_source(&glass);
     let _ = cr.fill();
 
-    // The lines, inside the sphere and turned about the leaning axis.
+    // The lines, inside the sphere and turned about the leaning axis: one
+    // layer, faded as a whole (`drawLayer`).
+    cr.push_group();
     let _ = cr.save();
     cr.new_path();
     ellipse(cr, cx - r, cy - r, r * 2.0, r * 2.0);
@@ -119,6 +126,8 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: 
         let _ = cr.stroke();
     }
     let _ = cr.restore();
+    let _ = cr.pop_group_to_source();
+    let _ = cr.paint_with_alpha(a);
 
     // The mark at the centre: its top-left at the square's, scaled by its
     // longer side (`GlassBrandMark.path(at:size:)`).
@@ -131,7 +140,7 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: 
         cr.scale(side / bw.max(bh), side / bw.max(bh));
         cr.translate(-bx, -by);
         super::glyph::trace_segments(cr, &segments);
-        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, a);
         cr.set_fill_rule(gtk::cairo::FillRule::Winding);
         let _ = cr.fill();
         let _ = cr.restore();
@@ -139,7 +148,7 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: 
 
     // The highlight and the rim.
     let shine = gtk::cairo::LinearGradient::new(cx, cy - r * 0.78, cx, cy - r * 0.4);
-    shine.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.45);
+    shine.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.45 * a);
     shine.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
     cr.new_path();
     ellipse(cr, cx - r * 0.62, cy - r * 0.78, r * 0.7, r * 0.38);
@@ -147,12 +156,10 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: 
     let _ = cr.fill();
     cr.new_path();
     ellipse(cr, cx - r, cy - r, r * 2.0, r * 2.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.35 * a);
     cr.set_line_width(1.0);
     let _ = cr.stroke();
 
-    let _ = cr.pop_group_to_source();
-    let _ = cr.paint_with_alpha(if lit { 1.0 } else { 0.6 });
     let _ = cr.restore();
 }
 
@@ -222,32 +229,76 @@ mod tests {
         assert!((turned[0].0 - 0.5_f64.cos()).abs() < 1e-12);
     }
 
+    /// The orb at rest, `lit` or not, as the Mac's comparison render is
+    /// made: a 104 frame in 124 at twice the size, on `ground`.
+    fn rendered(lit: bool, ground: [u8; 3]) -> gtk::cairo::ImageSurface {
+        use gtk::cairo;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 248, 248).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(
+                f64::from(ground[0]) / 255.0,
+                f64::from(ground[1]) / 255.0,
+                f64::from(ground[2]) / 255.0,
+            );
+            let _ = cr.paint();
+            cr.scale(2.0, 2.0);
+            node((10.0, 10.0), FRAME, FRAME, REST_ANGLE, lit).draw(&cr);
+        }
+        surface.flush();
+        surface
+    }
+
+    fn pixel(surface: &mut gtk::cairo::ImageSurface, x: usize, y: usize) -> [u8; 3] {
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let at = y * stride + x * 4;
+        [data[at + 2], data[at + 1], data[at]]
+    }
+
+    /// Unlit, the Mac fades each of the orb's drawing operations to 0.6
+    /// (`orb.opacity` on a copy of the `GraphicsContext`), not the orb as
+    /// one group: the white mark at its centre lets the sphere under it
+    /// show through. These are the Mac's own pixels at the mark's centre,
+    /// from `GlassLibraryOrb` rendered at rest (date 0) by the Swift probe;
+    /// a group fade would give near-white here instead (about 250 on the
+    /// light ground).
+    #[test]
+    fn unlit_the_mark_fades_by_operation_as_on_the_mac() {
+        for (ground, mac) in [
+            ([0xf2, 0xf3, 0xf6], [191, 217, 241]),
+            ([0x0d, 0x11, 0x24], [155, 182, 209]),
+        ] {
+            let mut surface = rendered(false, ground);
+            let got = pixel(&mut surface, 122, 124);
+            for k in 0..3 {
+                assert!(
+                    (i32::from(got[k]) - mac[k]).abs() <= 8,
+                    "unlit mark centre on {ground:?}: {got:?}, the Mac's {mac:?}"
+                );
+            }
+            // Lit, the mark is white.
+            let mut lit = rendered(true, ground);
+            assert!(pixel(&mut lit, 122, 124).iter().all(|&c| c >= 245));
+        }
+    }
+
     /// Renders the orb as the Mac's comparison render is made: a 104 frame
-    /// in 124, at twice the size, on the pane's ground, at rest, lit.
+    /// in 124, at twice the size, on the pane's ground, at rest, lit and
+    /// unlit.
     #[test]
     #[ignore = "writes comparison renders; set TC_STATION_RENDER_DIR"]
     fn render_for_comparison() {
-        use gtk::cairo;
         let Ok(dir) = std::env::var("TC_STATION_RENDER_DIR") else {
             return;
         };
         for (scheme, ground) in [("light", [0xf2, 0xf3, 0xf6]), ("dark", [0x0d, 0x11, 0x24])] {
-            let (w, h) = (248, 248);
-            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
-            {
-                let cr = cairo::Context::new(&surface).unwrap();
-                cr.set_source_rgb(
-                    f64::from(ground[0]) / 255.0,
-                    f64::from(ground[1]) / 255.0,
-                    f64::from(ground[2]) / 255.0,
-                );
-                let _ = cr.paint();
-                cr.scale(2.0, 2.0);
-                node((10.0, 10.0), FRAME, FRAME, REST_ANGLE, true).draw(&cr);
+            for lit in [true, false] {
+                let mut surface = rendered(lit, ground);
+                let state = if lit { "lit" } else { "unlit" };
+                let name = format!("{dir}/orb-{scheme}-{state}-248x248.bgra");
+                std::fs::write(name, &*surface.data().unwrap()).unwrap();
             }
-            surface.flush();
-            let name = format!("{dir}/orb-{scheme}-lit-{w}x{h}.bgra");
-            std::fs::write(name, &*surface.data().unwrap()).unwrap();
         }
     }
 }
