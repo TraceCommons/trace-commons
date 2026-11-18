@@ -572,11 +572,24 @@ fn panel_title(_mode: PanelMode) -> &'static str {
 /// application window of the app carrying its role's marker, so the
 /// extension can find it; elsewhere a plain window.
 fn surface_window(app: &App, gnome_role: Option<Role>, title: &str) -> gtk::Window {
-    let window = match (gnome_role, app.window.application()) {
-        (Some(role), Some(application)) => gnome::surface_window(&application, role).upcast(),
+    new_surface_window(app.window.application().as_ref(), gnome_role, title)
+}
+
+fn new_surface_window(
+    application: Option<&gtk::Application>,
+    gnome_role: Option<Role>,
+    title: &str,
+) -> gtk::Window {
+    let window = match (gnome_role, application) {
+        (Some(role), Some(application)) => gnome::surface_window(application, role).upcast(),
         _ => gtk::Window::new(),
     };
     window.set_title(Some(title));
+    // A group of its own: an open dialog of the app (first run, terms, a
+    // preview) grabs its window group, and GTK drops the keys of every
+    // other window in that group, so in the app's group the clicked rail
+    // would hold the keyboard while Escape and Tab did nothing.
+    gtk::WindowGroup::new().add_window(&window);
     window
 }
 
@@ -1588,6 +1601,46 @@ mod tests {
             folder_sub(&folder),
             monitor_traces_copy().tree.ignored_folder
         );
+    }
+
+    /// A modal dialog of the app (first run, terms, a preview) grabs input
+    /// for its window group, and GTK then drops every key sent to a window
+    /// of that group outside the dialog. Seen on GNOME 46 on 2026-11-18:
+    /// with the first-run window open, the clicked rail held the keyboard
+    /// yet Escape and Tab did nothing. The rail and the panel stand apart
+    /// from the app's windows, as the Mac's panels do from its sheets, so
+    /// each is in a group of its own.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys() {
+        gtk::init().expect("GTK display");
+        let application = gtk::Application::new(
+            Some("ai.tracecommons.Contributor.GroupTest"),
+            gtk::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .expect("registered");
+        let main = gtk::ApplicationWindow::builder()
+            .application(&application)
+            .build();
+        let dialog = gtk::Window::builder()
+            .transient_for(&main)
+            .modal(true)
+            .build();
+        for role in [None, Some(Role::Rail), Some(Role::Panel)] {
+            let window = new_surface_window(Some(&application), role, crate::copy::APP_NAME);
+            assert!(window.has_group(), "{role:?}: in the app's shared group");
+            assert_ne!(
+                window.group(),
+                dialog.group(),
+                "{role:?}: shares the dialog's group, so its grab takes the keys"
+            );
+            assert_ne!(window.group(), main.group(), "{role:?}");
+            window.destroy();
+        }
+        dialog.destroy();
+        main.destroy();
     }
 
     #[test]

@@ -235,6 +235,7 @@ else
     ui::edge_surfaces::tests::mounted_compact_graph_is_shown_without_its_controls \
     ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend \
     ui::edge_surfaces::tests::mounted_the_popovers_private_ai_card_follows_the_mac \
+    ui::edge_surfaces::tests::mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys \
     edge::gnome::tests::mounted_the_placed_windows_carry_their_marker_and_the_brand_name; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
