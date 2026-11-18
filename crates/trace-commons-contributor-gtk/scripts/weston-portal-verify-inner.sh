@@ -168,6 +168,9 @@ else
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   for test_name in \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
+    ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
+    ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
+    ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
@@ -189,11 +192,17 @@ else
     ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
     ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_a_new_card_slides_in_and_a_revealed_one_fades \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
     ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
     ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
     ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
+    ui::tool_tile::mounted::mounted_a_tile_is_the_macs_size_and_says_nothing \
+    ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
+    ui::armed_mark::tests::mounted_the_armed_card_goes_once \
+    ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
+    ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \

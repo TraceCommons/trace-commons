@@ -486,8 +486,9 @@ fn stylesheet(dark: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     format!(
-        "{brand}\n{glass}\n{tokens}\n{}\n{insights}",
-        include_str!("style.css")
+        "{brand}\n{glass}\n{tokens}\n{}\n{insights}\n{}",
+        include_str!("style.css"),
+        super::hero_art::css()
     )
 }
 

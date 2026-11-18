@@ -1869,8 +1869,11 @@ impl Transfers {
         }
     }
 
-    /// The cards drawn: the newest few, newest nearest the legend; none
-    /// while Traces is shown.
+    /// The cards drawn, as the Mac's popover stack hung from the map's foot
+    /// (`GlassPopoverStack`, anchor bottom): the newest whole, up to two
+    /// behind it peeking out above it; none while Traces is shown. A new
+    /// card rises into place, one revealed by closing the card in front of
+    /// it fades (`crate::ui::popover_stack`).
     fn draw_cards(self: &Rc<Self>) {
         let visible: Vec<MapTransfer> = if self.shown.get() {
             self.player
@@ -1886,12 +1889,14 @@ impl Transfers {
         if *self.drawn.borrow() == ids {
             return;
         }
-        self.drawn.replace(ids);
+        // The cards drawn before: the front one now was among them when a
+        // close revealed it, and was not when it has just arrived.
+        let before = self.drawn.replace(ids);
         while let Some(child) = self.cards.first_child() {
             self.cards.remove(&child);
         }
         let scene = self.canvas.scene();
-        for transfer in visible.iter().rev() {
+        if let Some(transfer) = visible.first() {
             let from_map = scene
                 .nodes
                 .iter()
@@ -1905,7 +1910,17 @@ impl Transfers {
                     transfers.sync();
                 }
             });
-            self.cards.append(&card);
+            let plates = crate::ui::popover_stack::Plates::hung_from_foot("tc-map-transfer-plate");
+            plates.set_behind(visible.len().saturating_sub(1).min(2));
+            // The plates sit flush on the card, whatever the column's gap.
+            let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            stack.append(&plates);
+            let slide = crate::ui::popover_stack::Slide::new(&card);
+            stack.append(&slide);
+            self.cards.append(&stack);
+            if crate::ui::glass_motion::animations_enabled() {
+                slide.arrive(!before.contains(&transfer.id), true);
+            }
         }
         self.cards.set_visible(!visible.is_empty());
     }

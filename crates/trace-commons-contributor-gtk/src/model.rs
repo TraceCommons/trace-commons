@@ -1049,6 +1049,11 @@ pub struct NearAiBalance {
     pub spend_limit_nanos: Option<i64>,
     #[serde(default)]
     pub total_spent_nanos: Option<i64>,
+    /// Everything received into the account so far, by the daemon's count.
+    /// Home marks NEAR AI credit arriving only when this grows
+    /// (`ui::hero_art::arrival`): the balance also moves with spending.
+    #[serde(default)]
+    pub received_total_nanos: Option<i64>,
     /// The DAEMON'S clock at the moment the service answered, RFC 3339 --
     /// not the service's own `updated_at`. What a shell may say with it is
     /// how long ago the question was put, and nothing about bookkeeping.

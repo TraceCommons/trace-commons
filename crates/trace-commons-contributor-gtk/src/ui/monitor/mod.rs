@@ -27,6 +27,7 @@ pub mod prefs;
 pub mod shell;
 pub mod tabs;
 pub mod three_pane;
+pub mod tool_art;
 pub mod traces_tree;
 pub mod transfer_card;
 pub mod transfers;
