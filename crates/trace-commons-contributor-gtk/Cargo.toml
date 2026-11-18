@@ -91,9 +91,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zbus = "5"
 
 # KWin's blur behind the glass panes (`ui::glass_backdrop`), Linux only, so
-# macOS test builds are unaffected. Owner-approved 2026-11-18 ("new
-# depdenencies for KDE blue are fine"), the set the blur spike (#2162)
-# measured; the dependency write-up is in its plan,
+# macOS test builds are unaffected. Owner-approved 2026-11-18: the set the
+# blur spike (#2162) measured; the dependency write-up is in its plan,
 # docs/superpowers/plans/2026-11-16-linux-blur-spike.md. Each turns FFI into
 # safe calls, so the crate keeps `unsafe_code = "forbid"`:
 # - gdk4-wayland (`wayland_crate`): GTK's wl_display and wl_surface as

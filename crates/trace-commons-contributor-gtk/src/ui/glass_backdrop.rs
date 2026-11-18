@@ -61,16 +61,18 @@ impl Capability {
     };
 }
 
-/// A developer override, `TRACE_COMMONS_GLASS`, for captures and
-/// comparison; unset, the window follows the desktop.
+/// A developer override, `TRACE_COMMONS_GLASS`; unset, the window follows
+/// the desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Override {
     Auto,
     /// Always painted.
     Painted,
-    /// Translucent with no blur request, to compare against: over a busy
-    /// desktop its text does not reach the contrast floors.
-    Translucent,
+    /// Blur wherever it is granted, even in a scheme whose text does not
+    /// yet read over every desktop ([`readable`]): for verifying the blur
+    /// itself on a KDE box. Still needs the grant, compositing and no high
+    /// contrast; it never makes the window translucent without blur.
+    Blur,
 }
 
 /// The environment variable [`Override`] is read from.
@@ -79,7 +81,7 @@ pub const OVERRIDE_ENV: &str = "TRACE_COMMONS_GLASS";
 pub fn parse_override(raw: Option<&str>) -> Override {
     match raw.map(str::trim) {
         Some("painted") => Override::Painted,
-        Some("translucent") => Override::Translucent,
+        Some("blur") => Override::Blur,
         _ => Override::Auto,
     }
 }
@@ -92,36 +94,52 @@ pub enum Glass {
     Painted,
     /// Translucent panes over KWin's blur of the desktop.
     Blurred,
-    /// Translucent with no blur ([`Override::Translucent`] only).
-    Translucent,
 }
 
 impl Glass {
     /// Whether the translucent sheet is loaded.
     pub fn translucent(self) -> bool {
-        !matches!(self, Glass::Painted)
+        self == Glass::Blurred
     }
+}
+
+/// Whether every text colour the panes' screens use reads at 4.5:1 on the
+/// translucent panes over a black and a white desktop, in and out of focus,
+/// in this scheme. Measured, not chosen: `style.rs`'s
+/// `every_text_colour_reads_on_the_translucent_panes` fails if this
+/// disagrees with the measurement either way.
+///
+/// False in both schemes today. KWin's blur averages the desktop and adds
+/// no frost of its own, as the Mac's material does, so over a dark desktop a
+/// light pane is mid-grey (worst 2.51:1, `tc_blue_text` out of focus;
+/// `tc_muted` 2.57:1) and over a white one a dark pane is too light (worst
+/// 3.33:1, `tc_muted`). No tint share reaches 4.5 in light
+/// (3.54:1 at the full veil); dark would need 0.65 against the Mac's 0.25.
+/// Until that is settled the window stays painted under [`Override::Auto`],
+/// on KDE too.
+pub fn readable(dark: bool) -> bool {
+    let _ = dark;
+    false
 }
 
 /// The one decision. High contrast always paints: the Mac's flat theme
 /// deepens its veil under Increase Contrast, and a painted pane is the
 /// deepest there is. Otherwise the window is translucent only where blur is
-/// granted and the display composites.
-pub fn decide(choice: Override, capability: Capability, high_contrast: bool) -> Glass {
-    if high_contrast {
-        return Glass::Painted;
-    }
+/// granted and the display composites, and under [`Override::Auto`] only
+/// where its text reads over any desktop (`readable`).
+pub fn decide(
+    choice: Override,
+    capability: Capability,
+    high_contrast: bool,
+    readable: bool,
+) -> Glass {
+    let granted =
+        capability.granted && capability.composited && capability.backend != Backend::Other;
     match choice {
+        _ if high_contrast || !granted => Glass::Painted,
         Override::Painted => Glass::Painted,
-        Override::Translucent => Glass::Translucent,
-        Override::Auto
-            if capability.granted
-                && capability.composited
-                && capability.backend != Backend::Other =>
-        {
-            Glass::Blurred
-        }
-        Override::Auto => Glass::Painted,
+        Override::Auto if !readable => Glass::Painted,
+        Override::Auto | Override::Blur => Glass::Blurred,
     }
 }
 
@@ -244,10 +262,18 @@ pub enum Effect {
 pub struct Requests {
     glass: Option<Glass>,
     sent: Option<Vec<Rect>>,
+    /// A request did not go out. Translucency without blur is never shown,
+    /// so the window paints until the grant is lost and given again.
+    refused: bool,
 }
 
 impl Requests {
-    pub fn update(&mut self, glass: Glass, region: Vec<Rect>) -> Vec<Effect> {
+    /// `glass` as [`decide`] chose it, with `granted` the backend's grant.
+    pub fn update(&mut self, glass: Glass, granted: bool, region: Vec<Rect>) -> Vec<Effect> {
+        if !granted {
+            self.refused = false;
+        }
+        let glass = if self.refused { Glass::Painted } else { glass };
         let mut effects = Vec::new();
         let was = self.glass.replace(glass);
         if was.map(Glass::translucent) != Some(glass.translucent()) {
@@ -270,6 +296,22 @@ impl Requests {
             effects.push(Effect::Request(region.clone()));
         }
         self.sent = Some(region);
+        effects
+    }
+
+    /// The backend did not send the last request: paint and withdraw.
+    pub fn refused(&mut self) -> Vec<Effect> {
+        self.refused = true;
+        let mut effects = Vec::new();
+        if self
+            .glass
+            .replace(Glass::Painted)
+            .is_some_and(Glass::translucent)
+        {
+            effects.push(Effect::Sheet(false));
+        }
+        self.sent = None;
+        effects.push(Effect::Unset);
         effects
     }
 }
@@ -389,8 +431,14 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
     let display = gtk::prelude::WidgetExt::display(window);
     let mut capability = state.backend.capability();
     capability.composited = display.is_composited() && display.is_rgba();
-    let high_contrast = adw::StyleManager::default().is_high_contrast();
-    let glass = decide(state.choice, capability, high_contrast);
+    let manager = adw::StyleManager::default();
+    let high_contrast = manager.is_high_contrast();
+    let glass = decide(
+        state.choice,
+        capability,
+        high_contrast,
+        readable(manager.is_dark()),
+    );
     if state.logged != Some((capability, glass)) {
         state.logged = Some((capability, glass));
         eprintln!(
@@ -417,19 +465,24 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
     let Some(surface) = window.surface() else {
         return;
     };
-    for effect in state.requests.update(glass, region) {
+    let mut effects = state
+        .requests
+        .update(glass, capability.granted, region)
+        .into_iter()
+        .collect::<std::collections::VecDeque<_>>();
+    while let Some(effect) = effects.pop_front() {
         match effect {
             Effect::Sheet(translucent) => super::style::set_translucent(translucent),
             Effect::Request(region) => {
-                let sent =
-                    state
-                        .backend
-                        .request(&surface, &region, f64::from(surface.scale_factor()));
-                if !sent {
+                let scale = f64::from(surface.scale_factor());
+                if !state.backend.request(&surface, &region, scale) {
                     eprintln!(
                         "trace-commons-shell: glass request=unsent bands={}",
                         region.len()
                     );
+                    // Never translucent without the blur behind it.
+                    effects.clear();
+                    effects.extend(state.requests.refused());
                 }
                 // Wayland's blur state is double-buffered on the surface:
                 // it lands with GTK's next commit, so ask for one.
@@ -458,65 +511,88 @@ mod tests {
         assert_eq!(parse_override(None), Override::Auto);
         assert_eq!(parse_override(Some("")), Override::Auto);
         assert_eq!(parse_override(Some("bogus")), Override::Auto);
+        assert_eq!(parse_override(Some("translucent")), Override::Auto);
         assert_eq!(parse_override(Some("painted")), Override::Painted);
-        assert_eq!(parse_override(Some(" translucent ")), Override::Translucent);
+        assert_eq!(parse_override(Some(" blur ")), Override::Blur);
     }
 
-    /// Every capability and high-contrast combination: Auto is translucent
-    /// in exactly one of them, the granted, compositing, known backend
-    /// without high contrast.
+    /// Every capability, high-contrast and readability combination, under
+    /// each override: blurred in exactly the granted, compositing, known
+    /// backend without high contrast, and under Auto only where readable.
     #[test]
-    fn auto_is_blurred_only_where_blur_is_granted_and_composited() {
-        let mut blurred = Vec::new();
-        for backend in [Backend::Wayland, Backend::X11, Backend::Other] {
-            for granted in [false, true] {
-                for composited in [false, true] {
-                    for high_contrast in [false, true] {
-                        let capability = Capability {
-                            backend,
-                            granted,
-                            composited,
-                        };
-                        let glass = decide(Override::Auto, capability, high_contrast);
-                        assert_ne!(glass, Glass::Translucent, "{capability:?}");
-                        if glass == Glass::Blurred {
-                            blurred.push((backend, granted, composited, high_contrast));
+    fn blurred_only_where_blur_is_granted_and_composited() {
+        for choice in [Override::Auto, Override::Painted, Override::Blur] {
+            let mut blurred = Vec::new();
+            for backend in [Backend::Wayland, Backend::X11, Backend::Other] {
+                for granted in [false, true] {
+                    for composited in [false, true] {
+                        for high_contrast in [false, true] {
+                            for readable in [false, true] {
+                                let capability = Capability {
+                                    backend,
+                                    granted,
+                                    composited,
+                                };
+                                if decide(choice, capability, high_contrast, readable)
+                                    == Glass::Blurred
+                                {
+                                    blurred.push((backend, readable));
+                                }
+                            }
                         }
                     }
                 }
             }
+            let expected = match choice {
+                Override::Painted => vec![],
+                Override::Auto => vec![(Backend::Wayland, true), (Backend::X11, true)],
+                Override::Blur => vec![
+                    (Backend::Wayland, false),
+                    (Backend::Wayland, true),
+                    (Backend::X11, false),
+                    (Backend::X11, true),
+                ],
+            };
+            assert_eq!(blurred, expected, "{choice:?}");
         }
-        assert_eq!(
-            blurred,
-            vec![
-                (Backend::Wayland, true, true, false),
-                (Backend::X11, true, true, false)
-            ]
-        );
     }
 
     #[test]
-    fn nothing_probed_is_painted() {
-        assert_eq!(
-            decide(Override::Auto, Capability::NONE, false),
-            Glass::Painted
-        );
+    fn nothing_probed_is_painted_whatever_the_override() {
+        for choice in [Override::Auto, Override::Painted, Override::Blur] {
+            assert_eq!(
+                decide(choice, Capability::NONE, false, true),
+                Glass::Painted
+            );
+        }
     }
 
     #[test]
     fn high_contrast_paints_whatever_the_override() {
-        for choice in [Override::Auto, Override::Painted, Override::Translucent] {
-            assert_eq!(decide(choice, WAYLAND, true), Glass::Painted, "{choice:?}");
+        for choice in [Override::Auto, Override::Painted, Override::Blur] {
+            assert_eq!(
+                decide(choice, WAYLAND, true, true),
+                Glass::Painted,
+                "{choice:?}"
+            );
         }
     }
 
+    /// Today neither scheme's text reads over every desktop, so a KDE box
+    /// with blur granted stays painted unless the override asks for blur.
     #[test]
-    fn the_overrides_ignore_the_grant() {
-        assert_eq!(decide(Override::Painted, WAYLAND, false), Glass::Painted);
-        assert_eq!(
-            decide(Override::Translucent, Capability::NONE, false),
-            Glass::Translucent
-        );
+    fn a_granted_kde_box_is_painted_until_its_text_reads() {
+        for dark in [false, true] {
+            assert!(!readable(dark));
+            assert_eq!(
+                decide(Override::Auto, WAYLAND, false, readable(dark)),
+                Glass::Painted
+            );
+            assert_eq!(
+                decide(Override::Blur, WAYLAND, false, readable(dark)),
+                Glass::Blurred
+            );
+        }
     }
 
     fn area(region: &[Rect]) -> i64 {
@@ -669,18 +745,18 @@ mod tests {
     fn a_grant_loads_the_translucent_sheet_and_asks_for_the_panes() {
         let mut requests = Requests::default();
         assert_eq!(
-            requests.update(Glass::Painted, band(0)),
+            requests.update(Glass::Painted, false, band(0)),
             vec![Effect::Sheet(false)]
         );
         assert_eq!(
-            requests.update(Glass::Blurred, band(0)),
+            requests.update(Glass::Blurred, true, band(0)),
             vec![Effect::Sheet(true), Effect::Request(band(0))]
         );
         // A frame that moves nothing sends nothing.
-        assert_eq!(requests.update(Glass::Blurred, band(0)), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(0)), vec![]);
         // A pane that moves is asked for again.
         assert_eq!(
-            requests.update(Glass::Blurred, band(5)),
+            requests.update(Glass::Blurred, true, band(5)),
             vec![Effect::Request(band(5))]
         );
     }
@@ -688,14 +764,14 @@ mod tests {
     #[test]
     fn a_revoked_grant_withdraws_the_request_and_paints() {
         let mut requests = Requests::default();
-        requests.update(Glass::Blurred, band(0));
+        requests.update(Glass::Blurred, true, band(0));
         assert_eq!(
-            requests.update(Glass::Painted, band(0)),
+            requests.update(Glass::Painted, false, band(0)),
             vec![Effect::Sheet(false), Effect::Unset]
         );
         // Granted again: asked again, though the region is the same.
         assert_eq!(
-            requests.update(Glass::Blurred, band(0)),
+            requests.update(Glass::Blurred, true, band(0)),
             vec![Effect::Sheet(true), Effect::Request(band(0))]
         );
     }
@@ -705,25 +781,38 @@ mod tests {
         // To both protocols an empty region means the whole surface.
         let mut requests = Requests::default();
         assert_eq!(
-            requests.update(Glass::Blurred, vec![]),
+            requests.update(Glass::Blurred, true, vec![]),
             vec![Effect::Sheet(true)]
         );
-        requests.update(Glass::Blurred, band(0));
-        assert_eq!(requests.update(Glass::Blurred, vec![]), vec![Effect::Unset]);
-        assert_eq!(requests.update(Glass::Blurred, vec![]), vec![]);
+        requests.update(Glass::Blurred, true, band(0));
         assert_eq!(
-            requests.update(Glass::Blurred, band(0)),
+            requests.update(Glass::Blurred, true, vec![]),
+            vec![Effect::Unset]
+        );
+        assert_eq!(requests.update(Glass::Blurred, true, vec![]), vec![]);
+        assert_eq!(
+            requests.update(Glass::Blurred, true, band(0)),
             vec![Effect::Request(band(0))]
         );
     }
 
+    /// A request that does not go out leaves no translucent window behind
+    /// it: paint, withdraw, and stay painted while the same grant lasts.
     #[test]
-    fn the_comparison_override_never_asks_for_blur() {
+    fn an_unsent_request_paints_and_withdraws_until_the_grant_returns() {
         let mut requests = Requests::default();
+        requests.update(Glass::Blurred, true, band(0));
         assert_eq!(
-            requests.update(Glass::Translucent, band(0)),
-            vec![Effect::Sheet(true)]
+            requests.refused(),
+            vec![Effect::Sheet(false), Effect::Unset]
         );
-        assert_eq!(requests.update(Glass::Translucent, band(5)), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(0)), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(5)), vec![]);
+        // The grant goes and comes back: asked again.
+        assert_eq!(requests.update(Glass::Painted, false, band(5)), vec![]);
+        assert_eq!(
+            requests.update(Glass::Blurred, true, band(5)),
+            vec![Effect::Sheet(true), Effect::Request(band(5))]
+        );
     }
 }

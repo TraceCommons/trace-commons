@@ -463,13 +463,20 @@ class GlassBlurTokensTests(unittest.TestCase):
             css = generate.render_insights_blur_css(self.tokens, scheme)
             card = generate.css_rgba(generate.flat_fill(self.tokens, "cardFill", scheme), "cardFill")
             control = generate.css_rgba(generate.flat_fill(self.tokens, "controlFill", scheme), "controlFill")
+            glass = "window.tc-glass-window"
             with self.subTest(scheme=scheme):
-                self.assertIn(".tc-insights { background: transparent; }", css)
-                self.assertIn(".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary "
+                self.assertIn(f"{glass} .tc-insights {{ background: transparent; }}", css)
+                self.assertIn(f"{glass} .tc-insights .tc-insights-card, "
+                              f"{glass} .tc-insights button.tc-insights-summary "
                               f"{{ background: {card}; }}", css)
-                self.assertIn(f".tc-insights stackswitcher {{ background: {control}; }}", css)
+                self.assertIn(f"{glass} .tc-insights stackswitcher {{ background: {control}; }}", css)
                 # The unfocused twins the painted sheet carries are undone.
-                self.assertIn("window.tc-glass-window:backdrop .tc-insights { background: transparent; }", css)
+                self.assertIn(f"{glass}:backdrop .tc-insights {{ background: transparent; }}", css)
+                # The sheet is display-wide while loaded: an Insights window
+                # of its own keeps its ground, so every rule is scoped.
+                for line in css.splitlines():
+                    for selector in line.split("{")[0].split(","):
+                        self.assertTrue(selector.strip().startswith(glass), selector)
 
     def test_blur_sheets_reach_rust(self):
         out = generate.render_gtk(self.tokens)

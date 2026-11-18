@@ -320,14 +320,14 @@ window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-
 "#;
 /// Insights over the translucent pane, light scheme.
 pub const INSIGHTS_LIGHT_BLUR_CSS: &str = r#"
-.tc-insights { background: transparent; }
-.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
-.tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
 window.tc-glass-window:backdrop .tc-insights { background: transparent; }
 window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
 window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
-.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: rgba(209, 213, 220, 0.712); }
-.tc-insights stackswitcher button:hover { background: rgba(213, 216, 223, 0.784); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(209, 213, 220, 0.712); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(213, 216, 223, 0.784); }
 "#;
 /// The translucent window's colours over the painted ones, dark scheme,
 /// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
@@ -355,14 +355,14 @@ window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-
 "#;
 /// Insights over the translucent pane, dark scheme.
 pub const INSIGHTS_DARK_BLUR_CSS: &str = r#"
-.tc-insights { background: transparent; }
-.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
-.tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
 window.tc-glass-window:backdrop .tc-insights { background: transparent; }
 window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
 window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
-.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: rgba(255, 255, 255, 0.08); }
-.tc-insights stackswitcher button:hover { background: rgba(108, 108, 108, 0.426); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(255, 255, 255, 0.08); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(108, 108, 108, 0.426); }
 "#;
 
 /// Radii, spacing and sizes of the glass system, as the flat theme draws them.

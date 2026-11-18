@@ -886,6 +886,98 @@ mod tests {
             .collect()
     }
 
+    /// A colour the translucent sheet defines, as r, g, b (0-255) and
+    /// alpha.
+    fn blur_colour(dark: bool, name: &str) -> (f64, f64, f64, f64) {
+        let sheet = if dark {
+            brand_tokens::GLASS_DARK_BLUR_CSS
+        } else {
+            brand_tokens::GLASS_LIGHT_BLUR_CSS
+        };
+        let value = sheet
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("@define-color {name} ")))
+            .unwrap_or_else(|| panic!("the translucent sheet defines no {name}"));
+        let inner = value
+            .trim_end_matches(';')
+            .trim()
+            .strip_prefix("rgba(")
+            .and_then(|v| v.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{name} is not rgba: {value}"));
+        let parts: Vec<f64> = inner
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        (parts[0], parts[1], parts[2], parts[3])
+    }
+
+    fn flatten(colour: (f64, f64, f64, f64), ground: &str) -> String {
+        let (r, g, b, a) = colour;
+        let base: Vec<f64> = (0..3)
+            .map(|i| f64::from(u8::from_str_radix(&ground[1 + 2 * i..3 + 2 * i], 16).unwrap()))
+            .collect();
+        let mix = |c: f64, i: usize| (c * a + base[i] * (1.0 - a)).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", mix(r, 0), mix(g, 1), mix(b, 2))
+    }
+
+    /// Text in a translucent pane sits on whatever KWin's blur averages the
+    /// desktop to. A scheme may go translucent on its own
+    /// (`glass_backdrop::readable`) only if every text colour the panes'
+    /// screens use reads at 4.5:1 there too, over a black and a white
+    /// desktop, in and out of focus, on the pane and on the tiers that hold
+    /// text. Two-sided: `readable` must agree with the measurement, so the
+    /// gate can neither open on a failure nor stay shut after a fix.
+    #[test]
+    fn every_text_colour_reads_on_the_translucent_panes() {
+        let inks = [
+            "tc_glass_ink",
+            "tc_glass_ink_secondary",
+            "tc_glass_status_on_text",
+            "tc_glass_status_ask_text",
+            "tc_ink",
+            "tc_muted",
+            "accent_color",
+            "tc_green_text",
+            "tc_gold_text",
+            "tc_coral_text",
+            "tc_blue_text",
+            "success_color",
+            "warning_color",
+            "error_color",
+        ];
+        for dark in [false, true] {
+            let mut failures = Vec::new();
+            let colours = palette(dark);
+            for desktop in ["#000000", "#ffffff"] {
+                for pane in ["tc_glass_pane", "tc_glass_pane_inactive"] {
+                    let ground = flatten(blur_colour(dark, pane), desktop);
+                    let mut grounds = vec![(pane.to_string(), ground.clone())];
+                    for tier in ["tc_glass_card", "tc_glass_card_quiet", "tc_glass_control"] {
+                        grounds.push((
+                            format!("{tier} on {pane}"),
+                            flatten(blur_colour(dark, tier), &ground),
+                        ));
+                    }
+                    for (where_, under) in &grounds {
+                        for ink in inks {
+                            let ratio = contrast(&colours[ink], under);
+                            if ratio < 4.5 {
+                                failures.push(format!(
+                                    "dark={dark}: {ink} on {where_} over {desktop} is {ratio:.2}:1"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                failures.is_empty(),
+                crate::ui::glass_backdrop::readable(dark),
+                "dark={dark}: {failures:#?}"
+            );
+        }
+    }
+
     #[test]
     fn every_status_and_accent_text_clears_4_5_on_every_ground() {
         let text = on_every_ground(&[

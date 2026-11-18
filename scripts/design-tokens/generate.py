@@ -725,8 +725,10 @@ def blur_pane_layers(tokens: dict, scheme: str, share: float, dimmed: bool) -> l
 
 
 def blur_failures(tokens: dict, scheme: str, share: float) -> list[str]:
-    """Every text that would read under 4.5:1 over a black or a white
-    desktop at this tint share, focused or not."""
+    """Every glass ink (ink, inkSecondary, selection text) that would read
+    under 4.5:1 over a black or a white desktop at this tint share, focused
+    or not. The shell's own text colours are checked against these panes in
+    style.rs, which decides whether a scheme may go translucent at all."""
     painted = glass_palette(tokens, scheme)
     fills = {"card": flat_fill(tokens, "cardFill", scheme),
              "cardQuiet": flat_fill(tokens, "cardFillQuiet", scheme),
@@ -754,7 +756,7 @@ def blur_failures(tokens: dict, scheme: str, share: float) -> list[str]:
 
 def glass_blur_tint_share(tokens: dict, scheme: str) -> float:
     """The Mac's tint share, or the smallest lift in 0.05 steps at which every
-    text still reads over a black or white desktop. KWin's blur adds no frost
+    glass ink still reads over a black or white desktop. KWin's blur adds no frost
     of its own, as the Mac's material does; a lift is a deviation from the
     Mac, kept as small as the 4.5:1 floor allows."""
     share = GLASS_TINT_SHARE
@@ -833,16 +835,21 @@ def render_insights_blur_css(tokens: dict, scheme: str) -> str:
                   else rgba_stack([flat_color(tokens, "cardHover", scheme)]))
     control_hover = rgba_stack([control, flat_color(tokens, "controlOnCardHover" if scheme == "light"
                                                     else "controlOnMenuHover", scheme)])
+    # Scoped to the glass window: the sheet is display-wide while loaded, and
+    # an Insights window of its own keeps its painted ground.
     cards = ".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary"
     out = []
-    for prefix in ("", "window.tc-glass-window:backdrop "):
+    for prefix in ("window.tc-glass-window ", "window.tc-glass-window:backdrop "):
         out += [f"{prefix}.tc-insights {{ background: transparent; }}",
                 ", ".join(prefix + part.strip() for part in cards.split(","))
                 + f" {{ background: {css_rgba(card, 'cardFill')}; }}",
                 f"{prefix}.tc-insights stackswitcher {{ background: {css_rgba(control, 'controlFill')}; }}"]
-    out += [".tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover "
+    scope = "window.tc-glass-window "
+    out += [f"{scope}.tc-insights button.tc-insights-card:hover, "
+            f"{scope}.tc-insights button.tc-insights-summary:hover "
             f"{{ background: {css_rgba_tuple(card_hover)}; }}",
-            f".tc-insights stackswitcher button:hover {{ background: {css_rgba_tuple(control_hover)}; }}"]
+            f"{scope}.tc-insights stackswitcher button:hover "
+            f"{{ background: {css_rgba_tuple(control_hover)}; }}"]
     return "\n".join(out)
 
 
