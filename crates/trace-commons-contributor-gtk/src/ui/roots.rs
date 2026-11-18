@@ -376,8 +376,7 @@ pub(super) fn connected(app: &Rc<super::App>, on_saved: impl Fn() + 'static) -> 
     title.add_css_class("tc-flow-title");
     root.append(&title);
     root.append(&body_label(copy::ROOTS_BODY));
-    let loading = gtk::Spinner::new();
-    loading.start();
+    let loading = super::glass_feedback::spinner();
     root.append(&loading);
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {

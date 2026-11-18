@@ -37,6 +37,7 @@ use trace_commons_contributor::account_contribution::{
     REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
 };
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
+use trace_commons_contributor::preview_copy::monitor_screens_copy;
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
 /// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
@@ -94,24 +95,36 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
-    /// The three `set_settings` knobs, built once and only ever refilled.
+    /// The sharing choice at the top of Projects, as on the Mac.
+    pub(crate) sharing: super::consent_settings::SharingCard,
+    /// The Uses section, as on the Mac.
+    pub(crate) uses: super::consent_settings::UsesCard,
+    /// The bulk change over the project list, as the Mac's Projects
+    /// manager offers it.
+    pub(crate) bulk: super::projects_bulk::BulkState,
+    /// The projects the list last drew, so a selection change can redraw
+    /// it without a daemon read.
+    last_projects: std::cell::RefCell<Vec<Project>>,
+    /// The two `set_settings` knobs, built once and only ever refilled.
     ///
     /// Everything else on this screen is torn down and rebuilt on each
     /// render, which is fine for labels and fatal for a control: a refresh
     /// runs on every daemon event, and rebuilding a spin button would
     /// destroy the one the contributor is in the middle of typing into.
     quiescence_minutes: gtk::SpinButton,
-    approval_hold_seconds: gtk::SpinButton,
-    /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
-    approval_hold_note: gtk::Label,
     digest_hours: gtk::SpinButton,
     /// Set while `render_knobs` is writing the daemon's own values into
-    /// those three, so the `value-changed` they emit is not mistaken for a
+    /// those two, so the `value-changed` they emit is not mistaken for a
     /// contributor turning a dial and echoed straight back as a write.
     filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
+    /// The Traces map's style: on, the rocket and station.
+    map_style_switch: gtk::Switch,
+    /// Home's "Show promotions" (the Mac's General section): off, Home's
+    /// campaign card never shows.
+    pub promotions_switch: gtk::Switch,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -586,8 +599,12 @@ impl SettingsView {
 
         sections.body(Section::Witness).append(&witness_card);
 
+        let sharing = super::consent_settings::SharingCard::new();
+        sections.body(Section::Projects).append(&sharing.root);
         let projects = style::card(gtk::Orientation::Vertical, space::M);
         sections.body(Section::Projects).append(&projects);
+        let uses = super::consent_settings::UsesCard::new();
+        sections.body(Section::Uses).append(&uses.root);
 
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
         // Ranges, not free numbers. The daemon accepts any `u64` for all
@@ -604,24 +621,6 @@ impl SettingsView {
             1.0,
             240.0,
         );
-        let approval_hold_seconds = knob_row(
-            &knobs,
-            copy::KNOB_HOLD_TITLE,
-            copy::KNOB_HOLD_UNIT,
-            0.0,
-            300.0,
-        );
-        // A hold of zero is not a small undo window, it is none, and that
-        // is a different statement from the number beside it. It gets its
-        // own line, shown only when it is true.
-        let approval_hold_note = gtk::Label::builder()
-            .label(copy::KNOB_HOLD_ZERO)
-            .xalign(0.0)
-            .wrap(true)
-            .visible(false)
-            .build();
-        approval_hold_note.add_css_class("tc-caveat");
-        knobs.append(&approval_hold_note);
         let digest_hours = knob_row(
             &knobs,
             copy::KNOB_DIGEST_TITLE,
@@ -661,6 +660,48 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The Traces map's style (the Mac's General section; this shell
+        // has none, so beside the other choices about this computer's
+        // window): the rocket and station, or the laptop and the orb.
+        let (map_style_card, map_style_switch) = map_style_card();
+        sections.body(Section::Startup).append(&map_style_card);
+        // The Linux app's Appearance choice (Omarchy skin spec, D2): a card
+        // of its own under Startup, since the sections are pinned to the
+        // macOS groups. It writes only the shell's own preference file.
+        sections
+            .body(Section::Startup)
+            .append(&super::appearance::settings_card());
+
+        // Home's promotion switch, as the Mac's General section has it: the
+        // core's card heading, the switch and the line under it.
+        let home_words = &monitor_screens_copy().home_history;
+        let promotions_card = style::card(gtk::Orientation::Vertical, space::S);
+        let promotions_heading = gtk::Label::builder()
+            .label(home_words.promotions_title)
+            .xalign(0.0)
+            .build();
+        promotions_heading.add_css_class("heading");
+        promotions_card.append(&promotions_heading);
+        let promotions_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let promotions_label = gtk::Label::builder()
+            .label(home_words.promotions_toggle)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        promotions_label.add_css_class("tc-body");
+        let promotions_switch = gtk::Switch::builder()
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Center)
+            .active(crate::home_cards::HomePrefs::load().shows_promotions)
+            .build();
+        promotions_switch.update_property(&[gtk::accessible::Property::Label(
+            home_words.promotions_toggle,
+        )]);
+        promotions_row.append(&promotions_label);
+        promotions_row.append(&promotions_switch);
+        promotions_card.append(&promotions_row);
+        style::append_meta(&promotions_card, home_words.promotions_caption);
+        sections.body(Section::Startup).append(&promotions_card);
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
@@ -687,14 +728,18 @@ impl SettingsView {
             connection_checks,
             pause_button,
             projects,
+            sharing,
+            uses,
+            bulk: Default::default(),
+            last_projects: Default::default(),
             quiescence_minutes,
-            approval_hold_seconds,
-            approval_hold_note,
             digest_hours,
             filling_knobs: std::cell::Cell::new(false),
             autostart_body,
             autostart_row,
             autostart_switch,
+            map_style_switch,
+            promotions_switch,
             background_state: RefCell::new(None),
             background_body,
             public,
@@ -755,7 +800,56 @@ impl SettingsView {
     }
 }
 
+/// The Traces map's style card, as the Mac's General section draws it
+/// (`GeneralSection.mapStyleCard`): its title, the switch, on for the
+/// rocket and station, and the caption under it. All in shared copy.
+pub(crate) fn map_style_card() -> (gtk::Box, gtk::Switch) {
+    let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    card.append(&style::eyebrow(flow.style_title));
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(flow.style_toggle)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-body");
+    let switch = gtk::Switch::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .active(true)
+        .build();
+    switch.update_property(&[gtk::accessible::Property::Label(flow.style_toggle)]);
+    row.append(&label);
+    row.append(&switch);
+    card.append(&row);
+    card.append(&style::meta(flow.style_caption));
+    (card, switch)
+}
+
+/// The map's style a position of the switch stands for: on, the rocket.
+pub(crate) fn map_style_for(active: bool) -> crate::ui::monitor::map_scene::MapStyle {
+    use crate::ui::monitor::map_scene::MapStyle;
+    if active {
+        MapStyle::Launch
+    } else {
+        MapStyle::Standard
+    }
+}
+
 pub fn wire(app: &Rc<App>) {
+    // The Traces map's style: kept with the window's choices, applied to
+    // the map at once.
+    app.settings
+        .map_style_switch
+        .set_active(app.shell.map_style() == crate::ui::monitor::map_scene::MapStyle::Launch);
+    let a = Rc::clone(app);
+    app.settings
+        .map_style_switch
+        .connect_active_notify(move |switch| {
+            a.shell.set_map_style(map_style_for(switch.is_active()))
+        });
+    super::consent_settings::wire(app);
     let a = Rc::clone(app);
     app.settings
         .contribution_refresh
@@ -779,22 +873,16 @@ pub fn wire(app: &Rc<App>) {
         }
     });
 
-    // The three knobs, each writing exactly the one key it owns.
+    // The two knobs, each writing exactly the one key it owns.
     //
     // `set_settings` rejects an object holding a key it does not recognise
     // rather than ignoring it, and it applies every key present -- so
-    // sending all three on every turn of one dial would make this window
-    // re-assert two values it was not asked to change, over whatever a
+    // sending both on every turn of one dial would make this window
+    // re-assert a value it was not asked to change, over whatever a
     // concurrent `trace-commons-contributor settings --set` had just
     // written. One key per write keeps this window's edits to what the
     // contributor actually edited.
     wire_knob(app, &app.settings.quiescence_minutes, "quiescence_secs", 60);
-    wire_knob(
-        app,
-        &app.settings.approval_hold_seconds,
-        "approval_hold_secs",
-        1,
-    );
     wire_knob(
         app,
         &app.settings.digest_hours,
@@ -862,6 +950,13 @@ pub fn wire(app: &Rc<App>) {
 
     render_autostart(app);
     render_public(app);
+    let home = Rc::clone(app);
+    app.settings
+        .promotions_switch
+        .connect_state_set(move |_, wanted| {
+            home.home.set_promotions(wanted);
+            gtk::glib::Propagation::Proceed
+        });
     let a = Rc::clone(app);
     app.settings
         .autostart_switch
@@ -990,6 +1085,7 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
+    super::consent_settings::note_status(app, status);
     let scope = status.account_scope.clone();
     if *app.settings.contribution_scope.borrow() != scope {
         *app.settings.contribution_scope.borrow_mut() = scope;
@@ -1191,10 +1287,15 @@ fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
     }
     app.settings.set_up_again.set(state);
     button.set_sensitive(false);
+    // Sharing writes pressed before the unenroll are not applied after it,
+    // nor while it runs, whatever it answers (the Mac's `unenroll`:
+    // `invalidateAccountScopedReads`, then `finishAccountReadBoundary`).
+    app.settings.sharing.owner.borrow_mut().boundary();
     app.call("unenroll", serde_json::json!({}), move |app, result| {
         let mut state = app.settings.set_up_again.get();
         state.finish(result.is_ok());
         app.settings.set_up_again.set(state);
+        app.settings.sharing.owner.borrow_mut().boundary();
         if let Ok(answer) = &result {
             // The NEAR AI sign-in goes with the enrollment (#1843): say so
             // only when it did not, as macOS does.
@@ -1975,11 +2076,14 @@ pub fn refresh(app: &Rc<App>) {
         discover_routing(app);
     }
     super::terminal_choice::refresh(app);
+    super::consent_settings::refresh(app);
+    super::projects_bulk::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
-        let projects: Vec<Project> = result
+        let read: Option<Vec<Project>> = result
             .ok()
-            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok())
-            .unwrap_or_default();
+            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok());
+        super::consent_settings::note_projects(app, read.as_deref());
+        let projects = read.unwrap_or_default();
         render_projects(app, &projects);
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {
@@ -2091,7 +2195,14 @@ fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)>
         .collect()
 }
 
+/// Redraw the project list from what it last drew (a selection change).
+pub(crate) fn rerender_projects(app: &Rc<App>) {
+    let projects = app.settings.last_projects.borrow().clone();
+    render_projects(app, &projects);
+}
+
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
+    *app.settings.last_projects.borrow_mut() = projects.to_vec();
     let view = &app.settings.projects;
     while let Some(child) = view.first_child() {
         view.remove(&child);
@@ -2131,6 +2242,10 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     armed_summary.append(&armed_line);
     view.append(&armed_summary);
 
+    // The Mac's bulk bar: Select all, how many, and Set to.
+    let shown: Vec<String> = projects.iter().map(|p| p.project_id.clone()).collect();
+    view.append(&super::projects_bulk::bar(app, &shown));
+
     for project in projects {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         // Name over note, so the row reads as one thing with a property.
@@ -2138,6 +2253,16 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         // single label it was.
         let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
         column.set_hexpand(true);
+        let title_for_check = if project.is_unresolved_bucket {
+            copy::ONBOARD_WATCH_UNKNOWN_LABEL
+        } else {
+            project.project_label.as_str()
+        };
+        row.append(&super::projects_bulk::row_check(
+            app,
+            &project.project_id,
+            title_for_check,
+        ));
         // The wire label for the unresolvable bucket is the slug
         // `unknown-project`, which is an identifier and not a name. Screen 5
         // says the same thing about the same bucket, so it says it in the
@@ -2248,7 +2373,7 @@ fn set_mode(app: &Rc<App>, project_id: &str, mode: &str) {
         serde_json::json!({ "project_id": project_id, "mode": mode }),
         |app, result| {
             if result.is_err() {
-                app.toast("That couldn't be changed just now. Nothing else changed either.");
+                app.toast(copy::project_mode_failed());
             }
             app.refresh();
         },
@@ -2345,7 +2470,7 @@ fn knob_row(card: &gtk::Box, title: &str, unit: &str, lower: f64, upper: f64) ->
     spin
 }
 
-/// Fill the three knobs from the daemon's own answer.
+/// Fill the two knobs from the daemon's own answer.
 ///
 /// Never from this shell's idea of what it just wrote: `set_settings`
 /// returns the settings as they now stand, and both that and `get_settings`
@@ -2364,14 +2489,9 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
     view.filling_knobs.set(true);
     view.quiescence_minutes
         .set_value(knob_shown(settings.quiescence_secs, 60));
-    view.approval_hold_seconds
-        .set_value(knob_shown(settings.approval_hold_secs, 1));
     view.digest_hours
         .set_value(knob_shown(settings.digest_interval_secs, 3600));
     view.filling_knobs.set(false);
-
-    view.approval_hold_note
-        .set_visible(settings.approval_hold_secs == 0);
 
     // The extra privacy scan and the two session folders used to be
     // restated here as well. §5.4 puts all three in the Connection section
@@ -4457,9 +4577,62 @@ mod witness_tests {
         }
     }
 }
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_settings_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's switch is `Toggle(styleToggle, isOn: $mapRocket)`: on is
+    /// the rocket and station, off the laptop and the orb.
+    #[test]
+    fn the_map_style_switch_on_is_the_rocket() {
+        use crate::ui::monitor::map_scene::MapStyle;
+        assert_eq!(map_style_for(true), MapStyle::Launch);
+        assert_eq!(map_style_for(false), MapStyle::Standard);
+    }
+
+    /// The map style card says the Mac's words from shared copy: its
+    /// title, the switch's name (its accessible name too) and the caption,
+    /// with the switch on, the rocket, before anything is read.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_map_style_card_has_the_shared_words() {
+        gtk::init().expect("GTK display");
+        let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+        let (card, switch) = map_style_card();
+        assert!(switch.is_active());
+        let mut texts = Vec::new();
+        let mut stack = vec![card.upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                texts.push(label.label().to_string());
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                stack.push(c);
+            }
+        }
+        for words in [flow.style_title, flow.style_toggle, flow.style_caption] {
+            assert!(
+                texts.iter().any(|t| t.eq_ignore_ascii_case(words)),
+                "{words:?} not in {texts:?}"
+            );
+        }
+    }
+
+    /// The Mac has no control over the approval hold, so this window has
+    /// none either: nothing here writes it, and the daemon's default hold
+    /// is the only one. A hold of zero would be no Undo at all.
+    #[test]
+    fn settings_offer_no_control_over_the_approval_hold() {
+        let key = concat!("\"approval_hold", "_secs\"");
+        assert!(!include_str!("settings.rs").contains(key));
+        assert!(!include_str!("../copy.rs").contains(concat!("KNOB_", "HOLD_")));
+    }
 
     fn settings_with_modes(claude: &str, codex: &str) -> Settings {
         serde_json::from_value(serde_json::json!({

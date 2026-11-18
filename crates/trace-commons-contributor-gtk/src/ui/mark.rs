@@ -76,7 +76,10 @@ pub fn template(size: i32) -> gtk::DrawingArea {
             (f64::from(width) - side) / 2.0,
             (f64::from(height) - side) / 2.0,
         );
-        set_source(cr, ink(current_scheme()));
+        // The skin's ink where one is applied, else the scheme's: the
+        // single-ink N is the Mac's menu-bar item, which follows the
+        // surroundings. The tile keeps the kit's grounds in every look.
+        set_source(cr, &super::style::inks().mark_template);
         fill_n(cr, origin, side);
     });
     follow_scheme(&area);

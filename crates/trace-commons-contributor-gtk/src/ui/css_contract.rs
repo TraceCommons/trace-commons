@@ -28,6 +28,7 @@ mod tests {
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
         ("home.rs", include_str!("home.rs")),
+        ("hero_card.rs", include_str!("hero_card.rs")),
         ("settings.rs", include_str!("settings.rs")),
         ("queue.rs", include_str!("queue.rs")),
         ("preview.rs", include_str!("preview.rs")),
@@ -132,9 +133,12 @@ mod tests {
         let selector = format!(".{class}");
         let ends_name =
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
+        // Home's hero cards: generated from the hero tokens at load time.
+        let hero = super::super::hero_art::css();
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,
+            hero.as_str(),
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
             super::super::style::brand_tokens::GLASS_LIGHT_CSS,

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Near.ai
+Name=Near AI Gateway
 Comment=Review and contribute Claude Code and Codex traces
 Exec=trace-commons-shell %u
 Icon=ai.tracecommons.Contributor

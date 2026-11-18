@@ -827,6 +827,93 @@ def render_glyphs_rust(glyphs: list[dict]) -> list[str]:
     return out
 
 
+# Home's hero promotions on the Mac (`GlassHeroCard`, `GlassHeroSymbol`):
+# the three card grounds, the ink and pill on them, and the pixel graphic's
+# three blues. The grounds are the same in both appearances; the blues are
+# not. Every one of them is opaque, so the Linux shell takes hex alone.
+HERO_GROUNDS = ["heroCampaignCard", "heroMissions", "heroInsights"]
+HERO_INKS = ["heroInk", "heroButtonFill", "heroButtonInk"]
+HERO_TINTS = ["dataKept", "chartSeries1", "firstRunBeamCore"]
+
+
+def render_hero_rust(tokens: dict) -> list[str]:
+    out = ["/// Home's hero cards, as the Mac's flat theme draws them: each ground's",
+           "/// CSS angle and stops (offset, hex), the ink and pill on every ground, and",
+           "/// the pixel graphic's three blues per scheme.",
+           "pub mod hero {",
+           "    pub type Ground = (i32, &'static [(f64, &'static str)]);"]
+    for name in HERO_GROUNDS:
+        ground = flat_value(tokens, "gradient", name, "dark")
+        if ground != flat_value(tokens, "gradient", name, "light"):
+            raise TokenError(f"hero {name}: a hero's ground is the same in both appearances")
+        stops = []
+        for stop in ground["stops"]:
+            rgb(stop["hex"], name)
+            if stop.get("alpha", 1) != 1 or "light" in stop:
+                raise TokenError(f"hero {name}: expected opaque stops shared by both appearances")
+            number(stop["at"], name)
+            stops.append(f'({float(stop["at"])!r}, "{stop["hex"].lower()}")')
+        out.append(f"    pub const {snake(name).upper()}: Ground = ({int(ground['angle'])}, &[{', '.join(stops)}]);")
+    for name in HERO_INKS:
+        colour = flat_color(tokens, name, "dark")
+        if colour != flat_color(tokens, name, "light") or colour.get("alpha", 1) != 1:
+            raise TokenError(f"hero {name}: expected one opaque ink in both appearances")
+        out.append(f'    pub const {snake(name).upper()}: &str = "{colour["hex"].lower()}";')
+    for scheme in SCHEMES:
+        out.append(f"    /// The pixel graphic's blues, {scheme} scheme.")
+        hexes = []
+        for name in HERO_TINTS:
+            colour = flat_color(tokens, name, scheme)
+            if colour.get("alpha", 1) != 1:
+                raise TokenError(f"hero {name}: expected an opaque tint")
+            hexes.append(f'"{colour["hex"].lower()}"')
+        out.append(f"    pub const TINTS_{scheme.upper()}: [&str; 3] = [{', '.join(hexes)}];")
+    out.append("}")
+    return out
+
+
+# The Mac's small drawn controls (`GlassToolTile`, `GlassSpinner`,
+# `GlassSkeleton`, `GlassRefreshButton`, `ManagedFolderHandoff`): their sizes
+# and timings, and the colours they take that the map module does not carry.
+TILE_SIZES = ["toolTile", "toolTileLarge", "toolLogo", "toolLogoLarge", "spinner", "spinnerStroke", "skeletonHeight"]
+TILE_MOTION = ["spin", "pulse", "easeX1", "easeY1", "easeX2", "easeY2"]
+TILE_COLOURS = ["tileFolder", "tileFolderInk", "ink", "hairline"]
+
+
+def tile_number(value: object, where: str) -> str:
+    number(value, where)
+    return rust_float(value)
+
+
+def render_tile_rust(tokens: dict) -> list[str]:
+    out = ["/// The Mac's tool tiles, spinner, skeleton and refresh turn, as the flat",
+           "/// theme draws them: sizes in points, times in seconds, the motion curve's",
+           "/// control points, and per scheme the colours the map module lacks.",
+           "pub mod tile {",
+           "    pub type Rgba = (&'static str, f64);"]
+    for name in TILE_SIZES:
+        out.append(f"    pub const {snake(name).upper()}: f64 = {tile_number(tokens['size'][name], name)};")
+    for name in ("tile", "control"):
+        value = flat_value(tokens, "radius", name, "light")
+        if value != flat_value(tokens, "radius", name, "dark"):
+            raise TokenError(f"tile radius {name}: expected one value in both appearances")
+        out.append(f"    pub const RADIUS_{snake(name).upper()}: f64 = {tile_number(value, name)};")
+    for name in TILE_MOTION:
+        out.append(f"    pub const {snake(name).upper()}: f64 = {tile_number(tokens['motion'][name], name)};")
+    out.append(f"    pub const SKELETON_DIM: f64 = {tile_number(tokens['opacity']['skeletonDim'], 'skeletonDim')};")
+    for scheme in SCHEMES:
+        out.append(f"    /// The {scheme} scheme.")
+        out.append(f"    pub mod {scheme} {{")
+        out.append("        use super::Rgba;")
+        for name in TILE_COLOURS:
+            colour = flat_color(tokens, name, scheme)
+            rgb(colour["hex"], name)
+            out.append(f'        pub const {snake(name).upper()}: Rgba = ("{colour["hex"].lower()}", {tile_number(colour.get("alpha", 1), name)});')
+        out.append("    }")
+    out.append("}")
+    return out
+
+
 def render_gtk(tokens: dict) -> str:
     values = role_values(tokens)
     out = [
@@ -875,6 +962,10 @@ def render_gtk(tokens: dict) -> str:
         out.append('"#;')
     out.append("")
     out.extend(render_glass_rust(tokens))
+    out.append("")
+    out.extend(render_hero_rust(tokens))
+    out.append("")
+    out.extend(render_tile_rust(tokens))
     out.append("")
     out.extend(render_glyphs_rust(parse_glyphs(GLYPHS.read_text())))
     out.append("")

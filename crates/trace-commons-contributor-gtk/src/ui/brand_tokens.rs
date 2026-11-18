@@ -267,6 +267,62 @@ pub mod glass {
     }
 }
 
+/// Home's hero cards, as the Mac's flat theme draws them: each ground's
+/// CSS angle and stops (offset, hex), the ink and pill on every ground, and
+/// the pixel graphic's three blues per scheme.
+pub mod hero {
+    pub type Ground = (i32, &'static [(f64, &'static str)]);
+    pub const HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")]);
+    pub const HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")]);
+    pub const HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")]);
+    pub const HERO_INK: &str = "#ffffff";
+    pub const HERO_BUTTON_FILL: &str = "#ffffff";
+    pub const HERO_BUTTON_INK: &str = "#16161a";
+    /// The pixel graphic's blues, light scheme.
+    pub const TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"];
+    /// The pixel graphic's blues, dark scheme.
+    pub const TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"];
+}
+
+/// The Mac's tool tiles, spinner, skeleton and refresh turn, as the flat
+/// theme draws them: sizes in points, times in seconds, the motion curve's
+/// control points, and per scheme the colours the map module lacks.
+pub mod tile {
+    pub type Rgba = (&'static str, f64);
+    pub const TOOL_TILE: f64 = 22.0;
+    pub const TOOL_TILE_LARGE: f64 = 30.0;
+    pub const TOOL_LOGO: f64 = 15.0;
+    pub const TOOL_LOGO_LARGE: f64 = 20.0;
+    pub const SPINNER: f64 = 12.0;
+    pub const SPINNER_STROKE: f64 = 1.5;
+    pub const SKELETON_HEIGHT: f64 = 12.0;
+    pub const RADIUS_TILE: f64 = 6.0;
+    pub const RADIUS_CONTROL: f64 = 11.0;
+    pub const SPIN: f64 = 0.8;
+    pub const PULSE: f64 = 1.6;
+    pub const EASE_X1: f64 = 0.2;
+    pub const EASE_Y1: f64 = 0.8;
+    pub const EASE_X2: f64 = 0.2;
+    pub const EASE_Y2: f64 = 1.0;
+    pub const SKELETON_DIM: f64 = 0.5;
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);
+        pub const TILE_FOLDER_INK: Rgba = ("#2c8a37", 1.0);
+        pub const INK: Rgba = ("#000000", 1.0);
+        pub const HAIRLINE: Rgba = ("#000000", 0.08);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);
+        pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);
+        pub const INK: Rgba = ("#ffffff", 1.0);
+        pub const HAIRLINE: Rgba = ("#ffffff", 0.08);
+    }
+}
+
 /// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.
 pub mod glyph {
     pub const VIEW_MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M1,2h12M1,6h12M1,10h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;

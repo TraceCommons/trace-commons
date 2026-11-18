@@ -28,6 +28,16 @@ pub struct Status {
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,
+    /// New terms are owed: uploads wait until they are accepted again.
+    #[serde(default)]
+    pub terms_hold: bool,
+    /// The global override (#1173): `null`, or `{mode, since}` while one
+    /// is in force.
+    #[serde(default)]
+    pub contribution_override: Option<serde_json::Value>,
+    /// True when an `auto_upload` roll-up leaves some folders out (#1208).
+    #[serde(default)]
+    pub contribution_mode_partial: Option<bool>,
     #[serde(default)]
     pub queue_depth: u64,
     /// The daemon's unresolved decision count. Missing on older daemons;
@@ -394,6 +404,16 @@ pub struct QueueEntry {
     pub state: String,
     #[serde(default)]
     pub reason_label: Option<String>,
+    /// The second look's fixed reasons (`nothing-matched`, `looks-unsure`,
+    /// `trimmed-to-fit`); absent until scrubbed.
+    #[serde(default)]
+    pub second_look: Option<Vec<String>>,
+    /// The core's sentence for each `second_look` reason, index for index.
+    #[serde(default)]
+    pub second_look_lines: Option<Vec<String>>,
+    /// Spans the scrubber was unsure about; absent until scrubbed, never 0.
+    #[serde(default)]
+    pub unsure_spans: Option<u64>,
     /// How many delegated subagent transcripts this entry's session covers,
     /// and how many were left out because the conversation exceeded the
     /// source's raw byte budget.
@@ -825,6 +845,10 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// The folder's own rule (`folder_mode`), when it has one; `mode` is
+    /// what the daemon applies after any override.
+    #[serde(default)]
+    pub folder_mode: Option<String>,
     /// How many of this project's sessions are waiting. Always present.
     #[serde(default)]
     pub pending_count: u64,
@@ -890,6 +914,10 @@ pub struct HistoryRecord {
     /// address".
     #[serde(default)]
     pub explanations: Vec<String>,
+    /// The row belongs to an account this device used before. The current
+    /// account cannot withdraw it, and the daemon refuses it.
+    #[serde(default)]
+    pub previous_account: bool,
 }
 
 /// `history_rollup`.
@@ -950,8 +978,6 @@ pub struct Settings {
     pub quiescence_secs: u64,
     #[serde(default)]
     pub digest_interval_secs: u64,
-    #[serde(default)]
-    pub approval_hold_secs: u64,
     #[serde(default)]
     pub local_notifications: bool,
     /// `watch`, `off` or `unset`, per source.
@@ -1021,7 +1047,7 @@ pub struct Settings {
 /// deliberately not parsed into an enum here: a label a later daemon grows
 /// would then have to be spelled in this shell before it could be shown, and
 /// the shared table already answers an unknown label safely.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PrivateInferenceState {
     #[serde(default)]
     pub state: String,
@@ -1063,6 +1089,11 @@ pub struct NearAiBalance {
     pub spend_limit_nanos: Option<i64>,
     #[serde(default)]
     pub total_spent_nanos: Option<i64>,
+    /// Everything received into the account so far, by the daemon's count.
+    /// Home marks NEAR AI credit arriving only when this grows
+    /// (`ui::hero_art::arrival`): the balance also moves with spending.
+    #[serde(default)]
+    pub received_total_nanos: Option<i64>,
     /// The DAEMON'S clock at the moment the service answered, RFC 3339 --
     /// not the service's own `updated_at`. What a shell may say with it is
     /// how long ago the question was put, and nothing about bookkeeping.
@@ -1382,6 +1413,10 @@ pub struct GateStatus {
     pub automatic_contribution_held: Option<HeldSessions>,
     #[serde(default)]
     pub grant_voids: Option<Vec<serde_json::Value>>,
+    /// The Private AI destination's state, which the Private AI map's
+    /// credential falls back to when `tool_destinations` does not say.
+    #[serde(default)]
+    pub private_inference_state: Option<PrivateInferenceState>,
 }
 
 /// `status.automatic_contribution_held`'s count.

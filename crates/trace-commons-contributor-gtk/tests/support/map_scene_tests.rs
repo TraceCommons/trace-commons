@@ -4,16 +4,12 @@
 //! sample set of this file's own), and every node is something a screen
 //! reader can inspect.
 //!
-//! Not ported here, because they test the Private AI scene or the
-//! Inference tab, later slices of the 2026-11-16 spec:
-//! `test_managedRoutesAreSeparateAndNeverAnimateUnobservedCalls`,
-//! `test_managedRoutesStayClearOfTheDestination`,
-//! `test_openCodeOnlyInstallHidesAbsentGlobalHarnessChoices`,
-//! `test_thePrivateAISceneFollowsTheCoresVerdict`,
-//! `test_theDestinationPaintsFromThePrivateAIState`,
-//! `test_nothingAnsweringIsDrawnStill`,
-//! `test_aMissingToolNeverSaysItIsNotConnected`,
-//! `test_harnessIdsMapToTheToolsWithArtwork`,
+//! The Private AI scene's tests are ported too, with those of
+//! `FlowMapLoadTests.swift`, `GlassParityRoundOneTests.swift` and
+//! `ManagedSessionsRenderTests.swift` that build it.
+//!
+//! Not ported here, because they test the Inference tab, a later slice of
+//! the 2026-11-16 spec:
 //! `test_pricedTotalsAreUnknownWhenAnyCallIs`,
 //! `test_onlyVerifiedReadsAsProof`,
 //! `test_toolNamesComeFromTheAdapterOrStayRaw`,
@@ -872,9 +868,19 @@ fn the_library_and_this_computer_cards_sit_beside_their_drawings() {
         "",
     );
     let hub = Node::new("hub", NodeKind::Hub, Point::default(), 16.0, "", "");
-    assert_eq!(drawn_half_width(&library, true), STATION_SIZE.width / 2.0);
-    assert_eq!(drawn_half_width(&hub, true), PAD_HALF_WIDTH);
-    assert_eq!(drawn_half_width(&library, false), 22.0);
+    // `FlowMapView.drawnHalfWidth`: the station 150 wide, the orb 104,
+    // the pad or the laptop the pad's half-width either way.
+    assert_eq!(drawn_half_width(&library, true, MapStyle::Launch), 75.0);
+    assert_eq!(drawn_half_width(&library, true, MapStyle::Standard), 52.0);
+    assert_eq!(
+        drawn_half_width(&hub, true, MapStyle::Launch),
+        PAD_HALF_WIDTH
+    );
+    assert_eq!(
+        drawn_half_width(&hub, true, MapStyle::Standard),
+        PAD_HALF_WIDTH
+    );
+    assert_eq!(drawn_half_width(&library, false, MapStyle::Launch), 22.0);
 
     for (pane, side) in [
         (Size::new(600.0, 800.0), "left"),
@@ -884,7 +890,7 @@ fn the_library_and_this_computer_cards_sit_beside_their_drawings() {
         let fit = MapGeometry::new(pane, 1.0, None, space);
         for (node, point) in [(&library, Scene::library(space)), (&hub, Scene::hub(space))] {
             let centre = fit.point(point).x;
-            let half = drawn_half_width(node, true) * fit.scale;
+            let half = drawn_half_width(node, true, MapStyle::Launch) * fit.scale;
             let x = card_x(centre, half, card, pane.width);
             let (lo, hi) = (x - card / 2.0, x + card / 2.0);
             let what = format!("{}, {} wide", node.id, pane.width);
@@ -1092,4 +1098,589 @@ fn nodes_follow_identity_after_reordering_and_removal() {
     // Nothing pending still draws the map: this computer and the library.
     let empty = traces(&TracesTree::build(&[], &[], None), &gate);
     assert!(node(&empty, "hub").is_some() && node(&empty, "library").is_some());
+}
+
+// --- The Private AI map ------------------------------------------------------
+
+fn harness_rows(set: &str) -> Vec<HarnessRow> {
+    let list: crate::model::HarnessList =
+        serde_json::from_value(sample(set, "harness_list")).unwrap();
+    list.harnesses.iter().map(HarnessRow::from_model).collect()
+}
+
+/// `FlowMapLoadTests.harnesses`: `count` installed tools with no artwork.
+fn many_harnesses(count: usize) -> Vec<HarnessRow> {
+    (0..count)
+        .map(|i| HarnessRow {
+            id: format!("h{i}"),
+            name: format!("Agent {i}"),
+            installed: true,
+            state: "connected".into(),
+        })
+        .collect()
+}
+
+fn private_ai(
+    rows: Option<&[HarnessRow]>,
+    private_ai: Option<&str>,
+    state: HarnessState,
+    destinations: Option<&ToolDestinations>,
+    space: Size,
+) -> Scene {
+    Scene::private_ai(rows, private_ai, |_| None, |_| state, destinations, space)
+}
+
+fn managed(wire: serde_json::Value) -> ToolDestinations {
+    serde_json::from_value(wire).unwrap()
+}
+
+/// The least gap between neighbours in a column of nodes.
+fn tightest(nodes: &[&Node]) -> f64 {
+    let mut ys: Vec<f64> = nodes.iter().map(|n| n.at.y).collect();
+    ys.sort_by(f64::total_cmp);
+    ys.windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// `test_managedRoutesAreSeparateAndNeverAnimateUnobservedCalls`.
+#[test]
+fn managed_routes_are_separate_and_never_animate_unobserved_calls() {
+    let destinations = managed(serde_json::json!({
+        "tools": [],
+        "managed_copy": {"opencode": "OpenCode", "provider_openai": "OpenAI",
+            "provider_near_ai": "NEAR AI", "state_running": "Running",
+            "collection_off": "Trace collection off",
+            "collection_pending": "Trace collection pending", "title": "Managed sessions"},
+        "managed_sessions": [
+            {"id": "a", "tool": "opencode", "connection": "api_key", "provider": "openai",
+             "model": "gpt-4.1", "state": "running", "collection_state": "off"},
+            {"id": "b", "tool": "opencode", "connection": "near_ai", "provider": "near_ai",
+             "model": "model-b", "state": "running", "collection_state": "pending"}
+        ]
+    }));
+    let scene = private_ai(None, None, HarnessState::Unknown, None, SIZE)
+        .adding_managed_routes(Some(&destinations));
+    assert_eq!(scene.nodes.len(), 4);
+    let ids: std::collections::BTreeSet<_> = scene.nodes.iter().map(|n| n.id.clone()).collect();
+    assert_eq!(ids.len(), 4);
+    assert_eq!(
+        scene.arcs.iter().map(|a| a.style).collect::<Vec<_>>(),
+        [ArcStyle::Dashed, ArcStyle::Dashed]
+    );
+    assert!(!scene.flows());
+    assert!(
+        node(&scene, "destination").is_none(),
+        "managed routes never imply a global harness connection"
+    );
+    assert!(
+        scene
+            .nodes
+            .iter()
+            .any(|n| n.detail.contains("Trace collection off"))
+    );
+    assert!(scene.nodes.iter().any(|n| n.label == "OpenAI"));
+    assert!(scene.nodes.iter().any(|n| n.label == "NEAR AI"));
+    assert!(scene.nodes.iter().all(|n| SIZE.contains(n.at)));
+    // A managed route's tool card: its name, the copy's title as its card
+    // title, and a count of its sessions under it.
+    let tool = node(&scene, "managed:opencode:openai").unwrap();
+    assert_eq!(tool.label, "OpenCode");
+    assert_eq!(tool.title.as_deref(), Some("Managed sessions"));
+    assert_eq!(tool.sublabel.as_deref(), Some("Managed sessions \u{b7} 1"));
+    assert!(matches!(
+        tool.kind,
+        NodeKind::Harness {
+            tool: Some(SourceKind::Opencode),
+            installed: true
+        }
+    ));
+    let provider = node(&scene, "managed-provider:opencode:near_ai").unwrap();
+    assert_eq!(provider.kind, NodeKind::Destination(Lamp::Unknown));
+    assert_eq!(provider.radius, 16.0);
+    assert!(
+        Scene::default()
+            .adding_managed_routes(None)
+            .nodes
+            .is_empty()
+    );
+}
+
+/// `test_managedRoutesStayClearOfTheDestination`: right of and below the
+/// destination in any design space, so their names never cover its card.
+#[test]
+fn managed_routes_stay_clear_of_the_destination() {
+    let destinations = managed(serde_json::json!({
+        "tools": [],
+        "managed_copy": {"title": "Managed sessions"},
+        "managed_sessions": [
+            {"id": "a", "tool": "opencode", "connection": "api_key", "provider": "openai",
+             "model": "m", "state": "running", "collection_state": "off"},
+            {"id": "b", "tool": "opencode", "connection": "near_ai", "provider": "near_ai",
+             "model": "m", "state": "running", "collection_state": "off"},
+            {"id": "c", "tool": "claude", "connection": "api_key", "provider": "anthropic",
+             "model": null, "state": "running", "collection_state": "off"}
+        ]
+    }));
+    for space in [
+        SIZE,
+        Scene::space_for(Size::new(1200.0, 500.0)),
+        Scene::space_for(Size::new(400.0, 1000.0)),
+    ] {
+        let scene = private_ai(None, None, HarnessState::Unknown, None, space)
+            .adding_managed_routes(Some(&destinations));
+        let destination = Scene::destination(space);
+        assert_eq!(scene.nodes.len(), 6);
+        for n in &scene.nodes {
+            assert!(space.contains(n.at), "{} outside {space:?}", n.id);
+            assert!(n.at.x > destination.x, "{}", n.id);
+            assert!(
+                n.at.y - destination.y > 60.0,
+                "{} sits on the destination in {space:?}",
+                n.id
+            );
+        }
+        // An unknown provider is said as unknown, never left blank.
+        let anthropic = node(&scene, "managed-provider:claude:anthropic").unwrap();
+        assert_eq!(anthropic.label, monitor_screens_copy().unknown);
+    }
+}
+
+/// `test_openCodeOnlyInstallHidesAbsentGlobalHarnessChoices`.
+#[test]
+fn an_opencode_only_install_hides_absent_global_harness_choices() {
+    let rows = harness_rows("normalDay");
+    let destinations = managed(serde_json::json!({"tools": [
+        {"tool": "claude-code", "installed": false},
+        {"tool": "codex", "installed": false},
+        {"tool": "opencode", "installed": true}
+    ]}));
+    let scene = private_ai(
+        Some(&rows),
+        Some("off"),
+        HarnessState::NotConnected,
+        Some(&destinations),
+        SIZE,
+    );
+    assert!(node(&scene, "harness:claude").is_none());
+    assert!(node(&scene, "harness:codex").is_none());
+    assert!(node(&scene, "harness:opencode").is_some());
+    assert!(!scene.flows());
+}
+
+/// `test_thePrivateAISceneFollowsTheCoresVerdict`: each tool's arc follows
+/// the core's state for it, never `connected`; every state has its own
+/// look, and only answering moves.
+#[test]
+fn the_private_ai_scene_follows_the_cores_verdict() {
+    let rows = harness_rows("normalDay");
+    let words = words();
+    let expected = [
+        (HarnessState::Answering, ArcStyle::Flowing),
+        (HarnessState::ConnectedNoCalls, ArcStyle::Quiet),
+        (HarnessState::ActivityShared, ArcStyle::Shared),
+        (HarnessState::NotConnected, ArcStyle::Dashed),
+        (HarnessState::Unknown, ArcStyle::Unknown),
+    ];
+    let styles: std::collections::BTreeSet<_> =
+        expected.iter().map(|(_, s)| format!("{s:?}")).collect();
+    assert_eq!(
+        styles.len(),
+        expected.len(),
+        "every state draws differently"
+    );
+    for (state, style) in expected {
+        let scene = private_ai(Some(&rows), Some("running"), state, None, SIZE);
+        assert_eq!(scene.nodes.len(), rows.len() + 1);
+        // #1146: the node is the credential, with its tools under it.
+        let first = &scene.nodes[0];
+        assert_eq!(first.label, words.credential);
+        let connected = if matches!(state, HarnessState::NotConnected | HarnessState::Unknown) {
+            0
+        } else {
+            rows.len()
+        };
+        assert_eq!(
+            first.sublabel.as_deref(),
+            Some(connected_words(&words, connected, false).as_str())
+        );
+        assert!(scene.arcs.iter().all(|a| a.style == style), "{state:?}");
+        assert_eq!(scene.flows(), state == HarnessState::Answering, "{state:?}");
+        let lamp = if state == HarnessState::Answering {
+            Lamp::Answering
+        } else {
+            Lamp::Running
+        };
+        assert_eq!(first.kind, NodeKind::Destination(lamp), "{state:?}");
+    }
+    // No sentence from the core: a dash, never words of the shell's own.
+    let scene = private_ai(Some(&rows), None, HarnessState::Unknown, None, SIZE);
+    assert!(scene.nodes[1..].iter().all(|n| n.detail == "\u{2014}"));
+}
+
+/// The credential's card: how many tools are connected, in a sentence,
+/// and unknown said after it, never left to read as off.
+#[test]
+fn the_credentials_card_says_how_many_are_connected_and_unknown() {
+    let rows = harness_rows("normalDay");
+    let words = words();
+    let scene = private_ai(
+        Some(&rows),
+        Some("running"),
+        HarnessState::Answering,
+        None,
+        SIZE,
+    );
+    assert_eq!(
+        scene.nodes[0].detail,
+        connected_words(&words, rows.len(), true)
+    );
+    assert_eq!(
+        connected_words(&words, 1, true),
+        words.connected.replace("{label}", words.tools_one)
+    );
+    assert_eq!(
+        connected_words(&words, 3, false),
+        words
+            .connected_line
+            .replace("{label}", &words.tools.replace("{count}", "3"))
+    );
+    let unknown = private_ai(Some(&rows), None, HarnessState::Answering, None, SIZE);
+    assert_eq!(unknown.nodes[0].kind, NodeKind::Destination(Lamp::Unknown));
+    assert_eq!(
+        unknown.nodes[0].detail,
+        format!(
+            "{} {}",
+            connected_words(&words, rows.len(), true),
+            monitor_screens_copy().unknown
+        )
+    );
+}
+
+/// `test_theDestinationPaintsFromThePrivateAIState`: unknown is kept apart
+/// from off.
+#[test]
+fn the_destination_paints_from_the_private_ai_state() {
+    assert_eq!(Scene::lamp(Some("running"), true), Lamp::Answering);
+    assert_eq!(Scene::lamp(Some("running"), false), Lamp::Running);
+    assert_eq!(Scene::lamp(Some("off"), false), Lamp::Off);
+    assert_eq!(Scene::lamp(None, false), Lamp::Unknown);
+    assert_eq!(
+        Scene::lamp(Some("a-state-from-a-later-daemon"), false),
+        Lamp::Unknown
+    );
+    // Calls are never answered by a destination the core says is off.
+    assert_eq!(Scene::lamp(Some("off"), true), Lamp::Off);
+}
+
+/// The state label the credential paints from: `tool_destinations`'s,
+/// then the status's, as `PrivateAIFlowMap` reads them.
+#[test]
+fn the_private_ai_label_is_the_destinations_then_the_statuss() {
+    let status: GateStatus = serde_json::from_value(sample("normalDay", "status")).unwrap();
+    let destinations = destinations("normalDay");
+    assert_eq!(destinations.private_ai.as_deref(), Some("off"));
+    assert_eq!(
+        private_ai_label(Some(&destinations), Some(&status)).as_deref(),
+        Some("off")
+    );
+    let silent = managed(serde_json::json!({"tools": []}));
+    assert_eq!(
+        private_ai_label(Some(&silent), Some(&status)).as_deref(),
+        Some("running")
+    );
+    assert_eq!(
+        private_ai_label(None, Some(&status)).as_deref(),
+        Some("running")
+    );
+    assert_eq!(private_ai_label(None, None), None);
+}
+
+/// `test_nothingAnsweringIsDrawnStill`.
+#[test]
+fn nothing_answering_is_drawn_still() {
+    let rows = harness_rows("empty");
+    let scene = private_ai(
+        Some(&rows),
+        Some("off"),
+        HarnessState::NotConnected,
+        None,
+        SIZE,
+    );
+    assert!(!scene.flows());
+    assert_eq!(scene.nodes[0].kind, NodeKind::Destination(Lamp::Off));
+}
+
+/// `test_aMissingToolNeverSaysItIsNotConnected` and `rowSentence`: a tool
+/// that is not here says so and nothing else; a state with no sentence
+/// says nothing, never a borrowed one.
+#[test]
+fn a_missing_tool_never_says_it_is_not_connected() {
+    let row = |installed: bool, state: &str| HarnessRow {
+        id: "gemini".into(),
+        name: "Gemini CLI".into(),
+        installed,
+        state: state.into(),
+    };
+    assert_eq!(
+        row_sentence(&row(false, "not_connected")).as_deref(),
+        Some(crate::copy::HARNESS_NOT_INSTALLED)
+    );
+    assert_eq!(
+        row_sentence(&row(true, "answering")).as_deref(),
+        Some(crate::copy::harness_state_line("answering"))
+    );
+    // The core's not-connected sentence is empty: a dash on the card.
+    assert_eq!(crate::copy::harness_state_line("not_connected"), "");
+    assert_eq!(row_sentence(&row(true, "not_connected")), None);
+    assert_eq!(row_sentence(&row(true, "activity_shared")), None);
+    assert_eq!(row_sentence(&row(true, "unknown")), None);
+    assert_eq!(harness_state("answering"), HarnessState::Answering);
+    assert_eq!(
+        harness_state("a-state-from-a-later-daemon"),
+        HarnessState::Unknown
+    );
+}
+
+/// `test_harnessIdsMapToTheToolsWithArtwork` (`HarnessToolArt`).
+#[test]
+fn harness_ids_map_to_the_tools_with_artwork() {
+    assert_eq!(harness_tool("claude"), Some(SourceKind::ClaudeCode));
+    assert_eq!(harness_tool("claude-code"), Some(SourceKind::ClaudeCode));
+    assert_eq!(harness_tool("codex"), Some(SourceKind::Codex));
+    assert_eq!(harness_tool("gemini"), Some(SourceKind::GeminiCli));
+    assert_eq!(harness_tool("gemini-cli"), Some(SourceKind::GeminiCli));
+    assert_eq!(harness_tool("cline"), Some(SourceKind::Cline));
+    assert_eq!(harness_tool("opencode"), Some(SourceKind::Opencode));
+    assert_eq!(harness_tool("something-new"), None);
+}
+
+/// `test_aLoadedPrivateAIMapFitsItsBandAndCountsEveryTool`.
+#[test]
+fn a_loaded_private_ai_map_fits_its_band_and_counts_every_tool() {
+    let words = words();
+    for count in [6, 12, 20, 40] {
+        let rows = many_harnesses(count);
+        for pane in [
+            Size::new(440.0, 860.0),
+            Size::new(900.0, 560.0),
+            Size::new(360.0, 560.0),
+        ] {
+            let space = Scene::space_for(pane);
+            let band = Scene::band(space);
+            let scene = private_ai(
+                Some(&rows),
+                Some("running"),
+                HarnessState::ConnectedNoCalls,
+                None,
+                space,
+            );
+            let tools: Vec<&Node> = scene
+                .nodes
+                .iter()
+                .filter(|n| n.id.starts_with("harness:"))
+                .collect();
+            for n in &tools {
+                assert!(
+                    n.at.y >= band.0 && n.at.y <= band.1,
+                    "{} off the band at {pane:?}",
+                    n.id
+                );
+            }
+            assert!(tightest(&tools) >= HARNESS_STEP_MIN - 0.5);
+            let counted: usize = scene.overflows.iter().map(|o| o.count).sum();
+            assert_eq!(tools.len() + counted, count, "{count} at {pane:?}");
+            // The credential counts every connected tool, drawn or not.
+            let destination = node(&scene, "destination").unwrap();
+            assert_eq!(
+                destination.sublabel.as_deref(),
+                Some(connected_words(&words, count, false).as_str())
+            );
+        }
+    }
+}
+
+/// `test_aToolWithoutArtworkCarriesItsInitials`: never a blank circle.
+#[test]
+fn a_tool_without_artwork_carries_its_initials() {
+    assert_eq!(initials("Cursor"), "Cu");
+    assert_eq!(initials("GitHub Copilot CLI"), "GC");
+    assert_eq!(initials("Agent 3"), "A3");
+    let scene = private_ai(
+        Some(&many_harnesses(3)),
+        Some("running"),
+        HarnessState::NotConnected,
+        None,
+        SIZE,
+    );
+    for n in scene.nodes.iter().filter(|n| n.id.starts_with("harness:")) {
+        assert!(
+            matches!(n.kind, NodeKind::Harness { tool: Some(_), .. })
+                || harness_initials(n).is_some(),
+            "{} is a blank circle",
+            n.id
+        );
+    }
+    let cursor = Node::new(
+        "harness:cursor",
+        NodeKind::Harness {
+            tool: None,
+            installed: true,
+        },
+        Point::default(),
+        13.0,
+        "Cursor",
+        "",
+    );
+    assert_eq!(harness_initials(&cursor).as_deref(), Some("Cu"));
+    let claude = Node::new(
+        "harness:claude",
+        NodeKind::Harness {
+            tool: Some(SourceKind::ClaudeCode),
+            installed: true,
+        },
+        Point::default(),
+        13.0,
+        "Claude Code",
+        "",
+    );
+    assert_eq!(
+        harness_initials(&claude),
+        None,
+        "a tool with artwork draws it"
+    );
+}
+
+/// `test_theMapWordsAreTheCores`: the credential node takes the core's
+/// words, and a list with no tools says none were found.
+#[test]
+fn the_map_words_are_the_cores() {
+    let words = words();
+    assert_eq!(words.credential, "NEAR AI credential");
+    assert_eq!(words.none_found, "No configured tools found.");
+    let empty = private_ai(Some(&[]), Some("off"), HarnessState::Unknown, None, SIZE);
+    assert_eq!(empty.nodes[0].sublabel.as_deref(), Some(words.none_found));
+    assert!(empty.draws_map());
+}
+
+/// `testUnreadHarnessListWithoutManagedRoutesDrawsNoMap`: an unread list
+/// is not an empty one, and draws nothing at all.
+#[test]
+fn an_unread_harness_list_without_managed_routes_draws_no_map() {
+    let scene = private_ai(None, Some("off"), HarnessState::Unknown, None, SIZE)
+        .adding_managed_routes(None);
+    assert!(!scene.draws_map());
+    assert!(scene.nodes.is_empty() && scene.arcs.is_empty());
+}
+
+/// The layout: the destination right of centre on the band's middle, the
+/// tools in a column to its left, each joined by a curve that leaves the
+/// tool level and arrives level; a tool not on this computer is faded.
+#[test]
+fn the_private_ai_map_is_laid_out_as_the_macs() {
+    let rows = harness_rows("normalDay");
+    let scene = private_ai(
+        Some(&rows),
+        Some("off"),
+        HarnessState::NotConnected,
+        None,
+        SIZE,
+    );
+    let band = Scene::band(SIZE);
+    let destination = Point::new(SIZE.width * 0.68, (band.0 + band.1) / 2.0);
+    assert_eq!(Scene::destination(SIZE), destination);
+    assert_eq!(Scene::harness_x(SIZE), 150.0_f64.max(SIZE.width * 0.36));
+    let d = node(&scene, "destination").unwrap();
+    assert_eq!((d.at, d.radius), (destination, 26.0));
+    let x = Scene::harness_x(SIZE);
+    for (row, arc) in rows.iter().zip(&scene.arcs) {
+        let n = node(&scene, &format!("harness:{}", row.id)).unwrap();
+        assert_eq!((n.at.x, n.radius), (x, 13.0));
+        assert_eq!(n.label, row.name);
+        assert!(n.label_beside());
+        let bend = (x + destination.x) / 2.0;
+        assert_eq!(arc.from, Point::new(x + 12.0, n.at.y));
+        assert_eq!(arc.control1, Point::new(bend, n.at.y));
+        assert_eq!(arc.control2, Point::new(bend, destination.y));
+        assert_eq!(arc.to, destination);
+    }
+    // Centred on the destination's line, at the most line height.
+    let ys: Vec<f64> = rows
+        .iter()
+        .map(|r| node(&scene, &format!("harness:{}", r.id)).unwrap().at.y)
+        .collect();
+    assert_eq!(ys[1] - ys[0], HARNESS_STEP_MAX);
+    assert!((ys.iter().sum::<f64>() / ys.len() as f64 - destination.y).abs() < 1e-9);
+    // Not on this computer by its own row, but the core lists it as
+    // installed: drawn, faded.
+    let mut missing = rows.clone();
+    missing[0].installed = false;
+    let listed = destinations("normalDay");
+    let scene = private_ai(
+        Some(&missing),
+        Some("off"),
+        HarnessState::NotConnected,
+        Some(&listed),
+        SIZE,
+    );
+    let n = node(&scene, "harness:claude").unwrap();
+    assert_eq!(n.dim, 0.5);
+    assert_eq!(
+        n.kind,
+        NodeKind::Harness {
+            tool: Some(SourceKind::ClaudeCode),
+            installed: false
+        }
+    );
+}
+
+/// `MapToolPile.hover`: under the pointer the pile grows taller at once,
+/// wider 260 ms later and shows its names 200 ms after that; leaving, the
+/// names go at once, the width 100 ms later and the height 220 ms after
+/// that. Under reduced motion every stage is at once.
+#[test]
+fn the_pile_opens_and_closes_in_the_macs_stages() {
+    assert_eq!(
+        pile_steps(true, false),
+        [
+            (0, PileStep::Tall(true)),
+            (260, PileStep::Wide(true)),
+            (460, PileStep::Names(true)),
+        ]
+    );
+    assert_eq!(
+        pile_steps(false, false),
+        [
+            (0, PileStep::Names(false)),
+            (100, PileStep::Wide(false)),
+            (320, PileStep::Tall(false)),
+        ]
+    );
+    for inside in [true, false] {
+        assert!(pile_steps(inside, true).iter().all(|(at, _)| *at == 0));
+    }
+    let mut stage = PileStage::default();
+    for (_, step) in pile_steps(true, false) {
+        stage = stage.with(step);
+    }
+    assert_eq!(
+        stage,
+        PileStage {
+            tall: true,
+            wide: true,
+            names: true
+        }
+    );
+    // Leaving halfway through opening: the names never show, and the
+    // card narrows and shortens as it closes.
+    let half = PileStage::default().with(PileStep::Tall(true));
+    let closing: Vec<PileStage> = pile_steps(false, false)
+        .iter()
+        .scan(half, |stage, (_, step)| {
+            *stage = stage.with(*step);
+            Some(*stage)
+        })
+        .collect();
+    assert_eq!(closing.last(), Some(&PileStage::default()));
+    assert!(closing.iter().all(|stage| !stage.names));
 }

@@ -12,10 +12,10 @@
 //! reports, a single word, a number, or core copy
 //! (`MonitorFlowMapCopy`, `MonitorScreensCopy`).
 //!
-//! Not ported in this slice: the Private AI scene (`privateAI`,
-//! `addingManagedRoutes`), which is a later slice of the 2026-11-16 spec.
-//! Its node kinds (`Harness`, `Destination`) and arc styles (`Shared`,
-//! `Unknown`) are defined here so the widget draws every kind the Mac does.
+//! The Private AI map is here too (`privateAI`, `addingManagedRoutes`):
+//! every tool that can send model calls here, joined to the credential
+//! they are answered with, drawn from `harness_list`, `tool_destinations`
+//! and `status`, the reads the window already makes.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +23,8 @@ use trace_commons_contributor::preview_copy::{MonitorFlowMapCopy, monitor_screen
 
 use super::graph_model::CONTRIBUTED_STATUSES;
 use super::traces_tree::{FolderNode, ProjectMode, SourceKind, SourceMode, ToolNode, TracesTree};
+use trace_commons_contributor::harness_state::HarnessState;
+
 use crate::model::{GateStatus, HistoryRecord, ToolDestinations};
 
 /// A point in the design space or the field.
@@ -875,6 +877,369 @@ impl Scene {
     }
 }
 
+// --- The Private AI map ----------------------------------------------------
+
+/// One `harness_list` row as the Private AI map reads it: the core's id,
+/// name, whether the tool is on this computer, and its state label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HarnessRow {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    pub state: String,
+}
+
+impl HarnessRow {
+    pub fn from_model(row: &crate::model::Harness) -> Self {
+        Self {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            installed: row.installed,
+            state: row.state.clone(),
+        }
+    }
+}
+
+/// A Private AI tool line's least and most height.
+pub const HARNESS_STEP_MIN: f64 = 30.0;
+pub const HARNESS_STEP_MAX: f64 = 72.0;
+
+/// The core's verdict for a row, from its label. A label this build has
+/// never heard of is unknown, as `tc_harness_state_code` answers it.
+pub fn harness_state(label: &str) -> HarnessState {
+    HarnessState::from_label(label).unwrap_or(HarnessState::Unknown)
+}
+
+/// The sentence a row's card says (`MonitorWindowView.rowSentence`): a
+/// tool that is not on this computer says so and nothing else; a state
+/// with no sentence of its own says nothing, never a borrowed one.
+pub fn row_sentence(row: &HarnessRow) -> Option<String> {
+    if !row.installed {
+        return Some(crate::copy::HARNESS_NOT_INSTALLED.to_string());
+    }
+    Some(crate::copy::harness_state_line(&row.state))
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// The core's Private AI state label: `tool_destinations`'s, then the
+/// status's; `None` when neither says.
+pub fn private_ai_label(
+    destinations: Option<&ToolDestinations>,
+    status: Option<&GateStatus>,
+) -> Option<String> {
+    destinations.and_then(|d| d.private_ai.clone()).or_else(|| {
+        status
+            .and_then(|s| s.private_inference_state.as_ref())
+            .map(|state| state.state.clone())
+    })
+}
+
+/// IronWire's harness ids to the tools that have artwork (`HarnessToolArt`).
+pub fn harness_tool(id: &str) -> Option<SourceKind> {
+    match id {
+        "claude" | "claude-code" => Some(SourceKind::ClaudeCode),
+        "codex" => Some(SourceKind::Codex),
+        "gemini" | "gemini-cli" => Some(SourceKind::GeminiCli),
+        "cline" => Some(SourceKind::Cline),
+        "opencode" => Some(SourceKind::Opencode),
+        _ => None,
+    }
+}
+
+/// The two letters a Private AI tool with no artwork carries (owner,
+/// 2026-10-14: a long list of blank circles reads as one), from its name,
+/// as the Mac's `.other(initials:)` takes them.
+pub fn harness_initials(node: &Node) -> Option<String> {
+    match node.kind {
+        NodeKind::Harness { tool: None, .. } => Some(initials(&node.label)),
+        _ => None,
+    }
+}
+
+/// The destination's card sentence (`sentence`) or the line under its
+/// node: how many tools are connected.
+pub fn connected_words(words: &MonitorFlowMapCopy, count: usize, sentence: bool) -> String {
+    fill(
+        if sentence {
+            words.connected
+        } else {
+            words.connected_line
+        },
+        &counted(Some(count), words.tools_one, words.tools),
+        None,
+    )
+}
+
+impl Scene {
+    /// The destination, right of centre on the band's middle; the tools in
+    /// a column to its left, their names to the left of their icons.
+    pub fn destination(space: Size) -> Point {
+        let band = Self::band(space);
+        Point::new(space.width * 0.68, (band.0 + band.1) / 2.0)
+    }
+
+    pub fn harness_x(space: Size) -> f64 {
+        (space.width * 0.36).max(150.0)
+    }
+
+    /// The destination's lamp from the core's Private AI state label. A
+    /// label this shell does not know is unknown, never off.
+    pub fn lamp(private_ai: Option<&str>, answering: bool) -> Lamp {
+        match private_ai {
+            Some("running") if answering => Lamp::Answering,
+            Some("running") => Lamp::Running,
+            Some("off") => Lamp::Off,
+            _ => Lamp::Unknown,
+        }
+    }
+
+    /// The Private AI map: each tool that can send model calls here,
+    /// joined to the destination, drawn from the core's state for it,
+    /// never from `connected`: flowing only when its calls are answered,
+    /// solid when connected with nothing answered, lit but still when its
+    /// family's calls cannot be attributed, dashed when not connected,
+    /// dotted when the core could not say.
+    ///
+    /// - `harnesses` is `harness_list`'s rows; `None` while unread or after
+    ///   a failed read, which is not an empty list and draws nothing.
+    /// - `private_ai` is the core's Private AI state label
+    ///   ([`private_ai_label`]), `None` when it did not say.
+    /// - `sentence` is the core's sentence for a row ([`row_sentence`]).
+    /// - `state` is the core's verdict for a row ([`harness_state`]).
+    pub fn private_ai(
+        harnesses: Option<&[HarnessRow]>,
+        private_ai: Option<&str>,
+        sentence: impl Fn(&HarnessRow) -> Option<String>,
+        state: impl Fn(&HarnessRow) -> HarnessState,
+        destinations: Option<&ToolDestinations>,
+        space: Size,
+    ) -> Scene {
+        let words = words();
+        let screens = monitor_screens_copy();
+        let mut scene = Scene {
+            space,
+            ..Scene::default()
+        };
+        // An unreadable list is not an empty configured list. Managed
+        // routes, read apart, may still be added.
+        let Some(harnesses) = harnesses else {
+            return scene;
+        };
+        let has_installed = destinations
+            .is_some_and(|d| d.tools.iter().any(|t| t.installed == Some(true)))
+            || harnesses.iter().any(|row| row.installed);
+        let rows: Vec<&HarnessRow> = harnesses
+            .iter()
+            .filter(|row| {
+                if !has_installed {
+                    return true;
+                }
+                let source = if row.id == "claude" {
+                    "claude-code"
+                } else {
+                    row.id.as_str()
+                };
+                destinations
+                    .and_then(|d| d.tools.iter().find(|t| t.tool == source))
+                    .and_then(|t| t.installed)
+                    .unwrap_or(row.installed)
+            })
+            .collect();
+        let destination = Self::destination(space);
+        let x = Self::harness_x(space);
+        // Evenly down the band, no further apart than reads as one group,
+        // centred on the destination; as many as fit at the least line
+        // height, the rest counted as "+N" under them.
+        let band = Self::band(space);
+        let fit = (((band.1 - band.0) / HARNESS_STEP_MIN) as usize).max(1);
+        let shown = if rows.len() > fit {
+            &rows[..fit - 1]
+        } else {
+            &rows[..]
+        };
+        let mut weights = vec![1.0; shown.len()];
+        if shown.len() < rows.len() {
+            weights.push(0.7);
+        }
+        let slots = Self::stack(&weights, band, HARNESS_STEP_MAX, HARNESS_STEP_MIN);
+        if shown.len() < rows.len()
+            && let Some(last) = slots.last()
+        {
+            scene.overflows.push(Overflow {
+                at: Point::new(x - 24.0, last.0),
+                count: rows.len() - shown.len(),
+            });
+        }
+        let mut answering = false;
+        let mut connected = 0;
+        for (index, row) in shown.iter().enumerate() {
+            let y = slots[index].0;
+            let style = match state(row) {
+                HarnessState::Answering => {
+                    answering = true;
+                    connected += 1;
+                    ArcStyle::Flowing
+                }
+                HarnessState::ConnectedNoCalls => {
+                    connected += 1;
+                    ArcStyle::Quiet
+                }
+                HarnessState::ActivityShared => {
+                    connected += 1;
+                    ArcStyle::Shared
+                }
+                HarnessState::NotConnected => ArcStyle::Dashed,
+                HarnessState::Unknown => ArcStyle::Unknown,
+            };
+            let bend = (x + destination.x) / 2.0;
+            scene.arcs.push(Arc {
+                from: Point::new(x + 12.0, y),
+                control1: Point::new(bend, y),
+                control2: Point::new(bend, destination.y),
+                to: destination,
+                style,
+                dim: 1.0,
+            });
+            let mut node = Node::new(
+                &format!("harness:{}", row.id),
+                NodeKind::Harness {
+                    tool: harness_tool(&row.id),
+                    installed: row.installed,
+                },
+                Point::new(x, y),
+                13.0,
+                &row.name,
+                &sentence(row).unwrap_or_else(|| figure(None)),
+            );
+            node.dim = if row.installed { 1.0 } else { 0.5 };
+            scene.nodes.push(node);
+        }
+        // The tools counted as "+N" still count: the credential says how
+        // many are connected and whether any is answered, drawn or not.
+        for row in &rows[shown.len()..] {
+            match state(row) {
+                HarnessState::Answering => {
+                    answering = true;
+                    connected += 1;
+                }
+                HarnessState::ConnectedNoCalls | HarnessState::ActivityShared => connected += 1,
+                HarnessState::NotConnected | HarnessState::Unknown => {}
+            }
+        }
+        let lamp = Self::lamp(private_ai, answering);
+        // #1146's credential card: how many tools are connected, in a
+        // sentence; unknown is said, never left to read as off.
+        let mut detail = connected_words(&words, connected, true);
+        if lamp == Lamp::Unknown {
+            detail = format!("{detail} {}", screens.unknown);
+        }
+        let mut credential = Node::new(
+            "destination",
+            NodeKind::Destination(lamp),
+            destination,
+            26.0,
+            words.credential,
+            &detail,
+        );
+        credential.sublabel = Some(if rows.is_empty() {
+            words.none_found.to_string()
+        } else {
+            connected_words(&words, connected, false)
+        });
+        scene.nodes.insert(0, credential);
+        scene
+    }
+
+    /// False for a scene with nothing to draw (an unread harness list and
+    /// no managed routes): the pane stays blank.
+    pub fn draws_map(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
+    /// Managed configuration has its own routes, right of the destination
+    /// and in the band's lower third, each a tool and its provider joined
+    /// by a dashed line. A process being alive never animates a model call
+    /// or lights the global destination.
+    pub fn adding_managed_routes(&self, destinations: Option<&ToolDestinations>) -> Scene {
+        let Some((sessions, copy)) = destinations
+            .and_then(|d| Some((d.managed_sessions.as_ref()?, d.managed_copy.as_ref()?)))
+        else {
+            return self.clone();
+        };
+        let screens = monitor_screens_copy();
+        let mut scene = self.clone();
+        let mut groups: BTreeMap<String, Vec<&crate::model::ManagedMapSession>> = BTreeMap::new();
+        for row in sessions {
+            groups
+                .entry(format!("{}:{}", row.tool, row.provider))
+                .or_default()
+                .push(row);
+        }
+        let keys = groups.len();
+        let band = Self::band(scene.space);
+        for (index, (key, rows)) in groups.iter().enumerate() {
+            let first = rows[0];
+            // Below the destination's own card, so a managed route's name
+            // (drawn left of its icon) never sits on the destination.
+            let top = band.0 + (band.1 - band.0) * 0.66;
+            let y = if keys > 1 {
+                top + index as f64 * (band.1 - top) / (keys - 1) as f64
+            } else {
+                band.0 + (band.1 - band.0) * 0.85
+            };
+            let start = Point::new(scene.space.width * 0.8, y);
+            let end = Point::new(scene.space.width * 0.93, y);
+            let details = rows
+                .iter()
+                .take(4)
+                .map(|row| row.detail(copy))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let overflow = if rows.len() > 4 {
+                format!("\n+{}", rows.len() - 4)
+            } else {
+                String::new()
+            };
+            let detail = copy
+                .get("map_scope")
+                .cloned()
+                .into_iter()
+                .chain([details + &overflow])
+                .collect::<Vec<_>>()
+                .join("\n");
+            let name = copy.get(&first.tool).unwrap_or(&first.tool);
+            let mut tool = Node::new(
+                &format!("managed:{key}"),
+                NodeKind::Harness {
+                    tool: harness_tool(&first.tool),
+                    installed: true,
+                },
+                start,
+                13.0,
+                name,
+                &detail,
+            );
+            tool.title = copy.get("title").cloned();
+            tool.sublabel = copy
+                .get("title")
+                .map(|title| dot_pair(title, Some(rows.len())));
+            scene.nodes.push(tool);
+            scene.nodes.push(Node::new(
+                &format!("managed-provider:{key}"),
+                NodeKind::Destination(Lamp::Unknown),
+                end,
+                16.0,
+                copy.get(&format!("provider_{}", first.provider))
+                    .map_or(screens.unknown, String::as_str),
+                &detail,
+            ));
+            scene.arcs.push(curve(start, end, ArcStyle::Dashed, 1.0));
+        }
+        scene
+    }
+}
+
 fn curve(from: Point, to: Point, style: ArcStyle, dim: f64) -> Arc {
     let mid = (from.x + to.x) / 2.0;
     Arc {
@@ -1156,17 +1521,97 @@ pub const NODE_CARD_WIDTH: f64 = 260.0;
 pub const CARD_GAP: f64 = 12.0;
 pub const CARD_MARGIN: f64 = 8.0;
 
+/// The Traces map's style (`TracesMapStyle`, Settings): the pad, rocket
+/// and station, the Mac's default, or the laptop and the library orb. A
+/// shell preference: only the drawing changes, never what is sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MapStyle {
+    #[default]
+    Launch,
+    Standard,
+}
+
+/// How far the tool pile has opened (`MapToolPile`'s `tall`, `wide` and
+/// `names`): its full column, then its card wide enough for the names,
+/// then the names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PileStage {
+    pub tall: bool,
+    pub wide: bool,
+    pub names: bool,
+}
+
+/// One stage of opening or closing the pile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PileStep {
+    Tall(bool),
+    Wide(bool),
+    Names(bool),
+}
+
+impl PileStage {
+    pub fn with(self, step: PileStep) -> Self {
+        match step {
+            PileStep::Tall(tall) => Self { tall, ..self },
+            PileStep::Wide(wide) => Self { wide, ..self },
+            PileStep::Names(names) => Self { names, ..self },
+        }
+    }
+
+    /// The stage as drawn: while a trace moves the card keeps its closed
+    /// size, so no line moves under it.
+    pub fn drawn(self, moving: bool) -> Self {
+        if moving { Self::default() } else { self }
+    }
+
+    /// The whole card open: tall and wide, drawn opaque.
+    pub fn open(self) -> bool {
+        self.tall && self.wide
+    }
+}
+
+/// The pile's stages when the pointer comes over its card (`inside`) or
+/// leaves it, each with its delay in milliseconds from then
+/// (`MapToolPile.hover`); all at once under reduced motion.
+pub fn pile_steps(inside: bool, reduce_motion: bool) -> [(u32, PileStep); 3] {
+    let at = |ms: u32| if reduce_motion { 0 } else { ms };
+    if inside {
+        [
+            (0, PileStep::Tall(true)),
+            (at(260), PileStep::Wide(true)),
+            (at(260 + 200), PileStep::Names(true)),
+        ]
+    } else {
+        [
+            (0, PileStep::Names(false)),
+            (at(100), PileStep::Wide(false)),
+            (at(100 + 220), PileStep::Tall(false)),
+        ]
+    }
+}
+
+/// The library orb's frame on the standard map, in design units
+/// (`MapTransferDrawing.orbFrame`).
+pub const ORB_FRAME: f64 = 104.0;
+
+/// The library's frame on the Traces map for `style`, in design units.
+pub fn library_size(style: MapStyle) -> Size {
+    match style {
+        MapStyle::Launch => STATION_SIZE,
+        MapStyle::Standard => Size::new(ORB_FRAME, ORB_FRAME),
+    }
+}
+
 /// Half the width the map draws a node at, in design units: on the Traces
-/// map the station for the library and the pad for this computer, far
-/// wider than their discs; elsewhere the disc. The Mac's other map style
-/// (the laptop and the orb, a Settings switch) is not ported: GTK draws
-/// the default, the pad and the station.
-pub fn drawn_half_width(node: &Node, traces: bool) -> f64 {
+/// map the station or the orb for the library and the pad or the laptop
+/// for this computer, far wider than their discs; elsewhere the disc
+/// (`FlowMapView.drawnHalfWidth`).
+pub fn drawn_half_width(node: &Node, traces: bool, style: MapStyle) -> f64 {
     if !traces {
         return node.radius;
     }
     match node.kind {
-        NodeKind::Library { .. } => STATION_SIZE.width / 2.0,
+        NodeKind::Library { .. } => library_size(style).width / 2.0,
         NodeKind::Hub => PAD_HALF_WIDTH,
         _ => node.radius,
     }
