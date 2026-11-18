@@ -94,19 +94,16 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
-    /// The three `set_settings` knobs, built once and only ever refilled.
+    /// The two `set_settings` knobs, built once and only ever refilled.
     ///
     /// Everything else on this screen is torn down and rebuilt on each
     /// render, which is fine for labels and fatal for a control: a refresh
     /// runs on every daemon event, and rebuilding a spin button would
     /// destroy the one the contributor is in the middle of typing into.
     quiescence_minutes: gtk::SpinButton,
-    approval_hold_seconds: gtk::SpinButton,
-    /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
-    approval_hold_note: gtk::Label,
     digest_hours: gtk::SpinButton,
     /// Set while `render_knobs` is writing the daemon's own values into
-    /// those three, so the `value-changed` they emit is not mistaken for a
+    /// those two, so the `value-changed` they emit is not mistaken for a
     /// contributor turning a dial and echoed straight back as a write.
     filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
@@ -604,24 +601,6 @@ impl SettingsView {
             1.0,
             240.0,
         );
-        let approval_hold_seconds = knob_row(
-            &knobs,
-            copy::KNOB_HOLD_TITLE,
-            copy::KNOB_HOLD_UNIT,
-            0.0,
-            300.0,
-        );
-        // A hold of zero is not a small undo window, it is none, and that
-        // is a different statement from the number beside it. It gets its
-        // own line, shown only when it is true.
-        let approval_hold_note = gtk::Label::builder()
-            .label(copy::KNOB_HOLD_ZERO)
-            .xalign(0.0)
-            .wrap(true)
-            .visible(false)
-            .build();
-        approval_hold_note.add_css_class("tc-caveat");
-        knobs.append(&approval_hold_note);
         let digest_hours = knob_row(
             &knobs,
             copy::KNOB_DIGEST_TITLE,
@@ -688,8 +667,6 @@ impl SettingsView {
             pause_button,
             projects,
             quiescence_minutes,
-            approval_hold_seconds,
-            approval_hold_note,
             digest_hours,
             filling_knobs: std::cell::Cell::new(false),
             autostart_body,
@@ -779,22 +756,16 @@ pub fn wire(app: &Rc<App>) {
         }
     });
 
-    // The three knobs, each writing exactly the one key it owns.
+    // The two knobs, each writing exactly the one key it owns.
     //
     // `set_settings` rejects an object holding a key it does not recognise
     // rather than ignoring it, and it applies every key present -- so
-    // sending all three on every turn of one dial would make this window
-    // re-assert two values it was not asked to change, over whatever a
+    // sending both on every turn of one dial would make this window
+    // re-assert a value it was not asked to change, over whatever a
     // concurrent `trace-commons-contributor settings --set` had just
     // written. One key per write keeps this window's edits to what the
     // contributor actually edited.
     wire_knob(app, &app.settings.quiescence_minutes, "quiescence_secs", 60);
-    wire_knob(
-        app,
-        &app.settings.approval_hold_seconds,
-        "approval_hold_secs",
-        1,
-    );
     wire_knob(
         app,
         &app.settings.digest_hours,
@@ -2362,7 +2333,7 @@ fn knob_row(card: &gtk::Box, title: &str, unit: &str, lower: f64, upper: f64) ->
     spin
 }
 
-/// Fill the three knobs from the daemon's own answer.
+/// Fill the two knobs from the daemon's own answer.
 ///
 /// Never from this shell's idea of what it just wrote: `set_settings`
 /// returns the settings as they now stand, and both that and `get_settings`
@@ -2381,14 +2352,9 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
     view.filling_knobs.set(true);
     view.quiescence_minutes
         .set_value(knob_shown(settings.quiescence_secs, 60));
-    view.approval_hold_seconds
-        .set_value(knob_shown(settings.approval_hold_secs, 1));
     view.digest_hours
         .set_value(knob_shown(settings.digest_interval_secs, 3600));
     view.filling_knobs.set(false);
-
-    view.approval_hold_note
-        .set_visible(settings.approval_hold_secs == 0);
 
     // The extra privacy scan and the two session folders used to be
     // restated here as well. §5.4 puts all three in the Connection section
@@ -4475,9 +4441,23 @@ mod witness_tests {
         }
     }
 }
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_settings_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac has no control over the approval hold, so this window has
+    /// none either: nothing here writes it, and the daemon's default hold
+    /// is the only one. A hold of zero would be no Undo at all.
+    #[test]
+    fn settings_offer_no_control_over_the_approval_hold() {
+        let key = concat!("\"approval_hold", "_secs\"");
+        assert!(!include_str!("settings.rs").contains(key));
+        assert!(!include_str!("../copy.rs").contains(concat!("KNOB_", "HOLD_")));
+    }
 
     fn settings_with_modes(claude: &str, codex: &str) -> Settings {
         serde_json::from_value(serde_json::json!({

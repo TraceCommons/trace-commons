@@ -878,24 +878,19 @@ pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 
 // --- Settings: how it behaves --------------------------------------------
 //
-// The three timing knobs `set_settings` accepts, as a title and a unit
-// each. Every one of them is a promise the daemon keeps -- how long a
-// session must be quiet, how long an approval is held, how often a
-// contributor may be interrupted -- so each label says what the number does
-// to the contributor rather than naming the setting.
+// Two of the timing knobs `set_settings` accepts, as a title and a unit
+// each. Each is a promise the daemon keeps -- how long a session must be
+// quiet, how often a contributor may be interrupted -- so each label says
+// what the number does to the contributor rather than naming the setting.
+// The approval hold has no control here, as on the Mac: the daemon's
+// default is the Undo window.
 
 pub const KNOB_QUIESCENCE_TITLE: &str = "Quiet time before a trace counts as finished";
 pub const KNOB_QUIESCENCE_UNIT: &str = "minutes";
-pub const KNOB_HOLD_TITLE: &str = "How long you can take something back";
-pub const KNOB_HOLD_UNIT: &str = "seconds after you approve";
-
-/// A hold of zero is not a smaller undo window, it is no undo window at
-/// all, and the row says so rather than showing a bare `0`.
-pub const KNOB_HOLD_ZERO: &str = "No undo window. Approving sends on the next pass.";
 pub const KNOB_DIGEST_TITLE: &str = "How often you can be interrupted";
 pub const KNOB_DIGEST_UNIT: &str = "hours between notifications, at most";
 
-/// Where a change made here lands, said once under the three of them.
+/// Where a change made here lands, said once under the two of them.
 ///
 /// On Linux the watcher is usually a separate process, so "this window" is
 /// the wrong mental model for what was just changed -- and a contributor
