@@ -58,7 +58,7 @@ The Windows app is a WinUI 3 shell over the same C ABI the Mac uses
 | Consent | `Views/Settings/SharingChoiceCard.swift`, `ConsentSection.swift`, `ProjectsSection.swift`; `PreviewSheet.swift` | Preview in `Controls/PreviewSheet.xaml`, hosted by `PreviewWindow.cs`. Withdraw in `Controls/WithdrawDialog.cs`. An undo-window setting, `NumberBox ApprovalHoldSeconds` (`Controls/SettingsView.xaml:279`), which the Mac does not have: Linux removed its own in #2179. Per-project modes only; no sharing-choice card was found | [read]; "no grant UI" is [inferred], the arming path was not traced |
 | Daemon hosting | In-process daemon, `TraceCommonsApp/DaemonHost.swift` | In-process too: `DaemonHost.cs` starts `TcDaemon` over the FFI. Fail-closed roots: `DaemonHost.cs:181-186` says the daemon refuses to start without both sources declared, and the shell routes the refusal to `SessionRootsWindow`. State in `%LOCALAPPDATA%/trace-commons` | [read]; the Rust refusal itself is [inferred] from the comment |
 | Run at login, install paths | `LoginItemManager.swift` | `RunAtLogin.cs` (HKCU Run, unpackaged) and `StartupRegistration.cs` (StartupTask when packaged). `AppUpdater.cs` uses the App Installer feed when packaged. MSIX manifest `windows/packaging/Package.appxmanifest`. Three install paths: MSIX App Installer, portable zip, CLI via `install.ps1` | [read]; install paths from memory notes |
-| Launch and terminals | `ManagedSessionsView.swift`, `Settings/ManagedTerminalPicker.swift` | `Controls/ManagedSessionsView.cs`, `Controls/ManagedTerminalPicker.cs`, filled from `managed_snapshot`. The list is in Rust: `crates/trace-commons-contributor/src/managed/terminal.rs:73`, `WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal]`. Linux offers ten | [read] |
+| Launch and terminals | `ManagedSessionsView.swift`, `Settings/ManagedTerminalPicker.swift` | `Controls/ManagedSessionsView.cs`, `Controls/ManagedTerminalPicker.cs`, filled from `managed_snapshot`. The list is in Rust: `crates/trace-commons-contributor/src/managed/terminal.rs:73`, `WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal]`. Linux offers ten (`:77`, `LINUX: [TerminalApp; 10]`) | [read] |
 | Brand name | The core's `brand.rs`: `app_name!()` is "Near AI Gateway" (`crates/trace-commons-contributor/src/brand.rs:30`). No `Near.ai` literal in `macos/Sources` outside comments | "Near.ai", the former name (`brand.rs` `FORMER_APP_NAMES`), hard-coded: 25 occurrences in 14 files under `windows/src`, for example `MainWindow.xaml:29` (window title) and `:97` (title bar). Also `Package.appxmanifest:32` `DisplayName`. No FFI call returns the app name | [read] |
 | Decoration | NEAR N (`TCDesign/Logos/GlassBrandMark.swift`), tool logos (`GlassLogoPaths.swift`), hero cards (`Components/HeroCard.swift`), pixel art, coin burst, station, orb, map field | `Controls/BrandMark.xaml`: the "Turn" mark, pure geometry, no gradients. No gradients, glows, halos or shadows in `BrandMark`, `DesignSystem.xaml` or `MainWindow.xaml` (grep). No Home, no hero cards, no tool logos | [read] |
 | Tray | Menu-bar strip with N, badge, ring and halo (`Components/MenuBarPanel.swift`); glass popover (`Views/Monitor/MenuBarGlassPanel.swift`) | `TrayIcon.cs`: Win32 `Shell_NotifyIcon` and a native popup menu (`CreatePopupMenu`, `TrackPopupMenuEx`). Four states (`TraceCommons.Interop/TrayModel.cs:17-29`: Idle, Paused, Unhealthy, Attention); a dot for Attention and Unhealthy. No ring, no halo, no flyout, no popup window | [read] |
@@ -74,7 +74,7 @@ These are worth knowing, because a port must keep them green [read]:
   (`:50-123`) is a ceiling and a floor: adding or removing a counted sentence
   both fail. `TheRustOwnedSurfacesAreNotGivenAWordingAllowance` (`:248`).
 - `SourceCheckTests.cs:138` `TheSettingsScreenAsksForTheRowRatherThanWritingIt`.
-- `NoCommonsNameTests.cs:50` `NothingThisShellShowsNamesTheCommons`. It scans
+- `NoCommonsNameTests.cs:45` `NothingThisShellShowsNamesTheCommons`. It scans
   C#, XAML and the MSIX manifest. The one allowed literal is the HKCU Run value
   name.
 - `XamlCommentSyntaxTests.cs:39`: no `--` inside a XAML comment, which would
@@ -119,7 +119,8 @@ Rust, because windowing drifts by platform. Windows reproduces it in C#.
   chosen by `TRACE_COMMONS_SAMPLE`, in debug builds only.
 - The Mac's debug hook (`TraceCommonsApp/DebugScreenshot.swift`) renders the
   whole Monitor window per sample, tab, pane set and appearance.
-- `scripts/parity/gallery.sh` pairs the two sides into one HTML page.
+- `scripts/parity/gallery.sh` (on #2161, not yet on `main`) pairs the two
+  sides into one HTML page.
 
 Every later look claim was checked against that gallery.
 
@@ -294,7 +295,9 @@ Two lessons from that inventory:
 
 - **Pin the SHA.** #2187 found that the inventory quoted the hero-card
   gradients from before a Mac cleanup (fc4ecc1c6): the Mac now ships solid
-  grounds and no radial light. #2187 ported what the Mac ships, from the
+  grounds and no radial light. Confirmed at 202e4cdd5:
+  `TCDesign/Generated/GlassTokens.swift:405` gives `heroCampaignCard` #081538
+  at both stops. #2187 ported what the Mac ships, from the
   tokens.
 - **"Not applicable" is an owner call.** The inventory marked the edge rail
   and the menu-bar popover not applicable on Linux. The owner then approved
@@ -449,7 +452,7 @@ minimise [inferred].
   table; the mapping needs approval.
 - **Fonts.** In August 2026 the owner ruled against bundling Inter in the
   apps. On 2026-11-16 he chose Inter (OFL) for Linux, pending a dependency
-  write-up, and #2165 shipped without it. Ask before bundling anything.
+  write-up. #2165, still a draft, leaves it out. Ask before bundling anything.
 - **New dependencies.** Win2D, a UI Automation driver library, the Windows
   Community Toolkit. Give the full write-up: adoption, transitive count,
   maintenance, licence, advisories.
@@ -543,8 +546,6 @@ Windows App SDK already gives before proposing a package.
   between checkouts; never copy it.
 - The Windows box is licensed per hour. Stop it when done and confirm it is
   terminated through the API.
-- Defender is disabled by policy on that image. A scan there proves nothing
-  until it is re-enabled and checked with a control sample.
 - Capture only the app's own window, located through the accessibility API
   at the moment of capture. Never take a full-screen capture or use remembered
   coordinates on a machine someone is using.
@@ -600,36 +601,43 @@ Windows App SDK already gives before proposing a package.
 
 ## 6. A concrete Windows plan
 
-Slices are PR-sized and ordered. W1 to W5 are a stack. Every slice follows the
+Slices are PR-sized and ordered. W1 to W4 are a stack; W5 can start beside
+W2. Every slice follows the
 repo's multi-task rule:
 
 - while writing: a compile check only;
 - at the end: the interop suite, the WinUI build on CI or the VM, the
   contributor crate tests for any core change, and fmt and clippy.
 
-| # | Slice | Mac sources to port | Windows files touched | Pin in tests | Likely owner decisions |
+| # | Slice | Mac sources to port | Windows files touched | Pin in tests | Likely owner decisions, as options |
 |---|---|---|---|---|---|
-| W0 | Spec and decoration inventory | All of the below, read, not ported | A new spec in `docs/superpowers/specs/` | Nothing; cite file:line at a stated SHA | Unfreeze Windows; Mac look vs Fluent look; title bar shape |
-| W1 | Samples and gallery | `TCShellCore/DataContract/RecordedSamples/`, `DebugScreenshot.swift` | Debug sample client in `TraceCommons.Interop`; a capture driver run through `win-capture.ps1`; gallery naming | Sample client refuses unrecorded methods and never starts a daemon; compiled out of Release | None, if it adds no package |
-| W2 | Window shell | `ThreePane.swift`, `MonitorWindowView.swift`, `Monitor/MonitorShell.swift`, `MonitorNotices.swift`, `TCShellCore/MonitorScreensCopy.swift` | `MainWindow.xaml(.cs)` rebuilt; a pure pane-layout class in the net8.0 project; `SettingsView` moved to its own window; tray and accelerators to the four tabs | Pane widths and gaps, first-launch seeding (map from 1100, inspector from 900), demand keys, notice stack order; `ShellWordingTests` baseline goes down | Tab labels and order; whether the rail's History and Mission drafts become sub-pages as on the Mac |
-| W3 | Traces map | `FlowMapScene.swift`, `FlowMapView.swift`, `MapToolPile.swift`, `TracesTree.swift` | New map control; scene and tree as pure C#; `tool_destinations` and `harness_list` reads | Port `FlowMapSceneTests` against the samples, as #2163 and #2182 did | Drawing stack: XAML shapes and Composition (no new package) or Win2D (new package) |
-| W4 | Transfers and motion | `MapTransferFeed.swift`, `MapTransfers.swift`, `TraceTransferCard.swift` | Map control; transfer player as pure C# | Player on an explicit clock (5 s hold, stack of 6, 3 drawn); still frame under reduced motion; no ticks while hidden | None beyond W3 |
-| W5 | Look | `glass.tokens.json`, `GlassTheme.swift`, `GlassBackdrop.swift`, `Glyphs.swift`, `Navigation.swift`, `Indicators.swift` | `generate.py` extended to emit the flat tiers, radii, spacing, type and motion to XAML; `DesignSystem.xaml` reduced to what the generator does not cover; glyph paths exported | `generate.py --check`; contrast per tier in both schemes; pixel tests of the tab ember, status dot and graph matrix | Mica, Acrylic or painted; Segoe Fluent mapping; fonts |
-| W6 | Map art | `LibraryStation.swift`, `LibraryOrb.swift`, `GlassLogoPaths.swift`, `GlassBrandMark.swift`, `GlassMapField` in `Indicators.swift` | Map control; generated logo and mark path data | Station face count 506 and corner count 2216 (#2182's pins), projected vertices from the probe, render diff | Logos on Windows; map style switch placement |
-| W7 | First-run steps | `Views/FirstRun/*`, `TCShellCore/FirstRun/*`, `FirstRunCopy.swift` | `OnboardingWindow` replaced; `OnboardingViewModel` | Step order, `can_continue` per step, nothing preselected, terms sent once | Wallet sign-in on Windows (dropped on Linux); "this computer" words for Windows |
-| W8 | First-run stage | `FirstRunStage.swift`, `WelcomeScreen.swift`, `ToolsScreen.swift`, `GlassBrandMarkDrawing.swift` | A stage control under the first-run window | Probe values for the spring, ring and marker check; reduced-motion final frame | The NEAR mark on Windows |
-| W9 | Consent | `Settings/SharingChoiceCard.swift`, `ConsentSection.swift`, `ProjectsSection.swift`, `PreviewSheet.swift`, `SessionReviewCard.swift` | `SettingsView`, `PreviewSheet`, `MainViewModel` undo | Undo settled against the pressed action; grant owner and account generation; bulk plan, confirm and stale; override shown with no clear | Remove `ApprovalHoldSeconds`; DRAFT words still on screen |
-| W10 | Brand | `brand.rs` | A new FFI read of `APP_NAME`; the 25 literals; `Package.appxmanifest` | Manifest `DisplayName` equals `APP_NAME`; no literal "Near.ai" in shell source | Which internal ids stay |
-| W11 | Home and decoration | `Monitor/HomeViews.swift`, `HeroCard.swift`, `PixelGlyph.swift`, `PixelField.swift`, `CoinBurst.swift`, `BalanceArrivalFlourish.swift`, `HomeInsightsVisual.swift` | A new Home tab | Hero grounds from tokens; probe-pinned pixel masks; coin offsets; count steps | Hand-drawn art in place of SF Symbols |
-| W12 | Tray mark | `Components/MenuBarPanel.swift` (`GlassMenuBarStrip`), `TCShellCore/MenuBarStatus.swift`, `NudgeSurface.swift` | `TrayIcon.cs`, `TrayModel.cs`, `MarkRaster.cs` | Badge cap 99+, ring and halo only from `status.nudge.mark`, halo inset 2.5 | Ring and halo are re-engagement signals under the notice rule; N vs Turn |
-| W13 | Tray flyout and edge rail | `Monitor/MenuBarGlassPanel.swift`, `MenuPanelStore.swift`, `EdgeRail/EdgeRailController.swift`, `EdgeRailView.swift`, `TCShellCore/EdgeRail.swift` | A topmost popup window from the tray click; an edge window | Rail geometry from the probe (#2188 pinned open (1436, 200, 484, 680) on 1920x1080) | Whether Windows gets either surface |
-| W14 | Terminals and launch | `ManagedSessionsView.swift`, `Settings/ManagedTerminalPicker.swift` | Rust `managed/terminal.rs` for any new terminal; `ManagedSessionsView.cs` | Argv arrives intact for a hostile folder; a real launch on the VM | Which terminals; "Show" on Windows |
-| W15 | Background service, only if needed | `DaemonHost.swift`, #2171 for the pattern | `DaemonHost.cs`, `RunAtLogin.cs`, `StartupRegistration.cs` | One watcher per login, if two daemons can collide | Whether Windows needs this at all; any dialog words |
+| W0 | Spec and decoration inventory | All of the below, read, not ported | A new spec in `docs/superpowers/specs/` | Nothing; cite file:line at a stated SHA | Unfreeze: (a) Windows now, (b) after a macOS release. Look: (a) Mac look, as Linux, (b) Fluent look with Mac structure. Title bar: (a) Mac toolbar row with system caption buttons, (b) standard title bar |
+| W1 | Samples and gallery | `TCShellCore/DataContract/RecordedSamples/`, `DebugScreenshot.swift` | Debug sample client in `TraceCommons.Interop`; a capture driver run through `win-capture.ps1`; gallery naming | Sample client refuses unrecorded methods and never starts a daemon; compiled out of Release | None if no package is added. Capture runs: (a) on the dev VM only, (b) also as a CI artifact (the spec kept CI uploads off) |
+| W2 | Window shell | `ThreePane.swift`, `MonitorWindowView.swift`, `Monitor/MonitorShell.swift`, `MonitorNotices.swift`, `TCShellCore/MonitorScreensCopy.swift` | `MainWindow.xaml(.cs)` rebuilt; a pure pane-layout class in the net8.0 project; `SettingsView` moved to its own window; tray and accelerators to the four tabs | Pane widths and gaps, first-launch seeding (map from 1100, inspector from 900), demand keys, notice stack order; `ShellWordingTests` baseline goes down | Rail destinations: (a) History and Mission drafts become sub-pages as on the Mac, (b) keep them in the rail. Window growth at the screen edge: (a) the Mac's slide-left, (b) panes reallocate in place |
+| W3 | Traces map | `FlowMapScene.swift`, `FlowMapView.swift`, `MapToolPile.swift`, `TracesTree.swift` | New map control; scene and tree as pure C#; `tool_destinations` and `harness_list` reads | Port `FlowMapSceneTests` against the samples, as #2163 and #2182 did | Drawing: (a) XAML shapes and Composition, no new package, (b) Win2D, a new package with a write-up |
+| W4 | Transfers and motion | `MapTransferFeed.swift`, `MapTransfers.swift`, `TraceTransferCard.swift` | Map control; transfer player as pure C# | Player on an explicit clock (5 s hold, stack of 6, 3 drawn); still frame under reduced motion; no ticks while hidden | Transfer cards: (a) the Mac's peeking stack, (b) a short column as on Linux #2164 |
+| W5 | Look | `glass.tokens.json`, `GlassTheme.swift`, `GlassBackdrop.swift`, `Glyphs.swift`, `Navigation.swift`, `Indicators.swift` | `generate.py` extended to emit the flat tiers, radii, spacing, type and motion to XAML; `DesignSystem.xaml` reduced to what the generator does not cover; glyph paths exported | `generate.py --check`; contrast per tier in both schemes; pixel tests of the tab ember, status dot and graph matrix | Glass: (a) painted only, (b) Mica or Acrylic where supported with a painted fallback. Icons: (a) Segoe Fluent mapping table, (b) export the Mac's own glyph paths where they exist and Segoe for the rest. Font: (a) Segoe UI Variable, (b) bundle Inter |
+| W6 | Map art | `LibraryStation.swift`, `LibraryOrb.swift`, `GlassLogoPaths.swift`, `GlassBrandMark.swift`, `GlassMapField` in `Indicators.swift` | Map control; generated logo and mark path data | Station face count 506 and corner count 2216 (#2182's pins), projected vertices from the probe, render diff | Logos: (a) the Mac's path data, as on Linux, (b) initials only. Map style switch: (a) in Settings as on Mac, (b) rocket only |
+| W7 | First-run steps | `Views/FirstRun/*`, `TCShellCore/FirstRun/*`, `FirstRunCopy.swift` | `OnboardingWindow` replaced; `OnboardingViewModel` | Step order, `can_continue` per step, nothing preselected, terms sent once | Wallet sign-in: (a) drop, as on Linux, (b) keep. Device words: (a) reuse the approved "this computer" fields, (b) new "this PC" variants (new words) |
+| W8 | First-run stage | `FirstRunStage.swift`, `WelcomeScreen.swift`, `ToolsScreen.swift`, `GlassBrandMarkDrawing.swift` | A stage control under the first-run window | Probe values for the spring, ring and marker check; reduced-motion final frame | App mark in the stage: (a) the NEAR N, as Mac and Linux, (b) the Turn |
+| W9 | Consent | `Settings/SharingChoiceCard.swift`, `ConsentSection.swift`, `ProjectsSection.swift`, `PreviewSheet.swift`, `SessionReviewCard.swift` | `SettingsView`, `PreviewSheet`, `MainViewModel` undo | Undo settled against the pressed action; grant owner and account generation; bulk plan, confirm and stale; override shown with no clear | Undo-window setting: (a) remove, as #2179, (b) keep. Clear-override control: (a) none, as on the Mac, (b) add one |
+| W10 | Brand | `brand.rs` | A new FFI read of `APP_NAME`; the 25 literals; `Package.appxmanifest` | Manifest `DisplayName` equals `APP_NAME`; no literal "Near.ai" in shell source | Internal ids: (a) keep all (package name, protocol, exe, Run value, install folder), as Linux did, (b) rename some, with a migration |
+| W11 | Home and decoration | `Monitor/HomeViews.swift`, `HeroCard.swift`, `PixelGlyph.swift`, `PixelField.swift`, `CoinBurst.swift`, `BalanceArrivalFlourish.swift`, `HomeInsightsVisual.swift` | A new Home tab | Hero grounds from tokens; probe-pinned pixel masks; coin offsets; count steps | SF Symbol art: (a) hand-drawn pixel art, as #2187, (b) leave those cards without art. Walkthrough card: (a) leave out, as #2187, (b) port (it is a closable card under the notice rule) |
+| W12 | Tray mark | `Components/MenuBarPanel.swift` (`GlassMenuBarStrip`), `TCShellCore/MenuBarStatus.swift`, `NudgeSurface.swift` | `TrayIcon.cs`, `TrayModel.cs`, `MarkRaster.cs` | Badge cap 99+, ring and halo only from `status.nudge.mark`, halo inset 2.5 | Mark: (a) NEAR N, (b) keep the Turn. Ring and halo: (a) port with the Mac's conditions and caps, as approved on Linux, (b) badge only |
+| W13 | Tray flyout and edge rail | `Monitor/MenuBarGlassPanel.swift`, `MenuPanelStore.swift`, `EdgeRail/EdgeRailController.swift`, `EdgeRailView.swift`, `TCShellCore/EdgeRail.swift` | A topmost popup window from the tray click; an edge window | Rail geometry from the probe (#2188 pinned open (1436, 200, 484, 680) on 1920x1080) | (a) Both a tray flyout and the edge rail, as Linux, (b) the flyout only, (c) neither |
+| W14 | Terminals and launch | `ManagedSessionsView.swift`, `Settings/ManagedTerminalPicker.swift` | Rust `managed/terminal.rs` for any new terminal; `ManagedSessionsView.cs` | Argv arrives intact for a hostile folder; a real launch on the VM | Terminals: (a) Windows Terminal only, (b) add PowerShell's console host, (c) add others after an argv check. Show: (a) spike it, (b) leave it Mac-only |
+| W15 | Background service, only if needed | `DaemonHost.swift`, #2171 for the pattern | `DaemonHost.cs`, `RunAtLogin.cs`, `StartupRegistration.cs` | One watcher per login, if two daemons can collide | (a) No Windows background-service flow, (b) a CLI-owned daemon with approved dialogs |
 
 W5 can start beside W2 once its decisions are made. W7 and W9 depend only on
 W2. W11 depends on W2 and W5.
 
 ## Appendix: Linux-to-Windows mappings
+
+The Windows column names APIs from platform knowledge, not from this repo or
+from Microsoft's documentation read for this guide. Treat every entry not
+already used in `windows/src` as [inferred] and check it before building on
+it. Already in use: `ExtendsContentIntoTitleBar`, `SetTitleBar`,
+`Shell_NotifyIcon`, theme dictionaries.
 
 | Linux (GTK) | Windows (WinUI 3) | New dependency? |
 |---|---|---|
@@ -670,5 +678,7 @@ W2. W11 depends on W2 and W5.
   shows for a backdrop.
 - Where Windows arms automatic contributing today. The arming offer path was
   not traced.
+- The Windows API names in sections 2.3, 2.4, 3.9 and the appendix, other
+  than those already used in `windows/src`.
 - The owner's statement that the macOS app tests job may be ignored. It is
   recorded here as relayed, scoped to PRs that change no Swift.
