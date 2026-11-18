@@ -749,8 +749,7 @@ impl AnalyticsTabs {
         self.bump(Slot::Overview);
         let generation = self.generation(Slot::Overview).get();
         clear(&self.overview_body);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        let spinner = crate::ui::glass_feedback::spinner();
         self.overview_body.append(&spinner);
         if self.live_busy.replace(true) {
             // Keep only the newest selection while the existing worker call runs.
@@ -940,8 +939,7 @@ impl AnalyticsTabs {
         let generation = self.generation(slot).get() + 1;
         self.generation(slot).set(generation);
         clear(body);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        let spinner = crate::ui::glass_feedback::spinner();
         body.append(&spinner);
         let (tx, rx) = async_channel::bounded(1);
         let store_dir = self.store_dir.clone();

@@ -117,6 +117,7 @@ pub fn draw(cr: &gtk::cairo::Context, tool: &Kind, t: f64, dark: bool) {
 pub struct FolderHandoff {
     pub area: gtk::DrawingArea,
     tool: Rc<RefCell<Kind>>,
+    t: Rc<Cell<f64>>,
 }
 
 impl FolderHandoff {
@@ -139,12 +140,13 @@ impl FolderHandoff {
         // Once, the first time it is shown; the rest frame from then on.
         let driver = Rc::new(Driver::default());
         let played = Cell::new(false);
+        let progress = Rc::clone(&t);
         area.connect_map(move |area| {
             if played.replace(true) {
                 return;
             }
             let weak = area.downgrade();
-            let frame = Rc::clone(&t);
+            let frame = Rc::clone(&progress);
             driver.start(
                 area,
                 DURATION,
@@ -172,7 +174,12 @@ impl FolderHandoff {
                 }
             });
         }
-        Self { area, tool }
+        Self { area, tool, t }
+    }
+
+    /// How far the folder has come, 0 to 1 (at rest).
+    pub fn progress(&self) -> f64 {
+        self.t.get()
     }
 
     pub fn set_tool(&self, tool: Kind) {
@@ -243,5 +250,48 @@ mod tests {
             "{:?}",
             px(64.0, 13.0)
         );
+    }
+
+    /// Plays once, the first time it is shown, and rests; with motion off
+    /// it is the rest frame at once.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_folder_slides_in_once() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let art = FolderHandoff::new(Kind::source(SourceKind::Codex));
+        let window = gtk::Window::new();
+        window.set_child(Some(&art.area));
+        window.present();
+        let context = gtk::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut between = false;
+        while art.progress() < 1.0 && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            between |= art.progress() > 0.0 && art.progress() < 1.0;
+        }
+        assert!(between, "it did not move");
+        assert_eq!(art.progress(), 1.0);
+        // Shown again, it stays at rest.
+        art.area.set_visible(false);
+        art.area.set_visible(true);
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert_eq!(art.progress(), 1.0);
+        window.destroy();
+
+        settings.set_gtk_enable_animations(false);
+        let still = FolderHandoff::new(Kind::source(SourceKind::Codex));
+        let window = gtk::Window::new();
+        window.set_child(Some(&still.area));
+        window.present();
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert_eq!(still.progress(), 1.0);
+        window.destroy();
+        settings.set_gtk_enable_animations(true);
     }
 }

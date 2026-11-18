@@ -15,6 +15,7 @@ mod first_run;
 mod first_run_terms;
 pub mod folder_handoff;
 pub mod funding;
+pub mod glass_feedback;
 pub mod glass_motion;
 pub mod hero_art;
 pub mod hero_card;

@@ -238,3 +238,23 @@ fn the_drawn_marks_are_the_symbols_sizes() {
         );
     }
 }
+
+/// A tile is the Mac's size whatever it holds, and hidden from assistive
+/// tech.
+#[test]
+#[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_a_tile_is_the_macs_size_and_says_nothing() {
+    gtk::init().unwrap();
+    for (kind, large, side) in [
+        (Kind::source(SourceKind::ClaudeCode), false, 22),
+        (Kind::FolderInitial("web".into()), true, 30),
+        (Kind::Session, false, 22),
+    ] {
+        let tile = ToolTile::new(kind, large);
+        let (_, natural, _, _) = tile.measure(gtk::Orientation::Horizontal, -1);
+        assert_eq!(natural, side);
+        let (_, natural, _, _) = tile.measure(gtk::Orientation::Vertical, -1);
+        assert_eq!(natural, side);
+        assert_eq!(tile.accessible_role(), gtk::AccessibleRole::Presentation);
+    }
+}

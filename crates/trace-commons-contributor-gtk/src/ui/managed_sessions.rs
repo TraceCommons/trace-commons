@@ -95,10 +95,8 @@ fn install_button(tool: &Value) -> Option<gtk::Button> {
 }
 /// A bare refresh glyph, its tooltip and accessible name "Refresh".
 fn refresh_glyph(app: &Rc<App>) -> gtk::Button {
-    let glyph = gtk::Button::from_icon_name("view-refresh-symbolic");
-    glyph.add_css_class("flat");
-    glyph.set_tooltip_text(Some(&text("refresh")));
-    glyph.update_property(&[gtk::accessible::Property::Label(&text("refresh"))]);
+    // Its icon turns once when pressed (`GlassRefreshButton`).
+    let (glyph, _) = super::glass_feedback::refresh_button(&text("refresh"));
     let app = Rc::clone(app);
     glyph.connect_clicked(move |_| refresh(&app));
     glyph

@@ -262,6 +262,11 @@ impl ArmedMark {
         self.imp().step.get()
     }
 
+    /// How far the bolt has turned to the check, and the ring's seconds.
+    pub fn motion(&self) -> (f64, Option<f64>) {
+        (self.imp().change.get(), self.imp().pulse.get())
+    }
+
     /// Moves the mark to `step`. Armed turns the bolt to a check on its
     /// spring and spreads the ring once; under reduced motion the check is
     /// drawn at once, with neither.
@@ -448,5 +453,45 @@ mod tests {
         for (got, want) in [(x0, 9.75), (y0, 9.75), (x1, 20.25), (y1, 20.0)] {
             assert!((got - want).abs() <= 0.5, "check {x0},{y0} {x1},{y1}");
         }
+    }
+    /// Armed with motion on, the check comes in on its spring and the ring
+    /// spreads once; with motion off the check is there at once, with no
+    /// ring.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_mark_turns_to_a_check_with_a_pulse() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let mark = ArmedMark::new();
+        let window = gtk::Window::new();
+        window.set_child(Some(&mark));
+        window.present();
+        let context = gtk::glib::MainContext::default();
+        let pump_until = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !done() && std::time::Instant::now() < deadline {
+                context.iteration(false);
+            }
+        };
+        assert_eq!(mark.motion(), (0.0, None));
+        mark.set_step(Some(Step::Arming));
+        assert_eq!(mark.motion(), (0.0, None));
+        mark.set_step(Some(Step::Armed));
+        let pulsed = std::cell::Cell::new(false);
+        pump_until(&|| {
+            pulsed.set(pulsed.get() || mark.motion().1.is_some_and(|t| t > 0.0));
+            pulsed.get() && mark.motion() == (1.0, None)
+        });
+        assert!(pulsed.get(), "no ring spread");
+        assert_eq!(mark.motion(), (1.0, None));
+
+        settings.set_gtk_enable_animations(false);
+        let still = ArmedMark::new();
+        window.set_child(Some(&still));
+        still.set_step(Some(Step::Armed));
+        assert_eq!(still.motion(), (1.0, None));
+        window.destroy();
+        settings.set_gtk_enable_animations(true);
     }
 }
