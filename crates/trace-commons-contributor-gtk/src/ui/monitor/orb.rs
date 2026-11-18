@@ -3,10 +3,9 @@
 //!
 //! A port of `GlassLibraryOrb` in
 //! `macos/Sources/TCDesign/Components/LibraryOrb.swift` (owner,
-//! 2026-10-19). The Mac draws it only on its standard map, which a
-//! Settings switch picks over the rocket map; this shell has no such
-//! switch yet and draws the station, so nothing here is on screen until it
-//! does.
+//! 2026-10-19). Drawn, as on the Mac, only on the standard map, which the
+//! Settings map style switch picks over the rocket map
+//! (`PanePrefs::map_style`).
 
 use std::f64::consts::{PI, TAU};
 

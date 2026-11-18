@@ -25,22 +25,27 @@
 //! and at rest the pile and the rocket on the pad too, are a still layer,
 //! kept as a render node and drawn again only when what it is drawn from
 //! changes (`StillKey`), as the Mac keys its still layer: at rest a tick
-//! redraws only the arcs and the library's station.
+//! redraws only the arcs and the library.
 //!
-//! The library on the Traces map is the NEAR AI space station (`station`),
-//! drawn between the two halves of the still layer on the map's clock: it
-//! turns at 20 frames a second while nothing else moves, and is drawn once
-//! at rest with animations off. The coins carry each tool's logo, or its
-//! initials, in its tint (`tool_art`). Colours are the Mac's own map
-//! tokens in the flat theme (`MapColours`), with the theme's ink where the
-//! Mac uses its ink.
+//! The map's style is the Mac's Settings switch (`TracesMapStyle`, kept in
+//! `PanePrefs`): on the rocket map, the default, this computer is a launch
+//! pad and the library the NEAR AI space station (`station`); on the
+//! standard map they are the laptop and the turning orb (`orb`). The
+//! library is drawn between the two halves of the still layer on the map's
+//! resting timeline (20 frames a second, 30 with moving dashes, never the
+//! run's 60), kept between frames (`LibraryArt`), and drawn once at rest
+//! with animations off. Under everything is the Mac's field (`field`).
+//! The coins carry each tool's logo, or its initials, in its tint
+//! (`tool_art`). Colours are the Mac's own map tokens in the flat theme
+//! (`MapColours`), the words in its text colours, with the theme's ink
+//! where the Mac uses its ink.
 //!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
-//! - The pile opens at once under the pointer, where the Mac stages it
-//!   (taller, then wider, then the names).
-//! - The Mac's other map style (the laptop and the library orb, a Settings
-//!   switch) is not drawn: this shell has no such switch.
+//! - The pile opens in the Mac's stages and at its times (taller, then
+//!   wider, then the names), but each stage is a step, not a spring.
+//! - The map style switch sits in Settings' Startup section: this shell
+//!   has no General section, where the Mac puts it.
 //! - A grown coin's glow is a soft radial halo; cairo has no blur filter.
 //! - The legend's memory item and the coins' lock say "this computer"
 //!   (`legend_memory_computer`) where the Mac's say "this Mac".
@@ -3679,7 +3684,11 @@ mod tests {
             ..light.clone()
         };
         for (scheme, palette) in [("light", light), ("dark", dark)] {
-            for open in [false, true] {
+            for (style, open) in [
+                (MapStyle::Launch, false),
+                (MapStyle::Launch, true),
+                (MapStyle::Standard, false),
+            ] {
                 let mut surface =
                     gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2)
                         .unwrap();
@@ -3698,14 +3707,14 @@ mod tests {
                     );
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
-                        draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
+                        draw_node(&cr, &scene, node, &fit, &palette, false, style);
                     }
-                    if let Some(frame) = library_frame(&scene, &fit, MapStyle::Launch) {
+                    if let Some(frame) = library_frame(&scene, &fit, style) {
                         LibraryArt::default()
-                            .node(MapStyle::Launch, &frame, 0.0, true)
+                            .node(style, &frame, 0.0, true)
                             .draw(&cr);
                     }
-                    map_transfers::resting_rocket(&cr, &scene, &fit, &palette, MapStyle::Launch);
+                    map_transfers::resting_rocket(&cr, &scene, &fit, &palette, style);
                     let stack = scene.stack.as_ref().unwrap();
                     draw_pile(
                         &cr,
@@ -3725,8 +3734,13 @@ mod tests {
                 }
                 surface.flush();
                 let name = format!(
-                    "{dir}/map-{scheme}-{}-{}x{}.bgra",
+                    "{dir}/map-{scheme}-{}{}-{}x{}.bgra",
                     if open { "open" } else { "closed" },
+                    if style == MapStyle::Standard {
+                        "-standard"
+                    } else {
+                        ""
+                    },
                     w * 2,
                     h * 2
                 );

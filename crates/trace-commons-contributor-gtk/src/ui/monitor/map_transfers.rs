@@ -13,8 +13,8 @@
 //! Deliberate platform differences:
 //! - The orbs' and the rocket's glow are soft radial halos; cairo has no
 //!   blur filter.
-//! - Only the launch style is drawn (see `transfers`), so a contributed
-//!   trace never rises to an orb here.
+//! - On the standard map a rising trace's trail is faded step by step as
+//!   groups, where the Mac fades a layer per step: the same result.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 

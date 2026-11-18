@@ -23,9 +23,9 @@
 //! Deliberate platform differences:
 //! - This shell has no `keep` action, so nothing feeds `kept` yet; it is
 //!   ported and tested so a keep plays the Mac's run once one exists.
-//! - This shell draws the launch style only (the pad and the rocket, the
-//!   Mac's default); it has no style switch. The standard map's rise is
-//!   ported with the run so the two stay one rule.
+//! - The map's style is the Settings switch's (`PanePrefs::map_style`),
+//!   the rocket by default, as on the Mac; a run keeps the style it began
+//!   with.
 
 use std::collections::HashSet;
 
