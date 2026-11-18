@@ -59,6 +59,7 @@ use gtk::glib;
 use gtk::subclass::prelude::*;
 use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
+use super::field;
 use super::map_scene::{
     self, ArcStyle, CommonsGate, Contributions, HarnessRow, Lamp, MapGeometry, NodeKind, Point,
     Scene, ScreenState, Size, ToolStack,
@@ -240,6 +241,9 @@ mod imp {
         pub style: Cell<MapStyle>,
         /// The library's station or orb, kept between resting frames.
         pub library: LibraryArt,
+        /// The map's field under everything, kept until its size or
+        /// scheme changes.
+        pub field: field::Field,
     }
 
     #[glib::object_subclass]
@@ -471,6 +475,9 @@ mod imp {
             let palette = Palette::current(&*obj);
             let bounds = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
             let reduce = reduce_motion();
+            // The field under both maps (`GlassMapField`).
+            let dark = adw::StyleManager::default().is_dark();
+            snapshot.append_node(self.field.node(width, height, dark));
             // The arcs, redrawn on every tick: their dashes move.
             let cr = snapshot.append_cairo(&bounds);
             let healthy = self.inputs.borrow().gate.state.is_healthy();
@@ -3375,6 +3382,13 @@ mod tests {
                     source(&cr, &palette.map.pane_opaque, 1.0);
                     let _ = cr.paint();
                     cr.scale(2.0, 2.0);
+                    field::draw(
+                        &cr,
+                        f64::from(w),
+                        f64::from(h),
+                        &palette.map,
+                        scheme == "dark",
+                    );
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
                         draw_node(&cr, &scene, node, &fit, &palette, false);
@@ -3503,6 +3517,13 @@ mod tests {
                     source(&cr, &ground, 1.0);
                     let _ = cr.paint();
                     cr.scale(2.0, 2.0);
+                    field::draw(
+                        &cr,
+                        f64::from(w),
+                        f64::from(h),
+                        &palette.map,
+                        scheme == "dark",
+                    );
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
                         draw_node(&cr, &scene, node, &fit, &palette, false);

@@ -16,6 +16,7 @@
 //! the library's station and orb), tested offscreen with cairo.
 
 pub mod demand;
+pub mod field;
 pub mod glyph;
 pub mod graph_footer;
 pub mod graph_model;

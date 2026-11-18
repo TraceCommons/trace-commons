@@ -284,8 +284,13 @@ impl Glyph {
 
 /// Adds `segments` to `cr`'s path, after clearing it.
 pub fn trace_segments(cr: &gtk::cairo::Context, segments: &[Segment]) {
+    cr.new_path();
+    append_segments(cr, segments);
+}
+
+/// Adds `segments` to `cr`'s path, keeping what is on it.
+pub fn append_segments(cr: &gtk::cairo::Context, segments: &[Segment]) {
     {
-        cr.new_path();
         let (mut x, mut y) = (0.0, 0.0);
         let mut start = (0.0, 0.0);
         for segment in segments {
