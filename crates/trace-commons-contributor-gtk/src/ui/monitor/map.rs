@@ -257,6 +257,10 @@ mod imp {
                 }
             });
 
+            // The clock runs only while the map is mapped.
+            obj.connect_map(|obj| obj.update_clock());
+            obj.connect_unmap(|obj| obj.update_clock());
+
             // Reduced motion stops the clock at once, and lets it run again.
             if let Some(settings) = gtk::Settings::default() {
                 let weak = obj.downgrade();
@@ -1001,7 +1005,10 @@ impl MapCanvas {
         } else {
             resting.interval
         });
-        let needed = running || !resting.paused;
+        // Only while the map can be seen: unmapped (hidden, or its pane
+        // collapsed) it draws nothing, so its clock stops, and mapping it
+        // again starts it (`GlassAnimationTimeline`'s visibility gate).
+        let needed = self.is_mapped() && (running || !resting.paused);
         if !needed {
             if let Some(tick) = imp.tick.take() {
                 tick.remove();
@@ -3151,6 +3158,18 @@ mod tests {
         assert!(map.canvas.run().is_some(), "the new row plays");
         assert!(map.canvas.is_ticking());
         assert_eq!(map.card_ids(), ["s2"]);
+
+        // At rest the station still turns, but only while the map is
+        // shown: hidden, the clock stops; shown again, it runs.
+        map.canvas.set_run(None);
+        settle();
+        assert!(map.canvas.is_ticking(), "the station turns at rest");
+        map.canvas.set_visible(false);
+        settle();
+        assert!(!map.canvas.is_ticking(), "a hidden map's clock stops");
+        map.canvas.set_visible(true);
+        settle();
+        assert!(map.canvas.is_ticking(), "shown again, it runs");
 
         // Reduced motion: the clock stops and no run is drawn; the card
         // stays.

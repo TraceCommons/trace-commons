@@ -580,15 +580,15 @@ pub struct RestingMotion {
 /// Moving dashes redraw at 30 frames a second.
 pub const DASH_INTERVAL: f64 = 1.0 / 30.0;
 /// The library's own rate, `GlassLibraryStation.frameInterval`.
-pub const LIBRARY_INTERVAL: f64 = 1.0 / 20.0;
+pub const LIBRARY_INTERVAL: f64 = super::station::FRAME_INTERVAL;
 /// A run redraws at 60 frames a second.
 pub const RUN_INTERVAL: f64 = 1.0 / 60.0;
 
 /// How the map's resting clock runs: at 30 frames a second while arcs
 /// carry moving dashes, at the library's rate while only the library
 /// turns, and not at all when nothing moves or under reduced motion. An
-/// unhealthy map draws its flows still. This shell's library does not
-/// turn yet (the look slice), so it passes `library: false`.
+/// unhealthy map draws its flows still. `library` is whether the Traces
+/// map's station is on the map (`map::library_turns`).
 pub fn resting_motion(
     reduce_motion: bool,
     flows: bool,

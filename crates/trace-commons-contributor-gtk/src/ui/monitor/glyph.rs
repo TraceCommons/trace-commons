@@ -1,15 +1,18 @@
-//! The Mac's toolbar glyphs, drawn in GTK.
+//! The Mac's toolbar glyphs, tool logos and NEAR AI mark, drawn in GTK.
 //!
-//! `brand_tokens::glyph` holds each glyph as an SVG, exported by
+//! `brand_tokens::glyph` holds each toolbar glyph as an SVG, exported by
 //! `scripts/design-tokens/generate.py` from the path data in
-//! `macos/Sources/TCDesign/Components/Glyphs.swift`. This file reads those
-//! strings (no SVG loader, no icon theme) and strokes or fills the path with
-//! cairo in the widget's own foreground colour, so a glyph follows the
-//! button's state and the scheme the way a symbolic icon does.
+//! `macos/Sources/TCDesign/Components/Glyphs.swift`; `brand_tokens::logo`
+//! holds the tool logos and the mark, exported from `GlassLogoPaths.swift`
+//! and `GlassBrandMark.swift`. This file reads those strings (no SVG
+//! loader, no icon theme) and strokes or fills the path with cairo: a
+//! glyph in the widget's own foreground colour, so it follows the button's
+//! state and the scheme the way a symbolic icon does; a logo (`Artwork`)
+//! in the colour its caller sets.
 //!
-//! The path data uses only `M L H V A Z` and their relative forms, which is
-//! all this parses; any other command makes the glyph not parse, and the
-//! tests below fail for it.
+//! `parse_path` reads the whole path grammar, `M L H V C S Q T A Z` and
+//! their relative forms, as `SVGPathData` does on the Mac; malformed data
+//! does not parse, and the tests below fail for it.
 
 use gtk::prelude::*;
 
