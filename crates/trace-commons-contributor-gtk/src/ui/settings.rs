@@ -112,6 +112,8 @@ pub struct SettingsView {
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
+    /// The Traces map's style: on, the rocket and station.
+    map_style_switch: gtk::Switch,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -661,6 +663,11 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The Traces map's style (the Mac's General section; this shell
+        // has none, so beside the other choices about this computer's
+        // window): the rocket and station, or the laptop and the orb.
+        let (map_style_card, map_style_switch) = map_style_card();
+        sections.body(Section::Startup).append(&map_style_card);
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
@@ -695,6 +702,7 @@ impl SettingsView {
             autostart_body,
             autostart_row,
             autostart_switch,
+            map_style_switch,
             background_state: RefCell::new(None),
             background_body,
             public,
@@ -755,7 +763,55 @@ impl SettingsView {
     }
 }
 
+/// The Traces map's style card, as the Mac's General section draws it
+/// (`GeneralSection.mapStyleCard`): its title, the switch, on for the
+/// rocket and station, and the caption under it. All in shared copy.
+pub(crate) fn map_style_card() -> (gtk::Box, gtk::Switch) {
+    let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    card.append(&style::eyebrow(flow.style_title));
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(flow.style_toggle)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-body");
+    let switch = gtk::Switch::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .active(true)
+        .build();
+    switch.update_property(&[gtk::accessible::Property::Label(flow.style_toggle)]);
+    row.append(&label);
+    row.append(&switch);
+    card.append(&row);
+    card.append(&style::meta(flow.style_caption));
+    (card, switch)
+}
+
+/// The map's style a position of the switch stands for: on, the rocket.
+pub(crate) fn map_style_for(active: bool) -> crate::ui::monitor::map_scene::MapStyle {
+    use crate::ui::monitor::map_scene::MapStyle;
+    if active {
+        MapStyle::Launch
+    } else {
+        MapStyle::Standard
+    }
+}
+
 pub fn wire(app: &Rc<App>) {
+    // The Traces map's style: kept with the window's choices, applied to
+    // the map at once.
+    app.settings
+        .map_style_switch
+        .set_active(app.shell.map_style() == crate::ui::monitor::map_scene::MapStyle::Launch);
+    let a = Rc::clone(app);
+    app.settings
+        .map_style_switch
+        .connect_active_notify(move |switch| {
+            a.shell.set_map_style(map_style_for(switch.is_active()))
+        });
     let a = Rc::clone(app);
     app.settings
         .contribution_refresh
@@ -4478,6 +4534,45 @@ mod witness_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's switch is `Toggle(styleToggle, isOn: $mapRocket)`: on is
+    /// the rocket and station, off the laptop and the orb.
+    #[test]
+    fn the_map_style_switch_on_is_the_rocket() {
+        use crate::ui::monitor::map_scene::MapStyle;
+        assert_eq!(map_style_for(true), MapStyle::Launch);
+        assert_eq!(map_style_for(false), MapStyle::Standard);
+    }
+
+    /// The map style card says the Mac's words from shared copy: its
+    /// title, the switch's name (its accessible name too) and the caption,
+    /// with the switch on, the rocket, before anything is read.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_map_style_card_has_the_shared_words() {
+        gtk::init().expect("GTK display");
+        let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+        let (card, switch) = map_style_card();
+        assert!(switch.is_active());
+        let mut texts = Vec::new();
+        let mut stack = vec![card.upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                texts.push(label.label().to_string());
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                stack.push(c);
+            }
+        }
+        for words in [flow.style_title, flow.style_toggle, flow.style_caption] {
+            assert!(
+                texts.iter().any(|t| t.eq_ignore_ascii_case(words)),
+                "{words:?} not in {texts:?}"
+            );
+        }
+    }
 
     fn settings_with_modes(claude: &str, codex: &str) -> Settings {
         serde_json::from_value(serde_json::json!({

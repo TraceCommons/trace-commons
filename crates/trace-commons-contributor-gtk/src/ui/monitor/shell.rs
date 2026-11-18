@@ -47,6 +47,7 @@ use trace_commons_contributor::preview_copy::monitor_screens_copy;
 use super::graph_footer::{GraphData, GraphFooter};
 use super::inspector::{Inspector, Selection};
 use super::map::TraceMap;
+use super::map_scene::MapStyle;
 use super::notices::{self, Notice};
 use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
@@ -712,6 +713,8 @@ impl Shell {
             prefs.save();
         }
         root.set_kept_widths(prefs.main_width, prefs.map_width);
+        // The Traces map's style, as the person last chose it.
+        map.set_style(prefs.map_style());
 
         let shell = Self {
             root,
@@ -904,6 +907,18 @@ impl Shell {
             *prefs
         };
         prefs.save();
+    }
+
+    /// The Traces map's style (Settings): the rocket and station, or the
+    /// laptop and the orb. One owner keeps it with the panes' choices, so
+    /// a later save of those never undoes it.
+    pub fn map_style(&self) -> MapStyle {
+        self.state.prefs.borrow().map_style()
+    }
+
+    pub fn set_map_style(&self, style: MapStyle) {
+        self.update_prefs(|prefs| prefs.set_map_style(style));
+        self.map.set_style(style);
     }
 
     pub fn set_inspector_shown(&self, _app: &Rc<App>, shown: bool) {

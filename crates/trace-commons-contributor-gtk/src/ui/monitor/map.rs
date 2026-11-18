@@ -173,6 +173,8 @@ pub struct StillKey {
     /// rocket on the pad are then part of the layer. `None` during a run,
     /// when they move and are drawn frame by frame.
     pub resting: Option<PileStage>,
+    /// The map's style: the pad or the laptop, and the rocket on the pad.
+    pub style: MapStyle,
 }
 
 impl StillKey {
@@ -184,12 +186,14 @@ impl StillKey {
         selection: Option<&str>,
         palette: &Palette,
         resting: Option<PileStage>,
+        style: MapStyle,
     ) -> bool {
         self.scene == *scene
             && self.fit == *fit
             && self.selection.as_deref() == selection
             && self.palette == *palette
             && self.resting == resting
+            && self.style == style
     }
 }
 
@@ -733,7 +737,16 @@ mod imp {
                 .still
                 .borrow()
                 .as_ref()
-                .filter(|(key, _)| key.is(scene, fit, selection.as_deref(), palette, resting))
+                .filter(|(key, _)| {
+                    key.is(
+                        scene,
+                        fit,
+                        selection.as_deref(),
+                        palette,
+                        resting,
+                        self.style.get(),
+                    )
+                })
                 .map(|(_, layer)| layer.clone());
             if kept.is_some() {
                 return kept;
@@ -742,7 +755,7 @@ mod imp {
             let cr = under.append_cairo(bounds);
             for node in &scene.nodes {
                 let selected = selection.as_deref() == Some(node.id.as_str());
-                draw_node(&cr, scene, node, fit, palette, selected);
+                draw_node(&cr, scene, node, fit, palette, selected, self.style.get());
             }
             drop(cr);
             self.draw_node_words(&under, scene, fit, palette);
@@ -750,7 +763,7 @@ mod imp {
                 // The rocket on the pad, then the pile over it.
                 let over = gtk::Snapshot::new();
                 let cr = over.append_cairo(bounds);
-                map_transfers::resting_rocket(&cr, scene, fit, palette);
+                map_transfers::resting_rocket(&cr, scene, fit, palette, self.style.get());
                 if let Some(stack) = scene.stack.as_ref() {
                     draw_pile(
                         &cr,
@@ -780,6 +793,7 @@ mod imp {
                 selection: selection.clone(),
                 palette: palette.clone(),
                 resting,
+                style: self.style.get(),
             };
             self.still.replace(Some((key, layer.clone())));
             Some(layer)
@@ -804,7 +818,7 @@ mod imp {
             let dock = map_transfers::draw(&cr, scene, run, t, fit, palette);
             // Between contributions the rocket stands on the pad.
             if run.action() != Action::Contribute {
-                map_transfers::resting_rocket(&cr, scene, fit, palette);
+                map_transfers::resting_rocket(&cr, scene, fit, palette, self.style.get());
             }
             if let Some(stack) = scene.stack.as_ref() {
                 let grown: Vec<String> = run.orbits(t).into_iter().map(|(id, _)| id).collect();
@@ -1061,6 +1075,20 @@ impl MapCanvas {
         }
         imp.inputs.replace(inputs);
         self.relayout();
+    }
+
+    /// Draws the Traces map in `style` (Settings): the pad, rocket and
+    /// station, or the laptop and the orb. It changes at once.
+    pub fn set_style(&self, style: MapStyle) {
+        if self.imp().style.replace(style) == style {
+            return;
+        }
+        self.queue_allocate();
+        self.queue_draw();
+    }
+
+    pub fn style(&self) -> MapStyle {
+        self.imp().style.get()
     }
 
     fn relayout(&self) {
@@ -1889,6 +1917,7 @@ fn draw_node(
     fit: &MapGeometry,
     palette: &Palette,
     selected: bool,
+    style: MapStyle,
 ) {
     let traces = scene.stack.is_some();
     // On the Traces map the tools are the pile's coins (`draw_pile`).
@@ -1900,7 +1929,10 @@ fn draw_node(
     let radius = node.radius * s;
     let dim = node.dim;
     match node.kind {
-        NodeKind::Hub if traces => draw_pad(cr, centre, s, palette, dim),
+        NodeKind::Hub if traces => match style {
+            MapStyle::Launch => draw_pad(cr, centre, s, palette, dim),
+            MapStyle::Standard => draw_laptop(cr, centre, s, palette, dim),
+        },
         NodeKind::Hub => {
             circle(cr, centre, radius);
             source(cr, &palette.map.status_off, dim);
@@ -2136,7 +2168,7 @@ fn draw_laptop(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palett
 }
 
 /// How far above this computer's point the laptop's screen rises.
-const LAPTOP_SCREEN_TOP: f64 = 36.0;
+pub const LAPTOP_SCREEN_TOP: f64 = 36.0;
 
 /// The tool group: a card, and the coins on it, the front coin first.
 /// The pile: its card, then its coins in `order`, front first. A coin a
@@ -2799,6 +2831,13 @@ impl TraceMap {
 
     /// Whether the transfer cards are at the map's foot: while a tab other
     /// than Traces is shown (`tabs::transfer_cards_shown`).
+    /// The Traces map's style (Settings): the map changes at once; a run
+    /// already playing keeps its own, the next ones take this.
+    pub fn set_style(&self, style: MapStyle) {
+        self.canvas.set_style(style);
+        self.transfers.player.borrow_mut().style = style;
+    }
+
     pub fn set_cards_shown(&self, shown: bool) {
         self.transfers.set_shown(shown);
     }
@@ -2989,7 +3028,7 @@ mod tests {
         let palette = Palette::fixed();
         let library = scene.nodes.iter().find(|n| n.id == "library").unwrap();
         let pixels = painted(580, 760, |cr| {
-            draw_node(cr, &scene, library, &fit, &palette, false);
+            draw_node(cr, &scene, library, &fit, &palette, false, MapStyle::Launch);
         });
         assert!(pixels.is_empty(), "the still layer drew the library");
         let centre = fit.point(library.at);
@@ -3012,6 +3051,32 @@ mod tests {
         let elsewhere = Scene::default();
         assert!(library_frame(&elsewhere, &fit, MapStyle::Launch).is_none());
         assert!(!library_turns(&elsewhere));
+    }
+
+    /// This computer on the Traces map is the launch pad on the rocket map
+    /// and the laptop on the standard one (`FlowMapView.drawNode`): only
+    /// the laptop's screen rises 20 above its point, inside the lid.
+    #[test]
+    fn this_computer_is_the_pad_or_the_laptop_by_the_maps_style() {
+        let scene = traces_scene(&[entry("a", "p", "codex")]);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let hub = scene.nodes.iter().find(|n| n.id == "hub").unwrap();
+        let centre = fit.point(hub.at);
+        let probe = (centre.x as usize, (centre.y - 20.0) as usize);
+        let at = |style| {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 580, 760).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                draw_node(&cr, &scene, hub, &fit, &palette, false, style);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            surface.data().unwrap()[probe.1 * stride + probe.0 * 4 + 3]
+        };
+        assert_eq!(at(MapStyle::Launch), 0, "the pad reaches up into the lid");
+        assert!(at(MapStyle::Standard) > 200, "no laptop screen");
     }
 
     /// The library turns on the map's resting timeline, as on the Mac,
@@ -3295,7 +3360,15 @@ mod tests {
         let space = Size::new(200.0, 200.0);
         let fit = MapGeometry::new(space, 2.0, None, space);
         let pixels = painted(200, 200, |cr| {
-            draw_node(cr, &Scene::default(), &node, &fit, &palette, true);
+            draw_node(
+                cr,
+                &Scene::default(),
+                &node,
+                &fit,
+                &palette,
+                true,
+                MapStyle::Launch,
+            );
         });
         let accent = parse("#023e83");
         let ring = pixels.iter().filter(|p| near_colour(**p, &accent)).count();
@@ -3328,7 +3401,15 @@ mod tests {
             gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 200, 200).unwrap();
         {
             let cr = gtk::cairo::Context::new(&surface).unwrap();
-            draw_node(&cr, &Scene::default(), &node, &fit, &palette, false);
+            draw_node(
+                &cr,
+                &Scene::default(),
+                &node,
+                &fit,
+                &palette,
+                false,
+                MapStyle::Launch,
+            );
         }
         surface.flush();
         let stride = surface.stride() as usize;
@@ -3415,7 +3496,7 @@ mod tests {
             .find(|n| n.id == "harness:cursor")
             .unwrap();
         let pixels = painted(580, 760, |cr| {
-            draw_node(cr, &scene, cursor, &fit, &palette, false);
+            draw_node(cr, &scene, cursor, &fit, &palette, false, MapStyle::Launch);
         });
         let ink = pixels
             .iter()
@@ -3482,7 +3563,7 @@ mod tests {
                     );
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
-                        draw_node(&cr, &scene, node, &fit, &palette, false);
+                        draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
                     }
                     let (label, sublabel, label_offset, sublabel_offset) =
                         map_scene::label_type(fit.scale);
@@ -3617,14 +3698,14 @@ mod tests {
                     );
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
-                        draw_node(&cr, &scene, node, &fit, &palette, false);
+                        draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
                     }
                     if let Some(frame) = library_frame(&scene, &fit, MapStyle::Launch) {
                         LibraryArt::default()
                             .node(MapStyle::Launch, &frame, 0.0, true)
                             .draw(&cr);
                     }
-                    map_transfers::resting_rocket(&cr, &scene, &fit, &palette);
+                    map_transfers::resting_rocket(&cr, &scene, &fit, &palette, MapStyle::Launch);
                     let stack = scene.stack.as_ref().unwrap();
                     draw_pile(
                         &cr,
@@ -3965,15 +4046,41 @@ mod tests {
             selection: None,
             palette: palette.clone(),
             resting: Some(PileStage::default()),
+            style: MapStyle::Launch,
         };
-        assert!(key.is(&scene, &fit, None, &palette, Some(PileStage::default())));
+        assert!(key.is(
+            &scene,
+            &fit,
+            None,
+            &palette,
+            Some(PileStage::default()),
+            MapStyle::Launch
+        ));
         assert!(
-            !key.is(&scene, &fit, None, &palette, Some(OPEN_PILE)),
+            !key.is(
+                &scene,
+                &fit,
+                None,
+                &palette,
+                Some(OPEN_PILE),
+                MapStyle::Launch
+            ),
             "the pile opened"
         );
         assert!(
-            !key.is(&scene, &fit, None, &palette, None),
+            !key.is(&scene, &fit, None, &palette, None, MapStyle::Launch),
             "a run began: the pile moves"
+        );
+        assert!(
+            !key.is(
+                &scene,
+                &fit,
+                None,
+                &palette,
+                Some(PileStage::default()),
+                MapStyle::Standard
+            ),
+            "the map's style"
         );
         assert_eq!(
             MapGeometry::new(size, 1.0, None, scene.space),
@@ -3983,12 +4090,26 @@ mod tests {
         let zoomed = MapGeometry::new(size, 1.25, None, scene.space);
         assert_ne!(zoomed, fit);
         assert!(
-            !key.is(&scene, &zoomed, None, &palette, Some(PileStage::default())),
+            !key.is(
+                &scene,
+                &zoomed,
+                None,
+                &palette,
+                Some(PileStage::default()),
+                MapStyle::Launch
+            ),
             "a zoom"
         );
         let wider = MapGeometry::new(Size::new(600.0, 760.0), 1.0, None, scene.space);
         assert!(
-            !key.is(&scene, &wider, None, &palette, Some(PileStage::default())),
+            !key.is(
+                &scene,
+                &wider,
+                None,
+                &palette,
+                Some(PileStage::default()),
+                MapStyle::Launch
+            ),
             "a resize"
         );
         assert!(
@@ -3997,14 +4118,22 @@ mod tests {
                 &fit,
                 Some("hub"),
                 &palette,
-                Some(PileStage::default())
+                Some(PileStage::default()),
+                MapStyle::Launch
             ),
             "a selection"
         );
         let mut dark = palette.clone();
         dark.ink = gtk::gdk::RGBA::WHITE;
         assert!(
-            !key.is(&scene, &fit, None, &dark, Some(PileStage::default())),
+            !key.is(
+                &scene,
+                &fit,
+                None,
+                &dark,
+                Some(PileStage::default()),
+                MapStyle::Launch
+            ),
             "a scheme"
         );
         let other = Scene::traces(
@@ -4016,7 +4145,14 @@ mod tests {
             map_scene::SIZE,
         );
         assert!(
-            !key.is(&other, &fit, None, &palette, Some(PileStage::default())),
+            !key.is(
+                &other,
+                &fit,
+                None,
+                &palette,
+                Some(PileStage::default()),
+                MapStyle::Launch
+            ),
             "a new scene"
         );
     }
