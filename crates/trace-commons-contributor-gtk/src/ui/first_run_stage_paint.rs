@@ -1167,7 +1167,7 @@ mod tests {
                     time,
                     ..Scene::default()
                 };
-                write(&format!("welcome-hub-{e}-{scheme}"), 240, 240, &|cr| {
+                write(&format!("welcome-hub-{e:.1}-{scheme}"), 240, 240, &|cr| {
                     let frame = Frame {
                         center: (120.0, 120.0),
                         side: 132.0,
@@ -1224,7 +1224,7 @@ mod tests {
                     time,
                     ..Scene::default()
                 };
-                write(&format!("tools-ring-{e}-{scheme}"), 860, 300, &|cr| {
+                write(&format!("tools-ring-{e:.1}-{scheme}"), 860, 300, &|cr| {
                     step_graphic(cr, Step::Tools, &scene, 0.0, &p)
                 });
             }

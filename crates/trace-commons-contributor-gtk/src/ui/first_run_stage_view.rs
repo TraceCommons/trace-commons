@@ -68,6 +68,13 @@ struct Inner {
     sharing: Sharing,
     sharing_at: f64,
     signed_in_at: Option<f64>,
+    /// Whether Join last read an account signed in, on this visit.
+    join_known: Option<bool>,
+    /// Traces' count has risen once: going back to it does not replay it
+    /// (`FirstRunStageMemory.tracesCounted`).
+    traces_counted: bool,
+    /// The scroller the steps sit in: the graphic is clipped to it.
+    scroller: Option<gtk::Widget>,
     tick: Option<gtk::TickCallbackId>,
     last_frame: i64,
 }
@@ -117,6 +124,9 @@ impl Stage {
                 sharing: Sharing::Ask,
                 sharing_at: at,
                 signed_in_at: None,
+                join_known: None,
+                traces_counted: false,
+                scroller: None,
                 tick: None,
                 last_frame: 0,
             }),
@@ -251,7 +261,12 @@ impl Stage {
                 moves.hub_from = if first { None } else { moves.hub_drawn };
                 moves.tiles_from = moves.tiles_drawn.clone();
                 moves.moved_at = at;
-                inner.opened_at = at;
+                inner.opened_at = if step == Step::Traces && inner.traces_counted {
+                    at - 3600.0
+                } else {
+                    at
+                };
+                inner.join_known = None;
                 if step == Step::Welcome {
                     inner.welcome_at = at;
                 }
@@ -290,9 +305,27 @@ impl Stage {
         }
     }
 
-    /// A sign-in on Join: a ring of light goes out from the N.
-    pub(super) fn signed_in(&self) {
-        self.inner.borrow_mut().signed_in_at = Some(now());
+    /// Join read whether an account is signed in. A sign-in while Join is
+    /// up sends a ring of light out from the N; one already held when Join
+    /// opens does not (the Mac's `onChange` of `signedIn`).
+    pub(super) fn join_signed_in(&self, signed: bool) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.join_known == Some(false) && signed {
+            inner.signed_in_at = Some(now());
+        }
+        inner.join_known = Some(signed);
+    }
+
+    /// The steps scroll in `scroller`: the stage follows it, and draws the
+    /// graphic only inside it, never under the header or the thread.
+    pub(super) fn follow(self: &Rc<Self>, scroller: &gtk::ScrolledWindow) {
+        let weak = Rc::downgrade(self);
+        scroller.vadjustment().connect_value_changed(move |_| {
+            if let Some(stage) = weak.upgrade() {
+                stage.area.queue_draw();
+            }
+        });
+        self.inner.borrow_mut().scroller = Some(scroller.clone().upcast());
     }
 
     fn rebuild_thread(self: &Rc<Self>, step: Step, enabled: bool, on_pick: Rc<dyn Fn(Step)>) {
@@ -456,6 +489,20 @@ impl Stage {
             inner.moves.tiles_drawn.clear();
             return;
         };
+        let _ = cr.save();
+        if let Some(view) = inner
+            .scroller
+            .as_ref()
+            .and_then(|s| s.compute_bounds(&self.area))
+        {
+            cr.rectangle(
+                f64::from(view.x()),
+                f64::from(view.y()),
+                f64::from(view.width()),
+                f64::from(view.height()),
+            );
+            cr.clip();
+        }
         let origin = (
             f64::from(bounds.x()) + f64::from(bounds.width()) / 2.0 - stage::CANVAS.0 / 2.0 * scale,
             f64::from(bounds.y()),
@@ -531,6 +578,10 @@ impl Stage {
             }
         }
         inner.moves.tiles_drawn = drawn;
+        if step == Step::Traces && stage::traces::counted(scene.opened, reduce) >= 1.0 {
+            inner.traces_counted = true;
+        }
+        let _ = cr.restore();
     }
 }
 
@@ -589,13 +640,22 @@ mod mounted_tests {
         content.append(stage.thread());
         let welcome = gtk::Box::new(gtk::Orientation::Vertical, 0);
         welcome.append(&stage.slot(Step::Welcome));
+        // Taller than the window, so the steps scroll.
+        let filler = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        filler.set_size_request(-1, 2000);
+        welcome.append(&filler);
         let tools = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let tools_slot = stage.slot(Step::Tools);
         tools.append(&tools_slot);
         let stack = gtk::Stack::new();
         stack.add_named(&welcome, Some("welcome"));
         stack.add_named(&tools, Some("tools"));
-        content.append(&stack);
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .child(&stack)
+            .build();
+        stage.follow(&scroll);
+        content.append(&scroll);
         window.set_content(Some(&stage.wrap(&content)));
         let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
         stage.set_step(Step::Welcome, true, pick.clone());
@@ -643,18 +703,26 @@ mod mounted_tests {
         stage.set_step(Step::Welcome, true, pick);
         settle(&context, 200);
         let (w, h) = (stage.area.width(), stage.area.height());
-        let mut surface =
-            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap();
-        {
-            let cr = gtk::cairo::Context::new(&surface).unwrap();
-            stage.draw(&cr, f64::from(w), f64::from(h));
-        }
-        let hub = stage
-            .inner
-            .borrow()
-            .moves
-            .hub_drawn
-            .expect("the N is drawn");
+        let render = || {
+            let surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                stage.draw(&cr, f64::from(w), f64::from(h));
+            }
+            (surface, stage.inner.borrow().moves.hub_drawn)
+        };
+        // Scrolled, the N moves with its page.
+        let (_, before) = render();
+        scroll.vadjustment().set_value(40.0);
+        settle(&context, 100);
+        let (_, after) = render();
+        let (before, after) = (before.unwrap(), after.unwrap());
+        assert!((before.center.1 - after.center.1 - 40.0).abs() < 0.5);
+        scroll.vadjustment().set_value(0.0);
+        settle(&context, 100);
+        let (mut surface, hub) = render();
+        let hub = hub.unwrap();
         surface.flush();
         let stride = surface.stride() as usize;
         let data = surface.data().unwrap();

@@ -249,6 +249,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         .vexpand(true)
         .child(&super::first_run_screens::column(&stack))
         .build();
+    stage.follow(&scroll);
     content.append(&scroll);
     // Back at the bar's left, as on the Mac (`FirstRunFrame.actionBar`).
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -421,6 +422,9 @@ impl Coordinator {
             Rc::new(move |picked| {
                 if let Some(c) = weak.upgrade() {
                     if !c.busy.get() {
+                        if c.customizing.get() {
+                            c.close_customize();
+                        }
                         c.state.borrow_mut().back_to(picked);
                         c.show();
                     }
@@ -1085,9 +1089,7 @@ impl Coordinator {
         // As the Mac's Join when its account goes: the organization check
         // and its one automatic Start may run again.
         let forward = join::can_forward(&state);
-        if forward && !self.forward.get() {
-            self.stage.signed_in();
-        }
+        self.stage.join_signed_in(forward);
         if join::forward_lost(self.forward.replace(forward), forward) {
             self.org_checked.set(false);
             self.auto_started.set(false);
