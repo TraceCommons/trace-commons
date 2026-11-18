@@ -81,6 +81,17 @@ fn bounds(widget: &gtk::Widget, to: &gtk::Widget) -> gtk::graphene::Rect {
     widget.compute_bounds(to).expect("placed")
 }
 
+/// Where `inner` sits inside `row`'s drawn box (its fill, padding
+/// included): both measured in `page`, so the answer does not depend on
+/// whether a widget's own origin is its border or its content box.
+fn offset_in(inner: &gtk::Widget, row: &gtk::Widget, page: &gtk::Widget) -> (f32, f32) {
+    let (inner, row) = (bounds(inner, page), bounds(row, page));
+    (
+        inner.x() - row.x(),
+        (row.x() + row.width()) - (inner.x() + inner.width()),
+    )
+}
+
 fn calls(jobs: &mpsc::Receiver<(u64, Job)>, seen: &mut Vec<(String, serde_json::Value)>) {
     while let Ok((_, job)) = jobs.try_recv() {
         if let Job::Call { method, params } = job {
@@ -192,16 +203,16 @@ fn mounted_the_folder_list_is_the_macs() {
             (size::TILE, size::TILE)
         );
         assert_eq!(
-            at.x() as i32,
+            offset_in(&tile, row, &page).0.round() as i32,
             super::leading_inset(super::Depth::Folder) + size::CHEVRON + size::COLUMN_GAP,
             "the tile's inset"
         );
         let kebab = with_class(row, "tc-tree-kebab").remove(0);
-        let menu = bounds(&kebab, row);
-        assert_eq!(menu.width() as i32, size::KEBAB);
+        assert_eq!(bounds(&kebab, row).width() as i32, size::KEBAB);
         assert_eq!(
-            (row.width() as f32 - menu.x() - menu.width()).round() as i32,
-            size::TRAILING
+            offset_in(&kebab, row, &page).1.round() as i32,
+            size::TRAILING,
+            "the row menu's trailing inset"
         );
     }
     // The rows sit 2 apart.
@@ -264,7 +275,7 @@ fn mounted_the_folder_list_is_the_macs() {
     let trace = &rows[1];
     let tile = with_class(trace, "tc-tree-tile").remove(0);
     assert_eq!(
-        bounds(&tile, trace).x() as i32,
+        offset_in(&tile, trace, &page).0.round() as i32,
         super::leading_inset(super::Depth::Session) + size::CHEVRON + size::COLUMN_GAP,
         "a trace's tile is one level in"
     );
