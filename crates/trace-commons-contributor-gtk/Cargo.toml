@@ -81,6 +81,11 @@ dirs = "6"
 notify-rust = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The Omarchy palette (`ui/omarchy.rs`) is flat TOML. Already in the
+# dependency tree at this version, default features, via
+# trace-commons-contributor's ironwire crates; declaring it directly adds
+# zero new packages (Cargo.lock gains only this crate's edge to it).
+toml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # The XDG Background portal (org.freedesktop.portal.Background) and the
