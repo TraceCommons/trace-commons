@@ -310,15 +310,50 @@ impl ArmedMark {
 }
 
 /// Fades `card` out on the exit spring, then hides it and runs `gone`.
-/// Under reduced motion it simply goes.
+/// Under reduced motion, or with the card not shown (its clock would not
+/// run), it simply goes; a card hidden mid-fade goes at once.
 pub fn exit(card: &impl IsA<gtk::Widget>, gone: impl FnOnce() + 'static) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     let card = card.as_ref().clone();
+    let unmapped: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::default();
+    let driver = Rc::new(Driver::default());
+    let ending = card.downgrade();
+    let pending: Rc<RefCell<Option<Box<dyn FnOnce()>>>> = {
+        let unmapped = Rc::clone(&unmapped);
+        let driver = Rc::clone(&driver);
+        Rc::new(RefCell::new(Some(Box::new(move || {
+            // A fade cut short by the card going stops here, so it cannot
+            // carry on over the next card shown in its place.
+            driver.finish();
+            if let Some(card) = ending.upgrade() {
+                if let Some(id) = unmapped.borrow_mut().take() {
+                    card.disconnect(id);
+                }
+                card.set_visible(false);
+                card.set_opacity(1.0);
+            }
+            gone();
+        }))))
+    };
+    let finish = move || {
+        let once = pending.borrow_mut().take();
+        if let Some(once) = once {
+            once();
+        }
+    };
+    if !card.is_mapped() || !glass_motion::animations_enabled() {
+        finish();
+        return;
+    }
+    let finish = Rc::new(finish);
+    {
+        let finish = Rc::clone(&finish);
+        *unmapped.borrow_mut() = Some(card.connect_unmap(move |_| finish()));
+    }
     let (response, damping) = EXIT_SPRING;
     let length = glass_motion::spring_settles(response, damping);
-    let driver = std::rc::Rc::new(Driver::default());
-    let keep = std::rc::Rc::clone(&driver);
     let fading = card.downgrade();
-    let ending = card.downgrade();
     driver.start(
         &card,
         length,
@@ -333,14 +368,7 @@ pub fn exit(card: &impl IsA<gtk::Widget>, gone: impl FnOnce() + 'static) {
                 card.set_opacity((1.0 - p).clamp(0.0, 1.0));
             }
         },
-        move || {
-            drop(keep);
-            if let Some(card) = ending.upgrade() {
-                card.set_visible(false);
-                card.set_opacity(1.0);
-            }
-            gone();
-        },
+        move || finish(),
     );
 }
 
@@ -493,5 +521,56 @@ mod tests {
         assert_eq!(still.motion(), (1.0, None));
         window.destroy();
         settings.set_gtk_enable_animations(true);
+    }
+
+    /// The armed card fades and goes, then its `gone` runs once; a card
+    /// not shown, or hidden mid-fade, goes at once and the fade stops.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_armed_card_goes_once() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let context = gtk::glib::MainContext::default();
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        card.set_size_request(100, 40);
+        let window = gtk::Window::new();
+        window.set_child(Some(&card));
+        window.present();
+        while context.pending() {
+            context.iteration(false);
+        }
+        let gone = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = std::rc::Rc::clone(&gone);
+        exit(&card, move || count.set(count.get() + 1));
+        let faded = std::cell::Cell::new(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gone.get() == 0 && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            faded.set(faded.get() || (card.opacity() > 0.0 && card.opacity() < 1.0));
+        }
+        assert!(faded.get(), "it did not fade");
+        assert_eq!(gone.get(), 1);
+        assert!(!card.get_visible());
+        assert_eq!(card.opacity(), 1.0);
+
+        // Hidden mid-fade: it goes at once, and showing it again does not
+        // pick the fade back up.
+        card.set_visible(true);
+        while context.pending() {
+            context.iteration(false);
+        }
+        let count = std::rc::Rc::clone(&gone);
+        exit(&card, move || count.set(count.get() + 1));
+        window.set_visible(false);
+        assert_eq!(gone.get(), 2);
+        card.set_visible(true);
+        window.set_visible(true);
+        for _ in 0..30 {
+            context.iteration(false);
+        }
+        assert_eq!(card.opacity(), 1.0);
+        assert_eq!(gone.get(), 2);
+        window.destroy();
     }
 }
