@@ -2843,10 +2843,13 @@ mod tests {
         mounted.window.close();
     }
 
-    /// The translucent sheet, as GTK applies it: the gaps clear (the Mac's
-    /// window draws no background), the panes the material stack's alpha
-    /// (`tc_glass_pane`, 0.7491 light, 0.745 dark), and back to opaque when
-    /// it is taken off. Loaded by hand: weston grants no blur.
+    /// The translucent sheet, as GTK applies it: the gaps show the desktop
+    /// (the Mac's window draws no background), with nothing over it but the
+    /// panes' own drop shadow (`paneEdge`, which the Mac draws over the
+    /// desktop too); the panes take the material stack's alpha
+    /// (`tc_glass_pane`, 0.7491 light, 0.745 dark); and all of it is opaque
+    /// again when the sheet is taken off. Loaded by hand: weston grants no
+    /// blur.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes() {
@@ -2862,15 +2865,37 @@ mod tests {
         // frame, so keep asking until the translucent one is what draws.
         pump_until(|| {
             crate::ui::style::set_translucent(true);
-            window_pixels(&window, &[gap])[0][3] == 0
+            window_pixels(&window, &[gap])[0][3] < 255
         });
-        let pixels = window_pixels(&mounted.window, &[gap, pane]);
-        assert_eq!(pixels[0][3], 0, "gap {pixels:?}");
-        let expected = if adw::StyleManager::default().is_dark() {
-            0.745
+        let dark = adw::StyleManager::default().is_dark();
+        // The pane's drop shadow, from the generated painted sheet.
+        let sheet = if dark {
+            brand_tokens::GLASS_DARK_CSS
         } else {
-            0.7491
+            brand_tokens::GLASS_LIGHT_CSS
         };
+        let shadow: Vec<f64> = sheet
+            .lines()
+            .find(|line| line.starts_with(".tc-glass-pane {"))
+            .and_then(|line| line.split("rgba(").nth(1))
+            .and_then(|rest| rest.split(')').next())
+            .expect("the pane's shadow")
+            .split(',')
+            .map(|v| v.trim().parse().expect("a number"))
+            .collect();
+        let pixels = window_pixels(&mounted.window, &[gap, pane]);
+        let [b, g, r, a] = pixels[0];
+        // Premultiplied: no channel brighter than the shadow's colour at
+        // its own alpha, and no more alpha than the shadow has.
+        let most = |channel: f64| (channel * shadow[3]).ceil() as u8 + 1;
+        assert!(
+            a <= (shadow[3] * 255.0).ceil() as u8
+                && r <= most(shadow[0])
+                && g <= most(shadow[1])
+                && b <= most(shadow[2]),
+            "gap {pixels:?} under shadow {shadow:?}"
+        );
+        let expected = if dark { 0.745 } else { 0.7491 };
         let alpha = f64::from(pixels[1][3]) / 255.0;
         assert!((alpha - expected).abs() < 0.02, "pane {pixels:?}");
         crate::ui::style::set_translucent(false);
