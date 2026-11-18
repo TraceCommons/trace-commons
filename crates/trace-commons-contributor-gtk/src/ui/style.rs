@@ -485,14 +485,19 @@ pub(super) fn stylesheet(dark: bool) -> String {
     } else {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
-    // The first run's stage is dark in either scheme (`stage.rs`), so its
-    // glow is the dark scheme's.
-    let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
     format!(
-        "{brand}\n{glass}\n{tokens}\n@define-color tc_first_run_glow {glow};\n{}\n{insights}\n{}",
+        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}",
+        first_run_glow_css(),
         include_str!("style.css"),
         super::hero_art::css()
     )
+}
+
+/// The first run's glow as a `@define-color` rule. The first run's stage is
+/// dark in either scheme (`stage.rs`), so its glow is the dark scheme's.
+fn first_run_glow_css() -> String {
+    let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
+    format!("@define-color tc_first_run_glow {glow};")
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -552,10 +557,11 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
         palette.tertiary.hex(),
     );
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{scoped}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}",
         define(brand),
         define(glass),
         define(tokens),
+        define(&first_run_glow_css()),
         include_str!("style.css"),
         recolour_insights(insights, palette, dark),
     )
@@ -604,6 +610,8 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_control_hover" => hex(p.control_hover),
         "tc_glass_row_hover" => hex(p.row_hover),
         "tc_glass_tab_ember" => hex(p.accent_line),
+        // The glow behind the first run's current step.
+        "tc_first_run_glow" => hex(p.accent),
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),
