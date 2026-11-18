@@ -492,6 +492,18 @@ def render_insights_css(tokens: dict, scheme: str) -> str:
 
 
 GLYPHS = REPO / "macos" / "Sources" / "TCDesign" / "Components" / "Glyphs.swift"
+LOGOS = REPO / "macos" / "Sources" / "TCDesign" / "Logos" / "GlassLogoPaths.swift"
+BRAND_MARK = REPO / "macos" / "Sources" / "TCDesign" / "Logos" / "GlassBrandMark.swift"
+
+# The colours the Traces map draws with on the Mac, as the flat theme draws
+# them: its nodes, the pad, the rocket, the runs' orbs, the coins and their
+# tints. The Linux map reads them from `brand_tokens::map`.
+MAP_COLOURS = [
+    "mapOrbShared", "mapOrbKept", "purpleSoft", "blue", "statusOff", "statusOn",
+    "statusOnText", "mapNodeOff", "mapCredentialOn", "paneOpaque", "wellFill",
+    "textPrimary", "textSecondary", "textTertiary",
+    "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode", "toolTheia",
+]
 
 # Glass tiers as the Linux shell paints them: every fill opaque, flattened
 # over the surface the tier sits on, as the Mac does under Reduce
@@ -715,6 +727,84 @@ def glyph_svg(glyph: dict) -> str:
             f'width="{glyph["size"][0]}" height="{glyph["size"][1]}"><path d="{glyph["data"]}" {paint}/></svg>')
 
 
+def parse_view_box(text: str, where: str) -> tuple:
+    box = re.search(r"CGRect\(x: ([\d.]+), y: ([\d.]+), width: ([\d.]+), height: ([\d.]+)\)", text)
+    if box is None:
+        raise TokenError(f"{where}: no viewBox")
+    return tuple(int(v) if v.isdigit() else float(v) for v in box.groups())
+
+
+def parse_logos(source: str) -> list[dict]:
+    """The tool logos from GlassLogoPaths.swift: the one copy of their path data."""
+    out = []
+    pattern = r"static let (\w+) = GlassLogoArtwork\(\s*viewBox: (CGRect\([^)]*\)),\s*paths: \[(.*?)\]\s*\)"
+    for match in re.finditer(pattern, source, re.S):
+        name = match.group(1)
+        paths = re.findall(r'"([^"\n]*)"', match.group(3))
+        if not paths:
+            raise TokenError(f"logo {name}: no paths")
+        out.append({"name": name, "view_box": parse_view_box(match.group(2), name), "paths": paths})
+    if not out:
+        raise TokenError("GlassLogoPaths.swift: no logos")
+    return out
+
+
+def parse_brand_mark(source: str) -> dict:
+    """The NEAR AI mark from GlassBrandMark.swift: its viewBox and path data."""
+    box = re.search(r"static let viewBox = (CGRect\([^)]*\))", source)
+    data = re.search(r'static let data =\s*"([^"\n]*)"', source)
+    if box is None or data is None:
+        raise TokenError("GlassBrandMark.swift: no mark")
+    return {"view_box": parse_view_box(box.group(1), "brand mark"), "data": data.group(1)}
+
+
+def rust_float(value) -> str:
+    text = repr(float(value))
+    return text
+
+
+def render_logos_rust(logos: list[dict], mark: dict) -> list[str]:
+    out = ["/// The tool logos and the NEAR AI mark, exported from `GlassLogoPaths.swift`",
+           "/// and `GlassBrandMark.swift`: SVG path data in each one's own viewBox",
+           "/// (x, y, width, height).",
+           "pub mod logo {"]
+    for logo in logos:
+        const = snake(logo["name"]).upper()
+        box = ", ".join(rust_float(v) for v in logo["view_box"])
+        out.append(f"    pub const {const}_VIEW_BOX: [f64; 4] = [{box}];")
+        out.append(f"    pub const {const}: &[&str] = &[")
+        for path in logo["paths"]:
+            out.append(f'        "{path}",')
+        out.append("    ];")
+    box = ", ".join(rust_float(v) for v in mark["view_box"])
+    out.append(f"    pub const BRAND_MARK_VIEW_BOX: [f64; 4] = [{box}];")
+    out.append(f'    pub const BRAND_MARK: &str = "{mark["data"]}";')
+    out.append("}")
+    return out
+
+
+def render_map_rust(tokens: dict) -> list[str]:
+    out = ["/// The Traces map's colours, as the Mac's flat theme draws them: a hex",
+           "/// colour and its alpha.",
+           "pub mod map {",
+           "    pub type Rgba = (&'static str, f64);"]
+    for scheme in SCHEMES:
+        out.append(f"    /// The {scheme} scheme.")
+        out.append(f"    pub mod {scheme} {{")
+        out.append("        use super::Rgba;")
+        for name in MAP_COLOURS:
+            colour = flat_color(tokens, name, scheme)
+            alpha = rust_float(colour.get("alpha", 1))
+            out.append(f'        pub const {snake(name).upper()}: Rgba = ("{colour["hex"].lower()}", {alpha});')
+        stops = [resolve_scheme(stop, scheme) for stop in flat_value(tokens, "gradient", "heroCampaign", scheme)["stops"]]
+        for label, stop in (("DEEP", stops[0]), ("BRIGHT", stops[-1])):
+            alpha = rust_float(stop.get("alpha", 1))
+            out.append(f'        pub const HERO_CAMPAIGN_{label}: Rgba = ("{stop["hex"].lower()}", {alpha});')
+        out.append("    }")
+    out.append("}")
+    return out
+
+
 def render_glyphs_rust(glyphs: list[dict]) -> list[str]:
     out = ["/// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.", "pub mod glyph {"]
     for glyph in glyphs:
@@ -779,6 +869,10 @@ def render_gtk(tokens: dict) -> str:
     out.extend(render_glass_rust(tokens))
     out.append("")
     out.extend(render_glyphs_rust(parse_glyphs(GLYPHS.read_text())))
+    out.append("")
+    out.extend(render_logos_rust(parse_logos(LOGOS.read_text()), parse_brand_mark(BRAND_MARK.read_text())))
+    out.append("")
+    out.extend(render_map_rust(tokens))
     out.append("")
     return "\n".join(out)
 
