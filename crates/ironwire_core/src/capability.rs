@@ -67,9 +67,10 @@ pub struct RequestRequirements {
     pub cached_prefix_tokens: u32,
     /// A strict JSON schema response format is requested.
     pub structured_output: bool,
-    /// The prompt's size in tokens, estimated from the body's bytes. Not the
-    /// whole requirement: [`eligible`] adds a margin for the estimate and the
-    /// answer's room ([`Self::output_tokens`]).
+    /// Estimated text context from the body's non-image transport bytes.
+    /// Inline image encodings are not text tokens; their model-specific visual
+    /// cost remains provider-enforced. [`eligible`] reserves a text-estimate
+    /// margin and the answer's room ([`Self::output_tokens`]).
     pub min_context_tokens: u32,
     /// The longest answer the client asked for: Anthropic's `max_tokens`,
     /// Chat Completions' `max_completion_tokens` or `max_tokens`, Responses'

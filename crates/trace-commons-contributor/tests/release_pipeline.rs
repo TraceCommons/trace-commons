@@ -853,6 +853,28 @@ fn flatpak_manifest_has_its_vendored_sources_enabled() {
 }
 
 #[test]
+fn flatpak_manifest_grants_network_to_the_in_sandbox_daemon() {
+    // The daemon runs inside the sandbox and talks to the Trace Commons
+    // server and NEAR AI; without --share=network it cannot enroll, upload
+    // or reach inference. Only the finish-args section is checked, so a
+    // comment mentioning the flag cannot satisfy this.
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    let finish_args: Vec<&str> = manifest
+        .lines()
+        .skip_while(|l| !l.starts_with("finish-args:"))
+        .skip(1)
+        .take_while(|l| l.starts_with(' ') || l.is_empty())
+        .map(str::trim)
+        .collect();
+    assert!(
+        finish_args.contains(&"- --share=network"),
+        "finish-args must include --share=network, or the in-sandbox daemon \
+         cannot reach the server or NEAR AI"
+    );
+}
+
+#[test]
 fn cargo_sources_json_looks_like_a_real_generated_source_list() {
     // Plain std::fs plus a manual scan, deliberately: a JSON dependency for
     // one test is not worth it, and this is only meant to catch the file
