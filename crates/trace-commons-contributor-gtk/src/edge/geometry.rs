@@ -13,6 +13,13 @@ use crate::ui::style::brand_tokens::glass::{size, space};
 /// an icon to its peek, before the rail closes (`EdgeRailView`'s 300 ms).
 pub const CLOSE_DELAY_MS: u64 = 300;
 
+/// How long after the pointer leaves the rail it closes: the delay while it
+/// is open, and nothing at all -- no timer -- while it is closed, so a
+/// closed rail runs nothing.
+pub fn close_delay_on_leave(open: bool) -> Option<u64> {
+    open.then_some(CLOSE_DELAY_MS)
+}
+
 /// Room left of the peek for its edge and shadow to draw into.
 pub const SHADOW_ROOM: i32 = space::EDGE_RAIL_GAP + space::S2;
 
@@ -207,6 +214,12 @@ mod tests {
         assert_eq!((PANEL_PADDING, PANEL_SPACING), (10, 8));
         assert_eq!((GRAPH_HEIGHT, MAP_HEIGHT), (110, 190));
         assert_eq!(CLOSE_DELAY_MS, 300);
+    }
+
+    #[test]
+    fn only_an_open_rail_starts_a_close_timer() {
+        assert_eq!(close_delay_on_leave(true), Some(300));
+        assert_eq!(close_delay_on_leave(false), None);
     }
 
     #[test]

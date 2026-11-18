@@ -809,20 +809,18 @@ impl Rail {
     /// Leaving an open rail closes it after the delay; leaving a closed one
     /// starts nothing.
     fn schedule_close(self: &Rc<Self>) {
-        if !self.opening.is_open() {
+        let Some(delay) = geometry::close_delay_on_leave(self.opening.is_open()) else {
             return;
-        }
+        };
         self.cancel_close();
         let weak = Rc::downgrade(self);
-        let source = glib::timeout_add_local_once(
-            std::time::Duration::from_millis(geometry::CLOSE_DELAY_MS),
-            move || {
+        let source =
+            glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
                 if let Some(rail) = weak.upgrade() {
                     rail.closing.take();
                     rail.opening.set(false);
                 }
-            },
-        );
+            });
         self.closing.replace(Some(source));
     }
 
@@ -1292,5 +1290,91 @@ mod tests {
             folder_sub(&folder),
             monitor_traces_copy().tree.ignored_folder
         );
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_rail_switch_is_hidden_until_the_session_is_known() {
+        gtk::init().expect("GTK display");
+        let rail = monitor_screens_copy().edge_rail;
+        let switch = rail_switch();
+        assert!(
+            !switch.card.is_visible(),
+            "shown before the session is known"
+        );
+        assert!(
+            !switch.switch.is_active(),
+            "on before the stored choice is read"
+        );
+        let mut labels = Vec::new();
+        let mut child = switch.card.first_child();
+        while let Some(widget) = child {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                labels.push(label.text().to_string());
+            }
+            child = widget.next_sibling();
+        }
+        assert!(labels.contains(&rail.rail_label.to_string()));
+        assert!(labels.contains(&rail.setting_caption.to_string()));
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_rail_slides_and_fades_under_reduced_motion() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        let revealer = gtk::Revealer::new();
+        settings.set_gtk_enable_animations(true);
+        follow_motion(&revealer);
+        assert_eq!(revealer.transition_duration(), glass::motion::SLIDE_MS);
+        assert_eq!(
+            revealer.transition_type(),
+            gtk::RevealerTransitionType::SlideLeft
+        );
+        settings.set_gtk_enable_animations(false);
+        assert_eq!(revealer.transition_duration(), 0);
+        assert_eq!(
+            revealer.transition_type(),
+            gtk::RevealerTransitionType::Crossfade
+        );
+        settings.set_gtk_enable_animations(previous);
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_compact_graph_is_shown_without_its_controls() {
+        gtk::init().expect("GTK display");
+        let graph = GraphFooter::new();
+        graph.compact(geometry::GRAPH_HEIGHT);
+        assert!(graph.root.reveals_child());
+        assert_eq!(graph.root.transition_duration(), 0);
+        // The focus pill sits in the row of controls, which is hidden.
+        let controls = graph.focus.parent().expect("the controls' row");
+        assert!(!controls.is_visible());
+    }
+
+    /// The session's own facts: on weston, which has no layer-shell, the
+    /// rail is offered only through the GNOME extension; on a compositor
+    /// with it, through layer-shell. Either way the rule and the library
+    /// agree.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_detection_reads_this_sessions_backend() {
+        gtk::init().expect("GTK display");
+        let display = gtk::gdk::Display::default().expect("display");
+        let facts = capability::detect(&display, false);
+        let modes = capability::modes(facts);
+        if facts.layer_shell {
+            assert_eq!(modes.rail, RailMode::LayerShell);
+        } else {
+            assert_eq!(modes.rail, RailMode::Unavailable);
+            assert_eq!(modes.panel, PanelMode::PlainWindow);
+        }
+        if std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var("GDK_BACKEND").as_deref() == Ok("wayland")
+        {
+            assert_eq!(facts.backend, capability::Backend::Wayland);
+        }
     }
 }

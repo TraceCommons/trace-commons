@@ -2143,12 +2143,16 @@ jobs:
       # is what is broken. A red check here that mentions apt is an
       # infrastructure failure, not an MSRV or GTK regression.
       - uses: ./.github/actions/apt-update-ubuntu-only
+      # libgtk4-layer-shell-dev: the shell links the layer-shell library on
+      # Linux (src/edge/layer.rs, its default `layer-shell` feature). Ubuntu
+      # ships it from 24.10; ubuntu-latest is 26.04 (1.3.0).
       - name: Install GTK dependencies
         run: |
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libgtk-4-dev \
             libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
             libnotify-dev
       # `check`, not `build`. The failure this job exists to catch is raised by
       # cargo's resolver and by rustc's front end, both of which run under

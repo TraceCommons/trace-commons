@@ -195,7 +195,11 @@ else
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
-    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::edge_surfaces::tests::mounted_rail_switch_is_hidden_until_the_session_is_known \
+    ui::edge_surfaces::tests::mounted_rail_slides_and_fades_under_reduced_motion \
+    ui::edge_surfaces::tests::mounted_compact_graph_is_shown_without_its_controls \
+    ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

@@ -537,6 +537,7 @@ jobs:
             pkg-config \
             libgtk-4-dev \
             libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
             libnotify-dev \
             weston \
             xdg-desktop-portal \
