@@ -652,6 +652,11 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     # status's text colour, or the tertiary ink with no status.
     for token in ("statusOnText", "statusAskText", "textTertiary"):
         palette[token] = over(flat_color(tokens, token, scheme), ground)
+    # The Traces tree's rows (`GlassListRow`): a flagged sub-line in
+    # statusAsk or statusOn, the chevron in statusOff, and the folder
+    # tile's fill (`GlassToolTile`, tileFolder).
+    for token in ("statusAsk", "statusOn", "statusOff", "tileFolder"):
+        palette[token] = over(flat_color(tokens, token, scheme), ground)
     ink = flat_color(tokens, "ink", scheme)
     palette["rangeFill"] = css_rgba({"hex": ink["hex"], "alpha": 0.07}, "rangeFill")
     # The solid stroke a tier with edge layers takes under Increase Contrast
@@ -875,6 +880,10 @@ GLASS_COLOURS = [
     ("statusOnText", "status_on_text"),
     ("statusAskText", "status_ask_text"),
     ("textTertiary", "ink_tertiary"),
+    ("statusAsk", "status_ask"),
+    ("statusOn", "status_on"),
+    ("statusOff", "status_off"),
+    ("tileFolder", "tile_folder"),
 ]
 
 

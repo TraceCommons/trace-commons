@@ -185,6 +185,10 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_status_on_text #0b4628;
 @define-color tc_glass_status_ask_text #573403;
 @define-color tc_glass_ink_tertiary #3d3d43;
+@define-color tc_glass_status_ask #a8690f;
+@define-color tc_glass_status_on #1a8f4c;
+@define-color tc_glass_status_off #8a8a90;
+@define-color tc_glass_tile_folder #e6e6ea;
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -260,6 +264,10 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_status_on_text #acedbc;
 @define-color tc_glass_status_ask_text #ffd585;
 @define-color tc_glass_ink_tertiary #cfd0d8;
+@define-color tc_glass_status_ask #ffc75c;
+@define-color tc_glass_status_on #30d158;
+@define-color tc_glass_status_off #a9a9b0;
+@define-color tc_glass_tile_folder #2a2a2c;
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }

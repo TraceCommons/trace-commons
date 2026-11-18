@@ -302,6 +302,22 @@ class GlassTokensTests(unittest.TestCase):
                 self.assertIn(f"@define-color tc_glass_status_ask_text {ask};", css)
                 self.assertIn(f"@define-color tc_glass_ink_tertiary {tertiary};", css)
 
+    def test_tree_row_inks_are_the_macs(self):
+        # GlassListRow (ListRow.swift): a flagged sub-line in statusAsk or
+        # statusOn (:292-296), the chevron in statusOff (:149), and
+        # GlassToolTile's folder tile on tileFolder (Indicators.swift:306);
+        # flat theme, flattened over the pane.
+        for scheme, (ask, on, off, folder) in (
+            ("light", ("#a8690f", "#1a8f4c", "#8a8a90", "#e6e6ea")),
+            ("dark", ("#ffc75c", "#30d158", "#a9a9b0", "#2a2a2c")),
+        ):
+            with self.subTest(scheme=scheme):
+                css = generate.render_glass_css(self.tokens, scheme)
+                self.assertIn(f"@define-color tc_glass_status_ask {ask};", css)
+                self.assertIn(f"@define-color tc_glass_status_on {on};", css)
+                self.assertIn(f"@define-color tc_glass_status_off {off};", css)
+                self.assertIn(f"@define-color tc_glass_tile_folder {folder};", css)
+
     def test_glyphs_come_from_the_swift_path_data(self):
         glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
         self.assertEqual([g["name"] for g in glyphs],
