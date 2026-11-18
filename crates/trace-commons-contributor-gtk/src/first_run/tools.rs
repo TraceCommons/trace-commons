@@ -294,16 +294,7 @@ impl Tools {
     pub fn record_held(&mut self, held: BTreeSet<String>) -> BTreeSet<String> {
         let newly: BTreeSet<String> = held.difference(&self.held).cloned().collect();
         for source in &newly {
-            let turned_off =
-                self.touched.contains(source) && self.row_answer(source) == ToolAnswer::Off;
-            if !turned_off {
-                self.answers.insert(source.clone(), ToolAnswer::Held);
-            }
-            for folder in self.added.iter_mut() {
-                if folder.kind == FolderKind::Source(source.clone()) {
-                    folder.watched = None;
-                }
-            }
+            self.hold(source);
         }
         for source in self.held.difference(&held) {
             if self.row_answer(source) == ToolAnswer::Held {
@@ -312,6 +303,30 @@ impl Tools {
         }
         self.held = held;
         newly
+    }
+    /// The daemon's declaration for `source`, a tool it already held, has
+    /// been written since a folder for it was picked here: the command for
+    /// that folder landed, so the row reads as the daemon's own again, as
+    /// for a tool it newly holds ([`Self::record_held`]).
+    pub fn record_landed(&mut self, source: &str) {
+        if self.held.contains(source) {
+            self.hold(source);
+        }
+    }
+    /// `source`'s row reads as the daemon's folder, unless the person
+    /// turned it off here, and a folder added here for it stops being
+    /// watched.
+    fn hold(&mut self, source: &str) {
+        let turned_off =
+            self.touched.contains(source) && self.row_answer(source) == ToolAnswer::Off;
+        if !turned_off {
+            self.answers.insert(source.to_owned(), ToolAnswer::Held);
+        }
+        for folder in self.added.iter_mut() {
+            if folder.kind == FolderKind::Source(source.to_owned()) {
+                folder.watched = None;
+            }
+        }
     }
     /// Whether the declaration for `settings_key` is the daemon's own,
     /// which no commit sends.
@@ -775,6 +790,29 @@ mod tests {
             before: older.clone(),
         };
         assert!(!refusal_ended(Some(&refusal), &older));
+    }
+
+    /// A folder picked for a tool the daemon already holds, then declared
+    /// from a terminal: once the declaration lands, Continue sends nothing
+    /// for that tool, as for a tool newly held -- re-sending the folder the
+    /// portal could not map would only be refused again (#2171 review 2,
+    /// finding 4).
+    #[test]
+    fn a_landed_declaration_for_a_held_tool_is_the_daemons_own_again() {
+        let mut tools = discovered();
+        tools.record_held(held(&[SOURCE_CLAUDE_CODE, SOURCE_CODEX]));
+        tools.add(AddedFolder::new(
+            FolderKind::Source(SOURCE_CLAUDE_CODE.into()),
+            "/run/user/1000/doc/abc/claude",
+        ));
+        tools.answer_added("/run/user/1000/doc/abc/claude", Some(true));
+        assert_eq!(
+            tools.session_roots().unwrap()["claude_source"],
+            json!({"mode":"watch","path":"/run/user/1000/doc/abc/claude"})
+        );
+        tools.record_landed(SOURCE_CLAUDE_CODE);
+        assert!(!tools.session_roots().unwrap().contains_key("claude_source"));
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Held);
     }
 
     /// A held tool this window's discovery cannot see still has its row.

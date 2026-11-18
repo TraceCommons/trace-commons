@@ -232,7 +232,13 @@ impl ToolsScreen {
         if self.busy.get() {
             return;
         }
-        if crate::first_run::tools::refusal_ended(self.refusal.borrow().as_ref(), &now) {
+        let ended = self
+            .refusal
+            .borrow()
+            .as_ref()
+            .filter(|refusal| crate::first_run::tools::refusal_ended(Some(refusal), &now))
+            .map(|refusal| refusal.tool);
+        if ended.is_some() {
             self.hide_refusal();
         }
         let held_changed = self.tools.borrow().held != now.held;
@@ -240,6 +246,14 @@ impl ToolsScreen {
         *self.watches.borrow_mut() = now;
         if held_changed {
             self.tools.borrow_mut().record_held(held);
+        }
+        // A tool held all along: the folder picked here is the one the
+        // command declared, so the row is the daemon's own again and
+        // Continue sends nothing for it.
+        if let Some(tool) = ended {
+            self.tools.borrow_mut().record_landed(tool);
+        }
+        if held_changed || ended.is_some() {
             self.render();
         }
     }

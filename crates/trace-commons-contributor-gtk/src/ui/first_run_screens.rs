@@ -331,7 +331,7 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod mounted_tests {
     use super::*;
-    use crate::first_run::tools::{Found, Tools, Watches};
+    use crate::first_run::tools::{AddedFolder, FolderKind, Found, Tools, Watches};
     use std::{cell::RefCell, rc::Rc};
 
     /// The daemon's answer as Tools reads it: `held` watched, with the
@@ -649,12 +649,16 @@ mod mounted_tests {
         let context = init();
         let _owner = context.acquire().unwrap();
         let window = gtk::Window::new();
-        let screen = super::super::first_run_tools::build(
-            Rc::new(RefCell::new(Tools::default())),
-            &window,
-            || {},
-        );
+        let tools = Rc::new(RefCell::new(Tools::default()));
+        let screen = super::super::first_run_tools::build(tools.clone(), &window, || {});
         screen.record_watches(watching(&["claude-code", "codex"], &[("codex", 2)]));
+        // The folder picked here, which the old portal could not map.
+        let picked = "/run/user/1000/doc/abc/claude";
+        tools.borrow_mut().add(AddedFolder::new(
+            FolderKind::Source("claude-code".into()),
+            picked,
+        ));
+        tools.borrow_mut().answer_added(picked, Some(true));
         let failed = first_run_copy().folders.settings_failed;
         let hint = super::super::roots::host_folder_hint("claude_source").expect("approved");
         screen.show_host_hint(Some(&hint));
@@ -695,6 +699,14 @@ mod mounted_tests {
         assert!(
             command.is_none_or(|l| !shown(&l)),
             "the refused tool's declaration landed: command still shown"
+        );
+        assert!(
+            !tools
+                .borrow()
+                .session_roots()
+                .unwrap()
+                .contains_key("claude_source"),
+            "Continue would send the folder the portal could not map again"
         );
     }
 
