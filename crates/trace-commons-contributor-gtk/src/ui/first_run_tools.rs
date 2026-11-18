@@ -91,13 +91,7 @@ pub(super) fn build(
     failure.set_visible(false);
     let host_hint = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let host_hint_line = body_label("");
-    let host_hint_command = gtk::Label::builder()
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::Char)
-        .selectable(true)
-        .xalign(0.0)
-        .css_classes(["monospace"])
-        .build();
+    let host_hint_command = super::service_dialog::command_label("");
     // Copies the command; never runs it.
     let copy_command = gtk::Button::with_label(
         trace_commons_contributor::managed::copy::background_service::COPY_COMMAND,

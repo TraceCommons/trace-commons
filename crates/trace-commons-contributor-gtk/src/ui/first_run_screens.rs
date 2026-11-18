@@ -465,6 +465,16 @@ mod mounted_tests {
         ] {
             assert!(labels.iter().any(|l| l == text), "{text} not shown");
         }
+        // Wrapped, the command shows no hyphen at the break, as the
+        // service dialogs' commands do.
+        let command_label = descendants(&root)
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .find(|l| l.text() == command.as_str())
+            .expect("the command's label");
+        assert!(super::super::service_dialog::draws_no_hyphen(
+            &command_label
+        ));
         let copy = descendants(&root)
             .into_iter()
             .filter(|w| shown(w))

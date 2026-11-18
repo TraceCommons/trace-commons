@@ -78,8 +78,16 @@ pub struct Parts {
     pub failed: gtk::Box,
 }
 
-fn command_label(command: &str) -> gtk::Label {
+/// A command as a person reads and selects it: monospace, broken at any
+/// character when it must wrap, and never with a hyphen drawn at the break.
+/// Pango hyphenates a word it breaks unless told not to, and a command is
+/// not prose: `trace-commons-contribut-` / `or.service` names a unit that
+/// does not exist, and someone typing it from the screen types the hyphen.
+pub(super) fn command_label(command: &str) -> gtk::Label {
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
     gtk::Label::builder()
+        .attributes(&attributes)
         .label(command)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::Char)
@@ -87,6 +95,19 @@ fn command_label(command: &str) -> gtk::Label {
         .xalign(0.0)
         .css_classes(["monospace"])
         .build()
+}
+
+/// Whether `label` asks Pango to draw no hyphen where it breaks a word.
+#[cfg(test)]
+pub(super) fn draws_no_hyphen(label: &gtk::Label) -> bool {
+    label.attributes().is_some_and(|list| {
+        list.attributes().iter().any(|attribute| {
+            attribute.type_() == gtk::pango::AttrType::InsertHyphens
+                && attribute
+                    .downcast_ref::<gtk::pango::AttrInt>()
+                    .is_some_and(|value| value.value() == 0)
+        })
+    })
 }
 
 /// Build one dialog's widgets with the approved words.
@@ -519,6 +540,45 @@ mod tests {
             // The service gone again: the line goes with it.
             show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
             assert!(!parts.failed.get_visible());
+        }
+    }
+
+    fn commands(root: &gtk::Widget, out: &mut Vec<gtk::Label>) {
+        if let Some(label) = root.downcast_ref::<gtk::Label>()
+            && label.has_css_class("monospace")
+        {
+            out.push(label.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            commands(&widget, out);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// Every command in the three dialogs wraps without a hyphen drawn at
+    /// the break. Seen on GNOME (2026-11-18): the status command read
+    /// `trace-commons-contribut-` / `or.service`.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_commands_wrap_without_a_drawn_hyphen() {
+        for dialog in [Dialog::Install, Dialog::Start, Dialog::Update] {
+            let (parts, _) = mounted(dialog);
+            let mut found = Vec::new();
+            commands(parts.window.content().as_ref().unwrap(), &mut found);
+            let texts: Vec<String> = found.iter().map(|l| l.label().to_string()).collect();
+            assert!(
+                texts.iter().any(|t| t == SERVICE_STATUS_COMMAND),
+                "{dialog:?}: {texts:?}"
+            );
+            assert_eq!(
+                texts.iter().any(|t| t == SERVICE_INSTALL_COMMAND),
+                dialog != Dialog::Start,
+                "{dialog:?}: {texts:?}"
+            );
+            for label in &found {
+                assert!(draws_no_hyphen(label), "{dialog:?}: {}", label.label());
+            }
         }
     }
 

@@ -172,6 +172,7 @@ else
     ui::service_dialog::tests::mounted_install_and_update_dialogs_show_the_status_command_after_their_last_try \
     ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
     ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
+    ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
