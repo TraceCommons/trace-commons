@@ -119,6 +119,13 @@ const NOTICE_SURFACE_CLASS: &str = "tc-notice-surface";
 /// generated glass sheet strokes the tiers that carry edge layers under it.
 const HIGH_CONTRAST_CLASS: &str = "tc-high-contrast";
 
+/// The tab the ember glows under: the shown tab, which is the one active
+/// and visible (a hidden selected tab is drawn as the one shown).
+fn glowing_tab(tabs: &[gtk::ToggleButton]) -> Option<&gtk::ToggleButton> {
+    tabs.iter()
+        .find(|button| button.is_active() && button.is_visible())
+}
+
 /// Keep the window's high-contrast class in step with the desktop
 /// (`AdwStyleManager:high-contrast`), as the Mac follows Increase Contrast.
 fn follow_high_contrast(window: &adw::ApplicationWindow) {
@@ -482,10 +489,7 @@ impl Shell {
                 .map(|(_, button)| button.clone())
                 .collect();
             ember.set_draw_func(move |area, context, _, height| {
-                let Some(selected) = tabs
-                    .iter()
-                    .find(|button| button.is_active() && button.is_visible())
-                else {
+                let Some(selected) = glowing_tab(&tabs) else {
                     return;
                 };
                 let Some(bounds) = selected.compute_bounds(area) else {
@@ -502,6 +506,14 @@ impl Shell {
             for (_, button) in &tab_buttons {
                 let weak = ember.downgrade();
                 button.connect_toggled(move |_| {
+                    if let Some(ember) = weak.upgrade() {
+                        ember.queue_draw();
+                    }
+                });
+                // A tab shown or hidden moves the others (onboarding hides
+                // two), and the glow with them.
+                let weak = ember.downgrade();
+                button.connect_visible_notify(move |_| {
                     if let Some(ember) = weak.upgrade() {
                         ember.queue_draw();
                     }
@@ -1874,6 +1886,13 @@ mod tests {
             .collect();
         assert_eq!(visible, [Tab::Inference, Tab::Insights]);
         assert_eq!(shell.shown().tab, Tab::Inference);
+        // The ember glows under the tab drawn, not the hidden choice.
+        let buttons: Vec<gtk::ToggleButton> = shell
+            .tabs
+            .iter()
+            .map(|(_, button)| button.clone())
+            .collect();
+        assert_eq!(glowing_tab(&buttons), Some(&shell.tabs[1].1));
         assert_eq!(shell.selected_tab(), Tab::Traces, "the choice is kept");
         assert_eq!(
             shell.content.visible_child_name().as_deref(),
@@ -2621,41 +2640,48 @@ mod tests {
     fn mounted_tab_strip_is_the_macs_rule_tabs() {
         let mounted = mounted(false);
         crate::ui::style::install();
-        pump();
         let shell = &mounted.shell;
         shell.pick_tab(Tab::Traces);
         shell.render_inference_state(
             trace_commons_contributor::private_inference_copy::STATE_LABELS[0],
         );
-        pump_until(|| shell.tabs.iter().all(|(_, button)| button.width() > 0));
+        let weight = |button: &gtk::ToggleButton| {
+            let mut inside = Vec::new();
+            descendants(button.upcast_ref(), &mut inside);
+            inside
+                .iter()
+                .find_map(|widget| widget.downcast_ref::<gtk::Label>().cloned())
+                .and_then(|title| title.pango_context().font_description())
+                .map(|font| font.weight())
+        };
+        let expected = |tab: Tab| {
+            if tab == Tab::Traces {
+                gtk::pango::Weight::Semibold
+            } else {
+                gtk::pango::Weight::Medium
+            }
+        };
+        // The stylesheet lands on a frame: wait for what is asserted.
+        pump_until(|| {
+            shell
+                .tabs
+                .iter()
+                .all(|(tab, button)| button.width() > 0 && weight(button) == Some(expected(*tab)))
+                && shell.inference_dot.width() == 6
+        });
+        // A homogeneous box gives the leftover pixels to the first tabs.
         let widths: Vec<i32> = shell
             .tabs
             .iter()
             .map(|(_, button)| button.width())
             .collect();
-        assert!(
-            widths.windows(2).all(|pair| pair[0] == pair[1]),
-            "{widths:?}"
-        );
+        let least = widths.iter().min().copied().unwrap_or(0);
+        let most = widths.iter().max().copied().unwrap_or(0);
+        assert!(least > 0 && most - least <= 1, "{widths:?}");
         for (tab, button) in &shell.tabs {
             let (height, ..) = button.measure(gtk::Orientation::Vertical, -1);
             assert_eq!(height, 38, "{tab:?}");
-            let mut inside = Vec::new();
-            descendants(button.upcast_ref(), &mut inside);
-            let title = inside
-                .iter()
-                .find_map(|widget| widget.downcast_ref::<gtk::Label>())
-                .expect("a title");
-            let weight = title
-                .pango_context()
-                .font_description()
-                .map(|font| font.weight());
-            let expected = if *tab == Tab::Traces {
-                gtk::pango::Weight::Semibold
-            } else {
-                gtk::pango::Weight::Medium
-            };
-            assert_eq!(weight, Some(expected), "{tab:?}");
+            assert_eq!(weight(button), Some(expected(*tab)), "{tab:?}");
         }
         let dot = &shell.inference_dot;
         assert!(dot.is_visible());
@@ -2671,7 +2697,6 @@ mod tests {
     fn mounted_toolbar_controls_are_the_macs_size() {
         let mounted = mounted(false);
         crate::ui::style::install();
-        pump();
         let shell = &mounted.shell;
         let size = |widget: &gtk::Widget| {
             (
@@ -2679,6 +2704,7 @@ mod tests {
                 widget.measure(gtk::Orientation::Vertical, -1).0,
             )
         };
+        pump_until(|| size(shell.settings_button.upcast_ref()) == (28, 28));
         for toggle in [
             &shell.graph_toggle,
             &shell.map_toggle,
@@ -2710,11 +2736,15 @@ mod tests {
                 pane.measure(gtk::Orientation::Vertical, -1),
             )
         };
+        // Once the stylesheet has landed (the toolbar's gear is its size).
+        let gear = mounted.shell.settings_button.clone();
+        pump_until(|| gear.measure(gtk::Orientation::Vertical, -1).0 == 28);
         mounted.window.remove_css_class(HIGH_CONTRAST_CLASS);
         pump();
         let plain = measure(&pane);
         mounted.window.add_css_class(HIGH_CONTRAST_CLASS);
-        pump();
+        // A border would grow the pane by 2 each way on the next frame.
+        pump_until(|| measure(&pane) != plain);
         assert_eq!(measure(&pane), plain);
     }
 

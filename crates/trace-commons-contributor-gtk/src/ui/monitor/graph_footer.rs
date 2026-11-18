@@ -752,6 +752,26 @@ mod tests {
         assert!(columns(0.0, 7).is_empty());
     }
 
+    /// Runs the main loop until `done`, for at most five seconds.
+    fn pump_until(done: impl Fn() -> bool) {
+        let context = gtk::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() && std::time::Instant::now() < deadline {
+            if !context.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Lets frames pass once `widget` is laid out, so a style change has
+    /// reached it.
+    fn pump_until_drawn(widget: &impl IsA<gtk::Widget>) {
+        pump_until(|| widget.as_ref().width() > 0);
+        // Past any style transition (libadwaita's run about 200ms).
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        pump_until(|| std::time::Instant::now() >= end);
+    }
+
     fn empty_week() -> Vec<Bucket> {
         ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             .iter()
@@ -883,15 +903,13 @@ mod tests {
         let window = gtk::Window::builder().child(&footer.root).build();
         footer.root.set_reveal_child(true);
         window.present();
-        let context = gtk::glib::MainContext::default();
-        while context.pending() {
-            context.iteration(false);
-        }
         let size = |widget: &gtk::Widget| {
             let (width, ..) = widget.measure(gtk::Orientation::Horizontal, -1);
             let (height, ..) = widget.measure(gtk::Orientation::Vertical, -1);
             (width, height)
         };
+        // The stylesheet lands on a frame.
+        pump_until(|| size(footer.zoom_in.upcast_ref()) == (30, 26));
         for pill in [
             &footer.zoom_out,
             &footer.zoom_in,
@@ -909,9 +927,33 @@ mod tests {
             ..GraphData::default()
         });
         assert!(footer.focus.has_css_class(FocusInk::Idle.css()));
+        // The pill's fill, 4 in from its left edge on its middle line,
+        // rendered from the widget: only the glyph may change with focus.
+        let fill = |footer: &GraphFooter| {
+            let pill = &footer.focus;
+            let (width, height) = (pill.width(), pill.height());
+            let paintable = gtk::WidgetPaintable::new(Some(pill));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+            let node = snapshot.to_node().expect("a render node");
+            let renderer = gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface"))
+                .expect("a renderer");
+            let texture = renderer.render_texture(&node, None);
+            renderer.unrealize();
+            let stride = texture.width() as usize * 4;
+            let mut pixels = vec![0u8; stride * texture.height() as usize];
+            texture.download(&mut pixels, stride);
+            let at = (texture.height() as usize / 2) * stride + 4 * 4;
+            pixels[at..at + 4].to_vec()
+        };
+        pump_until_drawn(&footer.focus);
+        let idle = fill(&footer);
         footer.set_focused(true);
         assert!(footer.focus.has_css_class(FocusInk::On.css()));
         assert!(!footer.focus.has_css_class(FocusInk::Idle.css()));
+        assert!(footer.focus.is_active());
+        pump_until_drawn(&footer.focus);
+        assert_eq!(fill(&footer), idle, "the focused pill changed its fill");
         window.close();
     }
 
