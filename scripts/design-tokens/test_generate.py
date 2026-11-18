@@ -171,21 +171,6 @@ class GlassTokensTests(unittest.TestCase):
         self.assertIn('pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);', rendered)
         self.assertIn('pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);', rendered)
 
-    def test_tile_values_are_the_macs(self):
-        rendered = "\n".join(generate.render_tile_rust(self.tokens))
-        # GlassTokens.Size.toolTile / toolTileLarge / toolLogo / toolLogoLarge.
-        for line in ("TOOL_TILE: f64 = 22.0", "TOOL_TILE_LARGE: f64 = 30.0",
-                     "TOOL_LOGO: f64 = 15.0", "TOOL_LOGO_LARGE: f64 = 20.0",
-                     "SPINNER: f64 = 12.0", "SPINNER_STROKE: f64 = 1.5", "SPIN: f64 = 0.8",
-                     "PULSE: f64 = 1.6", "SKELETON_DIM: f64 = 0.5"):
-            self.assertIn(f"pub const {line};", rendered)
-        # The flat theme rounds a control at 11, the classic at 8.
-        self.assertIn("pub const RADIUS_CONTROL: f64 = 11.0;", rendered)
-        self.assertIn("pub const RADIUS_TILE: f64 = 6.0;", rendered)
-        self.assertIn('pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);', rendered)
-        self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
-        self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
-
     def test_generated_output_is_deterministic(self):
         first = generate.render_gtk(self.tokens)
         self.assertEqual(first, generate.render_gtk(self.tokens))
@@ -215,6 +200,21 @@ class HeroTokensTests(unittest.TestCase):
         with self.assertRaisesRegex(generate.TokenError, 'heroInk'):
             generate.render_hero_rust(self.tokens)
 
+
+    def test_tile_values_are_the_macs(self):
+        rendered = "\n".join(generate.render_tile_rust(self.tokens))
+        # GlassTokens.Size.toolTile / toolTileLarge / toolLogo / toolLogoLarge.
+        for line in ("TOOL_TILE: f64 = 22.0", "TOOL_TILE_LARGE: f64 = 30.0",
+                     "TOOL_LOGO: f64 = 15.0", "TOOL_LOGO_LARGE: f64 = 20.0",
+                     "SPINNER: f64 = 12.0", "SPINNER_STROKE: f64 = 1.5", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6", "SKELETON_DIM: f64 = 0.5"):
+            self.assertIn(f"pub const {line};", rendered)
+        # The flat theme rounds a control at 11, the classic at 8.
+        self.assertIn("pub const RADIUS_CONTROL: f64 = 11.0;", rendered)
+        self.assertIn("pub const RADIUS_TILE: f64 = 6.0;", rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
 
 if __name__ == '__main__':
     unittest.main()
