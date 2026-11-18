@@ -23,6 +23,9 @@
 //! So the client remembers the last placement asked for each window and
 //! asks again whenever the extension's name gets a new owner.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 /// The extension's well-known name. Under the app's own id, so a Flatpak
 /// sandbox may talk to it without a further hole.
 pub const BUS_NAME: &str = "ai.tracecommons.Contributor.EdgeSurfaces";
@@ -61,24 +64,70 @@ pub enum Request {
     },
 }
 
-/// The extension's answer to "are you there", and the way to ask it for
-/// placements.
+/// The way to ask the extension for placements, once it is known to be
+/// there. Calls go over GIO's session-bus connection on the main loop; a
+/// failed call is dropped, and the window stays where the window manager
+/// put it, which is the no-extension behaviour.
 #[derive(Clone)]
 pub struct Client {
-    tx: async_channel::Sender<Message>,
+    connection: gtk::gio::DBusConnection,
+    /// What to ask again when the extension comes back.
+    held: Rc<RefCell<Held>>,
 }
 
 impl Client {
     pub fn send(&self, request: Request) {
-        let _ = self.tx.send_blocking(Message::Request(request));
+        self.held.borrow_mut().record(&request);
+        call(&self.connection, &request);
+    }
+
+    /// Asks again for every placement still held, whenever the extension's
+    /// name gets an owner: GNOME Shell disables every extension on the lock
+    /// screen, the extension then undoes its placements, and enables it
+    /// again on unlock. The watch lasts as long as the process.
+    fn replay_on_return(&self) {
+        let (connection, held) = (self.connection.clone(), Rc::downgrade(&self.held));
+        // Never unwatched: one client per process, for its whole life. The
+        // id has no destructor, so dropping it leaves the watch running.
+        let _ = gtk::gio::bus_watch_name_on_connection(
+            &self.connection,
+            BUS_NAME,
+            gtk::gio::BusNameWatcherFlags::NONE,
+            move |_, _, _| {
+                if let Some(held) = held.upgrade() {
+                    for request in held.borrow().replay() {
+                        call(&connection, request);
+                    }
+                }
+            },
+            |_, _| {},
+        );
     }
 }
 
-/// What the client's thread acts on: a request from the app, or the
-/// extension's name gaining an owner again.
-enum Message {
-    Request(Request),
-    Returned,
+/// One call, answer ignored. A failed call is dropped, and the window stays
+/// where the window manager put it, which is the no-extension behaviour.
+fn call(connection: &gtk::gio::DBusConnection, request: &Request) {
+    use gtk::glib::variant::ToVariant;
+    let (method, args) = match request {
+        Request::Place { title, role, at } => (
+            "Place",
+            (title.as_str(), role.wire(), at.0, at.1).to_variant(),
+        ),
+        Request::Release { title } => ("Release", (title.as_str(),).to_variant()),
+    };
+    connection.call(
+        Some(BUS_NAME),
+        OBJECT_PATH,
+        INTERFACE,
+        method,
+        Some(&args),
+        None,
+        gtk::gio::DBusCallFlags::NONE,
+        -1,
+        gtk::gio::Cancellable::NONE,
+        |_| {},
+    );
 }
 
 /// The placements to ask for again, by window title: the last `Place` for
@@ -105,74 +154,36 @@ impl Held {
     }
 }
 
-/// Starts the client on its own thread. The receiver answers once: whether
-/// the extension owns its name. A session with no bus answers false.
-pub fn spawn() -> (Client, async_channel::Receiver<bool>) {
-    let (tx, requests) = async_channel::unbounded::<Message>();
-    let (present_tx, present) = async_channel::bounded(1);
-    let returned = tx.clone();
-    std::thread::spawn(move || {
-        let outcome = crate::dbus::with_runtime(|| run(requests, returned, present_tx.clone()));
-        if outcome.is_err() {
-            let _ = present_tx.send_blocking(false);
-        }
-    });
-    (Client { tx }, present)
-}
-
-fn run(
-    requests: async_channel::Receiver<Message>,
-    returned: async_channel::Sender<Message>,
-    present: async_channel::Sender<bool>,
-) -> anyhow::Result<()> {
-    let connection = zbus::blocking::Connection::session()?;
-    let bus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
-    let name = zbus::names::BusName::try_from(BUS_NAME)?;
-    let owned = bus.name_has_owner(name).unwrap_or(false);
-    let _ = present.send_blocking(owned);
+/// The extension, if it owns its name on the session bus. `None` on a
+/// session with no bus, or where it is not installed and enabled.
+pub async fn find() -> Option<Client> {
+    use gtk::glib::variant::ToVariant;
+    let connection = gtk::gio::bus_get_future(gtk::gio::BusType::Session)
+        .await
+        .ok()?;
+    let reply = connection
+        .call_future(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            Some(&(BUS_NAME,).to_variant()),
+            Some(gtk::glib::VariantTy::new("(b)").ok()?),
+            gtk::gio::DBusCallFlags::NONE,
+            2000,
+        )
+        .await
+        .ok()?;
+    let (owned,) = reply.get::<(bool,)>()?;
     if !owned {
-        return Ok(());
+        return None;
     }
-    // The name gains a new owner each time the extension is enabled again
-    // (after every screen unlock). Watched on its own thread, which only
-    // tells this one; a failure to watch costs the replay, nothing else.
-    if let Ok(changes) = bus.receive_name_owner_changed_with_args(&[(0, BUS_NAME)]) {
-        std::thread::spawn(move || {
-            for change in changes {
-                let back = change.args().is_ok_and(|args| args.new_owner().is_some());
-                if back && returned.send_blocking(Message::Returned).is_err() {
-                    return;
-                }
-            }
-        });
-    }
-    let proxy = zbus::blocking::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE)?;
-    let mut held = Held::default();
-    while let Ok(message) = requests.recv_blocking() {
-        match message {
-            Message::Request(request) => {
-                held.record(&request);
-                call(&proxy, &request);
-            }
-            Message::Returned => {
-                for request in held.replay() {
-                    call(&proxy, request);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// One call. A failed call is dropped: the window stays where the window
-/// manager put it, which is the no-extension behaviour.
-fn call(proxy: &zbus::blocking::Proxy<'_>, request: &Request) {
-    let _ = match request {
-        Request::Place { title, role, at } => {
-            proxy.call::<_, _, ()>("Place", &(title.as_str(), role.wire(), at.0, at.1))
-        }
-        Request::Release { title } => proxy.call::<_, _, ()>("Release", &(title.as_str(),)),
+    let client = Client {
+        connection,
+        held: Rc::default(),
     };
+    client.replay_on_return();
+    Some(client)
 }
 
 #[cfg(test)]
@@ -444,12 +455,8 @@ mod live_tests {
     async fn run(
         connection: &gtk::gio::DBusConnection,
         client: &Client,
-        present: bool,
         rail: &gtk::Window,
     ) -> Result<(), String> {
-        if !present {
-            return Err("the client did not find the extension".into());
-        }
         let place_rail = || Request::Place {
             title: RAIL.into(),
             role: Role::Rail,
@@ -617,15 +624,16 @@ mod live_tests {
         rail.present();
         panel.present();
 
-        let (client, present) = spawn();
         let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
         let finished = Rc::new(Cell::new(false));
         {
             let (outcome, finished, rail) =
                 (Rc::clone(&outcome), Rc::clone(&finished), rail.clone());
             glib::spawn_future_local(async move {
-                let present = present.recv().await.unwrap_or(false);
-                let result = run(&connection, &client, present, &rail).await;
+                let result = match find().await {
+                    Some(client) => run(&connection, &client, &rail).await,
+                    None => Err("the client did not find the extension".into()),
+                };
                 *outcome.borrow_mut() = Some(result);
                 finished.set(true);
             });
