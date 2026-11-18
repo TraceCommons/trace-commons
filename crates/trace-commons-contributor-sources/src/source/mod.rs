@@ -1053,6 +1053,36 @@ impl SourceRoots {
         out
     }
 
+    /// For each declared Claude Code or Codex home whose store the tool has
+    /// not made yet ([`discovery::store_to_come`]): that store, and the
+    /// identity [`Self::source_identities`] will give the source once the
+    /// store is made and the home is read there. The daemon's automatic
+    /// grant records the home under this identity too, so the home and its
+    /// store are one source (owner decision 2026-11-18). Every other source
+    /// is absent.
+    pub fn stores_to_come(&self) -> BTreeMap<&'static str, (PathBuf, String)> {
+        let identities = self.source_identities();
+        let mut out = BTreeMap::new();
+        for spec in NATIVE_SOURCES {
+            let Some(SourceDeclaration::Watch { path }) = self.declared.get(spec.name) else {
+                continue;
+            };
+            let Some(store) = discovery::store_to_come(spec.name, path) else {
+                continue;
+            };
+            let root = path.to_string_lossy();
+            let Some(rest) = identities
+                .get(spec.name)
+                .and_then(|identity| identity.strip_prefix(root.as_ref()))
+            else {
+                continue;
+            };
+            let identity = format!("{}{rest}", store.to_string_lossy());
+            out.insert(spec.name, (store, identity));
+        }
+        out
+    }
+
     /// The trajectory folder the contributor declared, read alongside
     /// whatever [`TrajectorySelection`] this root set carries. `Off` and
     /// absent both add nothing: there is no conventional trajectory store.
@@ -1277,6 +1307,48 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A declared home with no store yet names the identity the source
+    /// will have once the store is made and the home is read there, the
+    /// grant's carry-over (owner decision 2026-11-18). A home with its
+    /// store, a store declared as itself, and an undeclared source name
+    /// none.
+    #[test]
+    fn a_home_without_its_store_names_the_identity_its_store_will_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_home = dir.path().join("claude-home");
+        let codex_store = dir.path().join("codex").join("sessions");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        std::fs::create_dir_all(&codex_store).unwrap();
+        let declared = |claude: PathBuf| {
+            SourceRoots::new()
+                .declare(
+                    SOURCE_CLAUDE_CODE,
+                    Some(SourceDeclaration::Watch { path: claude }),
+                )
+                .declare(
+                    SOURCE_CODEX,
+                    Some(SourceDeclaration::Watch {
+                        path: codex_store.clone(),
+                    }),
+                )
+                .declare(SOURCE_GEMINI_CLI, None)
+        };
+        let before = declared(claude_home.clone());
+        let to_come = before.stores_to_come();
+        assert_eq!(to_come.len(), 1, "{to_come:?}");
+        let (store, identity) = to_come[SOURCE_CLAUDE_CODE].clone();
+        assert_eq!(store, claude_home.join("projects"));
+        assert_ne!(
+            Some(&identity),
+            before.source_identities().get(SOURCE_CLAUDE_CODE)
+        );
+
+        std::fs::create_dir(&store).unwrap();
+        let after = declared(discovery::declared_store(SOURCE_CLAUDE_CODE, &claude_home));
+        assert_eq!(after.source_identities()[SOURCE_CLAUDE_CODE], identity);
+        assert!(after.stores_to_come().is_empty());
+    }
 
     #[test]
     fn additional_native_roots_share_one_adapter_and_keep_off_authoritative() {

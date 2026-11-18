@@ -331,11 +331,7 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
 /// tool or folder, and for a relative path, which would be read against
 /// the process's working directory.
 fn home_store(source: &str, path: &Path) -> Option<PathBuf> {
-    let store = match source {
-        SOURCE_CLAUDE_CODE => "projects",
-        SOURCE_CODEX => "sessions",
-        _ => return None,
-    };
+    let store = store_name(source)?;
     if !path.has_root() {
         return None;
     }
@@ -343,6 +339,39 @@ fn home_store(source: &str, path: &Path) -> Option<PathBuf> {
     std::fs::symlink_metadata(&at)
         .is_ok_and(|m| m.is_dir())
         .then_some(at)
+}
+
+/// The name of `source`'s store inside its home: `projects` for Claude
+/// Code, `sessions` for Codex, `None` for any other tool.
+fn store_name(source: &str) -> Option<&'static str> {
+    match source {
+        SOURCE_CLAUDE_CODE => Some("projects"),
+        SOURCE_CODEX => Some("sessions"),
+        _ => None,
+    }
+}
+
+/// The store a home declared for `source` will be read at once the tool
+/// makes it ([`declared_store`]): `path`'s `projects` (Claude Code) or
+/// `sessions` (Codex) when nothing at all is there yet -- not a folder,
+/// not a link, not a file, and not a path that cannot be read. `None` for
+/// any other tool, a relative path, a folder already named as its store
+/// (a store, not a home), and whenever anything is in the store's place.
+///
+/// The automatic grant treats the home and this store as one source (owner
+/// decision 2026-11-18), so a session written in the store after the grant
+/// recorded the home arms; this is the only case it does. Anything already
+/// in the store's place may hold sessions from before the grant.
+pub fn store_to_come(source: &str, path: &Path) -> Option<PathBuf> {
+    let store = store_name(source)?;
+    if !path.has_root() || path.file_name() == Some(std::ffi::OsStr::new(store)) {
+        return None;
+    }
+    let at = path.join(store);
+    match std::fs::symlink_metadata(&at) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(at),
+        _ => None,
+    }
 }
 
 /// The store inside `path` when `path` is `source`'s home ([`home_store`])
@@ -1252,6 +1281,42 @@ mod tests {
                 declared_store(SOURCE_CLAUDE_CODE, linked.path()),
                 linked.path()
             );
+        }
+    }
+
+    /// The store a home will be read at is named only while nothing is in
+    /// its place: the grant carries over to it, and to nothing else (owner
+    /// decision 2026-11-18).
+    #[test]
+    fn a_store_to_come_is_named_only_while_nothing_is_in_its_place() {
+        let home = Scratch::new("store-to-come-claude-home");
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, home.path()),
+            Some(home.path().join("projects"))
+        );
+        assert_eq!(
+            store_to_come(SOURCE_CODEX, home.path()),
+            Some(home.path().join("sessions"))
+        );
+        assert_eq!(store_to_come(SOURCE_GEMINI_CLI, home.path()), None);
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, Path::new("relative/home")),
+            None
+        );
+        std::fs::create_dir(home.path().join("projects")).unwrap();
+        assert_eq!(store_to_come(SOURCE_CLAUDE_CODE, home.path()), None);
+        // A store is not a home.
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, &home.path().join("projects")),
+            None
+        );
+        std::fs::write(home.path().join("sessions"), b"").unwrap();
+        assert_eq!(store_to_come(SOURCE_CODEX, home.path()), None);
+        #[cfg(unix)]
+        {
+            let linked = Scratch::new("store-to-come-linked-home");
+            std::os::unix::fs::symlink(home.path(), linked.path().join("projects")).unwrap();
+            assert_eq!(store_to_come(SOURCE_CLAUDE_CODE, linked.path()), None);
         }
     }
 

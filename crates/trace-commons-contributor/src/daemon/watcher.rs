@@ -154,7 +154,7 @@ fn tick_blocking(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<TickR
         shared,
         now,
         all_sources(&source_roots),
-        source_roots.source_identities(),
+        &source_roots,
         max_queue_entries,
     )
 }
@@ -166,7 +166,7 @@ fn tick_blocking(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<TickR
 /// claim about how often `TraceSource::load` runs, and nothing observable
 /// from the queue alone can prove it.
 ///
-/// `source_identities` must come from the same `SourceRoots` as `sources`:
+/// `source_roots` must be the `SourceRoots` `sources` were built from:
 /// the automatic grant records each source under its name and root, and a
 /// root read separately could name one a `set_settings` has since swapped
 /// in, so root A's listing would be recorded as root B's and B's history
@@ -181,7 +181,7 @@ fn tick_over(
     shared: &Arc<DaemonShared>,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
-    source_identities: SourceIdentities,
+    source_roots: &crate::source::SourceRoots,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
     // The whole pass, from the config read to the epilogue, under the pass
@@ -191,7 +191,13 @@ fn tick_over(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     release_stale_holds(shared, now);
-    let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
+    let mut ctx = PassContext::read(
+        shared,
+        now,
+        max_queue_entries,
+        source_roots.source_identities(),
+    );
+    ctx.stores_to_come = source_roots.stores_to_come();
     // Before any session is visited, so a project whose grant was just
     // voided is already ask-first when its sessions are looked at -- and
     // against the same config snapshot the pass uses, so a widening written
@@ -574,9 +580,21 @@ fn record_sources_for_grant(
             projects.insert(project_key_of(shared, *source, session_ref));
         }
         let mut policy = shared.policy.lock().expect("policy lock");
-        if policy.record_source(grant, &key, sessions, projects)
-            && policy.save(&shared.store).is_err()
+        let mut recorded = policy.record_source(grant, &key, sessions, projects);
+        // A home and the store its tool has not made yet are one source
+        // (owner decision 2026-11-18): the store counts as recorded too, so
+        // a session written there after this record arms. Checked again
+        // now, after the listing: a store made since was not listed here,
+        // and is recorded on its own once it is read.
+        if let Some((store, store_key)) = ctx.store_to_come_key(source.name())
+            && matches!(
+                std::fs::symlink_metadata(store),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            )
         {
+            recorded |= policy.carry_source_record(grant, &key, &store_key);
+        }
+        if recorded && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist what was on disk for the automatic grant");
         }
     }
@@ -1438,6 +1456,11 @@ struct PassContext {
     /// record: from the same `SourceRoots` the pass's sources were built
     /// from, never a second read of the settings. See `tick_over`.
     source_identities: SourceIdentities,
+    /// Each declared tool home whose store is not made yet, from the same
+    /// `SourceRoots` (`SourceRoots::stores_to_come`): the store, and the
+    /// identity the source will have once it is read there. Only a full
+    /// pass sets it, for the automatic grant's record; empty otherwise.
+    stores_to_come: std::collections::BTreeMap<&'static str, (PathBuf, String)>,
 }
 
 impl PassContext {
@@ -1445,9 +1468,24 @@ impl PassContext {
     /// a harness pointed at another root is recorded afresh.
     fn source_key(&self, name: &str) -> String {
         match self.source_identities.get(name) {
-            Some(root) => format!("{name} {root}"),
+            Some(root) => Self::key_of(name, root),
             None => name.to_string(),
         }
+    }
+
+    /// The key a source named `name` with the identity `identity` is
+    /// recorded under.
+    fn key_of(name: &str, identity: &str) -> String {
+        format!("{name} {identity}")
+    }
+
+    /// The key `name` will be recorded under once the store its declared
+    /// home does not have yet is made, with that store: `None` when its
+    /// root is not such a home. See `stores_to_come`.
+    fn store_to_come_key(&self, name: &str) -> Option<(&Path, String)> {
+        self.stores_to_come
+            .get(name)
+            .map(|(store, identity)| (store.as_path(), Self::key_of(name, identity)))
     }
 
     fn read(
@@ -1512,6 +1550,7 @@ impl PassContext {
             disclosure,
             grant_terms,
             source_identities,
+            stores_to_come: Default::default(),
         }
     }
 }
@@ -2998,14 +3037,7 @@ mod tests {
                     }) as Box<dyn TraceSource>
                 })
                 .collect();
-            tick_over(
-                &self.shared,
-                now,
-                sources,
-                source_roots.source_identities(),
-                max_queue_entries,
-            )
-            .unwrap()
+            tick_over(&self.shared, now, sources, &source_roots, max_queue_entries).unwrap()
         }
 
         /// One *scoped* pass -- the same `tick_over_paths` `tick_paths` runs
@@ -5909,7 +5941,7 @@ mod tests {
             &f.shared,
             Utc::now() + chrono::Duration::hours(31),
             all_sources(&roots_a),
-            roots_a.source_identities(),
+            &roots_a,
             max_queue_entries,
         )
         .unwrap();
@@ -5929,6 +5961,107 @@ mod tests {
                 QueueState::Approved,
                 "a session on disk at the grant under root B was approved unattended"
             );
+        }
+    }
+
+    /// Owner decision 2026-11-18, "Carry the grant over": a declared tool
+    /// home and the store inside it are one source for the automatic grant.
+    /// A Claude Code home with no `projects` folder yet is read as it is, and
+    /// the grant records it there; once Claude Code makes the store, the
+    /// home is read at the store, and sessions written there after the grant
+    /// arm as any new session would. What was on disk at the grant still
+    /// does not: its project stays Ask, and its session is never approved
+    /// unattended (`include_existing` is false here).
+    #[tokio::test]
+    async fn a_grant_recorded_at_a_tool_home_carries_over_to_its_store() {
+        let mut f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let home = f._dir.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        f.claude_root = home.clone();
+        let pre = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch { path: home.clone() });
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::NotifyOnly, false));
+
+        // Claude Code makes its store, and writes there after the grant.
+        f.claude_root = home.join("projects");
+        let new = f.write_session("new", "22222222-2222-2222-2222-222222222222", 0);
+        let old_later = f.write_session("old", "33333333-3333-3333-3333-333333333333", 0);
+        for h in 31..35 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(
+            mode_of(&f, "new"),
+            (ProjectMode::AutoUpload, true),
+            "a project new in the store after the grant was not armed"
+        );
+        assert_eq!(
+            mode_of(&f, "old"),
+            (ProjectMode::NotifyOnly, false),
+            "a project on disk at the grant was armed"
+        );
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .all()
+                .iter()
+                .any(|e| e.path == new && e.state == QueueState::Approved),
+            "the store's new session is approved"
+        );
+        for e in queue
+            .all()
+            .iter()
+            .filter(|e| e.path == pre || e.path == old_later)
+        {
+            assert_ne!(
+                e.state,
+                QueueState::Approved,
+                "a session of a project on disk at the grant was approved unattended"
+            );
+        }
+    }
+
+    /// The carry-over is only for a store that did not exist when the home
+    /// was recorded. A `projects` link is not a store (`declared_store`
+    /// never follows one), so the home is read as it is; when a real store
+    /// replaces the link, nothing says its sessions were written after the
+    /// grant, and it is recorded afresh: nothing in it arms.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_store_that_was_a_link_at_the_grant_is_recorded_afresh() {
+        let mut f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let home = f._dir.path().join("claude-home");
+        let elsewhere = f._dir.path().join("elsewhere");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join("projects")).unwrap();
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch { path: home.clone() });
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        std::fs::remove_file(home.join("projects")).unwrap();
+        f.claude_root = home.join("projects");
+        let moved = f.write_session("moved", "44444444-4444-4444-4444-444444444444", 0);
+        for h in 31..35 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(mode_of(&f, "moved"), (ProjectMode::NotifyOnly, false));
+        let queue = f.shared.queue.lock().unwrap();
+        for e in queue.all().iter().filter(|e| e.path == moved) {
+            assert_ne!(e.state, QueueState::Approved);
         }
     }
 
@@ -8772,14 +8905,7 @@ mod tests {
                 .into_iter()
                 .map(|inner| Box::new(RefusingSource { inner, err }) as Box<dyn TraceSource>)
                 .collect();
-            tick_over(
-                &self.shared,
-                now,
-                sources,
-                source_roots.source_identities(),
-                max_queue_entries,
-            )
-            .unwrap()
+            tick_over(&self.shared, now, sources, &source_roots, max_queue_entries).unwrap()
         }
 
         fn health_label(&self) -> Option<String> {
