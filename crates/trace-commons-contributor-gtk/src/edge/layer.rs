@@ -22,9 +22,11 @@ pub fn supported() -> bool {
 /// The rail: on the overlay layer, over full-screen windows as the Mac's
 /// `.statusBar` panel is, anchored to the right edge alone so the
 /// compositor centres it vertically, reserving no space, and taking the
-/// keyboard only while open.
-pub fn make_rail(window: &gtk::Window) {
+/// keyboard only while open. Pinned to `monitor`, the first, as the Mac's
+/// is to its first screen; with none, the compositor picks.
+pub fn make_rail(window: &gtk::Window, monitor: Option<&gtk::gdk::Monitor>) {
     window.init_layer_shell();
+    window.set_monitor(monitor);
     window.set_namespace(Some("edge-rail"));
     window.set_layer(Layer::Overlay);
     window.set_anchor(Edge::Right, true);
@@ -53,8 +55,9 @@ pub fn make_panel(window: &gtk::Window) {
     window.set_keyboard_mode(KeyboardMode::OnDemand);
 }
 
-/// Anchors the panel as `geometry::panel_anchor` decided.
-pub fn place_panel(window: &gtk::Window, anchor: PanelAnchor) {
+/// Anchors the panel as `geometry::panel_anchor` decided, on `monitor`.
+pub fn place_panel(window: &gtk::Window, anchor: PanelAnchor, monitor: &gtk::gdk::Monitor) {
+    window.set_monitor(Some(monitor));
     window.set_anchor(Edge::Top, anchor.top);
     window.set_anchor(Edge::Bottom, !anchor.top);
     window.set_anchor(Edge::Left, anchor.left);

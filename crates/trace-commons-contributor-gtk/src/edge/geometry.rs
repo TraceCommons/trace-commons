@@ -106,8 +106,9 @@ pub struct PanelAnchor {
     pub horizontal: i32,
 }
 
-/// Where the panel goes for a tray click at `click`, on a monitor of
-/// `monitor` size (logical pixels, y down, the click in the same space).
+/// Where the panel goes for a tray click at `click`, on `monitor` (its
+/// place and size in desktop coordinates, logical pixels, y down; the
+/// click in the same space, as tray hosts send it).
 ///
 /// The Mac's popover hangs under its menu-bar item. A tray host passes the
 /// pointer's position with `Activate`: the panel opens on the click's side
@@ -115,8 +116,7 @@ pub struct PanelAnchor {
 /// centred on the click and kept inside the screen. Many hosts pass (0, 0)
 /// or nothing at all; then it opens in the top right corner, where a tray
 /// most often is.
-pub fn panel_anchor(click: Option<(i32, i32)>, monitor: (i32, i32)) -> PanelAnchor {
-    let (monitor_width, monitor_height) = monitor;
+pub fn panel_anchor(click: Option<(i32, i32)>, monitor: Rect) -> PanelAnchor {
     let corner = PanelAnchor {
         top: true,
         left: false,
@@ -126,13 +126,15 @@ pub fn panel_anchor(click: Option<(i32, i32)>, monitor: (i32, i32)) -> PanelAnch
     let Some((x, y)) = click.filter(|&(x, y)| (x, y) != (0, 0)) else {
         return corner;
     };
-    if x < 0 || y < 0 || x >= monitor_width || y >= monitor_height {
+    // The anchor's margins are the monitor's own.
+    let (x, y) = (x - monitor.x, y - monitor.y);
+    if x < 0 || y < 0 || x >= monitor.width || y >= monitor.height {
         // A click outside this monitor: another output's, or a host that
         // passes something else in these numbers.
         return corner;
     }
-    let top = y < monitor_height / 2;
-    let widest = (monitor_width - PANEL_WIDTH - PANEL_MARGIN).max(PANEL_MARGIN);
+    let top = y < monitor.height / 2;
+    let widest = (monitor.width - PANEL_WIDTH - PANEL_MARGIN).max(PANEL_MARGIN);
     let left = (x - PANEL_WIDTH / 2).clamp(PANEL_MARGIN, widest);
     PanelAnchor {
         top,
@@ -142,9 +144,29 @@ pub fn panel_anchor(click: Option<(i32, i32)>, monitor: (i32, i32)) -> PanelAnch
     }
 }
 
+/// Which of `monitors` (desktop coordinates) a tray click landed on, so the
+/// panel opens on that monitor. `None` with no position, a host's (0, 0),
+/// or a point on none of them.
+pub fn monitor_for_click(monitors: &[Rect], click: Option<(i32, i32)>) -> Option<usize> {
+    let (x, y) = click.filter(|&point| point != (0, 0))?;
+    monitors.iter().position(|monitor| {
+        x >= monitor.x
+            && y >= monitor.y
+            && x < monitor.x + monitor.width
+            && y < monitor.y + monitor.height
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FIRST: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
 
     const SCREEN: Rect = Rect {
         x: 0,
@@ -233,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_top_bar_opens_the_panel_under_it_centred() {
-        let anchor = panel_anchor(Some((1700, 12)), (1920, 1080));
+        let anchor = panel_anchor(Some((1700, 12)), FIRST);
         assert!(anchor.top && anchor.left);
         assert_eq!(anchor.horizontal, 1700 - 142);
         assert_eq!(anchor.vertical, PANEL_MARGIN);
@@ -241,16 +263,16 @@ mod tests {
 
     #[test]
     fn a_click_on_a_bottom_bar_opens_it_above() {
-        let anchor = panel_anchor(Some((400, 1070)), (1920, 1080));
+        let anchor = panel_anchor(Some((400, 1070)), FIRST);
         assert!(!anchor.top && anchor.left);
         assert_eq!(anchor.horizontal, 400 - 142);
     }
 
     #[test]
     fn the_panel_stays_on_screen_at_either_side() {
-        let right = panel_anchor(Some((1915, 5)), (1920, 1080));
+        let right = panel_anchor(Some((1915, 5)), FIRST);
         assert_eq!(right.horizontal, 1920 - PANEL_WIDTH - PANEL_MARGIN);
-        let left = panel_anchor(Some((3, 5)), (1920, 1080));
+        let left = panel_anchor(Some((3, 5)), FIRST);
         assert_eq!(left.horizontal, PANEL_MARGIN);
     }
 
@@ -262,11 +284,47 @@ mod tests {
             vertical: PANEL_MARGIN,
             horizontal: PANEL_MARGIN,
         };
-        assert_eq!(panel_anchor(None, (1920, 1080)), corner);
+        assert_eq!(panel_anchor(None, FIRST), corner);
         // What many hosts send for "no position".
-        assert_eq!(panel_anchor(Some((0, 0)), (1920, 1080)), corner);
+        assert_eq!(panel_anchor(Some((0, 0)), FIRST), corner);
         // Another monitor's coordinates.
-        assert_eq!(panel_anchor(Some((2500, 10)), (1920, 1080)), corner);
-        assert_eq!(panel_anchor(Some((-5, 10)), (1920, 1080)), corner);
+        assert_eq!(panel_anchor(Some((2500, 10)), FIRST), corner);
+        assert_eq!(panel_anchor(Some((-5, 10)), FIRST), corner);
+    }
+
+    /// A second monitor to the right of the first, as GDK lays them out
+    /// in desktop coordinates.
+    const SECOND: Rect = Rect {
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+    };
+
+    #[test]
+    fn a_click_on_a_second_monitor_opens_the_panel_on_it() {
+        // The tray's coordinates are the desktop's; the anchor is in the
+        // monitor's own.
+        let anchor = panel_anchor(Some((2100, 10)), SECOND);
+        assert!(anchor.top && anchor.left);
+        assert_eq!(anchor.horizontal, 2100 - 1920 - 142);
+        let bottom = panel_anchor(Some((4470, 1430)), SECOND);
+        assert!(!bottom.top);
+        assert_eq!(bottom.horizontal, 2560 - PANEL_WIDTH - PANEL_MARGIN);
+        // The first monitor's click is not this monitor's.
+        assert!(!panel_anchor(Some((1700, 12)), SECOND).left);
+    }
+
+    #[test]
+    fn the_panel_opens_on_the_monitor_under_the_click() {
+        let monitors = [FIRST, SECOND];
+        assert_eq!(monitor_for_click(&monitors, Some((2100, 10))), Some(1));
+        assert_eq!(monitor_for_click(&monitors, Some((1919, 10))), Some(0));
+        assert_eq!(monitor_for_click(&monitors, Some((1920, 10))), Some(1));
+        // No position, a host's (0, 0), or a point on no monitor: the
+        // caller's own monitor decides.
+        assert_eq!(monitor_for_click(&monitors, None), None);
+        assert_eq!(monitor_for_click(&monitors, Some((0, 0))), None);
+        assert_eq!(monitor_for_click(&monitors, Some((9000, 10))), None);
     }
 }

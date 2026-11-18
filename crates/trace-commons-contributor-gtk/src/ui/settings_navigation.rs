@@ -4,7 +4,7 @@ use super::super::style::{self, space};
 use adw::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Section {
+pub(crate) enum Section {
     Account,
     Watching,
     Tools,
@@ -89,6 +89,9 @@ fn scroll_target(y: f64, upper: f64, page_size: f64) -> f64 {
 
 pub(super) struct Navigation {
     pub root: gtk::Box,
+    /// Selects a section and scrolls to it, now or, before the window has
+    /// been laid out, on its first frame that can scroll.
+    pub select: std::rc::Rc<dyn Fn(Section)>,
     // Keep these for the real-widget regression test; production ownership
     // belongs to the GTK tree, not a second persistent view model.
     #[cfg(test)]
@@ -240,7 +243,25 @@ impl Navigation {
         });
         // Activating the already-selected section still returns to it after
         // manual scrolling; selection-changed alone would leave a dead row.
-        list.connect_row_activated(move |_, row| navigate(row.index() as usize));
+        list.connect_row_activated({
+            let navigate = navigate.clone();
+            move |_, row| navigate(row.index() as usize)
+        });
+        // A section asked for from outside, scrolled to on the first frame
+        // the content is laid out in: before that there is nowhere to
+        // scroll, and the window may not have been shown yet.
+        let pending: std::rc::Rc<std::cell::Cell<Option<usize>>> = std::rc::Rc::default();
+        let select: std::rc::Rc<dyn Fn(Section)> = std::rc::Rc::new({
+            let list = list.downgrade();
+            let pending = pending.clone();
+            move |section: Section| {
+                let index = Section::ALL.iter().position(|s| *s == section).unwrap_or(0);
+                if let Some(list) = list.upgrade() {
+                    list.select_row(list.row_at_index(index as i32).as_ref());
+                }
+                pending.set(Some(index));
+            }
+        });
         // Written when the libadwaita floor was 1.2, which has no
         // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
         // been moved to one. Allocation is checked at frame time and only
@@ -248,11 +269,21 @@ impl Navigation {
         root.add_tick_callback({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();
+            let scroller = scroller.downgrade();
+            let navigate = navigate.clone();
             move |root, _| {
                 if let (Some(sidebar), Some(compact)) = (sidebar.upgrade(), compact.upgrade()) {
                     let wide = root.width() >= 760;
                     sidebar.set_visible(wide);
                     compact.set_visible(!wide);
+                }
+                if let Some(index) = pending.get()
+                    && let Some(scroller) = scroller.upgrade()
+                    && scroller.is_mapped()
+                    && scroller.vadjustment().page_size() > 0.0
+                {
+                    pending.set(None);
+                    navigate(index);
                 }
                 gtk::glib::ControlFlow::Continue
             }
@@ -260,6 +291,7 @@ impl Navigation {
         list.select_row(list.row_at_index(0).as_ref());
         Self {
             root,
+            select,
             #[cfg(test)]
             sidebar,
             #[cfg(test)]
@@ -376,6 +408,47 @@ mod tests {
             Some(Section::Witness.title())
         );
         assert_eq!(field.text(), "unsaved input");
+        window.close();
+    }
+
+    /// Settings opened at a section from outside (the edge rail's and the
+    /// popover's buttons) scrolls there even when asked before the window
+    /// has ever been laid out.
+    #[test]
+    #[ignore = "requires a GTK display; run separately with --ignored --test-threads=1"]
+    fn mounted_settings_opened_at_a_section_scrolls_there_on_first_show() {
+        adw::init().expect("GTK display unavailable");
+        let sections = Sections::new();
+        for section in Section::ALL {
+            sections.body(section).set_size_request(-1, 240);
+        }
+        let navigation = Navigation::new(sections);
+        (navigation.select)(Section::Startup);
+        let window = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(600)
+            .child(&navigation.root)
+            .build();
+        window.present();
+        wait_for_layout(&navigation, true);
+        settle();
+        let startup = Section::ALL
+            .iter()
+            .position(|section| *section == Section::Startup)
+            .expect("Startup");
+        assert_eq!(
+            navigation.list.selected_row().unwrap().index() as usize,
+            startup
+        );
+        assert!(
+            navigation.scroller.vadjustment().value() > 0.0,
+            "left at the top"
+        );
+        // Asked again once shown, from somewhere else.
+        navigation.scroller.vadjustment().set_value(0.0);
+        (navigation.select)(Section::PrivateAI);
+        settle();
+        assert!(navigation.scroller.vadjustment().value() > 0.0);
         window.close();
     }
 

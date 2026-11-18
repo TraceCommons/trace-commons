@@ -5,17 +5,22 @@
 //! windows: it owns [`BUS_NAME`] on the session bus and exports one narrow
 //! interface, [`INTERFACE`], at [`OBJECT_PATH`]:
 //!
-//! * `Place(s title, s role, i x, i y)`: the calling process's window with
-//!   that title is put where `role` says -- `"rail"` against the primary
-//!   monitor's right edge, centred, and kept there as it resizes;
-//!   `"panel"` near (`x`, `y`), or near the pointer when they are
+//! * `Place(s title, s role, i x, i y, b open)`: the calling process's
+//!   window with that title is put where `role` says -- `"rail"` against
+//!   the primary monitor's right edge, centred, and kept there as it
+//!   resizes; `"panel"` near (`x`, `y`), or near the pointer when they are
 //!   negative -- kept above other windows and shown on every workspace.
+//!   `open` says whether the rail is open (the panel's is ignored): an
+//!   open rail keeps keyboard focus once given it, a closed one never
+//!   does (owner, 2026-11-18, "Keyboard only while open").
 //! * `Release(s title)`: stop placing it.
 //! * `Version` (u): the interface's version, [`VERSION`].
 //!
 //! The extension matches windows by the caller's process id and the title,
-//! so it cannot be pointed at another application's windows. Nothing else
-//! crosses: no trace, no setting, no word. Without the extension the app
+//! and each role places only its own title, [`RAIL_TITLE`] or
+//! [`PANEL_TITLE`], which no other window of this app carries: it cannot
+//! be pointed at another application's windows, nor at this app's main
+//! window. Nothing else crosses: no trace, no setting, no word. Without the extension the app
 //! works as before (`capability`): no rail, and a plain panel window.
 //!
 //! GNOME Shell disables every extension on the lock screen and enables it
@@ -31,7 +36,15 @@ use std::rc::Rc;
 pub const BUS_NAME: &str = "ai.tracecommons.Contributor.EdgeSurfaces";
 pub const OBJECT_PATH: &str = "/ai/tracecommons/Contributor/EdgeSurfaces";
 pub const INTERFACE: &str = "ai.tracecommons.Contributor.EdgeSurfaces1";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// The rail's and the panel's window titles while the extension places
+/// them: identifiers, not words, the same as their layer-shell namespaces,
+/// and unlike any other window's title in this app (the main window and
+/// the panel's plain window are titled with the app's name). The
+/// accessible names stay the shared copy's.
+pub const RAIL_TITLE: &str = "edge-rail";
+pub const PANEL_TITLE: &str = "menu-panel";
 
 /// Which of the two windows a placement is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,20 +60,29 @@ impl Role {
             Self::Panel => "panel",
         }
     }
+
+    /// The window title the extension places for this role.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Rail => RAIL_TITLE,
+            Self::Panel => PANEL_TITLE,
+        }
+    }
 }
 
 /// One request to the extension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Place {
-        title: String,
         role: Role,
         /// Where the panel was asked for; negative for the pointer's
         /// position. Ignored for the rail.
         at: (i32, i32),
+        /// Whether the rail is open. Ignored for the panel.
+        open: bool,
     },
     Release {
-        title: String,
+        role: Role,
     },
 }
 
@@ -110,11 +132,11 @@ impl Client {
 fn call(connection: &gtk::gio::DBusConnection, request: &Request) {
     use gtk::glib::variant::ToVariant;
     let (method, args) = match request {
-        Request::Place { title, role, at } => (
+        Request::Place { role, at, open } => (
             "Place",
-            (title.as_str(), role.wire(), at.0, at.1).to_variant(),
+            (role.title(), role.wire(), at.0, at.1, *open).to_variant(),
         ),
-        Request::Release { title } => ("Release", (title.as_str(),).to_variant()),
+        Request::Release { role } => ("Release", (role.title(),).to_variant()),
     };
     connection.call(
         Some(BUS_NAME),
@@ -130,21 +152,21 @@ fn call(connection: &gtk::gio::DBusConnection, request: &Request) {
     );
 }
 
-/// The placements to ask for again, by window title: the last `Place` for
-/// each, gone once released.
+/// The placements to ask for again, by window: the last `Place` for each,
+/// gone once released.
 #[derive(Default, Debug, PartialEq, Eq)]
 struct Held {
-    places: std::collections::BTreeMap<String, Request>,
+    places: std::collections::BTreeMap<&'static str, Request>,
 }
 
 impl Held {
     fn record(&mut self, request: &Request) {
         match request {
-            Request::Place { title, .. } => {
-                self.places.insert(title.clone(), request.clone());
+            Request::Place { role, .. } => {
+                self.places.insert(role.title(), request.clone());
             }
-            Request::Release { title } => {
-                self.places.remove(title);
+            Request::Release { role } => {
+                self.places.remove(role.title());
             }
         }
     }
@@ -211,6 +233,7 @@ mod tests {
             format!("<interface name=\"{INTERFACE}\">"),
             format!("const VERSION = {VERSION};"),
             "<method name=\"Place\">".to_string(),
+            "<arg type=\"b\" direction=\"in\" name=\"open\"/>".to_string(),
             "<method name=\"Release\">".to_string(),
         ] {
             assert!(extension.contains(&needle), "extension.js lacks {needle}");
@@ -220,6 +243,8 @@ mod tests {
             format!("ROLE_RAIL = '{}';", Role::Rail.wire()),
             format!("ROLE_PANEL = '{}';", Role::Panel.wire()),
             format!("MARGIN = {};", crate::edge::geometry::PANEL_MARGIN),
+            format!("TITLE_RAIL = '{RAIL_TITLE}';"),
+            format!("TITLE_PANEL = '{PANEL_TITLE}';"),
         ] {
             assert!(placement.contains(&needle), "placement.js lacks {needle}");
         }
@@ -246,31 +271,57 @@ mod tests {
 
     #[test]
     fn a_returning_extension_is_asked_again_for_what_is_still_placed() {
-        let place = |title: &str, role| Request::Place {
-            title: title.into(),
+        let place = |role, open| Request::Place {
             role,
             at: (-1, -1),
+            open,
         };
         let mut held = Held::default();
-        held.record(&place("rail", Role::Rail));
-        held.record(&place("panel", Role::Panel));
+        held.record(&place(Role::Rail, false));
+        held.record(&place(Role::Panel, true));
         held.record(&Request::Place {
-            title: "panel".into(),
             role: Role::Panel,
             at: (5, 6),
+            open: true,
         });
-        held.record(&Request::Release {
-            title: "rail".into(),
-        });
+        held.record(&Request::Release { role: Role::Rail });
         let again: Vec<&Request> = held.replay().collect();
         assert_eq!(
             again,
             vec![&Request::Place {
-                title: "panel".into(),
                 role: Role::Panel,
                 at: (5, 6),
+                open: true,
             }],
             "the last placement per window, and nothing released"
+        );
+        // The rail's open state is the latest asked, so an unlock while it
+        // is open gives it back its keyboard.
+        let mut held = Held::default();
+        held.record(&place(Role::Rail, false));
+        held.record(&place(Role::Rail, true));
+        assert_eq!(
+            held.replay().collect::<Vec<_>>(),
+            vec![&place(Role::Rail, true)]
+        );
+    }
+
+    /// F3: the extension can only ever be pointed at the rail and the
+    /// panel. Their titles are their own, never the main window's (the
+    /// app's name) nor any word a person reads.
+    #[test]
+    fn the_placed_titles_cannot_be_the_main_windows() {
+        let words = trace_commons_contributor::preview_copy::monitor_screens_copy();
+        for title in [Role::Rail.title(), Role::Panel.title()] {
+            assert_ne!(title, crate::copy::APP_NAME);
+            assert_ne!(title, words.settings_title);
+            assert_ne!(title, words.edge_rail.rail_label);
+        }
+        assert_ne!(Role::Rail.title(), Role::Panel.title());
+        let extension = extension_file("extension.js");
+        assert!(
+            extension.contains("titleFor(role) !== title"),
+            "Place refuses a title that is not its role's"
         );
     }
 
@@ -448,26 +499,62 @@ mod live_tests {
         glib::timeout_future(Duration::from_millis(1500)).await;
     }
 
-    const RAIL: &str = "rail-under-test";
-    const PANEL: &str = "panel-under-test";
+    const RAIL: &str = RAIL_TITLE;
+    const PANEL: &str = PANEL_TITLE;
+    /// An ordinary window of the same process, never placed: what focus
+    /// goes back to, and what must never be moved.
+    const OTHER: &str = "other-under-test";
     const PANEL_AT: (i32, i32) = (1700, 10);
+
+    /// Runs `body` with `w(title)` naming this process's window of that
+    /// title, and answers with what it returns, as a string.
+    async fn with_windows(
+        connection: &gtk::gio::DBusConnection,
+        body: &str,
+    ) -> Result<String, String> {
+        let text = eval(
+            connection,
+            &format!(
+                "(() => {{ const w = t => global.get_window_actors().map(a => a.meta_window)                  .find(x => x.get_pid() === {pid} && x.get_title() === t);                  const now = global.display.get_current_time_roundtrip();                  return String((() => {{ {body} }})()); }})()",
+                pid = std::process::id(),
+            ),
+        )
+        .await?;
+        serde_json::from_str(&text).map_err(|e| format!("{e}: {text}"))
+    }
+
+    /// The focused window's title (empty for none), whether `OTHER` is
+    /// minimised, and the active workspace's index.
+    async fn focus_state(
+        connection: &gtk::gio::DBusConnection,
+    ) -> Result<(String, bool, i32), String> {
+        let text = with_windows(
+            connection,
+            &format!(
+                "const f = global.display.focus_window;                  return JSON.stringify([f ? (f.get_title() || '') : '',                    w('{OTHER}').minimized,                    global.workspace_manager.get_active_workspace_index()]);"
+            ),
+        )
+        .await?;
+        serde_json::from_str(&text).map_err(|e| format!("{e}: {text}"))
+    }
 
     async fn run(
         connection: &gtk::gio::DBusConnection,
         client: &Client,
         rail: &gtk::Window,
+        panel: &gtk::Window,
     ) -> Result<(), String> {
-        let place_rail = || Request::Place {
-            title: RAIL.into(),
+        let place_rail = |open| Request::Place {
             role: Role::Rail,
             at: (-1, -1),
+            open,
         };
         let place_panel = || Request::Place {
-            title: PANEL.into(),
             role: Role::Panel,
             at: PANEL_AT,
+            open: true,
         };
-        client.send(place_rail());
+        client.send(place_rail(false));
         client.send(place_panel());
         settle().await;
 
@@ -515,28 +602,124 @@ mod live_tests {
         )?;
         rail.set_default_size(geometry::OPEN_WIDTH, 680);
 
-        // A click on the rail leaves focus with the window before it: the Mac
+        // The main window is never touched, whatever it is called: a Place
+        // naming any title but the role's own is refused.
+        let refused = connection
+            .call_future(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                INTERFACE,
+                "Place",
+                Some(&(OTHER, Role::Panel.wire(), 5i32, 5i32, true).to_variant()),
+                None,
+                gtk::gio::DBusCallFlags::NONE,
+                5_000,
+            )
+            .await;
+        check(
+            refused.is_err(),
+            "a Place for another title refused",
+            &shell,
+        )?;
+
+        // Focus (owner, 2026-11-18, "Keyboard only while open"). A click on
+        // the closed rail leaves focus with the window before it: the Mac
         // panel never becomes key.
-        eval(
+        with_windows(
+            connection,
+            &format!("w('{OTHER}').activate(now); w('{RAIL}').activate(now); return '';"),
+        )
+        .await?;
+        settle().await;
+        let (focused, _, _) = focus_state(connection).await?;
+        if focused != OTHER {
+            return Err(format!(
+                "closed rail: focus on {focused:?}, not back on {OTHER}"
+            ));
+        }
+
+        // The open rail keeps it, so Escape and Tab reach it ...
+        client.send(place_rail(true));
+        settle().await;
+        with_windows(
+            connection,
+            &format!("w('{RAIL}').activate(now); return '';"),
+        )
+        .await?;
+        settle().await;
+        let (focused, _, _) = focus_state(connection).await?;
+        if focused != RAIL {
+            return Err(format!("open rail: focus on {focused:?}, not kept"));
+        }
+        // ... and closing it gives focus back.
+        client.send(place_rail(false));
+        settle().await;
+        let (focused, _, _) = focus_state(connection).await?;
+        if focused != OTHER {
+            return Err(format!(
+                "rail closed: focus on {focused:?}, not back on {OTHER}"
+            ));
+        }
+
+        // The panel is shown on every workspace and would take focus in
+        // the steps below; hidden, the rail is the only other window left.
+        panel.set_visible(false);
+        settle().await;
+
+        // A minimised window is never brought back to take focus.
+        with_windows(
+            connection,
+            &format!("w('{OTHER}').minimize(); w('{RAIL}').activate(now); return '';"),
+        )
+        .await?;
+        settle().await;
+        let (focused, minimised, _) = focus_state(connection).await?;
+        if !minimised || focused == OTHER || focused == RAIL {
+            return Err(format!(
+                "minimised: focus on {focused:?}, {OTHER} minimised {minimised}"
+            ));
+        }
+
+        // Focus is never given back across workspaces: the rail is the only
+        // window on the empty one.
+        with_windows(
             connection,
             &format!(
-                "(() => {{ const ws = global.get_window_actors().map(a => a.meta_window) \
-                 .filter(w => w.get_pid() === {pid}); \
-                 const p = ws.find(w => w.get_title() === '{PANEL}'); \
-                 const r = ws.find(w => w.get_title() === '{RAIL}'); \
-                 p.activate(global.get_current_time()); r.activate(global.get_current_time()); \
-                 return ''; }})()",
-                pid = std::process::id(),
+                "w('{OTHER}').unminimize(); w('{OTHER}').activate(now); \
+                 const m = global.workspace_manager; \
+                 if (m.get_n_workspaces() < 2) m.append_new_workspace(false, now); \
+                 return '';"
             ),
         )
         .await?;
         settle().await;
-        let shell = look(connection).await?;
-        check(
-            window(&shell, PANEL)?.focused,
-            "focus back on the panel",
-            &shell,
-        )?;
+        with_windows(
+            connection,
+            "global.workspace_manager.get_workspace_by_index(1).activate(now); return '';",
+        )
+        .await?;
+        settle().await;
+        with_windows(
+            connection,
+            &format!("w('{RAIL}').activate(now); return '';"),
+        )
+        .await?;
+        settle().await;
+        let (focused, minimised, workspace) = focus_state(connection).await?;
+        if workspace != 1 || focused == OTHER || focused == RAIL || minimised {
+            return Err(format!(
+                "workspace switch: on workspace {workspace}, focus on {focused:?}, \
+                 {OTHER} minimised {minimised}"
+            ));
+        }
+        with_windows(
+            connection,
+            "global.workspace_manager.get_workspace_by_index(0).activate(now); return '';",
+        )
+        .await?;
+        panel.present();
+        client.send(place_panel());
+        settle().await;
 
         // The lock screen's shape: disabled, everything it did is undone;
         // enabled again, this client asks again and both are held again.
@@ -588,7 +771,7 @@ mod live_tests {
         )?;
 
         // Released by the app: no longer kept above.
-        client.send(Request::Release { title: RAIL.into() });
+        client.send(Request::Release { role: Role::Rail });
         settle().await;
         let shell = look(connection).await?;
         check(
@@ -621,17 +804,27 @@ mod live_tests {
             .default_width(geometry::PANEL_WIDTH)
             .default_height(400)
             .build();
+        let other = gtk::Window::builder()
+            .title(OTHER)
+            .default_width(300)
+            .default_height(200)
+            .build();
         rail.present();
         panel.present();
+        other.present();
 
         let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
         let finished = Rc::new(Cell::new(false));
         {
-            let (outcome, finished, rail) =
-                (Rc::clone(&outcome), Rc::clone(&finished), rail.clone());
+            let (outcome, finished, rail, panel) = (
+                Rc::clone(&outcome),
+                Rc::clone(&finished),
+                rail.clone(),
+                panel.clone(),
+            );
             glib::spawn_future_local(async move {
                 let result = match find().await {
-                    Some(client) => run(&connection, &client, &rail).await,
+                    Some(client) => run(&connection, &client, &rail, &panel).await,
                     None => Err("the client did not find the extension".into()),
                 };
                 *outcome.borrow_mut() = Some(result);
@@ -641,7 +834,7 @@ mod live_tests {
         while !finished.get() {
             context.iteration(true);
         }
-        drop((rail, panel));
+        drop((rail, panel, other));
         if let Some(Err(failure)) = outcome.borrow_mut().take() {
             panic!("{failure}");
         }

@@ -7,15 +7,21 @@
 // them above other windows and shows them on every workspace. It draws
 // nothing and holds no words of its own.
 //
-// One narrow interface on the session bus: Place(title, role, x, y) and
-// Release(title). A window is matched by the calling process's id and its
-// title, so a caller can only ever place its own windows. Without this
-// extension the app falls back on its own: no rail, a plain panel window.
+// One narrow interface on the session bus: Place(title, role, x, y, open)
+// and Release(title). A window is matched by the calling process's id and
+// its title, and each role places only the one title placement.js names
+// for it, which no other window of the app carries: a caller can only ever
+// place its own rail and panel, never its main window or anyone else's.
+// Without this extension the app falls back on its own: no rail, a plain
+// panel window.
 //
-// The rail never keeps keyboard focus (the Mac's is a non-activating
-// panel): when a click gives it focus, focus goes back to the window that
-// had it. Both windows are placed again when the monitors or work areas
-// change. Everything this does to a window is undone by Release, by the
+// Keyboard focus (owner, 2026-11-18, "Keyboard only while open"): the open
+// rail keeps it once given it, so Escape and Tab work; a closed rail never
+// keeps it (the Mac's is a non-activating panel). Focus goes back only to
+// a window on the active workspace and not minimised, or else to nothing,
+// so it never switches workspaces or brings a window back (placement.js,
+// focusAfter). Both windows are placed again when the monitors or work
+// areas change. Everything this does to a window is undone by Release, by the
 // caller leaving the bus, and by disable() -- which GNOME Shell calls on
 // every screen lock; the app asks again when the name returns
 // (src/edge/gnome.rs).
@@ -23,8 +29,11 @@
 // Written against GNOME Shell 46 (Ubuntu 24.04) and the ES module
 // extension API that 45 introduced, which 47-51 keep. Every Meta call here
 // (get_pid, get_title, get_gtk_window_object_path, get_frame_rect,
-// move_frame, make_above, stick, get_work_area_for_monitor) and the display's window-created signal are
-// present in each of those versions.
+// move_frame, make_above, stick, get_work_area_for_monitor,
+// located_on_workspace, focus, the minimized property, the unmanaging
+// signal, and the display's unset_input_focus,
+// get_current_time_roundtrip and window-created) is in mutter's public
+// API in each of those versions.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -33,11 +42,13 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {ROLE_PANEL, ROLE_RAIL, focusToRestore, frameFor} from './placement.js';
+import {
+    FOCUS_RESTORE, FOCUS_UNSET, ROLE_RAIL, focusAfter, frameFor, titleFor,
+} from './placement.js';
 
 const BUS_NAME = 'ai.tracecommons.Contributor.EdgeSurfaces';
 const OBJECT_PATH = '/ai/tracecommons/Contributor/EdgeSurfaces';
-const VERSION = 1;
+const VERSION = 2;
 
 const IFACE = `<node>
   <interface name="ai.tracecommons.Contributor.EdgeSurfaces1">
@@ -46,6 +57,7 @@ const IFACE = `<node>
       <arg type="s" direction="in" name="role"/>
       <arg type="i" direction="in" name="x"/>
       <arg type="i" direction="in" name="y"/>
+      <arg type="b" direction="in" name="open"/>
     </method>
     <method name="Release">
       <arg type="s" direction="in" name="title"/>
@@ -72,11 +84,11 @@ function callerPid(sender) {
 }
 
 /**
- * Whether `window` is the caller's window of that title. The app's main
- * window may share the panel's title, but it is a GtkApplicationWindow,
- * which GTK names with an object path (gtk-shell on Wayland, a window
- * property on X11); the two windows placed here are plain GtkWindows and
- * have none.
+ * Whether `window` is the caller's window of that title. The title is one
+ * only the rail or the panel carries (PlaceAsync refuses any other). As a
+ * second guard, a GtkApplicationWindow -- the app's main window is one, and
+ * GTK names it with an object path where it can -- is never matched; the
+ * two windows placed here are plain GtkWindows.
  */
 function matches(window, pid, title) {
     return window.get_pid() === pid && window.get_title() === title &&
@@ -86,22 +98,26 @@ function matches(window, pid, title) {
 export default class EdgeSurfacesExtension extends Extension {
     enable() {
         // key: pid + '\n' + title ->
-        //   {pid, sender, title, role, at, window, signals, made: {above, stuck}}
+        //   {pid, sender, title, role, at, open, window, signals, made: {above, stuck}}
         this._placements = new Map();
         // sender -> bus watch id, so a caller's placements end with it.
         this._watches = new Map();
         this._lastFocus = null;
         this._lastFocusId = 0;
+        // The idle callbacks window-created queued, removed on disable.
+        this._idles = new Set();
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._nameId = Gio.bus_own_name_on_connection(
             Gio.DBus.session, BUS_NAME, Gio.BusNameOwnerFlags.NONE, null, null);
         this._created = global.display.connect('window-created', (_display, window) => {
             // The title may arrive a moment after the window does.
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._idles?.delete(id);
                 this._adopt(window);
                 return GLib.SOURCE_REMOVE;
             });
+            this._idles.add(id);
         });
         this._displayIds = [
             global.display.connect('workareas-changed', () => this._placeAll()),
@@ -113,6 +129,9 @@ export default class EdgeSurfacesExtension extends Extension {
     disable() {
         global.display.disconnect(this._created);
         this._created = 0;
+        for (const id of this._idles)
+            GLib.source_remove(id);
+        this._idles = null;
         for (const id of this._displayIds)
             global.display.disconnect(id);
         this._displayIds = [];
@@ -135,8 +154,8 @@ export default class EdgeSurfacesExtension extends Extension {
         return VERSION;
     }
 
-    PlaceAsync([title, role, x, y], invocation) {
-        if (role !== ROLE_RAIL && role !== ROLE_PANEL) {
+    PlaceAsync([title, role, x, y, open], invocation) {
+        if (titleFor(role) === null || titleFor(role) !== title) {
             invocation.return_dbus_error('org.freedesktop.DBus.Error.InvalidArgs', 'role');
             return;
         }
@@ -147,12 +166,23 @@ export default class EdgeSurfacesExtension extends Extension {
                 return;
             }
             const key = `${pid}\n${title}`;
+            const at = x < 0 || y < 0 ? global.get_pointer().slice(0, 2) : [x, y];
             const old = this._placements.get(key);
+            if (old && old.window && old.sender === sender) {
+                // The rail opening or closing, or the panel asked for again:
+                // held as it is, only placed anew.
+                old.at = at;
+                old.open = open;
+                old.place?.();
+                if (global.display.focus_window === old.window)
+                    this._onFocus();
+                invocation.return_value(null);
+                return;
+            }
             if (old)
                 this._forget(old);
-            const at = x < 0 || y < 0 ? global.get_pointer().slice(0, 2) : [x, y];
             const placement = {
-                pid, sender, title, role, at, window: null, signals: [],
+                pid, sender, title, role, at, open, window: null, signals: [],
                 made: {above: false, stuck: false},
             };
             this._placements.set(key, placement);
@@ -209,7 +239,7 @@ export default class EdgeSurfacesExtension extends Extension {
         placement.place = place;
         placement.signals = [
             window.connect('size-changed', place),
-            window.connect('unmanaged', () => {
+            window.connect('unmanaging', () => {
                 placement.signals = [];
                 placement.window = null;
                 placement.place = null;
@@ -217,6 +247,12 @@ export default class EdgeSurfacesExtension extends Extension {
             }),
         ];
         place();
+        // A window placed now may have taken focus before it was known
+        // to be the rail, and been noted as the window to go back to.
+        if (this._lastFocus === window)
+            this._setLastFocus(null);
+        if (global.display.focus_window === window)
+            this._onFocus();
     }
 
     /** Stops placing a window and undoes what placing it did. */
@@ -241,22 +277,38 @@ export default class EdgeSurfacesExtension extends Extension {
             placement.place?.();
     }
 
-    _isRail(window) {
+    _placementOf(window) {
         for (const placement of this._placements?.values() ?? []) {
             if (placement.window === window)
-                return placement.role === ROLE_RAIL;
+                return placement;
         }
-        return false;
+        return null;
     }
 
     _onFocus() {
         const focused = global.display.focus_window;
-        const back = focusToRestore(focused, this._lastFocus, w => this._isRail(w));
-        if (back) {
-            back.activate(global.get_current_time());
+        const shell = {
+            isRail: w => this._placementOf(w)?.role === ROLE_RAIL,
+            isOpen: w => Boolean(this._placementOf(w)?.open),
+            // The window noted last is forgotten as it starts to go.
+            isManaged: w => w === this._lastFocus,
+            onActiveWorkspace: w => w.located_on_workspace(
+                global.workspace_manager.get_active_workspace()),
+            isMinimized: w => w.minimized,
+        };
+        const decision = focusAfter(focused, this._lastFocus, shell);
+        const now = global.display.get_current_time_roundtrip();
+        if (decision.action === FOCUS_RESTORE) {
+            // focus, not activate: it neither raises, nor switches
+            // workspace, nor unminimises.
+            decision.window.focus(now);
             return;
         }
-        if (focused && !this._isRail(focused))
+        if (decision.action === FOCUS_UNSET) {
+            global.display.unset_input_focus(now);
+            return;
+        }
+        if (focused && !shell.isRail(focused))
             this._setLastFocus(focused);
     }
 
@@ -264,8 +316,10 @@ export default class EdgeSurfacesExtension extends Extension {
         if (this._lastFocus && this._lastFocusId)
             this._lastFocus.disconnect(this._lastFocusId);
         this._lastFocus = window;
+        // unmanaging, not unmanaged: focus moves on while a window is
+        // going, before unmanaged is sent.
         this._lastFocusId = window
-            ? window.connect('unmanaged', () => this._setLastFocus(null))
+            ? window.connect('unmanaging', () => this._setLastFocus(null))
             : 0;
     }
 

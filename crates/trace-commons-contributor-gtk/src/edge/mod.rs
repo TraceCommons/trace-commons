@@ -13,11 +13,16 @@
 //!   compositors): both are layer surfaces, anchored to the edge or near the
 //!   tray, over every window, taking keyboard focus only while open
 //!   ([`layer`], behind the `layer-shell` feature, Linux only).
-//! * **the GNOME Shell extension** in `gnome-shell-extension/`: both are
-//!   ordinary windows the extension places and keeps above ([`gnome`]).
-//! * **neither** (GNOME without the extension, any X11 session): no rail,
-//!   since a window that cannot be put at the edge cannot be one, and the
-//!   panel is a plain small window. GTK 4 has no X11 positioning or
+//! * **the GNOME Shell extension** in `gnome-shell-extension/`, on Wayland
+//!   or X11: both are ordinary windows the extension places and keeps
+//!   above ([`gnome`]). The open rail keeps the keyboard once clicked, so
+//!   Escape and Tab reach it, and a closed one never does (owner,
+//!   2026-11-18). The Mac's rail never becomes key and has no Escape; the
+//!   open rail taking the keyboard is a deliberate difference here and
+//!   under layer-shell (`layer::set_rail_keyboard`).
+//! * **neither** (GNOME without the extension, or an X11 session other
+//!   than GNOME's with it): no rail, since a window that cannot be put at
+//!   the edge cannot be one, and the panel is a plain small window. GTK 4 has no X11 positioning or
 //!   keep-above call; the X11 window hints the Mac's panel would need are
 //!   only reachable through `gdk4-x11`, which this build does not take.
 //!

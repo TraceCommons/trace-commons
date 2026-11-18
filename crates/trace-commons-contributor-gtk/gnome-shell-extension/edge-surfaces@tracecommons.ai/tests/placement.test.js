@@ -12,7 +12,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 
-import {MARGIN, ROLE_PANEL, ROLE_RAIL, focusToRestore, frameFor} from '../placement.js';
+import {
+    FOCUS_LEAVE, FOCUS_RESTORE, FOCUS_UNSET, MARGIN, ROLE_PANEL, ROLE_RAIL, TITLE_PANEL, TITLE_RAIL,
+    focusAfter, frameFor, titleFor,
+} from '../placement.js';
 
 const AREA = {x: 0, y: 32, width: 1920, height: 1048};
 
@@ -48,13 +51,67 @@ test('a press in the lower half puts the panel against the bottom margin', () =>
     assert.equal(frameFor(ROLE_PANEL, AREA, size, [960, 556]).y, 672);
 });
 
-test('a rail that takes focus gives it back to the window before it', () => {
-    const rail = {};
-    const editor = {};
-    const isRail = w => w === rail;
-    assert.equal(focusToRestore(rail, editor, isRail), editor);
-    assert.equal(focusToRestore(editor, rail, isRail), null);
-    assert.equal(focusToRestore(rail, null, isRail), null);
-    assert.equal(focusToRestore(rail, rail, isRail), null);
-    assert.equal(focusToRestore(null, editor, isRail), null);
+// A model of the shell for the focus rule: each window says whether it is
+// the rail and open, still managed, on the active workspace, minimised.
+function shell(...windows) {
+    return {
+        isRail: w => Boolean(w.rail),
+        isOpen: w => Boolean(w.open),
+        isManaged: w => w.managed !== false,
+        onActiveWorkspace: w => w.workspace === 'active',
+        isMinimized: w => Boolean(w.minimized),
+        windows,
+    };
+}
+
+test('a closed rail never keeps focus: it goes back to the window before it', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const editor = {workspace: 'active'};
+    assert.deepEqual(focusAfter(rail, editor, shell(rail, editor)), {action: FOCUS_RESTORE, window: editor});
+});
+
+test('an open rail keeps the keyboard, so Escape and Tab reach it', () => {
+    const rail = {rail: true, open: true, workspace: 'active'};
+    const editor = {workspace: 'active'};
+    assert.deepEqual(focusAfter(rail, editor, shell(rail, editor)), {action: FOCUS_LEAVE, window: null});
+});
+
+test('focus is never given back across workspaces', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const elsewhere = {workspace: 'other'};
+    assert.deepEqual(focusAfter(rail, elsewhere, shell(rail, elsewhere)), {action: FOCUS_UNSET, window: null});
+});
+
+test('a minimised window is never brought back to take focus', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const minimised = {workspace: 'active', minimized: true};
+    assert.deepEqual(focusAfter(rail, minimised, shell(rail, minimised)), {action: FOCUS_UNSET, window: null});
+});
+
+test('a window that is going away is never given focus', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const closing = {workspace: 'active', managed: false};
+    assert.deepEqual(focusAfter(rail, closing, shell(rail, closing)), {action: FOCUS_UNSET, window: null});
+});
+
+test('with no window to go back to, focus is unset rather than left on the rail', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const other = {rail: true, open: false, workspace: 'active'};
+    assert.deepEqual(focusAfter(rail, null, shell(rail)), {action: FOCUS_UNSET, window: null});
+    assert.deepEqual(focusAfter(rail, rail, shell(rail)), {action: FOCUS_UNSET, window: null});
+    assert.deepEqual(focusAfter(rail, other, shell(rail, other)), {action: FOCUS_UNSET, window: null});
+});
+
+test('focus on any other window is left alone', () => {
+    const rail = {rail: true, open: false, workspace: 'active'};
+    const editor = {workspace: 'active'};
+    assert.deepEqual(focusAfter(editor, rail, shell(rail, editor)), {action: FOCUS_LEAVE, window: null});
+    assert.deepEqual(focusAfter(null, editor, shell(editor)), {action: FOCUS_LEAVE, window: null});
+});
+
+test('each role places only the window of its own title', () => {
+    assert.equal(titleFor(ROLE_RAIL), TITLE_RAIL);
+    assert.equal(titleFor(ROLE_PANEL), TITLE_PANEL);
+    assert.notEqual(TITLE_RAIL, TITLE_PANEL);
+    assert.equal(titleFor('main'), null);
 });

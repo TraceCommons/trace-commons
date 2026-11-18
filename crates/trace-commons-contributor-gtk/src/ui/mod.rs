@@ -146,14 +146,14 @@ pub struct PendingUndo {
 
 pub struct App {
     pub worker: Worker,
+    /// The edge rail and the menu-bar panel (`edge_surfaces`).
+    pub edge: edge_surfaces::Surfaces,
     /// Where the model-calls switch stands, as the tray reads it.
     ///
     /// Written on every settings read (see `private_inference::render`) and
     /// read by nothing that paints: it is the switch's position, not a claim
     /// that a listener is running. It decides which way the tray's one
     /// action row points and nothing else.
-    /// The edge rail and the menu-bar panel (`edge_surfaces`).
-    pub edge: edge_surfaces::Surfaces,
     pub tray: crate::tray::TrayState,
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
@@ -687,8 +687,10 @@ impl App {
     /// that was pressed, and one row can stop this computer answering model
     /// calls.
     ///
-    /// That last one is the only write anything outside this window can ask
-    /// for, and it goes in one direction. There is no request that turns
+    /// That last one is the only write the tray's menu can ask for, and it
+    /// goes in one direction (the edge rail and the popover the tray opens
+    /// offer one more, the watcher's pause and resume, as the Mac's do; see
+    /// `edge_surfaces`). There is no request that turns
     /// model calls ON -- `tray.rs` has no word for it -- because enabling it
     /// changes what anything else running here may send through, and the
     /// sentence saying so is on the screen the off-state row opens instead.

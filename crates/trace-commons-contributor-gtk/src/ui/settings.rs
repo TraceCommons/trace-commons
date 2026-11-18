@@ -19,7 +19,8 @@
 
 #[path = "settings_navigation.rs"]
 mod navigation;
-use navigation::{Section, Sections};
+pub(crate) use navigation::Section;
+use navigation::Sections;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -114,6 +115,9 @@ pub struct SettingsView {
     autostart_switch: gtk::Switch,
     /// The edge rail's switch (`ui::edge_surfaces`).
     pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
+    /// Scrolls Settings to a section, for the edge rail's and the
+    /// popover's buttons.
+    select_section: std::rc::Rc<dyn Fn(Section)>,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -255,6 +259,11 @@ impl Default for SettingsView {
 }
 
 impl SettingsView {
+    /// Shows `section` in the Settings window, scrolled to it.
+    pub(crate) fn show_section(&self, section: Section) {
+        (self.select_section)(section);
+    }
+
     pub fn new() -> Self {
         community_brand::install();
 
@@ -680,7 +689,8 @@ impl SettingsView {
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         sections.body(Section::Changes).append(&audit);
 
-        let root = navigation::Navigation::new(sections).root;
+        let navigation = navigation::Navigation::new(sections);
+        let (root, select_section) = (navigation.root, navigation.select);
 
         Self {
             root,
@@ -702,6 +712,7 @@ impl SettingsView {
             autostart_row,
             autostart_switch,
             edge_rail,
+            select_section,
             background_state: RefCell::new(None),
             background_body,
             public,

@@ -68,6 +68,9 @@ pub struct PrivateInferenceView {
     pub root: gtk::Box,
     pub(super) managed: gtk::Box,
     pub(super) managed_revision: std::cell::Cell<u64>,
+    /// Signed in to NEAR AI, as the last managed snapshot said; `None`
+    /// until one is read. The popover's Private AI card waits on it.
+    pub(super) near_ai_signed_in: std::cell::Cell<Option<bool>>,
     /// The terminal the last managed snapshot named, for the line a launch
     /// refused as not found shows.
     pub(super) managed_destination: std::cell::RefCell<Option<String>>,
@@ -232,6 +235,7 @@ impl PrivateInferenceView {
             root,
             managed,
             managed_revision: std::cell::Cell::new(0),
+            near_ai_signed_in: std::cell::Cell::new(None),
             managed_destination: std::cell::RefCell::new(None),
             spend,
             harnesses,

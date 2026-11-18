@@ -111,6 +111,14 @@ pub fn watch_choices(state: Watching) -> Vec<(WatchChoice, &'static str)> {
     }
 }
 
+/// Whether the popover draws its Private AI card
+/// (`MenuBarGlassPanel.privateAI`): only while signed in to NEAR AI, as the
+/// daemon's managed snapshot says, and only with the core's name for it. A
+/// sign-in not yet read draws none.
+pub fn private_ai_card(signed_in: Option<bool>, destination: &str) -> bool {
+    signed_in == Some(true) && !destination.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +196,16 @@ mod tests {
             watching_value(watching(Some(true))),
             monitor_screens_copy().paused
         );
+    }
+
+    /// The popover's Private AI card (`MenuBarGlassPanel.privateAI`): only
+    /// while signed in to NEAR AI, and only with the core's name for it. An
+    /// unknown sign-in draws no card.
+    #[test]
+    fn the_private_ai_card_needs_a_sign_in_and_the_cores_name() {
+        assert!(private_ai_card(Some(true), "Private AI"));
+        assert!(!private_ai_card(Some(false), "Private AI"));
+        assert!(!private_ai_card(None, "Private AI"));
+        assert!(!private_ai_card(Some(true), ""));
     }
 }

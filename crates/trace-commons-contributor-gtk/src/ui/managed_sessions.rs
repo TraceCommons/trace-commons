@@ -250,6 +250,10 @@ pub fn refresh(app: &Rc<App>) {
         let revision = snapshot["revision"].as_u64().unwrap_or_default();
         if revision < app.private_inference.managed_revision.get() { return; }
         app.private_inference.managed_revision.set(revision);
+        let signed_in = Some(snapshot["capabilities"]["near_ai_signin"] == true);
+        if app.private_inference.near_ai_signed_in.replace(signed_in) != signed_in {
+            super::edge_surfaces::data_changed(app);
+        }
         let root = &app.private_inference.managed;
         clear(root);
         root.append(&style::section(&text("title")));

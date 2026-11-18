@@ -6,6 +6,12 @@
 
 export const ROLE_RAIL = 'rail';
 export const ROLE_PANEL = 'panel';
+// The only window titles each role places: names no other window of the
+// app carries, so the app's main window can never be matched, whatever
+// GTK exports for it. The app gives its windows these titles only on GNOME
+// with this extension (src/edge/gnome.rs, RAIL_TITLE and PANEL_TITLE).
+export const TITLE_RAIL = 'edge-rail';
+export const TITLE_PANEL = 'menu-panel';
 // The panel's distance from the screen's edges: the app's PANEL_MARGIN.
 export const MARGIN = 8;
 
@@ -27,16 +33,40 @@ export function frameFor(role, area, size, at) {
     return {x: left, y: top};
 }
 
+/** The title a role places, or null for a role that is not one. */
+export function titleFor(role) {
+    if (role === ROLE_RAIL)
+        return TITLE_RAIL;
+    if (role === ROLE_PANEL)
+        return TITLE_PANEL;
+    return null;
+}
+
+export const FOCUS_LEAVE = 'leave';
+export const FOCUS_RESTORE = 'restore';
+export const FOCUS_UNSET = 'unset';
+
 /**
- * The rail never keeps keyboard focus: on the Mac it is a non-activating
- * panel that "never takes focus from the app in front". Mutter focuses a
- * window when it is clicked, so when focus lands on a rail this names the
- * window to give it back to, or null to leave it where it is.
+ * What to do with keyboard focus once it lands on `focused` (owner,
+ * 2026-11-18, "Keyboard only while open"): an open rail keeps it, so
+ * Escape and Tab reach it; a closed rail never does -- the Mac's rail is a
+ * non-activating panel that "never takes focus from the app in front".
+ * Focus goes back only to a window still managed, on the active workspace
+ * and not minimised, so giving it back can never switch workspaces or
+ * bring a minimised window back; otherwise nothing has focus.
+ *
+ * `shell` answers isRail, isOpen, isManaged, onActiveWorkspace and
+ * isMinimized for a window. Returns {action, window}, window set only for
+ * FOCUS_RESTORE.
  */
-export function focusToRestore(focused, previous, isRail) {
-    if (!focused || !isRail(focused))
-        return null;
-    if (!previous || previous === focused || isRail(previous))
-        return null;
-    return previous;
+export function focusAfter(focused, previous, shell) {
+    const leave = {action: FOCUS_LEAVE, window: null};
+    if (!focused || !shell.isRail(focused) || shell.isOpen(focused))
+        return leave;
+    const usable = previous && previous !== focused && !shell.isRail(previous) &&
+        shell.isManaged(previous) && shell.onActiveWorkspace(previous) &&
+        !shell.isMinimized(previous);
+    return usable
+        ? {action: FOCUS_RESTORE, window: previous}
+        : {action: FOCUS_UNSET, window: null};
 }
