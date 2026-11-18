@@ -24,7 +24,7 @@ pub const MERIDIANS: usize = 6;
 pub const LEAN: f64 = -14.0 * PI / 180.0;
 /// The orb's frame on the standard map, in design units
 /// (`MapTransferDrawing.orbFrame`).
-pub const FRAME: f64 = 104.0;
+pub const FRAME: f64 = super::map_scene::ORB_FRAME;
 /// The campaign gradient's deep stop, #0057b0.
 pub const DEEP_BLUE: [f64; 3] = [0.0, 87.0 / 255.0, 176.0 / 255.0];
 /// The glow's radius on the Mac (`.shadow(radius: 10)`), and as a GSK

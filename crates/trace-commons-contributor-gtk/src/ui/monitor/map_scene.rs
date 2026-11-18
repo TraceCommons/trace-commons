@@ -1521,17 +1521,38 @@ pub const NODE_CARD_WIDTH: f64 = 260.0;
 pub const CARD_GAP: f64 = 12.0;
 pub const CARD_MARGIN: f64 = 8.0;
 
+/// The Traces map's style (`TracesMapStyle`, Settings): the pad, rocket
+/// and station, the Mac's default, or the laptop and the library orb. A
+/// shell preference: only the drawing changes, never what is sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MapStyle {
+    #[default]
+    Launch,
+    Standard,
+}
+
+/// The library orb's frame on the standard map, in design units
+/// (`MapTransferDrawing.orbFrame`).
+pub const ORB_FRAME: f64 = 104.0;
+
+/// The library's frame on the Traces map for `style`, in design units.
+pub fn library_size(style: MapStyle) -> Size {
+    match style {
+        MapStyle::Launch => STATION_SIZE,
+        MapStyle::Standard => Size::new(ORB_FRAME, ORB_FRAME),
+    }
+}
+
 /// Half the width the map draws a node at, in design units: on the Traces
-/// map the station for the library and the pad for this computer, far
-/// wider than their discs; elsewhere the disc. The Mac's other map style
-/// (the laptop and the orb, a Settings switch) is not ported: GTK draws
-/// the default, the pad and the station.
-pub fn drawn_half_width(node: &Node, traces: bool) -> f64 {
+/// map the station or the orb for the library and the pad or the laptop
+/// for this computer, far wider than their discs; elsewhere the disc
+/// (`FlowMapView.drawnHalfWidth`).
+pub fn drawn_half_width(node: &Node, traces: bool, style: MapStyle) -> f64 {
     if !traces {
         return node.radius;
     }
     match node.kind {
-        NodeKind::Library { .. } => STATION_SIZE.width / 2.0,
+        NodeKind::Library { .. } => library_size(style).width / 2.0,
         NodeKind::Hub => PAD_HALF_WIDTH,
         _ => node.radius,
     }

@@ -348,12 +348,17 @@ pub fn mesh() -> &'static [Face] {
     MESH.get_or_init(build)
 }
 
+/// The tilt's and the lean's cosines and sines, worked out once rather
+/// than for every corner of every face on every frame, as the Swift keeps
+/// them in statics.
+static POSE: std::sync::LazyLock<[f64; 4]> =
+    std::sync::LazyLock::new(|| [TILT.cos(), TILT.sin(), LEAN.cos(), LEAN.sin()]);
+
 /// `turned` with the angle's cosine and sine given, so a frame works them
 /// out once for the whole mesh: the same arithmetic in the same order as
 /// the Swift.
 fn turned_by(p: Vec3, cy: f64, sy: f64) -> Vec3 {
-    let (cx, sx) = (TILT.cos(), TILT.sin());
-    let (cz, sz) = (LEAN.cos(), LEAN.sin());
+    let [cx, sx, cz, sz] = *POSE;
     let x = p[0] * cy + p[2] * sy;
     let z = -p[0] * sy + p[2] * cy;
     let y = p[1];

@@ -868,9 +868,19 @@ fn the_library_and_this_computer_cards_sit_beside_their_drawings() {
         "",
     );
     let hub = Node::new("hub", NodeKind::Hub, Point::default(), 16.0, "", "");
-    assert_eq!(drawn_half_width(&library, true), STATION_SIZE.width / 2.0);
-    assert_eq!(drawn_half_width(&hub, true), PAD_HALF_WIDTH);
-    assert_eq!(drawn_half_width(&library, false), 22.0);
+    // `FlowMapView.drawnHalfWidth`: the station 150 wide, the orb 104,
+    // the pad or the laptop the pad's half-width either way.
+    assert_eq!(drawn_half_width(&library, true, MapStyle::Launch), 75.0);
+    assert_eq!(drawn_half_width(&library, true, MapStyle::Standard), 52.0);
+    assert_eq!(
+        drawn_half_width(&hub, true, MapStyle::Launch),
+        PAD_HALF_WIDTH
+    );
+    assert_eq!(
+        drawn_half_width(&hub, true, MapStyle::Standard),
+        PAD_HALF_WIDTH
+    );
+    assert_eq!(drawn_half_width(&library, false, MapStyle::Launch), 22.0);
 
     for (pane, side) in [
         (Size::new(600.0, 800.0), "left"),
@@ -880,7 +890,7 @@ fn the_library_and_this_computer_cards_sit_beside_their_drawings() {
         let fit = MapGeometry::new(pane, 1.0, None, space);
         for (node, point) in [(&library, Scene::library(space)), (&hub, Scene::hub(space))] {
             let centre = fit.point(point).x;
-            let half = drawn_half_width(node, true) * fit.scale;
+            let half = drawn_half_width(node, true, MapStyle::Launch) * fit.scale;
             let x = card_x(centre, half, card, pane.width);
             let (lo, hi) = (x - card / 2.0, x + card / 2.0);
             let what = format!("{}, {} wide", node.id, pane.width);

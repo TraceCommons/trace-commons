@@ -44,14 +44,7 @@ pub enum Action {
     Dismiss,
 }
 
-/// The Traces map's style: the pad, rocket and station, or the laptop and
-/// the library orb. This shell draws `Launch`, the Mac's default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MapStyle {
-    #[default]
-    Launch,
-    Standard,
-}
+pub use super::map_scene::MapStyle;
 
 /// A trace the Traces map shows moving, built only from what the core
 /// reported, never from a guess.

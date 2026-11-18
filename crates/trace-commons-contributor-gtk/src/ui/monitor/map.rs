@@ -64,12 +64,13 @@ use super::map_scene::{
     Scene, ScreenState, Size, ToolStack,
 };
 use super::map_transfers;
+use super::orb;
 use super::station;
 use super::tabs::MapView;
 use super::tool_art::{self, Tint};
 use super::traces_tree::{ProjectMode, SourceKind, TracesTree};
 use super::transfer_card;
-use super::transfers::{self, Action, Feed, MapTransfer, Player, Run};
+use super::transfers::{self, Action, Feed, MapStyle, MapTransfer, Player, Run};
 use crate::model::{
     GateStatus, HarnessList, HistoryRecord, Project, QueueEntry, Settings, ToolDestinations,
 };
@@ -234,6 +235,11 @@ mod imp {
         pub pile_at: RefCell<(Vec<String>, bool)>,
         /// The legend's memory item, shown while the tool group is drawn.
         pub memory_legend: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
+        /// The Traces map's style (Settings): the rocket and station, or
+        /// the laptop and the orb.
+        pub style: Cell<MapStyle>,
+        /// The library's station or orb, kept between resting frames.
+        pub library: LibraryArt,
     }
 
     #[glib::object_subclass]
@@ -432,8 +438,11 @@ mod imp {
                         let (_, h, _, _) =
                             card.measure(gtk::Orientation::Vertical, card_width as i32);
                         let centre = fit.point(node.at);
-                        let half =
-                            map_scene::drawn_half_width(&node, scene.stack.is_some()) * fit.scale;
+                        let half = map_scene::drawn_half_width(
+                            &node,
+                            scene.stack.is_some(),
+                            self.style.get(),
+                        ) * fit.scale;
                         let x = map_scene::card_x(centre.x, half, card_width, field);
                         let y = map_scene::card_y(centre.y, f64::from(height));
                         card.size_allocate(
@@ -479,11 +488,21 @@ mod imp {
             if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
                 snapshot.append_node(under);
             }
-            // The library's station turns on the map's clock, over the
-            // nodes and under the rocket and the pile, as the Mac draws it.
-            if let Some((origin, width, height, lit)) = station_frame(&scene, &fit) {
-                let angle = station::angle(self.now(), reduce);
-                snapshot.append_node(station::node(origin, width, height, angle, lit));
+            // The library's station or orb turns on the map's resting
+            // timeline, over the nodes and under the rocket and the pile,
+            // as the Mac draws it: during a run too, it moves at the
+            // resting rate, not the run's.
+            let style = self.style.get();
+            if let Some(frame) = library_frame(&scene, &fit, style) {
+                let interval = transfers::resting_motion(
+                    reduce,
+                    scene.flows(),
+                    healthy,
+                    library_turns(&scene),
+                )
+                .interval;
+                let seconds = library_seconds(self.now(), interval);
+                snapshot.append_node(&self.library.node(style, &frame, seconds, reduce));
             }
             if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
                 snapshot.append_node(over);
@@ -1414,23 +1433,105 @@ fn library_on_map(scene: &Scene) -> Option<&map_scene::Node> {
     scene.nodes.iter().find(|node| node.id == "library")
 }
 
-/// The station's frame on the Traces map: its top-left, width and height,
+/// The library's frame on the Traces map: its top-left, width and height,
 /// centred on the library's point at the map's scale, and whether anything
-/// has been contributed. `None` on the other maps.
-pub fn station_frame(scene: &Scene, fit: &MapGeometry) -> Option<((f64, f64), f64, f64, bool)> {
+/// has been contributed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LibraryFrame {
+    pub origin: (f64, f64),
+    pub width: f64,
+    pub height: f64,
+    pub lit: bool,
+}
+
+/// The library's frame for `style`: the station's on the rocket map, the
+/// orb's on the standard one (`FlowMapView.libraryArt`). `None` on the
+/// other maps.
+pub fn library_frame(scene: &Scene, fit: &MapGeometry, style: MapStyle) -> Option<LibraryFrame> {
     let library = library_on_map(scene)?;
     let NodeKind::Library { active } = library.kind else {
         return None;
     };
     let centre = fit.point(library.at);
-    let width = map_scene::STATION_SIZE.width * fit.scale;
-    let height = map_scene::STATION_SIZE.height * fit.scale;
-    Some((
-        (centre.x - width / 2.0, centre.y - height / 2.0),
+    let size = map_scene::library_size(style);
+    let (width, height) = (size.width * fit.scale, size.height * fit.scale);
+    Some(LibraryFrame {
+        origin: (centre.x - width / 2.0, centre.y - height / 2.0),
         width,
         height,
-        active,
-    ))
+        lit: active,
+    })
+}
+
+/// The map's seconds held to the resting timeline's last tick, so the
+/// library moves at the resting rate even while a run draws at 60.
+pub fn library_seconds(now: f64, interval: f64) -> f64 {
+    if interval > 0.0 {
+        (now / interval).floor() * interval
+    } else {
+        now
+    }
+}
+
+/// What the library was last drawn from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LibraryKey {
+    style: MapStyle,
+    frame: LibraryFrame,
+    angle: f64,
+}
+
+/// The library's drawing, kept until its angle, light, frame or style
+/// changes: built at most once a resting frame.
+#[derive(Default)]
+pub struct LibraryArt {
+    kept: RefCell<Option<(LibraryKey, gtk::gsk::RenderNode)>>,
+    builds: Cell<usize>,
+}
+
+impl LibraryArt {
+    /// The library at `seconds` on the map's clock (`library_seconds`),
+    /// at rest under reduced motion.
+    pub fn node(
+        &self,
+        style: MapStyle,
+        frame: &LibraryFrame,
+        seconds: f64,
+        reduce_motion: bool,
+    ) -> gtk::gsk::RenderNode {
+        let angle = match style {
+            MapStyle::Launch => station::angle(seconds, reduce_motion),
+            MapStyle::Standard => orb::angle(seconds, reduce_motion),
+        };
+        let key = LibraryKey {
+            style,
+            frame: *frame,
+            angle,
+        };
+        if let Some((kept, node)) = self.kept.borrow().as_ref()
+            && *kept == key
+        {
+            return node.clone();
+        }
+        let LibraryFrame {
+            origin,
+            width,
+            height,
+            lit,
+        } = *frame;
+        let node = match style {
+            MapStyle::Launch => station::node(origin, width, height, angle, lit),
+            MapStyle::Standard => orb::node(origin, width, height, angle, lit),
+        };
+        self.builds.set(self.builds.get() + 1);
+        self.kept.replace(Some((key, node.clone())));
+        node
+    }
+
+    /// How many times the drawing has been built.
+    pub fn builds(&self) -> usize {
+        self.builds.get()
+    }
 }
 
 impl Palette {
@@ -2746,32 +2847,106 @@ mod tests {
         (0..3).all(|k| (f32::from(pixel[k]) - target[k] * 255.0).abs() <= 12.0) && pixel[3] > 200
     }
 
-    /// On the Traces map the library is the station, drawn over the still
-    /// layer on the map's clock: the still layer draws no disc for it, and
-    /// the station's frame is centred on the library's point.
+    /// On the Traces map the library is the station on the rocket map and
+    /// the orb on the standard one, drawn over the still layer on the
+    /// map's clock: the still layer draws no disc for it. Its frame is the
+    /// Mac's: the station 150 by 130 (`FlowMapView.stationSize`), the orb
+    /// 104 square (`MapTransferDrawing.orbFrame`), centred on the
+    /// library's point at the map's scale.
     #[test]
-    fn the_traces_library_is_the_station_not_a_disc() {
+    fn the_traces_library_is_the_station_or_the_orb_not_a_disc() {
         let scene = traces_scene(&[entry("a", "p", "codex")]);
-        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.5, None, scene.space);
         let palette = Palette::fixed();
         let library = scene.nodes.iter().find(|n| n.id == "library").unwrap();
         let pixels = painted(580, 760, |cr| {
             draw_node(cr, &scene, library, &fit, &palette, false);
         });
         assert!(pixels.is_empty(), "the still layer drew the library");
-        let (origin, width, height, lit) = station_frame(&scene, &fit).expect("a station");
         let centre = fit.point(library.at);
-        assert_eq!(width, map_scene::STATION_SIZE.width * fit.scale);
-        assert_eq!(height, map_scene::STATION_SIZE.height * fit.scale);
-        assert_eq!(origin, (centre.x - width / 2.0, centre.y - height / 2.0));
-        assert_eq!(
-            lit,
-            matches!(library.kind, NodeKind::Library { active: true })
-        );
+        for (style, (w, h)) in [
+            (MapStyle::Launch, (150.0, 130.0)),
+            (MapStyle::Standard, (104.0, 104.0)),
+        ] {
+            let frame = library_frame(&scene, &fit, style).expect("a library");
+            assert_eq!((frame.width, frame.height), (w * fit.scale, h * fit.scale));
+            assert_eq!(
+                frame.origin,
+                (
+                    centre.x - w * fit.scale / 2.0,
+                    centre.y - h * fit.scale / 2.0
+                )
+            );
+            assert!(!frame.lit, "nothing contributed yet: unlit");
+        }
         assert!(library_turns(&scene));
         let elsewhere = Scene::default();
-        assert!(station_frame(&elsewhere, &fit).is_none());
+        assert!(library_frame(&elsewhere, &fit, MapStyle::Launch).is_none());
         assert!(!library_turns(&elsewhere));
+    }
+
+    /// The library turns on the map's resting timeline, as on the Mac,
+    /// where it is drawn on that timeline (20 frames a second, 30 while
+    /// arcs carry dashes) and never on the run's 60: its drawing is built
+    /// once a resting frame and kept between, however often the map draws.
+    #[test]
+    fn the_library_is_built_once_a_resting_frame_while_a_run_draws_at_sixty() {
+        let art = LibraryArt::default();
+        let frame = LibraryFrame {
+            origin: (10.0, 20.0),
+            width: 150.0,
+            height: 130.0,
+            lit: true,
+        };
+        // One second of a run, drawn at 60 frames a second.
+        for i in 0..60 {
+            let now = 100.01 + f64::from(i) / 60.0;
+            art.node(
+                MapStyle::Launch,
+                &frame,
+                library_seconds(now, 1.0 / 20.0),
+                false,
+            );
+        }
+        assert_eq!(art.builds(), 20, "20 station frames in a second");
+        // With moving dashes the resting timeline is 30 a second.
+        for i in 0..60 {
+            let now = 200.01 + f64::from(i) / 60.0;
+            art.node(
+                MapStyle::Launch,
+                &frame,
+                library_seconds(now, 1.0 / 30.0),
+                false,
+            );
+        }
+        assert_eq!(art.builds(), 50);
+        // Under reduced motion it rests: built once, whatever the clock.
+        let still = LibraryArt::default();
+        for i in 0..60 {
+            let now = 300.0 + f64::from(i) / 7.0;
+            still.node(MapStyle::Launch, &frame, now, true);
+        }
+        assert_eq!(still.builds(), 1);
+        // A change of light, frame or style builds it again.
+        still.node(
+            MapStyle::Launch,
+            &LibraryFrame {
+                lit: false,
+                ..frame
+            },
+            0.0,
+            true,
+        );
+        still.node(
+            MapStyle::Standard,
+            &LibraryFrame {
+                lit: false,
+                ..frame
+            },
+            0.0,
+            true,
+        );
+        assert_eq!(still.builds(), 3);
     }
 
     /// A coin is drawn as `MapToolPile` draws it: its edge and rim in the
@@ -3073,8 +3248,10 @@ mod tests {
                     for node in &scene.nodes {
                         draw_node(&cr, &scene, node, &fit, &palette, false);
                     }
-                    if let Some((origin, sw, sh, lit)) = station_frame(&scene, &fit) {
-                        station::node(origin, sw, sh, station::REST_ANGLE, lit).draw(&cr);
+                    if let Some(frame) = library_frame(&scene, &fit, MapStyle::Launch) {
+                        LibraryArt::default()
+                            .node(MapStyle::Launch, &frame, 0.0, true)
+                            .draw(&cr);
                     }
                     map_transfers::resting_rocket(&cr, &scene, &fit, &palette);
                     let stack = scene.stack.as_ref().unwrap();
