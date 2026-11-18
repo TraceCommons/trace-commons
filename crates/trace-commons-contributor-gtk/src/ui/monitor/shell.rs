@@ -2763,9 +2763,15 @@ mod tests {
     fn window_pixels(window: &adw::ApplicationWindow, points: &[(i32, i32)]) -> Vec<[u8; 4]> {
         let (width, height) = (window.width(), window.height());
         let paintable = gtk::WidgetPaintable::new(Some(window));
-        let snapshot = gtk::Snapshot::new();
-        paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
-        let node = snapshot.to_node().expect("a render node");
+        // The paintable is empty until the window has drawn a frame.
+        let node = std::cell::RefCell::new(None);
+        pump_until(|| {
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+            *node.borrow_mut() = snapshot.to_node();
+            node.borrow().is_some()
+        });
+        let node = node.into_inner().expect("a render node");
         let renderer = gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface"))
             .expect("a renderer");
         // The window's own box: the shadow outside it is not the window.
@@ -2819,6 +2825,9 @@ mod tests {
         crate::ui::style::install();
         let gear = mounted.shell.settings_button.clone();
         pump_until(|| gear.width() == 28);
+        // Past any style transition (libadwaita's run about 200ms).
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        pump_until(|| std::time::Instant::now() >= end);
         let display = gtk::prelude::WidgetExt::display(&mounted.window);
         let capability = crate::ui::glass_backdrop::probe_capability(&display);
         assert_eq!(
@@ -2845,6 +2854,8 @@ mod tests {
         crate::ui::style::install();
         let gear = mounted.shell.settings_button.clone();
         pump_until(|| gear.width() == 28);
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        pump_until(|| std::time::Instant::now() >= end);
         let (gap, pane) = gap_and_pane(&mounted);
         let window = mounted.window.clone();
         // The window's own follower may load the painted sheet on its first
