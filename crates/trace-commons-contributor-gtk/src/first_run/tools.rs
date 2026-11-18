@@ -26,6 +26,25 @@ pub enum ToolAnswer {
     Undecided,
     Off,
     Watch(String),
+    /// Watched, in the folder the attached daemon already holds for it
+    /// (`get_settings` says "watch" and never where). Nothing is sent for
+    /// it, so a commit never replaces that folder.
+    Held,
+}
+
+/// The tools the attached daemon already watches, from its `get_settings`
+/// answer: each `*_source_mode` that is "watch".
+pub fn held_watches(settings: &Value) -> BTreeSet<String> {
+    TOOL_ORDER
+        .iter()
+        .filter(|source| {
+            trace_commons_contributor::daemon::settings::source_settings_key(source)
+                .and_then(|key| settings.get(format!("{key}_mode")))
+                .and_then(Value::as_str)
+                == Some("watch")
+        })
+        .map(|source| (*source).to_owned())
+        .collect()
 }
 
 /// What a folder picked with "add your tool" is.
@@ -126,6 +145,10 @@ pub struct Tools {
     pub not_found: BTreeSet<String>,
     /// Discovery's last answer; None until it has answered.
     pub discovered: Option<Vec<Found>>,
+    /// The tools the attached daemon already watches ([`held_watches`]).
+    pub held: BTreeSet<String>,
+    /// The tools whose check the person set in this window.
+    pub touched: BTreeSet<String>,
 }
 
 impl Tools {
@@ -147,26 +170,82 @@ impl Tools {
     pub fn row_answer(&self, source: &str) -> ToolAnswer {
         self.answers.get(source).cloned().unwrap_or_default()
     }
-    /// The found tools a check is offered for, in ring order.
+    /// The found tools a check is offered for, in ring order, and the
+    /// tools the daemon already watches that discovery here did not find
+    /// (a folder this window cannot see), with no folder of their own.
     pub fn listed(&self) -> Vec<Found> {
         let found = self.discovered.as_deref().unwrap_or_default();
         TOOL_ORDER
             .iter()
-            .filter_map(|tool| found.iter().find(|f| f.source == *tool && f.exists))
-            .cloned()
+            .filter_map(|tool| {
+                found
+                    .iter()
+                    .find(|f| f.source == *tool && f.exists)
+                    .cloned()
+                    .or_else(|| {
+                        self.held.contains(*tool).then(|| Found {
+                            source: (*tool).to_owned(),
+                            path: String::new(),
+                            exists: true,
+                            session_count: 0,
+                            total_bytes: None,
+                        })
+                    })
+            })
             .collect()
     }
     pub fn is_watched(&self, source: &str) -> bool {
-        matches!(self.row_answer(source), ToolAnswer::Watch(_))
+        matches!(
+            self.row_answer(source),
+            ToolAnswer::Watch(_) | ToolAnswer::Held
+        )
     }
-    /// Tick or untick a found tool's check: ticked watches its found folder.
+    /// Tick or untick a found tool's check: ticked watches its found folder,
+    /// or, for a tool the daemon already watches, keeps the daemon's.
     pub fn set_watched(&mut self, found: &Found, on: bool) {
-        let answer = if on {
-            ToolAnswer::Watch(found.path.clone())
-        } else {
+        let answer = if !on {
             ToolAnswer::Off
+        } else if self.held.contains(&found.source) {
+            ToolAnswer::Held
+        } else {
+            ToolAnswer::Watch(found.path.clone())
         };
+        self.touched.insert(found.source.clone());
         self.answers.insert(found.source.clone(), answer);
+    }
+    /// Record which tools the attached daemon watches ([`held_watches`]).
+    /// A tool it newly holds reads ticked, in its folder, unless the person
+    /// turned it off here; a folder added here for that tool stops being
+    /// watched, since the daemon reads one folder per tool and holds one.
+    /// A tool it no longer holds reads off.
+    pub fn record_held(&mut self, held: BTreeSet<String>) {
+        for source in held.difference(&self.held) {
+            let turned_off =
+                self.touched.contains(source) && self.row_answer(source) == ToolAnswer::Off;
+            if !turned_off {
+                self.answers.insert(source.clone(), ToolAnswer::Held);
+            }
+            for folder in self.added.iter_mut() {
+                if folder.kind == FolderKind::Source(source.clone()) {
+                    folder.watched = None;
+                }
+            }
+        }
+        for source in self.held.difference(&held) {
+            if self.row_answer(source) == ToolAnswer::Held {
+                self.answers.insert(source.clone(), ToolAnswer::Off);
+            }
+        }
+        self.held = held;
+    }
+    /// Whether the declaration for `settings_key` is the daemon's own,
+    /// which no commit sends.
+    pub fn holds(&self, settings_key: &str) -> bool {
+        self.declarations().iter().any(|(source, answer)| {
+            *answer == ToolAnswer::Held
+                && trace_commons_contributor::daemon::settings::source_settings_key(source)
+                    == Some(settings_key)
+        })
     }
     /// One folder is one thing: a folder at the same path is replaced, and a
     /// second trajectory folder replaces the first.
@@ -189,7 +268,7 @@ impl Tools {
     pub fn watched_twice(&self) -> BTreeSet<String> {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for (kind, answer) in &self.answers {
-            if matches!(answer, ToolAnswer::Watch(_)) {
+            if matches!(answer, ToolAnswer::Watch(_) | ToolAnswer::Held) {
                 *counts.entry(kind).or_default() += 1;
             }
         }
@@ -233,7 +312,7 @@ impl Tools {
     pub fn watches_anything(&self) -> bool {
         self.declarations()
             .values()
-            .any(|a| matches!(a, ToolAnswer::Watch(_)))
+            .any(|a| matches!(a, ToolAnswer::Watch(_) | ToolAnswer::Held))
     }
     /// The watched tools in ring order (Uses, Traces and Customize read it).
     pub fn watched_kinds(&self) -> Vec<&'static str> {
@@ -241,11 +320,12 @@ impl Tools {
         TOOL_ORDER
             .iter()
             .copied()
-            .filter(|k| matches!(roots.get(*k), Some(ToolAnswer::Watch(_))))
+            .filter(|k| matches!(roots.get(*k), Some(ToolAnswer::Watch(_) | ToolAnswer::Held)))
             .collect()
     }
     /// The `set_settings` declaration, or None while Claude Code or Codex
-    /// is undeclared: the daemon would not start with it.
+    /// is undeclared: the daemon would not start with it. A tool the
+    /// daemon already watches counts as declared and is left out.
     pub fn session_roots(&self) -> Option<super::Roots> {
         let declared = self.declarations();
         if !declared.contains_key(SOURCE_CLAUDE_CODE) || !declared.contains_key(SOURCE_CODEX) {
@@ -257,7 +337,8 @@ impl Tools {
             let value: Value = match answer {
                 ToolAnswer::Off => json!({"mode":"off"}),
                 ToolAnswer::Watch(path) => json!({"mode":"watch","path":path}),
-                ToolAnswer::Undecided => continue,
+                // The daemon's own folder: nothing to send.
+                ToolAnswer::Held | ToolAnswer::Undecided => continue,
             };
             roots.insert(key.to_owned(), value);
         }
@@ -454,6 +535,125 @@ mod tests {
             roots["codex_source"],
             serde_json::to_value(SourceDeclaration::Off).unwrap()
         );
+    }
+
+    fn held(sources: &[&str]) -> BTreeSet<String> {
+        sources.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The daemon's `get_settings` names which tools it watches, never
+    /// where: `*_source_mode` "watch" is held, "off" and "unset" are not.
+    #[test]
+    fn the_daemons_watches_are_read_from_its_modes() {
+        let settings = json!({
+            "claude_source_mode": "watch",
+            "codex_source_mode": "off",
+            "opencode_source_mode": "unset",
+            "gemini_source_mode": "watch",
+            "claude_root_configured": true,
+        });
+        assert_eq!(
+            held_watches(&settings),
+            held(&[SOURCE_CLAUDE_CODE, SOURCE_GEMINI_CLI])
+        );
+        assert!(held_watches(&json!({})).is_empty());
+    }
+
+    /// After the old-portal command, the daemon watches the folder the
+    /// command declared: Tools shows that tool ticked, Continue works, and
+    /// nothing it sends replaces the folder (#2171 review, finding 3).
+    #[test]
+    fn a_tool_the_daemon_already_watches_is_ticked_and_never_overwritten() {
+        let mut tools = discovered();
+        tools.record_held(held(&[SOURCE_CLAUDE_CODE]));
+        assert!(tools.is_watched(SOURCE_CLAUDE_CODE));
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Held);
+        assert!(tools.can_continue());
+        assert_eq!(tools.watched_kinds(), [SOURCE_CLAUDE_CODE]);
+        // Nothing is sent for it: the daemon keeps its folder. Codex, not
+        // found and unanswered, is still declared off.
+        let roots = tools.session_roots().unwrap();
+        assert!(!roots.contains_key("claude_source"), "{roots:?}");
+        assert_eq!(roots["codex_source"], json!({"mode":"off"}));
+        assert!(tools.holds("claude_source"));
+        assert!(!tools.holds("codex_source"));
+        // Ticking it again keeps the daemon's folder; unticking is off.
+        let claude = tools.listed()[0].clone();
+        tools.set_watched(&claude, false);
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Off);
+        assert_eq!(
+            tools.session_roots().unwrap()["claude_source"],
+            json!({"mode":"off"})
+        );
+        tools.set_watched(&claude, true);
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Held);
+        assert!(!tools.session_roots().unwrap().contains_key("claude_source"));
+    }
+
+    /// A tool ticked before the daemon's answer came is still the daemon's
+    /// folder; one the person turned off stays off. A folder added for a
+    /// tool the daemon then holds stops being watched here: one folder per
+    /// tool, and the daemon holds it.
+    #[test]
+    fn the_daemons_watch_wins_over_a_tick_but_not_over_an_off() {
+        let mut tools = discovered();
+        let claude = tools.listed()[0].clone();
+        tools.set_watched(&claude, true);
+        let opencode = tools.listed()[1].clone();
+        tools.set_watched(&opencode, false);
+        tools.add(AddedFolder::new(
+            FolderKind::Source(SOURCE_CODEX.into()),
+            "/run/user/1000/doc/a1/projects",
+        ));
+        tools.answer_added("/run/user/1000/doc/a1/projects", Some(true));
+        tools.record_held(held(&[SOURCE_CLAUDE_CODE, SOURCE_OPENCODE, SOURCE_CODEX]));
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Held);
+        assert_eq!(tools.row_answer(SOURCE_OPENCODE), ToolAnswer::Off);
+        assert_eq!(tools.added[0].watched, None);
+        assert!(tools.watched_twice().is_empty());
+        let roots = tools.session_roots().unwrap();
+        assert!(!roots.contains_key("claude_source"));
+        assert!(!roots.contains_key("codex_source"));
+        assert_eq!(roots["opencode_source"], json!({"mode":"off"}));
+        assert!(tools.can_continue());
+        // Read again, the same answer changes nothing.
+        let before = tools.clone();
+        tools.record_held(held(&[SOURCE_CLAUDE_CODE, SOURCE_OPENCODE, SOURCE_CODEX]));
+        assert_eq!(tools, before);
+        // The daemon no longer holds one: that tool reads off again.
+        tools.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Off);
+        assert!(tools.is_watched(SOURCE_CODEX));
+        assert!(tools.can_continue());
+    }
+
+    /// A held tool this window's discovery cannot see still has its row.
+    #[test]
+    fn a_held_tool_discovery_did_not_find_still_has_a_row() {
+        let mut tools = discovered();
+        tools.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!(
+            tools
+                .listed()
+                .iter()
+                .map(|f| f.source.as_str())
+                .collect::<Vec<_>>(),
+            [SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_OPENCODE]
+        );
+        assert!(tools.is_watched(SOURCE_CODEX));
+        let roots = tools.session_roots().unwrap();
+        assert!(!roots.contains_key("codex_source"), "never sent as off");
+        assert_eq!(roots["claude_source"], json!({"mode":"off"}));
+        // Both held: nothing to send, and Continue still works.
+        tools.record_held(held(&[SOURCE_CLAUDE_CODE, SOURCE_CODEX]));
+        assert_eq!(
+            tools.session_roots(),
+            Some(super::super::Roots::from([(
+                "opencode_source".to_owned(),
+                json!({"mode":"off"})
+            )]))
+        );
+        assert!(tools.can_continue());
     }
 
     #[test]

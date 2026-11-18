@@ -366,7 +366,7 @@ impl State {
         match commit {
             Commit::Roots => self.root_calls(),
             Commit::SignIn => {
-                if self.roots.is_empty() {
+                if self.roots.is_empty() && self.tools.held.is_empty() {
                     return vec![];
                 }
                 let mut calls = self.root_calls();
@@ -406,8 +406,11 @@ impl State {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if let Some(before) = &self.committed_roots {
+            // A key Tools leaves out because the daemon already holds it
+            // is the daemon's folder, not one withdrawn.
             for key in before.keys().filter(|key| {
                 !self.roots.contains_key(*key)
+                    && !self.tools.holds(key)
                     && before[*key].get("mode").and_then(Value::as_str) != Some("off")
             }) {
                 changes.insert(key.clone(), json!({"mode":"off"}));
@@ -840,6 +843,38 @@ mod tests {
             fresh.plan(Commit::Roots).as_slice(),
             [Action::StartDaemon(_)]
         ));
+    }
+
+    /// A tool the daemon already watches is never sent, not even as off
+    /// when an earlier commit named it, and Sign in still goes ahead when
+    /// every declared tool is the daemon's (#2171 review, finding 3).
+    #[test]
+    fn the_daemons_own_watches_are_left_alone_by_every_commit() {
+        let mut state = State {
+            daemon_started: true,
+            tools: discovered_tools(),
+            ..Default::default()
+        };
+        let claude = state.tools.listed()[0].clone();
+        state.tools.set_watched(&claude, true);
+        state.sync_roots();
+        state.committed_roots = Some(state.roots.clone());
+        state
+            .tools
+            .record_held(["claude-code".to_owned()].into_iter().collect());
+        state.sync_roots();
+        assert_eq!(state.plan(Commit::Roots), vec![]);
+        // Codex too: nothing left to send, and Sign in still runs.
+        state.tools.record_held(
+            ["claude-code".to_owned(), "codex".to_owned()]
+                .into_iter()
+                .collect(),
+        );
+        state.sync_roots();
+        assert!(state.roots.is_empty());
+        assert_eq!(state.plan(Commit::Roots), vec![]);
+        state.account = Account::NearAi;
+        assert!(!state.plan(Commit::SignIn).is_empty());
     }
 
     /// A Roots commit whose portal folder was sent to the host daemon as its

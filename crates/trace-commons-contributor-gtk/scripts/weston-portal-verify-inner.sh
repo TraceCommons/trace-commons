@@ -173,6 +173,7 @@ else
     ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
     ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
     ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
+    ui::service_dialog::tests::mounted_a_narrow_command_wraps_only_between_tokens \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
@@ -184,6 +185,7 @@ else
     ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
     ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
+    ui::first_run_screens::mounted_tests::tools_tick_a_tool_the_daemon_already_watches \
     ui::first_run_screens::mounted_tests::a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command \
     ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
     ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \

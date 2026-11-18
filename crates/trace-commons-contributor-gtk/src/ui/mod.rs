@@ -553,6 +553,7 @@ impl App {
         app.wire_health_action();
         app.wire_tray();
         app.wire_service_fallback();
+        app.wire_folder_refresh();
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -802,6 +803,21 @@ impl App {
                 });
             }
             glib::ControlFlow::Continue
+        });
+    }
+
+    /// Read the folder rows again whenever the window comes to the front,
+    /// as the Mac reads its state again when the app becomes active: a
+    /// folder declared from a terminal changes the daemon without a word to
+    /// this window, which otherwise showed the old folders until a relaunch.
+    fn wire_folder_refresh(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.window.connect_is_active_notify(move |window| {
+            if let Some(app) = weak.upgrade()
+                && window.is_active()
+            {
+                settings::refresh_folders(&app);
+            }
         });
     }
 

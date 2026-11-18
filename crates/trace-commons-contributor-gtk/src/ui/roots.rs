@@ -90,7 +90,8 @@ pub(super) fn answers(tools: &Tools) -> Option<Vec<(String, SourceDeclaration)>>
                 let declaration = match answer {
                     ToolAnswer::Off => SourceDeclaration::Off,
                     ToolAnswer::Watch(path) => SourceDeclaration::Watch { path: path.into() },
-                    ToolAnswer::Undecided => return None,
+                    // Only a daemon already running holds a folder.
+                    ToolAnswer::Held | ToolAnswer::Undecided => return None,
                 };
                 Some((source, declaration))
             })
@@ -272,6 +273,16 @@ pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
                 pending.set(false);
                 return;
             };
+            // Every tool declared is one the daemon already watches:
+            // nothing to send (`set_settings` refuses an empty object).
+            if roots.is_empty() {
+                pending.set(false);
+                app.refresh();
+                if let Some(window) = weak_window.upgrade() {
+                    window.close();
+                }
+                return;
+            }
             let pending = pending.clone();
             let screen = screen.clone();
             let weak_window = weak_window.clone();
@@ -301,6 +312,7 @@ pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
         }
     });
     *screen.borrow_mut() = Some(built.clone());
+    follow_held_watches(app, window.upcast_ref(), &built);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("tc-root");
     content.append(
@@ -321,6 +333,38 @@ pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
     window.set_content(Some(&content));
     window.present();
     window
+}
+
+/// Show on `screen` the tools the attached daemon already watches: read
+/// now, and again each time `window` comes to the front, as the Mac's
+/// Tools reads again when the app becomes active. A folder declared from a
+/// terminal (the old-portal command) then shows here without a relaunch.
+pub(super) fn follow_held_watches(
+    app: &Rc<super::App>,
+    window: &gtk::Window,
+    screen: &Rc<super::first_run_tools::ToolsScreen>,
+) {
+    let read = {
+        let weak_app = Rc::downgrade(app);
+        let weak_screen = Rc::downgrade(screen);
+        move || {
+            let Some(app) = weak_app.upgrade() else {
+                return;
+            };
+            let weak_screen = weak_screen.clone();
+            app.call("get_settings", serde_json::json!({}), move |_, result| {
+                if let (Some(screen), Ok(settings)) = (weak_screen.upgrade(), result) {
+                    screen.record_held(crate::first_run::tools::held_watches(&settings));
+                }
+            });
+        }
+    };
+    read();
+    window.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            read();
+        }
+    });
 }
 
 /// What a folder declaration became on its way to the attached daemon, and

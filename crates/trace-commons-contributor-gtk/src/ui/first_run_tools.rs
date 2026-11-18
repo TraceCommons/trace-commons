@@ -15,7 +15,9 @@ use trace_commons_contributor::first_run_copy::first_run_copy;
 use trace_commons_contributor::source::discovery;
 
 use super::onboarding::body_label;
-use crate::first_run::tools::{AddOutcome, AddedFolder, FolderKind, Found, Tools, add_outcome};
+use crate::first_run::tools::{
+    AddOutcome, AddedFolder, FolderKind, Found, ToolAnswer, Tools, add_outcome,
+};
 
 /// The live Tools screen.
 pub(super) struct ToolsScreen {
@@ -214,6 +216,17 @@ impl ToolsScreen {
         });
     }
 
+    /// Show the tools the attached daemon already watches
+    /// (`Tools::record_held`). Not while a commit holds the answers it
+    /// started from.
+    pub fn record_held(self: &Rc<Self>, held: std::collections::BTreeSet<String>) {
+        if self.busy.get() || self.tools.borrow().held == held {
+            return;
+        }
+        self.tools.borrow_mut().record_held(held);
+        self.render();
+    }
+
     /// The commit ended: on failure say so with `failure`, and let Continue
     /// be pressed again.
     pub fn finish(&self, failure: Option<&str>) {
@@ -273,7 +286,11 @@ impl ToolsScreen {
             let name = tool_name(&found.source);
             let check = gtk::CheckButton::with_label(name);
             check.set_active(tools.is_watched(&found.source));
-            check.set_tooltip_text(Some(&found.path));
+            // A folder the daemon holds is not known here: no path is shown
+            // for it, rather than the one discovery found.
+            if tools.row_answer(&found.source) != ToolAnswer::Held && !found.path.is_empty() {
+                check.set_tooltip_text(Some(&found.path));
+            }
             check.update_property(&[gtk::accessible::Property::Label(&fill(
                 copy.folders.watch_question,
                 "tool",

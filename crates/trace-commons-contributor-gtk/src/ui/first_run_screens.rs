@@ -416,6 +416,42 @@ mod mounted_tests {
         assert!(tools.borrow().watches_anything());
     }
 
+    /// After the old-portal command the daemon watches the folder it
+    /// declared: Tools shows that tool ticked, with no path of discovery's,
+    /// and Continue works (#2171 review, finding 3).
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn tools_tick_a_tool_the_daemon_already_watches() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let mut tools = Tools::default();
+        tools.record_discovery(vec![Found {
+            source: "claude-code".into(),
+            path: "/home/x/.claude/projects".into(),
+            exists: true,
+            session_count: 1,
+            total_bytes: None,
+        }]);
+        let tools = Rc::new(RefCell::new(tools));
+        let window = gtk::Window::new();
+        let screen = super::super::first_run_tools::build(tools.clone(), &window, || {});
+        let checks = || -> Vec<gtk::CheckButton> {
+            descendants(screen.root.upcast_ref())
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::CheckButton>().ok())
+                .collect()
+        };
+        assert!(!checks()[0].is_active());
+        assert!(!screen.continue_button.is_sensitive());
+        screen.record_held(["claude-code".to_owned()].into_iter().collect());
+        let check = checks()[0].clone();
+        assert!(check.is_active());
+        assert_eq!(check.tooltip_text(), None);
+        assert!(screen.continue_button.is_sensitive());
+        let roots = tools.borrow().session_roots().unwrap();
+        assert!(!roots.contains_key("claude_source"), "{roots:?}");
+    }
+
     /// A folder the old Documents portal (v4) cannot map: the failure line,
     /// then the owner's approved line, the fixed command, and "Copy
     /// command", which puts exactly that command on the clipboard. A later

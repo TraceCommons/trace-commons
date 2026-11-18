@@ -315,6 +315,9 @@ impl Coordinator {
             }
         });
         self.stack.add_named(&tools.root, Some("tools"));
+        if let Some(app) = self.app.upgrade() {
+            super::roots::follow_held_watches(&app, window.upcast_ref(), &tools);
+        }
         *self.tools_screen.borrow_mut() = Some(tools);
 
         let private_ai = page(&title(
