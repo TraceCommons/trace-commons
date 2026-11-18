@@ -149,5 +149,30 @@ class GlassTokensTests(unittest.TestCase):
         self.assertEqual(first, generate.render_gtk(self.tokens))
 
 
+class HeroTokensTests(unittest.TestCase):
+    """Home's hero cards on Linux take the Mac's flat values from the JSON."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_grounds_are_the_card_tokens_not_the_map_gradient(self):
+        hero = "\n".join(generate.render_hero_rust(self.tokens))
+        self.assertIn('HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")])', hero)
+        self.assertIn('HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")])', hero)
+        self.assertIn('HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")])', hero)
+        self.assertIn('TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"]', hero)
+        self.assertIn('TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"]', hero)
+
+    def test_a_translucent_or_themed_ground_is_refused(self):
+        self.tokens['gradient']['heroMissions']['stops'][0]['alpha'] = 0.5
+        with self.assertRaisesRegex(generate.TokenError, 'heroMissions'):
+            generate.render_hero_rust(self.tokens)
+
+    def test_a_translucent_ink_is_refused(self):
+        self.tokens['color']['heroInk']['alpha'] = 0.9
+        with self.assertRaisesRegex(generate.TokenError, 'heroInk'):
+            generate.render_hero_rust(self.tokens)
+
+
 if __name__ == '__main__':
     unittest.main()

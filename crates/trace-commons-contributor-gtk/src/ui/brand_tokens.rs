@@ -267,6 +267,23 @@ pub mod glass {
     }
 }
 
+/// Home's hero cards, as the Mac's flat theme draws them: each ground's
+/// CSS angle and stops (offset, hex), the ink and pill on every ground, and
+/// the pixel graphic's three blues per scheme.
+pub mod hero {
+    pub type Ground = (i32, &'static [(f64, &'static str)]);
+    pub const HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")]);
+    pub const HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")]);
+    pub const HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")]);
+    pub const HERO_INK: &str = "#ffffff";
+    pub const HERO_BUTTON_FILL: &str = "#ffffff";
+    pub const HERO_BUTTON_INK: &str = "#16161a";
+    /// The pixel graphic's blues, light scheme.
+    pub const TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"];
+    /// The pixel graphic's blues, dark scheme.
+    pub const TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"];
+}
+
 /// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.
 pub mod glyph {
     pub const VIEW_MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M1,2h12M1,6h12M1,10h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
