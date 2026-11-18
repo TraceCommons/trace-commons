@@ -191,6 +191,7 @@ else
     ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
     ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_a_new_card_slides_in_and_a_revealed_one_fades \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
     ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
     ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \

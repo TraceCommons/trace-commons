@@ -70,6 +70,9 @@ pub struct QueueView {
     /// that change the queue, since an upload landing is what moves a
     /// project past the threshold.
     arming_offer: gtk::Box,
+    /// Where the offer's Enable is (`super::armed_mark`): set from the press
+    /// until the card has gone, so a refresh in between keeps the card.
+    arming_step: std::rc::Rc<std::cell::Cell<Option<super::armed_mark::Step>>>,
     private_inference_offer: gtk::Box,
     /// Persistent rather than rebuilt each render: it is the only widget in
     /// this window that updates once a second, and rebuilding it under the
@@ -307,6 +310,7 @@ impl QueueView {
             open_history: history,
             first_contribution,
             arming_offer,
+            arming_step: Default::default(),
             private_inference_offer,
             undo_bar,
             undo_headline,
@@ -710,17 +714,33 @@ fn stat_card(tone: Tone, label: &str, value: u32) -> gtk::Box {
 /// back to it, so "Not now" is remembered across relaunches and across
 /// shells rather than being a dismissal this view forgets.
 pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffer>) {
+    use super::armed_mark::{self, ArmedMark, Step};
     let view = &app.queue;
+    // A card answering its Enable stays until its own exit, whatever the
+    // daemon now says (`ArmingOfferMotion.offerAfterRefresh`).
+    if view.arming_step.get().is_some() {
+        return;
+    }
     clear(&view.arming_offer);
     let Some(offer) = offer else {
         view.arming_offer.set_visible(false);
         return;
     };
 
+    // The offer's mark, as the Mac's popover draws it (`GlassNoticeMark`):
+    // a bolt that turns to a check once the project is armed.
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let mark = ArmedMark::new();
+    row.append(&mark);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+    column.set_hexpand(true);
+    row.append(&column);
+    view.arming_offer.append(&row);
+
     // Evidence first, question second: someone who reads only the first line
     // still learns why they are being asked.
     style::append_meta(
-        &view.arming_offer,
+        &column,
         copy::arming_offer_evidence(&offer.project_label, offer.contributed_count),
     );
 
@@ -729,7 +749,7 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
         .xalign(0.0)
         .wrap(true)
         .build();
-    view.arming_offer.append(&question);
+    column.append(&question);
 
     let actions = style::wrap_row(space::M);
     let decline = gtk::Button::with_label(copy::ARMING_OFFER_DECLINE);
@@ -739,13 +759,17 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
     // eye to "yes" is not asking a question.
     style::wrap_append(&actions, &decline);
     style::wrap_append(&actions, &arm);
-    view.arming_offer.append(&actions);
+    column.append(&actions);
     view.arming_offer.set_visible(true);
 
     let declined_id = offer.project_id.clone();
     let declined_app = Rc::clone(app);
     decline.connect_clicked(move |_| {
         let app = Rc::clone(&declined_app);
+        // Not while Enable is being answered.
+        if app.queue.arming_step.get().is_some() {
+            return;
+        }
         app.call(
             "decline_arming",
             serde_json::json!({ "project_id": declined_id }),
@@ -755,14 +779,46 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
 
     let armed_id = offer.project_id.clone();
     let armed_app = Rc::clone(app);
-    arm.connect_clicked(move |_| {
+    arm.connect_clicked(move |arm| {
         let app = Rc::clone(&armed_app);
+        if armed_mark::enable_locked(app.queue.arming_step.get()) {
+            return;
+        }
+        // Enable is pressed once: locked while the daemon arms the project.
+        app.queue.arming_step.set(Some(Step::Arming));
+        mark.set_step(Some(Step::Arming));
+        arm.set_sensitive(false);
+        let mark = mark.clone();
+        let arm = arm.clone();
         app.call(
             "set_project_mode",
             serde_json::json!({ "project_id": armed_id, "mode": "auto_upload" }),
-            |app, _| {
-                render_arming_offer(app, None);
+            move |app, result| {
+                if result.is_err() {
+                    // A failure unlocks it; the card stays to be tried again.
+                    app.queue.arming_step.set(None);
+                    mark.set_step(None);
+                    arm.set_sensitive(true);
+                    app.refresh();
+                    return;
+                }
+                // Armed: the check and its pulse, then after a beat the
+                // card goes.
+                app.queue.arming_step.set(Some(Step::Armed));
+                mark.set_step(Some(Step::Armed));
                 app.refresh();
+                let app = Rc::clone(app);
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(armed_mark::HOLD_MS),
+                    move || {
+                        let card = app.queue.arming_offer.clone();
+                        let gone = Rc::clone(&app);
+                        armed_mark::exit(&card, move || {
+                            gone.queue.arming_step.set(None);
+                            render_arming_offer(&gone, None);
+                        });
+                    },
+                );
             },
         );
     });

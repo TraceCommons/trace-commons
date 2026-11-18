@@ -50,10 +50,11 @@
 //!   every one of those but an update (which it does not show) has an X,
 //!   and only a card that goes when its cause does (a gate hold, the terms
 //!   hold, a down or unread core's health) has none.
-//! - Not ported: the Mac's slide-in and fade (a new card simply replaces
-//!   the front one here), its plates drawn behind the front card at the
-//!   front card's size (here they are slivers under it), and the 4% a
-//!   level the Mac narrows each plate by (here a fixed step).
+//! - A new card slides in from the top and a revealed one fades, and each
+//!   plate is 4% a level narrower at 0.9 and 0.7 opacity, as on the Mac
+//!   (`ui::popover_stack`). Not ported: the covered card's fade (it is
+//!   hidden at once), and the plates are slivers under the front card, not
+//!   cards its size behind it, so they do not show in its rounded corners.
 
 use super::tabs::Place;
 
