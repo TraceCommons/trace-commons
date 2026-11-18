@@ -524,7 +524,7 @@ mod imp {
                 )
                 .interval;
                 let seconds = library_seconds(self.now(), interval);
-                snapshot.append_node(&self.library.node(style, &frame, seconds, reduce));
+                snapshot.append_node(self.library.node(style, &frame, seconds, reduce));
             }
             if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
                 snapshot.append_node(over);

@@ -307,8 +307,7 @@ mod tests {
         let cell = (200.0 / PITCH).floor() * PITCH;
         let mark = (cell + PITCH * 0.25, cell + PITCH * 0.25);
         let lit = (0..3)
-            .map(|dy| (0..3).map(move |dx| (dx, dy)))
-            .flatten()
+            .flat_map(|dy| (0..3).map(move |dx| (dx, dy)))
             .map(|(dx, dy)| {
                 px(mark.0 as usize - 1 + dx, mark.1 as usize - 1 + dy)
                     .iter()
