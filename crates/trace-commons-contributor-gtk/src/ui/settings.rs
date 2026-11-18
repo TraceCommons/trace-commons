@@ -2066,6 +2066,18 @@ fn routing_port_value(app: &Rc<App>) -> u16 {
         .clamp(1, i32::from(u16::MAX)) as u16
 }
 
+/// The folder rows alone, from a fresh `get_settings`: what the main window
+/// reads when it comes to the front, since a folder declared from a
+/// terminal (the old-portal command) changes the daemon and sends this
+/// window nothing.
+pub fn refresh_folders(app: &Rc<App>) {
+    app.call("get_settings", serde_json::json!({}), |app, result| {
+        if let Ok(Ok(settings)) = result.map(serde_json::from_value::<Settings>) {
+            render_connection_checks(app, &settings);
+        }
+    });
+}
+
 pub fn refresh(app: &Rc<App>) {
     // Asked before anything is offered, and asked once rather than on
     // every daemon event: this reads a file, and a settings screen that

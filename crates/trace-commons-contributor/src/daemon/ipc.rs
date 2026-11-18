@@ -20,6 +20,13 @@
 //! socket's own mode; the daemon refuses to serve from a directory that is
 //! not 0700.
 //!
+//! On Linux a daemon on its default state directory, outside a Flatpak
+//! sandbox, also serves this same dispatcher on the host link
+//! (`daemon::host_link`), for a Flatpak window that cannot see the state
+//! directory. That socket's directory under `XDG_RUNTIME_DIR` is held at
+//! 0700 too, and every connection to it must also come from the daemon's own
+//! uid (`SO_PEERCRED`) before a byte is read.
+//!
 //! Two operations -- arming a project for `auto_upload` and bulk-approving
 //! the whole queue -- used to be refused over the socket and required a
 //! terminal. That restriction is gone: the reasoning behind it does not
@@ -4263,6 +4270,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
+                (super::service::HELLO_SERVICE_LEVEL_KEY): super::service::SERVICE_LEVEL,
             }),
         ),
         "feature_flags_snapshot" => Response::ok(
@@ -16317,6 +16325,24 @@ mod tests {
         assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
     }
 
+    /// The background service's level, which every shell compares with its
+    /// minimum (`daemon::service`): this daemon meets its own shells.
+    #[test]
+    fn hello_reports_the_service_level() {
+        let s = shared();
+        let result = handle_request(&s, &req("hello", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            result[super::super::service::HELLO_SERVICE_LEVEL_KEY],
+            super::super::service::SERVICE_LEVEL
+        );
+        assert_eq!(
+            super::super::service::answer_from_hello(Some(&result)),
+            super::super::service::DaemonAnswer::Meets
+        );
+    }
+
     #[test]
     fn status_exposes_every_field_a_tray_needs() {
         let s = shared();
@@ -23105,6 +23131,23 @@ mod tests {
                     "{method}: a refusal publishes nothing"
                 );
             }
+        }
+
+        /// `capabilities.daemon_on_host`: whether the answering daemon is
+        /// the host part, outside any Flatpak sandbox. A sandboxed window
+        /// attached over the host link reads it; absent (an older daemon)
+        /// reads as false. These tests never run in a sandbox.
+        #[test]
+        fn the_managed_snapshot_says_the_daemon_runs_on_the_host() {
+            let s = live();
+            let snapshot = handle_request(&s, &req("managed_snapshot", serde_json::json!({})))
+                .result
+                .expect("snapshot");
+            assert_eq!(
+                snapshot["capabilities"]["daemon_on_host"],
+                !crate::daemon::host_link::runs_sandboxed()
+            );
+            assert_eq!(snapshot["capabilities"]["daemon_on_host"], true);
         }
 
         /// The managed-session terminal: one of three ids, persisted

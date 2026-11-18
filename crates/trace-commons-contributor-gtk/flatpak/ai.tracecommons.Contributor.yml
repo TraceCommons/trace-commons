@@ -18,7 +18,9 @@
 # `trace-commons-contributor-sources/src/source/mod.rs`) -- without an explicit
 # filesystem permission, and the whole point of Flatpak confinement is that
 # it must not get a blanket grant of `home` to do it. So `finish-args` below
-# names exactly those two directories, read-only, and nothing wider. The
+# names exactly those two directories, read-only, and nothing wider (the one
+# other filesystem grant is the host link's runtime directory, which holds a
+# socket, a lock file and a marker file, no session data; see its entry). The
 # design spec's wording for why -- "Trace Commons needs to read your Claude
 # Code and Codex trace files. It asks for access to those folders only."
 # -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
@@ -33,12 +35,17 @@
 # the tarball distribution the design spec also asks for has no such limit,
 # because it is not confined.
 app-id: ai.tracecommons.Contributor
+# GNOME 51 since 2026-11-18 (owner: "Newest supported"; 48 is end-of-life
+# on Flathub since 2026-03-24); it was 48, and 46 before that. The
+# runtime branch is named again in release-apps.yml's linux-flatpak job,
+# which installs exactly this Platform and Sdk branch, and
+# release_pipeline.rs holds the two together.
 runtime: org.gnome.Platform
-runtime-version: '46'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 # No sdk-extensions entry for rust-stable here anymore. The first real
-# release run (app-v0.1.0, run 31959830328) proved org.gnome.Sdk//46
-# resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
+# release run (app-v0.1.0, run 31959830328, then on runtime 46) proved
+# org.gnome.Sdk//46 resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
 # the newer //24.08 branch only reaches 1.89.0, still 7 minors short of this
 # crate's rust-version = "1.96" floor. The build is network-sandboxed, so
 # rustup cannot fetch a newer toolchain at build time either. The
@@ -93,6 +100,21 @@ finish-args:
   # per-app location with no extra permission needed).
   - --filesystem=~/.claude/projects:ro
   - --filesystem=~/.codex/sessions:ro
+  # Host-daemon mode. When the contributor daemon is installed on the host
+  # (the CLI installer plus its systemd user unit), it serves a second socket,
+  # the host link, at $XDG_RUNTIME_DIR/trace-commons/daemon.sock, and this
+  # window attaches to it instead of running a daemon in the sandbox: the
+  # sandbox cannot open a host terminal, and a daemon in it stops watching
+  # when the window closes. The directory
+  # holds that socket, a lock file (watcher.lock) that keeps a host daemon
+  # and an in-sandbox one from watching the same sessions, and the empty
+  # host-unit marker the systemd unit's daemon writes -- never the host
+  # state directory, which holds the device key. `:create` lets a window
+  # started before the daemon see the socket when it arrives; the daemon
+  # tightens the directory to 0700 and checks each peer's uid. Production
+  # channel only: a staging build's directory is trace-commons-staging. See
+  # docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md.
+  - --filesystem=xdg-run/trace-commons:create
 
 modules:
   - name: trace-commons-shell

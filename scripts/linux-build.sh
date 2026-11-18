@@ -78,19 +78,6 @@ case "${1:---build}" in
     # answer.
     run "bash /work/$CRATE_DIR/scripts/queue-shot.sh"
     ;;
-  --onboarding-shots)
-    # Photographs every onboarding page that styles itself. Onboarding was
-    # merged carrying four class names no stylesheet defined; a camera is the
-    # only thing that shows a widget rendering in GTK's defaults, because
-    # `add_css_class` accepts any string without complaint.
-    run "bash /work/$CRATE_DIR/scripts/onboarding-shots.sh"
-    ;;
-  --removed-dialog-shot)
-    # Photographs the "What gets removed?" dialog, whose list is generated
-    # from the protocol's detector table. Needs a click, so onboarding-shots
-    # cannot reach it.
-    run "bash /work/$CRATE_DIR/scripts/removed-dialog-shot.sh"
-    ;;
   --roots-answer)
     # Drives the roots window with xdotool and asserts that the two answers
     # reach daemon-settings.json as a Watch and an Off. The screenshot proves
