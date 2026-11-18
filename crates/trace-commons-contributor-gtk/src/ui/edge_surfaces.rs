@@ -89,16 +89,22 @@ pub fn rail_switch() -> RailSwitch {
 /// Learns what the session supports, shows the rail if it is switched on,
 /// and wires the Settings switch.
 pub fn wire(app: &Rc<App>) {
-    let (client, present) = gnome::spawn();
-    app.edge.gnome.replace(Some(client));
     {
         let app = Rc::clone(app);
         glib::spawn_future_local(async move {
-            let extension = present.recv().await.unwrap_or(false);
+            let client = gnome::find().await;
+            let extension = client.is_some();
+            app.edge.gnome.replace(client);
             let Some(display) = gtk::gdk::Display::default() else {
                 return;
             };
-            let modes = capability::modes(capability::detect(&display, extension));
+            let facts = capability::detect(&display, extension);
+            let modes = capability::modes(facts);
+            // Fixed labels only: which way each surface is shown here.
+            eprintln!(
+                "trace-commons-shell: edge surfaces {:?}, rail {:?}, panel {:?}",
+                facts.backend, modes.rail, modes.panel
+            );
             app.edge.modes.set(Some(modes));
             let on = EdgePrefs::load().edge_rail_enabled;
             app.edge.filling.set(true);
@@ -532,6 +538,9 @@ impl Rail {
             .resizable(false)
             .build();
         window.add_css_class("tc-edge-surface");
+        // GTK opens a window at 200 x 200 unless asked; the closed rail is
+        // its four-pixel zone from the first frame.
+        window.set_default_size(1, 1);
         window.update_property(&[gtk::accessible::Property::Label(rail_words.rail_label)]);
 
         // Closed: the handle on the edge, in a zone four pixels wide.
@@ -619,7 +628,10 @@ impl Rail {
             .build();
         open_row.append(&peek_card);
         open_row.append(&icons);
-        let revealer = gtk::Revealer::builder().child(&open_row).build();
+        let revealer = gtk::Revealer::builder()
+            .child(&open_row)
+            .visible(false)
+            .build();
         follow_motion(&revealer);
 
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -653,9 +665,13 @@ impl Rail {
             };
             let place: crate::edge::opening::Place = {
                 let (window, root, zone) = (window.clone(), root.clone(), zone.clone());
+                let revealer = revealer.clone();
                 let weak_app = Rc::downgrade(app);
                 Box::new(move |open| {
                     zone.set_visible(!open);
+                    // A hidden revealer that slides sideways still asks for
+                    // its child's height; the closed rail is the zone alone.
+                    revealer.set_visible(open);
                     let (_, height) = monitor_size(&window);
                     let (width, height) = geometry::rail_size(open, height);
                     root.set_size_request(width, height);
@@ -1068,7 +1084,8 @@ impl Panel {
         let body = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(geometry::PANEL_SPACING)
-            .width_request(geometry::PANEL_WIDTH)
+            // The Mac's 285 includes the padding round the rows.
+            .width_request(geometry::PANEL_WIDTH - 2 * geometry::PANEL_PADDING)
             .build();
         let surface = gtk::Box::new(gtk::Orientation::Vertical, 0);
         surface.add_css_class("tc-glass-popover");

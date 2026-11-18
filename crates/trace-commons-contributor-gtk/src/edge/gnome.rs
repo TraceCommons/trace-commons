@@ -56,57 +56,62 @@ pub enum Request {
     },
 }
 
-/// The extension's answer to "are you there", and the way to ask it for
-/// placements.
+/// The way to ask the extension for placements, once it is known to be
+/// there. Calls go over GIO's session-bus connection on the main loop; a
+/// failed call is dropped, and the window stays where the window manager
+/// put it, which is the no-extension behaviour.
 #[derive(Clone)]
 pub struct Client {
-    tx: async_channel::Sender<Request>,
+    connection: gtk::gio::DBusConnection,
 }
 
 impl Client {
     pub fn send(&self, request: Request) {
-        let _ = self.tx.send_blocking(request);
-    }
-}
-
-/// Starts the client on its own thread. The receiver answers once: whether
-/// the extension owns its name. A session with no bus answers false.
-pub fn spawn() -> (Client, async_channel::Receiver<bool>) {
-    let (tx, requests) = async_channel::unbounded::<Request>();
-    let (present_tx, present) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let outcome = crate::dbus::with_runtime(|| run(requests, present_tx.clone()));
-        if outcome.is_err() {
-            let _ = present_tx.send_blocking(false);
-        }
-    });
-    (Client { tx }, present)
-}
-
-fn run(
-    requests: async_channel::Receiver<Request>,
-    present: async_channel::Sender<bool>,
-) -> anyhow::Result<()> {
-    let connection = zbus::blocking::Connection::session()?;
-    let bus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
-    let name = zbus::names::BusName::try_from(BUS_NAME)?;
-    let owned = bus.name_has_owner(name).unwrap_or(false);
-    let _ = present.send_blocking(owned);
-    if !owned {
-        return Ok(());
-    }
-    let proxy = zbus::blocking::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE)?;
-    while let Ok(request) = requests.recv_blocking() {
-        // A failed call is dropped: the window stays where the window
-        // manager put it, which is the no-extension behaviour.
-        let _ = match request {
-            Request::Place { title, role, at } => {
-                proxy.call::<_, _, ()>("Place", &(title.as_str(), role.wire(), at.0, at.1))
-            }
-            Request::Release { title } => proxy.call::<_, _, ()>("Release", &(title.as_str(),)),
+        use gtk::glib::variant::ToVariant;
+        let (method, args) = match request {
+            Request::Place { title, role, at } => (
+                "Place",
+                (title, role.wire().to_string(), at.0, at.1).to_variant(),
+            ),
+            Request::Release { title } => ("Release", (title,).to_variant()),
         };
+        self.connection.call(
+            Some(BUS_NAME),
+            OBJECT_PATH,
+            INTERFACE,
+            method,
+            Some(&args),
+            None,
+            gtk::gio::DBusCallFlags::NONE,
+            -1,
+            gtk::gio::Cancellable::NONE,
+            |_| {},
+        );
     }
-    Ok(())
+}
+
+/// The extension, if it owns its name on the session bus. `None` on a
+/// session with no bus, or where it is not installed and enabled.
+pub async fn find() -> Option<Client> {
+    use gtk::glib::variant::ToVariant;
+    let connection = gtk::gio::bus_get_future(gtk::gio::BusType::Session)
+        .await
+        .ok()?;
+    let reply = connection
+        .call_future(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            Some(&(BUS_NAME,).to_variant()),
+            Some(gtk::glib::VariantTy::new("(b)").ok()?),
+            gtk::gio::DBusCallFlags::NONE,
+            2000,
+        )
+        .await
+        .ok()?;
+    let (owned,) = reply.get::<(bool,)>()?;
+    owned.then_some(Client { connection })
 }
 
 #[cfg(test)]
