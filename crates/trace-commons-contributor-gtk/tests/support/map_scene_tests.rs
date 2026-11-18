@@ -1633,3 +1633,54 @@ fn the_private_ai_map_is_laid_out_as_the_macs() {
         }
     );
 }
+
+/// `MapToolPile.hover`: under the pointer the pile grows taller at once,
+/// wider 260 ms later and shows its names 200 ms after that; leaving, the
+/// names go at once, the width 100 ms later and the height 220 ms after
+/// that. Under reduced motion every stage is at once.
+#[test]
+fn the_pile_opens_and_closes_in_the_macs_stages() {
+    assert_eq!(
+        pile_steps(true, false),
+        [
+            (0, PileStep::Tall(true)),
+            (260, PileStep::Wide(true)),
+            (460, PileStep::Names(true)),
+        ]
+    );
+    assert_eq!(
+        pile_steps(false, false),
+        [
+            (0, PileStep::Names(false)),
+            (100, PileStep::Wide(false)),
+            (320, PileStep::Tall(false)),
+        ]
+    );
+    for inside in [true, false] {
+        assert!(pile_steps(inside, true).iter().all(|(at, _)| *at == 0));
+    }
+    let mut stage = PileStage::default();
+    for (_, step) in pile_steps(true, false) {
+        stage = stage.with(step);
+    }
+    assert_eq!(
+        stage,
+        PileStage {
+            tall: true,
+            wide: true,
+            names: true
+        }
+    );
+    // Leaving halfway through opening: the names never show, and the
+    // card narrows and shortens as it closes.
+    let half = PileStage::default().with(PileStep::Tall(true));
+    let closing: Vec<PileStage> = pile_steps(false, false)
+        .iter()
+        .scan(half, |stage, (_, step)| {
+            *stage = stage.with(*step);
+            Some(*stage)
+        })
+        .collect();
+    assert_eq!(closing.last(), Some(&PileStage::default()));
+    assert!(closing.iter().all(|stage| !stage.names));
+}

@@ -61,8 +61,8 @@ use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
 use super::field;
 use super::map_scene::{
-    self, ArcStyle, CommonsGate, Contributions, HarnessRow, Lamp, MapGeometry, NodeKind, Point,
-    Scene, ScreenState, Size, ToolStack,
+    self, ArcStyle, CommonsGate, Contributions, HarnessRow, Lamp, MapGeometry, NodeKind, PileStage,
+    Point, Scene, ScreenState, Size, ToolStack,
 };
 use super::map_transfers;
 use super::orb;
@@ -169,10 +169,10 @@ pub struct StillKey {
     pub fit: MapGeometry,
     pub selection: Option<String>,
     pub palette: Palette,
-    /// At rest, whether the pile is open: the pile, its words and the
+    /// At rest, how far the pile is open: the pile, its words and the
     /// rocket on the pad are then part of the layer. `None` during a run,
     /// when they move and are drawn frame by frame.
-    pub resting: Option<bool>,
+    pub resting: Option<PileStage>,
 }
 
 impl StillKey {
@@ -183,7 +183,7 @@ impl StillKey {
         fit: &MapGeometry,
         selection: Option<&str>,
         palette: &Palette,
-        resting: Option<bool>,
+        resting: Option<PileStage>,
     ) -> bool {
         self.scene == *scene
             && self.fit == *fit
@@ -214,8 +214,12 @@ mod imp {
         pub size: Cell<(i32, i32)>,
         pub hovered: RefCell<Option<String>>,
         pub focused: RefCell<Option<String>>,
-        /// Whether the tool pile is open: the pointer is over its card.
-        pub pile_open: Cell<bool>,
+        /// How far the tool pile is open (`MapToolPile`'s stages), and
+        /// whether the pointer is over its card.
+        pub pile_stage: Cell<PileStage>,
+        pub pile_inside: Cell<bool>,
+        /// The stages still to come, cancelled by a change of mind.
+        pub pile_staging: RefCell<Vec<glib::SourceId>>,
         /// Each node's button, by node id, in keyboard order.
         pub nodes: RefCell<Vec<(String, gtk::Button)>>,
         pub pill: RefCell<Option<gtk::Button>>,
@@ -233,7 +237,7 @@ mod imp {
         pub still: RefCell<Option<(StillKey, StillLayer)>>,
         /// The pile's coin order and openness the buttons were last
         /// allocated for.
-        pub pile_at: RefCell<(Vec<String>, bool)>,
+        pub pile_at: RefCell<(Vec<String>, PileStage)>,
         /// The legend's memory item, shown while the tool group is drawn.
         pub memory_legend: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
         /// The Traces map's style (Settings): the rocket and station, or
@@ -344,6 +348,9 @@ mod imp {
             if let Some(tick) = self.tick.take() {
                 tick.remove();
             }
+            for source in self.pile_staging.take() {
+                source.remove();
+            }
             for (_, button) in self.nodes.take() {
                 button.unparent();
             }
@@ -392,7 +399,7 @@ mod imp {
                 let at = order
                     .iter()
                     .position(|tool| tool == id)
-                    .and_then(|i| Some(scene.stack.as_ref()?.coin_center(i, open)))
+                    .and_then(|i| Some(scene.stack.as_ref()?.coin_center(i, open.tall)))
                     .unwrap_or(node.at);
                 let centre = fit.point(at);
                 let side = 24.0_f64.max((node.radius * 2.0 + 8.0) * fit.scale);
@@ -490,7 +497,7 @@ mod imp {
             // At rest the pile, its words and the rocket on the pad are
             // still too, so they join the still layer; during a run they
             // move and are drawn on every frame.
-            let resting = motion.is_none().then(|| self.pile_open.get());
+            let resting = motion.is_none().then(|| self.pile_stage.get());
             let still = self.still_layer(&scene, &fit, &palette, &bounds, resting);
             if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
                 snapshot.append_node(under);
@@ -592,7 +599,6 @@ mod imp {
         }
 
         fn point_at(&self, pointer: Option<(f64, f64)>) {
-            let open = self.pile_open.get();
             let inside = {
                 let scene = self.scene.borrow();
                 let Some(stack) = scene.stack.as_ref() else {
@@ -600,15 +606,40 @@ mod imp {
                 };
                 // The card as drawn: while a trace moves it keeps its size.
                 let drawn = self.pile(&scene).1;
-                let (x, y, w, h) = stack.card(&self.geometry(), drawn, drawn);
+                let (x, y, w, h) = stack.card(&self.geometry(), drawn.tall, drawn.wide);
                 pointer.is_some_and(|(px, py)| px >= x && px <= x + w && py >= y && py <= y + h)
             };
-            if inside != open {
-                self.pile_open.set(inside);
-                let obj = self.obj();
-                obj.queue_allocate();
-                obj.queue_draw();
+            if inside == self.pile_inside.replace(inside) {
+                return;
             }
+            // A change of mind cancels the stages still to come
+            // (`MapToolPile.hover`).
+            for source in self.pile_staging.take() {
+                source.remove();
+            }
+            let mut pending = Vec::new();
+            for (delay, step) in map_scene::pile_steps(inside, reduce_motion()) {
+                if delay == 0 {
+                    self.pile_stage.set(self.pile_stage.get().with(step));
+                    continue;
+                }
+                let weak = self.obj().downgrade();
+                pending.push(glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(u64::from(delay)),
+                    move || {
+                        if let Some(obj) = weak.upgrade() {
+                            let imp = obj.imp();
+                            imp.pile_stage.set(imp.pile_stage.get().with(step));
+                            obj.queue_allocate();
+                            obj.queue_draw();
+                        }
+                    },
+                ));
+            }
+            self.pile_staging.replace(pending);
+            let obj = self.obj();
+            obj.queue_allocate();
+            obj.queue_draw();
         }
 
         fn layout(&self, text: &str, size: f64, bold: bool) -> gtk::pango::Layout {
@@ -669,19 +700,17 @@ mod imp {
             Some((run.clone(), self.now() - run.start))
         }
 
-        /// The pile's coin order, front first, and whether it is open:
+        /// The pile's coin order, front first, and how far it is open:
         /// while a trace moves the pile keeps its size, and each trace's
         /// tool comes to the front as it sets off.
-        pub fn pile(&self, scene: &Scene) -> (Vec<String>, bool) {
+        pub fn pile(&self, scene: &Scene) -> (Vec<String>, PileStage) {
             let Some(stack) = scene.stack.as_ref() else {
-                return (Vec::new(), false);
+                return (Vec::new(), PileStage::default());
             };
+            let stage = self.pile_stage.get();
             match self.motion() {
-                Some((run, t)) => (
-                    run.order(&stack.tools, t),
-                    self.pile_open.get() && !run.moving(t),
-                ),
-                None => (stack.tools.clone(), self.pile_open.get()),
+                Some((run, t)) => (run.order(&stack.tools, t), stage.drawn(run.moving(t))),
+                None => (stack.tools.clone(), stage),
             }
         }
 
@@ -698,7 +727,7 @@ mod imp {
             fit: &MapGeometry,
             palette: &Palette,
             bounds: &gtk::graphene::Rect,
-            resting: Option<bool>,
+            resting: Option<PileStage>,
         ) -> Option<StillLayer> {
             let selection = self.selection();
             let kept = self
@@ -924,7 +953,7 @@ mod imp {
             snapshot: &gtk::Snapshot,
             scene: &Scene,
             order: &[String],
-            open: bool,
+            stage: PileStage,
             fit: &MapGeometry,
             palette: &Palette,
         ) {
@@ -933,6 +962,7 @@ mod imp {
                 return;
             };
             let s = fit.scale;
+            let open = stage.tall;
             let left = fit.point(stack.port_left());
             let height = stack.height(open) * s;
             self.text(
@@ -950,7 +980,9 @@ mod imp {
                 };
                 let centre = fit.point(stack.coin_center(index, open));
                 let shown = if node.dashed { 0.55 } else { 1.0 };
-                if !open {
+                // The names show at their own stage, after the card has
+                // widened (`MapToolPile`'s `names`).
+                if !(open && stage.names) {
                     continue;
                 }
                 // A coin's name and what waits from it, beside it once the
@@ -2121,13 +2153,14 @@ fn draw_pile(
     glow: Option<&gtk::gdk::RGBA>,
     fit: &MapGeometry,
     palette: &Palette,
-    open: bool,
+    stage: PileStage,
 ) {
     let s = fit.scale;
-    let (x, y, w, h) = stack.card(fit, open, open);
+    let open = stage.tall;
+    let (x, y, w, h) = stack.card(fit, stage.tall, stage.wide);
     rounded(cr, x, y, w, h, 26.0 * s);
     // An open card is opaque: nothing under it shows through.
-    let card = if open {
+    let card = if stage.open() {
         palette.map.pane_opaque
     } else {
         palette.map.well_fill
@@ -2818,6 +2851,12 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OPEN_PILE: PileStage = PileStage {
+        tall: true,
+        wide: true,
+        names: true,
+    };
     use trace_commons_contributor::harness_state::HarnessState;
 
     /// The legend's memory item is the shared copy's word for this
@@ -3058,12 +3097,65 @@ mod tests {
                 None,
                 &fit,
                 &palette,
-                false,
+                PileStage::default(),
             );
         });
         let tint = palette.map.tint(Tint::Claude);
         let tinted = pixels.iter().filter(|p| near_colour(**p, &tint)).count();
         assert!(tinted > 150, "only {tinted} pixels in the Claude tint");
+    }
+
+    /// The pile's card follows the Mac's stages: taller first, still the
+    /// narrow card in the well's fill; only once wide is it the open,
+    /// opaque card (`MapToolPile`: width from `wide`, the opaque fill
+    /// from `open && wide`).
+    #[test]
+    fn the_pile_card_widens_only_at_its_wide_stage() {
+        let scene = traces_scene(&[entry("a", "p", "claude-code"), entry("b", "p", "codex")]);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let stack = scene.stack.as_ref().unwrap();
+        let (x, y, w, h) = stack.card(&fit, true, true);
+        let narrow = stack.card(&fit, true, false).2;
+        assert!(w > narrow + 20.0);
+        // A point in the wide card, right of the narrow one.
+        let probe = ((x + (narrow + w) / 2.0) as usize, (y + h / 2.0) as usize);
+        let at = |stage: PileStage| {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 580, 760).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                draw_pile(
+                    &cr,
+                    &scene,
+                    stack,
+                    &stack.tools,
+                    &[],
+                    None,
+                    &fit,
+                    &palette,
+                    stage,
+                );
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let i = probe.1 * stride + probe.0 * 4;
+            [data[i + 2], data[i + 1], data[i], data[i + 3]]
+        };
+        let tall = PileStage {
+            tall: true,
+            ..PileStage::default()
+        };
+        assert_eq!(at(tall)[3], 0, "the card widened before its wide stage");
+        let open = at(PileStage {
+            tall: true,
+            wide: true,
+            names: false,
+        });
+        let pane = palette.map.pane_opaque;
+        assert_eq!(open[3], 255, "the open card is opaque");
+        assert!((f32::from(open[0]) - pane.red() * 255.0).abs() <= 2.0);
     }
 
     fn private_rows() -> Vec<HarnessRow> {
@@ -3544,7 +3636,11 @@ mod tests {
                         None,
                         &fit,
                         &palette,
-                        open,
+                        if open {
+                            OPEN_PILE
+                        } else {
+                            PileStage::default()
+                        },
                     );
                 }
                 surface.flush();
@@ -3869,11 +3965,11 @@ mod tests {
             fit,
             selection: None,
             palette: palette.clone(),
-            resting: Some(false),
+            resting: Some(PileStage::default()),
         };
-        assert!(key.is(&scene, &fit, None, &palette, Some(false)));
+        assert!(key.is(&scene, &fit, None, &palette, Some(PileStage::default())));
         assert!(
-            !key.is(&scene, &fit, None, &palette, Some(true)),
+            !key.is(&scene, &fit, None, &palette, Some(OPEN_PILE)),
             "the pile opened"
         );
         assert!(
@@ -3888,21 +3984,30 @@ mod tests {
         let zoomed = MapGeometry::new(size, 1.25, None, scene.space);
         assert_ne!(zoomed, fit);
         assert!(
-            !key.is(&scene, &zoomed, None, &palette, Some(false)),
+            !key.is(&scene, &zoomed, None, &palette, Some(PileStage::default())),
             "a zoom"
         );
         let wider = MapGeometry::new(Size::new(600.0, 760.0), 1.0, None, scene.space);
         assert!(
-            !key.is(&scene, &wider, None, &palette, Some(false)),
+            !key.is(&scene, &wider, None, &palette, Some(PileStage::default())),
             "a resize"
         );
         assert!(
-            !key.is(&scene, &fit, Some("hub"), &palette, Some(false)),
+            !key.is(
+                &scene,
+                &fit,
+                Some("hub"),
+                &palette,
+                Some(PileStage::default())
+            ),
             "a selection"
         );
         let mut dark = palette.clone();
         dark.ink = gtk::gdk::RGBA::WHITE;
-        assert!(!key.is(&scene, &fit, None, &dark, Some(false)), "a scheme");
+        assert!(
+            !key.is(&scene, &fit, None, &dark, Some(PileStage::default())),
+            "a scheme"
+        );
         let other = Scene::traces(
             &TracesTree::build(&[], &[], None),
             &CommonsGate::with_state(ScreenState::Ready),
@@ -3912,7 +4017,7 @@ mod tests {
             map_scene::SIZE,
         );
         assert!(
-            !key.is(&other, &fit, None, &palette, Some(false)),
+            !key.is(&other, &fit, None, &palette, Some(PileStage::default())),
             "a new scene"
         );
     }

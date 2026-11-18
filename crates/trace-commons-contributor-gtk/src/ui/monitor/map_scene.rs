@@ -1531,6 +1531,65 @@ pub enum MapStyle {
     Standard,
 }
 
+/// How far the tool pile has opened (`MapToolPile`'s `tall`, `wide` and
+/// `names`): its full column, then its card wide enough for the names,
+/// then the names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PileStage {
+    pub tall: bool,
+    pub wide: bool,
+    pub names: bool,
+}
+
+/// One stage of opening or closing the pile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PileStep {
+    Tall(bool),
+    Wide(bool),
+    Names(bool),
+}
+
+impl PileStage {
+    pub fn with(self, step: PileStep) -> Self {
+        match step {
+            PileStep::Tall(tall) => Self { tall, ..self },
+            PileStep::Wide(wide) => Self { wide, ..self },
+            PileStep::Names(names) => Self { names, ..self },
+        }
+    }
+
+    /// The stage as drawn: while a trace moves the card keeps its closed
+    /// size, so no line moves under it.
+    pub fn drawn(self, moving: bool) -> Self {
+        if moving { Self::default() } else { self }
+    }
+
+    /// The whole card open: tall and wide, drawn opaque.
+    pub fn open(self) -> bool {
+        self.tall && self.wide
+    }
+}
+
+/// The pile's stages when the pointer comes over its card (`inside`) or
+/// leaves it, each with its delay in milliseconds from then
+/// (`MapToolPile.hover`); all at once under reduced motion.
+pub fn pile_steps(inside: bool, reduce_motion: bool) -> [(u32, PileStep); 3] {
+    let at = |ms: u32| if reduce_motion { 0 } else { ms };
+    if inside {
+        [
+            (0, PileStep::Tall(true)),
+            (at(260), PileStep::Wide(true)),
+            (at(260 + 200), PileStep::Names(true)),
+        ]
+    } else {
+        [
+            (0, PileStep::Names(false)),
+            (at(100), PileStep::Wide(false)),
+            (at(100 + 220), PileStep::Tall(false)),
+        ]
+    }
+}
+
 /// The library orb's frame on the standard map, in design units
 /// (`MapTransferDrawing.orbFrame`).
 pub const ORB_FRAME: f64 = 104.0;
