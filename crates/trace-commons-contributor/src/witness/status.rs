@@ -466,7 +466,6 @@ mod tests {
             user_subject: "subject".into(),
             device_key_id: "device".into(),
             consent_scopes: vec![],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,

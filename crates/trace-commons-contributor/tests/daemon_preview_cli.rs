@@ -81,7 +81,6 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
         user_subject: "alice".into(),
         device_key_id: "sha256:test".into(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,

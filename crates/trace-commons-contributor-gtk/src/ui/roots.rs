@@ -164,16 +164,15 @@ fn present_mode<F>(
         .xalign(0.0)
         .wrap(true)
         .build();
-    heading.add_css_class("tc-brand-dialog-title");
+    heading.add_css_class("tc-flow-title");
     outer.append(&heading);
     outer.append(&body_label(copy::ROOTS_BODY));
     let consequence = body_label(copy::ROOTS_BOTH);
     // A notice box rather than a colour on running text. This is the sentence
     // that makes "I don't use this" mean something -- leave it as prose and it
-    // reads as the third paragraph of an intro nobody finishes. The brand
-    // sheet loads at a higher priority than style.css, so an emphasis picked
-    // from style.css would lose to `tc-brand-body`'s own size and colour and
-    // silently do nothing, which is the same failure this screen already had.
+    // reads as the third paragraph of an intro nobody finishes. The notice
+    // box sets its own ground and ink, and the brand sheet loads at a higher
+    // priority than style.css, so it wins over `tc-flow-body`'s colour.
     consequence.add_css_class("tc-brand-notice");
     outer.append(&consequence);
 
@@ -326,8 +325,12 @@ fn present_mode<F>(
             .margin_start(space::XL)
             .margin_end(space::XL)
             .build();
-        let title = body_label(words.welcome.title);
-        title.add_css_class("tc-brand-dialog-title");
+        let title = gtk::Label::builder()
+            .label(words.welcome.title)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        title.add_css_class("tc-flow-title");
         intro.append(&title);
         intro.append(&body_label(words.welcome.body));
         let start = gtk::Button::with_label(words.welcome.start);
@@ -362,11 +365,15 @@ fn present_mode<F>(
 pub(super) fn connected(app: &Rc<super::App>, on_saved: impl Fn() + 'static) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, space::L);
     let words = trace_commons_contributor::first_run_copy::first_run_copy();
-    let title = body_label(&format!(
-        "{} {}",
-        words.tools.title_light, words.tools.title_bold
-    ));
-    title.add_css_class("tc-brand-dialog-title");
+    let title = gtk::Label::builder()
+        .label(format!(
+            "{} {}",
+            words.tools.title_light, words.tools.title_bold
+        ))
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    title.add_css_class("tc-flow-title");
     root.append(&title);
     root.append(&body_label(copy::ROOTS_BODY));
     let loading = gtk::Spinner::new();
@@ -647,7 +654,7 @@ fn body_label(text: &str) -> gtk::Label {
         .xalign(0.0)
         .wrap(true)
         .build();
-    label.add_css_class("tc-brand-body");
+    label.add_css_class("tc-flow-body");
     label
 }
 

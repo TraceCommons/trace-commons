@@ -64,7 +64,6 @@ func seedSettings(configDir: String) throws {
         "history_poll_secs": 1800,
         "canary_interval_secs": 3600,
         "local_notifications": false,
-        "near_ai": NSNull(),
         "claude_root": claudeRoot,
         "codex_root": codexRoot,
     ]

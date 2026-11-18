@@ -112,12 +112,6 @@ public enum TCCoreCopy {
         take(tc_withdrawal_confirmation_prompt_text())
     }
 
-    /// `tc_privacy_scan_copy_json`: the extra privacy scan's words. Decoded
-    /// by `TCShellCore.PrivacyScanCopy`.
-    public static func privacyScanCopyJSON() -> String? {
-        take(tc_privacy_scan_copy_json())
-    }
-
     /// `tc_health_copy_json`: the health banner's words. `reachable` is this
     /// shell's own liveness fact; a nil or empty `label` on a reachable
     /// daemon is nil (nothing to show). A nil `maxQueueEntries` is passed as
