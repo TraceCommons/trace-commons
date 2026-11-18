@@ -1675,7 +1675,7 @@ impl Sheet {
         let sheet = Rc::clone(self);
         // Asks first, as the Mac's `dismissModal`; the sheet moves on only
         // once the daemon has taken it.
-        super::queue::confirm_dismiss(&self.app, &entry, move |app, dismissed| {
+        super::queue::confirm_dismiss(&self.app, entry, move |app, dismissed| {
             app.refresh();
             if dismissed {
                 sheet.advance();

@@ -1097,7 +1097,7 @@ mod tests {
         assert!(!clear_needs_confirmation(None, Some("auto_upload")));
         assert!(clear_needs_confirmation(None, Some("notify_only")));
         assert!(!clear_needs_confirmation(
-            Some(&[ask.clone()]),
+            Some(std::slice::from_ref(&ask)),
             Some("ignore")
         ));
         assert!(clear_needs_confirmation(

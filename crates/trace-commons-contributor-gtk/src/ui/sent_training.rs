@@ -154,12 +154,11 @@ fn raise(app: &Rc<App>, copy: SentTracesTrainingCopy, count: u64, failed: bool) 
             OPEN.with(|open| open.set(false));
             return;
         }
-        let copy = copy.clone();
         app.call(
             "model_training_consent_grant",
             serde_json::json!({ "all_eligible": true }),
             move |app, result| match grant_outcome(&result) {
-                Grant::Failed => raise(app, copy.clone(), count, true),
+                Grant::Failed => raise(app, copy, count, true),
                 Grant::Answered | Grant::Hidden => {
                     OPEN.with(|open| open.set(false));
                     app.refresh();

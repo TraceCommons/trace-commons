@@ -54,7 +54,7 @@ fn the_sheet_says_the_cores_words() {
     assert_eq!(body(&copy, 1), copy.body_one);
     assert_eq!(body(&copy, 4), copy.body_other.replace("{count}", "4"));
     assert!(complete(&copy));
-    let mut partial = copy.clone();
+    let mut partial = copy;
     partial.scope = " ";
     assert!(!complete(&partial));
 }
