@@ -171,6 +171,7 @@ else
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
+    ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \

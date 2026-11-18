@@ -1917,12 +1917,10 @@ impl Sheet {
 /// hole. See `.tc-redaction` in `style.css` for the full treatment, which
 /// applies where a marker is drawn as a widget rather than as buffer text.
 fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
-    let dark = adw::StyleManager::default().is_dark();
-    let (background, foreground) = if dark {
-        ("#4A3C18", "#F0EBDD")
-    } else {
-        ("#f3e3c0", "#202426")
-    };
+    // The scheme's literals live in `style::Inks` now, beside the Omarchy
+    // skin's, so one place answers for both.
+    let inks = style::inks();
+    let (background, foreground) = (inks.redaction_bg.as_str(), inks.redaction_fg.as_str());
     let tag = buffer
         .create_tag(
             None,
@@ -2384,18 +2382,28 @@ impl Excerpt {
     /// can, so the hue and its alpha are written out per scheme. They are
     /// `tc_gold_highlight`'s own two components -- `rgba(185,130,31,.28)`
     /// light, `rgba(220,170,67,.32)` dark -- and must be kept in step with
-    /// it. Only the background is set: the foreground stays the label's own
-    /// ink, which is what keeps the excerpt readable at both ends of the
-    /// scheme.
+    /// it. In the standard look only the background is set: the foreground
+    /// stays the label's own ink, which keeps the excerpt readable at both
+    /// ends of the scheme. In the Omarchy skin the hit's ink is set too,
+    /// solved against the theme's yellow wash (`omarchy::Palette::
+    /// highlight_ink`), since a theme's yellow can leave its own ink under
+    /// 4.5:1.
     fn markup(&self) -> String {
-        let dark = adw::StyleManager::default().is_dark();
-        let (hue, alpha) = if dark {
-            ("#DCAA43", "32%")
-        } else {
-            ("#B9821F", "28%")
-        };
+        self.markup_with(&style::inks())
+    }
+
+    /// [`Self::markup`] with the inks given rather than read from what is
+    /// on screen; `style::Inks::standard` carries the two scheme values
+    /// above.
+    fn markup_with(&self, inks: &style::Inks) -> String {
+        let (hue, alpha) = (&inks.highlight, &inks.highlight_alpha);
+        let ink = inks
+            .highlight_ink
+            .as_ref()
+            .map(|ink| format!(" foreground=\"{ink}\""))
+            .unwrap_or_default();
         format!(
-            "{}<span background=\"{hue}\" bgalpha=\"{alpha}\">{}</span>{}",
+            "{}<span background=\"{hue}\" bgalpha=\"{alpha}\"{ink}>{}</span>{}",
             glib::markup_escape_text(&self.text[..self.hit.start]),
             glib::markup_escape_text(&self.text[self.hit.clone()]),
             glib::markup_escape_text(&self.text[self.hit.end..]),
@@ -2665,6 +2673,32 @@ mod tests {
         }
     }
     use super::context_around;
+
+    /// The highlighted excerpt is washed in the inks it is given: the
+    /// standard gold, or the Omarchy palette's.
+    #[test]
+    fn the_excerpt_wash_follows_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::TOKYO};
+        use crate::ui::style::Inks;
+        let excerpt = super::Excerpt {
+            text: "a needle here".to_string(),
+            hit: 2..8,
+        };
+        // Standard: the wash only, exactly as before the skin.
+        assert_eq!(
+            excerpt.markup_with(&Inks::standard(false)),
+            "a <span background=\"#B9821F\" bgalpha=\"28%\">needle</span> here"
+        );
+        let palette = omarchy::parse(TOKYO, false).unwrap();
+        let markup = excerpt.markup_with(&Inks::omarchy(&palette));
+        assert!(markup.contains(&format!("background=\"{}\"", palette.highlight.hex())));
+        assert!(markup.contains(&format!("bgalpha=\"{}\"", omarchy::HIGHLIGHT_ALPHA)));
+        // The skin also sets the hit's ink, solved against its wash.
+        assert!(
+            markup.contains(&format!("foreground=\"{}\"", palette.highlight_ink.hex())),
+            "{markup}"
+        );
+    }
 
     #[test]
     fn context_never_splits_a_multibyte_character() {

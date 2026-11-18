@@ -6,6 +6,7 @@
 //! application tells a contributor to install a shell extension.
 
 pub(crate) mod account_change;
+pub mod appearance;
 pub mod balance;
 pub mod community_brand;
 pub(crate) mod consent_settings;
@@ -23,6 +24,7 @@ mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod monitor;
+pub mod omarchy;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
