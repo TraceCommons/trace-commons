@@ -147,6 +147,16 @@ impl ManagedService {
             .get(std::time::Instant::now(), launching, probe)
     }
 
+    /// The terminal a launch or a tool setup opens in, with the installed
+    /// apps it was checked against: the stored choice, or, while none was
+    /// chosen and the default is missing, the first installed app
+    /// ([`terminal::effective`]).
+    fn terminal_for(&mut self, terminal: TerminalChoice) -> (TerminalSetting, Vec<TerminalApp>) {
+        let installed = self.installed_terminals(terminal.setting.app());
+        let choice = terminal::effective(terminal.setting, terminal.chosen, &installed);
+        (choice, installed)
+    }
+
     /// The terminal a `managed_session_focus` request shows, and how to show
     /// it. Read under the lock; the showing runs after it is released.
     fn focus_target(
@@ -169,9 +179,9 @@ impl ManagedService {
     fn begin_terminal_launch(
         &mut self,
         request: &Request,
-        choice: TerminalSetting,
-        grouped: bool,
+        terminal: TerminalChoice,
     ) -> Result<TerminalLaunch, ManagedError> {
+        let grouped = terminal.herdr;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
@@ -195,6 +205,7 @@ impl ManagedService {
         let cwd = self
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
+        let (choice, installed) = self.terminal_for(terminal);
         Ok(TerminalLaunch {
             launch: if grouped {
                 self.launch_herdr
@@ -203,7 +214,7 @@ impl ManagedService {
             },
             grouped,
             choice,
-            installed: self.installed_terminals(choice.app()),
+            installed,
             config_dir: self.config_dir.clone(),
             cwd,
             session_id: p.session_id,
@@ -547,11 +558,14 @@ impl ManagedService {
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
                 // The offered apps found here, for a shell's picker.
-                let choices: Vec<Value> = self
-                    .installed_terminals(None)
-                    .into_iter()
+                let installed = self.installed_terminals(None);
+                let choices: Vec<Value> = installed
+                    .iter()
                     .map(|app| json!({"id":app.id(),"name":app.name()}))
                     .collect();
+                // What a launch would open: the default's fallback while
+                // none was chosen, so the picker and destination name it.
+                let choice = terminal::effective(choice, terminal.chosen, &installed);
                 // Off macOS, with no offered terminal found there is nothing
                 // to choose and nothing to open: Launch stays off and the
                 // shells show their "unavailable" line, rather than a
@@ -581,7 +595,7 @@ impl ManagedService {
                 let params: Params = parse(request)?;
                 let native = find_native(params.tool).ok();
                 let command = tool_setup::command(params.tool, params.action, native.as_deref())?;
-                let installed = self.installed_terminals(choice.app());
+                let (choice, installed) = self.terminal_for(terminal);
                 (self.setup_terminal)(choice, &installed, &command)?;
                 // This acknowledges only the visible terminal handoff. The
                 // installer runs there; the next snapshot re-discovers tools.
@@ -1113,7 +1127,7 @@ where
 fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
     let choice = terminal_choice(shared);
     let launch = match with_service(shared, |service| {
-        service.begin_terminal_launch(request, choice.setting, choice.herdr)
+        service.begin_terminal_launch(request, choice)
     }) {
         Ok(launch) => launch,
         Err(refusal) => return respond(request, Err(refusal)),
@@ -2849,6 +2863,71 @@ mod tests {
         }
     }
 
+    /// While no terminal was chosen and the default is not installed, the
+    /// snapshot and tool setup use the first installed app in picker order,
+    /// without saving it; a terminal the person chose is kept and refused.
+    #[test]
+    fn a_missing_default_opens_the_first_installed_terminal_until_one_is_chosen() {
+        let (_home, _store, mut service) = service();
+        // Every offered app but the default.
+        service.installed_terminals = || {
+            TerminalApp::offered()
+                .iter()
+                .copied()
+                .filter(|app| Some(*app) != TerminalSetting::default().app())
+                .collect()
+        };
+        let Some(first) = (service.installed_terminals)().first().copied() else {
+            // One offered terminal here (Windows): nothing to fall back to.
+            return;
+        };
+        let current = |service: &mut ManagedService, chosen: bool| {
+            call_choosing(
+                service,
+                "managed_snapshot",
+                json!({}),
+                false,
+                TerminalSetting::default(),
+                chosen,
+            )
+            .unwrap()["capabilities"]["terminal_current"]
+                .clone()
+        };
+        assert_eq!(current(&mut service, false), first.id());
+        assert_eq!(
+            current(&mut service, true),
+            json!(TerminalSetting::default().app().map(TerminalApp::id))
+        );
+
+        static SETUP_IN: std::sync::Mutex<Vec<TerminalSetting>> = std::sync::Mutex::new(vec![]);
+        service.setup_terminal = |choice, installed, _| {
+            SETUP_IN.lock().unwrap().push(choice);
+            match choice.app() {
+                Some(app) if installed.contains(&app) => Ok(()),
+                _ => Err(ManagedError::TerminalNotFound),
+            }
+        };
+        let setup = |service: &mut ManagedService, chosen: bool| {
+            call_choosing(
+                service,
+                "managed_tool_setup",
+                json!({"tool":"codex","action":"install"}),
+                false,
+                TerminalSetting::default(),
+                chosen,
+            )
+        };
+        assert_eq!(setup(&mut service, false), Ok(json!({"opened":true})));
+        assert_eq!(
+            setup(&mut service, true),
+            Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            *SETUP_IN.lock().unwrap(),
+            [TerminalSetting::from(first), TerminalSetting::default()]
+        );
+    }
+
     /// Off macOS, no offered terminal found means no Launch, rather than a
     /// refusal pointing at a picker that is not drawn.
     #[test]
@@ -3382,6 +3461,86 @@ mod tests {
                 Err(ManagedError::InvalidRequest)
             );
         });
+    }
+
+    /// The terminal each [`record_choice`] launch was asked to open in.
+    static LAUNCHED_IN: std::sync::Mutex<Vec<(Uuid, TerminalSetting)>> =
+        std::sync::Mutex::new(vec![]);
+
+    /// Records the terminal it was asked to open in, and refuses one that
+    /// is not installed, as [`terminal::launch`] does.
+    fn record_choice(
+        choice: TerminalSetting,
+        installed: &[TerminalApp],
+        config: &std::path::Path,
+        cwd: &std::path::Path,
+        session: Uuid,
+        ticket: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        LAUNCHED_IN.lock().unwrap().push((session, choice));
+        match choice.app() {
+            Some(app) if installed.contains(&app) => {
+                record_launch(choice, installed, config, cwd, session, ticket)
+            }
+            _ => Err(ManagedError::TerminalNotFound),
+        }
+    }
+
+    /// A launch through the daemon, with no terminal chosen and the default
+    /// missing, opens the first installed terminal; once the person has
+    /// chosen the missing default, the launch is refused, never moved.
+    #[test]
+    fn a_launch_with_a_missing_unchosen_default_opens_the_first_installed_terminal() {
+        let (home, shared) = launching(record_choice);
+        let others = || -> Vec<TerminalApp> {
+            TerminalApp::offered()
+                .iter()
+                .copied()
+                .filter(|app| Some(*app) != TerminalSetting::default().app())
+                .collect()
+        };
+        let Some(first) = others().first().copied() else {
+            // One offered terminal here (Windows): nothing to fall back to.
+            return;
+        };
+        locked(&shared, |service| service.installed_terminals = others);
+        let in_terminal = |session: Uuid| {
+            LAUNCHED_IN
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == session)
+                .map(|(_, choice)| *choice)
+        };
+        {
+            let settings = shared.settings.lock().unwrap();
+            assert!(!settings.managed_terminal_chosen);
+            assert_eq!(settings.managed_terminal, TerminalSetting::default());
+        }
+        let unchosen = prepared(&shared, home.path());
+        let id = unchosen.session_id;
+        assert!(
+            terminal(
+                &shared,
+                json!({"session_id":id,"ticket":unchosen.ticket.unwrap()})
+            )
+            .is_ok()
+        );
+        assert_eq!(in_terminal(id), Some(TerminalSetting::from(first)));
+        // Not saved: the setting still names the default, unchosen.
+        assert!(!shared.settings.lock().unwrap().managed_terminal_chosen);
+
+        shared.settings.lock().unwrap().managed_terminal_chosen = true;
+        let chosen = prepared(&shared, home.path());
+        let id = chosen.session_id;
+        assert_eq!(
+            terminal(
+                &shared,
+                json!({"session_id":id,"ticket":chosen.ticket.unwrap()})
+            ),
+            Err(label(ManagedError::TerminalNotFound).to_string())
+        );
+        assert_eq!(in_terminal(id), Some(TerminalSetting::default()));
     }
 
     /// The sessions [`record_opened`] was asked to open.

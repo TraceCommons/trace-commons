@@ -91,7 +91,18 @@ impl Fixture {
                 // line.
                 | "route_disclosure"
                 // Private AI's saved-account panel; refused, it stays empty.
-                | "managed_snapshot" => {
+                | "managed_snapshot"
+                // The Traces map's tool read; refused, it draws no tools.
+                | "tool_destinations"
+                // Settings' sharing choice and Uses; refused, they stay
+                // unpicked and empty.
+                | "automatic_grant"
+                | "consent_options"
+                // Settings' bulk change asks which modes it may set;
+                // refused, its menu offers nothing.
+                | "plan_project_modes"
+                // Home's Insights hero; refused, it draws its teaser.
+                | "insights_glance" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected credential-side operation: {method}"),
@@ -205,7 +216,7 @@ fn settings_sign_in_signals_preserve_pending_and_recover() {
     let fixture = Fixture::new(&application);
     fixture.settle(&context);
     let app = &fixture.app;
-    app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+    assert!(app.open_screen(PRIVATE_INFERENCE_SCREEN));
     app.window.present();
     let root = app
         .private_inference

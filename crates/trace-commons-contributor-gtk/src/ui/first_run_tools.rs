@@ -191,9 +191,7 @@ impl ToolsScreen {
     fn discover(self: &Rc<Self>) {
         // The core's loading line, for any computer (owner, 2026-11-17).
         let loading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
-        loading.append(&spinner);
+        loading.append(&super::glass_feedback::spinner());
         let line = gtk::Label::new(Some(first_run_copy().folders.loading_this_computer));
         line.add_css_class("tc-meta");
         loading.append(&line);

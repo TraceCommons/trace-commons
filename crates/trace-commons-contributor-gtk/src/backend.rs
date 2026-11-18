@@ -32,6 +32,12 @@ pub enum Backend {
     /// Nothing held the lock, so this process took it and runs the loop
     /// itself. Calls are answered in-process.
     Hosting(Box<Hosting>),
+    /// `TRACE_COMMONS_SAMPLE` named a recorded set: no daemon, no state
+    /// directory, no lock, and every answer read from the recordings the
+    /// macOS app draws from (see `crate::sample`). Debug builds only; a
+    /// release build has no such variant.
+    #[cfg(debug_assertions)]
+    Sample(crate::sample::SampleBackend),
 }
 
 pub struct Hosting {
@@ -152,6 +158,29 @@ impl Backend {
     /// to a daemon this shell did not start would be a different decision
     /// than the one made here.
     pub fn open(dir: std::path::PathBuf) -> Result<Self> {
+        #[cfg(debug_assertions)]
+        {
+            Self::open_or_sample(dir, std::env::var(crate::sample::SAMPLE_ENV).ok())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Self::open_daemon(dir)
+        }
+    }
+
+    /// The sample `sample` names, before anything else is touched -- the
+    /// state directory, a running daemon, the lock -- or else the daemon.
+    #[cfg(debug_assertions)]
+    fn open_or_sample(dir: std::path::PathBuf, sample: Option<String>) -> Result<Self> {
+        match crate::sample::SampleBackend::from_value(sample.as_deref()) {
+            Some(sample) => Ok(Backend::Sample(sample)),
+            None => Self::open_daemon(dir),
+        }
+    }
+
+    /// The daemon path: a host daemon from a sandbox ([`Backend::open_with`]),
+    /// else attach to or start this state directory's daemon.
+    fn open_daemon(dir: std::path::PathBuf) -> Result<Self> {
         Self::open_with(
             dir,
             daemon::host_link::runs_sandboxed(),
@@ -275,6 +304,15 @@ impl Backend {
         matches!(self, Backend::Hosting(_))
     }
 
+    /// The recorded set this backend answers from, if it is a sample.
+    pub fn sample_set(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(debug_assertions)]
+            Backend::Sample(sample) => Some(sample.set()),
+            _ => None,
+        }
+    }
+
     /// One request, one result. Blocking: callers run this off the GTK
     /// thread (see `worker`), because a `preview` can run the whole
     /// redaction pipeline and, under an external privacy filter, a network
@@ -291,6 +329,11 @@ impl Backend {
                 }
             }
             Backend::Hosting(h) => daemon::ipc::handle_local(&h.shared, method, params),
+            #[cfg(debug_assertions)]
+            Backend::Sample(sample) => {
+                let _ = params;
+                return sample.call(method);
+            }
         };
         response_result(response)
     }
@@ -345,6 +388,10 @@ impl Backend {
                 let summary = serde_json::from_value(serde_json::to_value(&summary)?)?;
                 Ok((summary, Some(body)))
             }
+            // No transcript is recorded, and none is made up here: the
+            // preview is refused, as an unrecorded method is.
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => Err(anyhow!(crate::sample::ERR_SAMPLE_UNRECORDED)),
         }
     }
 
@@ -391,11 +438,14 @@ impl Backend {
         release_after_shutdown(rt, move || embedded.close(), STOP_WAIT)
     }
 
-    /// The socket an attached window talks to; `None` while hosting.
+    /// The socket an attached window talks to; `None` while hosting, and
+    /// on a sample.
     pub fn attached_socket(&self) -> Option<&std::path::Path> {
         match self {
             Backend::Attached { socket } => Some(socket),
             Backend::Hosting(_) => None,
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => None,
         }
     }
 
@@ -410,6 +460,8 @@ impl Backend {
             Backend::Hosting(h) => Ok(Box::new(BroadcastEvents {
                 rx: h.shared.events.subscribe(),
             })),
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => Ok(Box::new(crate::sample::NoEvents)),
         }
     }
 }
@@ -808,6 +860,8 @@ mod roots_tests {
         match backend {
             Backend::Attached { socket } => socket,
             Backend::Hosting(_) => panic!("expected to attach, not to host"),
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => panic!("expected to attach, not a sample"),
         }
     }
 
@@ -1442,5 +1496,120 @@ mod native_witness_body_tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(debug_assertions)]
+mod sample_tests {
+    use super::*;
+
+    fn untouched_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tc-gtk-sample-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn a_named_sample_opens_without_touching_the_state_directory() {
+        let dir = untouched_dir();
+        let backend = Backend::open_or_sample(dir.clone(), Some("heldSessions".into())).unwrap();
+        assert_eq!(backend.sample_set(), Some("heldSessions"));
+        assert!(!backend.hosts_the_loop(), "a sample hosts no loop");
+        assert!(!dir.exists(), "the sample created {}", dir.display());
+        let status = backend.call("status", serde_json::json!({})).unwrap();
+        assert!(status.is_object());
+        let refused = backend
+            .call("set_settings", serde_json::json!({"x": 1}))
+            .unwrap_err();
+        assert_eq!(
+            DaemonFailure::from_error(refused).label,
+            crate::sample::ERR_SAMPLE_UNRECORDED
+        );
+        assert_eq!(
+            backend
+                .preview("00000000-0000-0000-0000-000000000000")
+                .unwrap_err()
+                .to_string(),
+            crate::sample::ERR_SAMPLE_UNRECORDED
+        );
+        assert!(backend.events().unwrap().next().is_none());
+        assert!(backend.search_original("x", "y").is_none());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn an_unrecognised_or_empty_name_is_the_default_set() {
+        for value in ["", "noSuchSet"] {
+            let backend = Backend::open_or_sample(untouched_dir(), Some(value.into())).unwrap();
+            assert_eq!(
+                backend.sample_set(),
+                Some(crate::sample::DEFAULT_SET),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_opens_the_daemon_path() {
+        // The daemon path's first act is to refuse undeclared roots, so a
+        // fresh directory shows the daemon path was taken, not the sample.
+        let dir = untouched_dir();
+        let error = Backend::open_or_sample(dir.clone(), None)
+            .err()
+            .expect("not a sample");
+        assert_eq!(error.to_string(), ERR_ROOTS_NOT_DECLARED);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The sample is impossible in a release build: the variable's name is
+    /// spelled only in `sample.rs`, whose declaration, like every reference
+    /// to the module and the variant, is under `cfg(debug_assertions)`.
+    #[test]
+    fn the_sample_is_compiled_only_into_debug_builds() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let lib = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+        assert!(lib.contains("#[cfg(debug_assertions)]\npub mod sample;"));
+        let mut stack = vec![src.clone()];
+        let mut spelled = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if text.contains(concat!("TRACE_COMMONS_", "SAMPLE\"")) {
+                    spelled.push(path.strip_prefix(&src).unwrap().display().to_string());
+                }
+                // Every line naming the module or the variant sits under the
+                // gate, directly or in a gated block or item. A gated test
+                // module is gated whole, so its lines are not read.
+                let production = text.split(concat!("mod sample", "_tests")).next().unwrap();
+                let lines: Vec<&str> = production.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") || path.ends_with("sample.rs") {
+                        continue;
+                    }
+                    if code.contains("::sample::")
+                        || code.contains("Backend::Sample")
+                        || code.starts_with("Sample(")
+                    {
+                        let gated = lines[..i]
+                            .iter()
+                            .rev()
+                            .take(12)
+                            .any(|l| l.contains("cfg(debug_assertions)"));
+                        assert!(
+                            gated,
+                            "{}:{} is not under cfg(debug_assertions)",
+                            path.display(),
+                            i + 1
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(spelled, vec!["sample.rs".to_string()]);
     }
 }

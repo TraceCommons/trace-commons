@@ -64,6 +64,18 @@ fn setup_complete(status: &Status, legacy_complete: bool) -> bool {
         && (status.shared_setup_complete() || legacy_complete)
 }
 
+/// Whether this device still owes onboarding, for the tab strip: the same
+/// two answers `present_if_needed` reads, and the same camera-only switch.
+/// `TC_SUPPRESS_ONBOARDING` photographs the main window's own screens on a
+/// fixture that is deliberately not enrolled, so it must not hide them
+/// either.
+pub fn requires_onboarding(status: &Status) -> bool {
+    if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
+        return false;
+    }
+    !setup_complete(status, is_complete(status.tenant_id.as_deref()))
+}
+
 /// Show onboarding if this device needs it, or do nothing.
 ///
 /// Called after a `status` read, because both halves of the question --
@@ -79,7 +91,9 @@ pub fn present_if_needed(app: &Rc<App>, status: &Status) {
             }
         });
     }
-    if app.stack.visible_child_name().as_deref() == Some("insights") {
+    // The tab the person selected, not the one drawn: Insights is
+    // account-free, and reading it must not raise onboarding over it.
+    if app.shell.selected_tab() == super::monitor::tabs::Tab::Insights {
         return;
     }
     if setup_complete(status, is_complete(status.tenant_id.as_deref())) {

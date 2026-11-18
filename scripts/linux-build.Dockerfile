@@ -6,12 +6,15 @@
 # so the application can actually be started headlessly rather than only
 # compiled.
 #
-# Versions here are what Debian bookworm ships: GTK 4.8.3 and libadwaita
-# 1.2.2. That is deliberately an old-but-widely-deployed pair -- if the shell
-# builds and runs against it, it runs on the distributions contributors
-# actually have. Do not raise the base image to get newer GTK without
-# checking what that costs in reach.
-FROM rust:1-bookworm
+# The base is Debian trixie (13). It was bookworm, for GTK 4.8.3 and
+# libadwaita 1.2.2, an old-but-widely-deployed pair. The owner raised the
+# shell's libadwaita floor to 1.4 on 2026-11-16 (the crate builds with
+# feature `v1_4`), and bookworm's 1.2 can no longer build it. Do not raise
+# the base again to get newer GTK without checking what that costs in reach.
+#
+# Not rebuilt since the move: confirm the image builds, and which GTK and
+# libadwaita it installs, before relying on it.
+FROM rust:1-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config \

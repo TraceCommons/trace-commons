@@ -9,6 +9,7 @@ pub(super) enum Section {
     Watching,
     Tools,
     Projects,
+    Uses,
     Profile,
     Changes,
     PrivateAI,
@@ -17,11 +18,12 @@ pub(super) enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Account,
         Self::Watching,
         Self::Tools,
         Self::Projects,
+        Self::Uses,
         Self::Profile,
         Self::Changes,
         Self::PrivateAI,
@@ -36,6 +38,7 @@ impl Section {
             Self::Watching => nav.watching,
             Self::Tools => nav.tools,
             Self::Projects => nav.projects,
+            Self::Uses => nav.uses,
             Self::Profile => nav.profile,
             Self::Changes => nav.log,
             Self::PrivateAI => nav.private_ai,
@@ -241,8 +244,10 @@ impl Navigation {
         // Activating the already-selected section still returns to it after
         // manual scrolling; selection-changed alone would leave a dead row.
         list.connect_row_activated(move |_, row| navigate(row.index() as usize));
-        // GTK 4 / libadwaita 1.2 has no Breakpoint. Allocation is checked at
-        // frame time and only visibility changes; fields are never rebuilt.
+        // Written when the libadwaita floor was 1.2, which has no
+        // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
+        // been moved to one. Allocation is checked at frame time and only
+        // visibility changes; fields are never rebuilt.
         root.add_tick_callback({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();
@@ -286,6 +291,7 @@ mod tests {
                 nav.watching,
                 nav.tools,
                 nav.projects,
+                nav.uses,
                 nav.profile,
                 nav.log,
                 nav.private_ai,
@@ -295,7 +301,9 @@ mod tests {
         );
         assert_eq!(
             Section::ALL.map(Section::starts_group),
-            [false, true, false, true, false, false, true, true, true]
+            [
+                false, true, false, true, false, false, false, true, true, true
+            ]
         );
     }
 
@@ -351,9 +359,9 @@ mod tests {
         wait_for_layout(&navigation, false);
         assert!(!navigation.sidebar.is_visible());
         assert!(navigation.compact.is_visible());
-        navigation.compact_choices[8].emit_clicked();
+        navigation.compact_choices[9].emit_clicked();
         settle();
-        assert_eq!(navigation.list.selected_row().unwrap().index(), 8);
+        assert_eq!(navigation.list.selected_row().unwrap().index(), 9);
         assert!(navigation.scroller.vadjustment().value() > 0.0);
         let witness_scroll = navigation.scroller.vadjustment().value();
         navigation.scroller.vadjustment().set_value(0.0);
@@ -363,7 +371,7 @@ mod tests {
             navigation.compact.label().as_deref(),
             Some(Section::Witness.title())
         );
-        navigation.compact_choices[8].emit_clicked();
+        navigation.compact_choices[9].emit_clicked();
         settle();
         assert_eq!(navigation.scroller.vadjustment().value(), witness_scroll);
         window.set_default_size(1000, 600);

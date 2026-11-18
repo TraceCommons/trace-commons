@@ -146,7 +146,18 @@ impl Fixture {
                 // line.
                 | "route_disclosure"
                 // Private AI's saved-account panel; refused, it stays empty.
-                | "managed_snapshot" => {
+                | "managed_snapshot"
+                // The Traces map's tool read; refused, it draws no tools.
+                | "tool_destinations"
+                // Settings' sharing choice and Uses; refused, they stay
+                // unpicked and empty.
+                | "automatic_grant"
+                | "consent_options"
+                // Settings' bulk change asks which modes it may set;
+                // refused, its menu offers nothing.
+                | "plan_project_modes"
+                // Home's Insights hero; refused, it draws its teaser.
+                | "insights_glance" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),
@@ -298,10 +309,7 @@ fn billing_widgets_bind_and_invalidate_browser_handoffs() {
     let fixture = Fixture::new(&application);
     fixture.settle(&context);
     assert!(fixture.funding.borrow().is_empty());
-    fixture
-        .app
-        .stack
-        .set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+    assert!(fixture.app.open_screen(PRIVATE_INFERENCE_SCREEN));
     fixture.app.window.present();
     fixture.drive_until(&context, || {
         fixture.view().root.is_mapped() && !fixture.funding.borrow().is_empty()

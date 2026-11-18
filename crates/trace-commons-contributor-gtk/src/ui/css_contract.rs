@@ -30,11 +30,28 @@ mod tests {
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
         ("home.rs", include_str!("home.rs")),
+        ("hero_card.rs", include_str!("hero_card.rs")),
         ("settings.rs", include_str!("settings.rs")),
         ("queue.rs", include_str!("queue.rs")),
         ("preview.rs", include_str!("preview.rs")),
         ("update.rs", include_str!("update.rs")),
         ("mark.rs", include_str!("mark.rs")),
+        // The Monitor window's views (spec 2026-11-16, window shell).
+        ("monitor/shell.rs", include_str!("monitor/shell.rs")),
+        (
+            "monitor/three_pane.rs",
+            include_str!("monitor/three_pane.rs"),
+        ),
+        (
+            "monitor/graph_footer.rs",
+            include_str!("monitor/graph_footer.rs"),
+        ),
+        ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
+        ("monitor/map.rs", include_str!("monitor/map.rs")),
+        (
+            "monitor/transfer_card.rs",
+            include_str!("monitor/transfer_card.rs"),
+        ),
     ];
 
     const STYLE_CSS: &str = include_str!("style.css");
@@ -118,11 +135,16 @@ mod tests {
         let selector = format!(".{class}");
         let ends_name =
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
+        // Home's hero cards: generated from the hero tokens at load time.
+        let hero = super::super::hero_art::css();
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,
+            hero.as_str(),
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
+            super::super::style::brand_tokens::GLASS_LIGHT_CSS,
+            super::super::style::brand_tokens::GLASS_DARK_CSS,
         ] {
             for line in sheet.lines() {
                 let line = line.trim();

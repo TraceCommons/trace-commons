@@ -96,5 +96,125 @@ class InsightsTokensTests(unittest.TestCase):
             self.assertIn('button:checked', css)
 
 
+class GlassTokensTests(unittest.TestCase):
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_every_tier_has_an_opaque_fill_and_a_class(self):
+        for scheme in generate.SCHEMES:
+            palette = generate.glass_palette(self.tokens, scheme)
+            css = generate.render_glass_css(self.tokens, scheme)
+            for tier, name, _, _, _ in generate.GLASS_TIERS:
+                with self.subTest(scheme=scheme, tier=tier):
+                    self.assertRegex(palette[tier], r"^#[0-9a-f]{6}$")
+                    self.assertIn(f".tc-glass-{name} {{ background-color: @tc_glass_{generate.snake(tier)};", css)
+
+    def test_tiers_are_the_nine_the_mac_names(self):
+        self.assertEqual([t[0] for t in generate.GLASS_TIERS],
+                         ["pane", "card", "cardQuiet", "well", "control", "controlSelected",
+                          "popover", "menu", "nodeCard"])
+
+    def test_radii_follow_the_flat_theme(self):
+        css = generate.render_glass_css(self.tokens, "light")
+        self.assertIn(".tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px;", css)
+        self.assertIn(".tc-glass-card { background-color: @tc_glass_card; border-radius: 16px;", css)
+
+    def test_every_type_role_has_a_class_relative_to_the_body(self):
+        css = generate.render_glass_css(self.tokens, "dark")
+        for role in self.tokens["type"]:
+            self.assertIn(".tc-type-" + generate.snake(role).replace("_", "-") + " {", css)
+        self.assertNotRegex(css, r"font-size: [\d.]+px")
+
+    def test_unreadable_future_ink_is_rejected(self):
+        self.tokens["themes"]["flatDark"]["color"]["textSecondary"] = {"hex": "#0d1124"}
+        with self.assertRaisesRegex(generate.TokenError, "inkSecondary"):
+            generate.glass_palette(self.tokens, "dark")
+
+    def test_glyphs_come_from_the_swift_path_data(self):
+        glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
+        self.assertEqual([g["name"] for g in glyphs],
+                         ["viewMenu", "graph", "map", "inspector", "gear", "chevronDown", "folder", "kebab"])
+        by_name = {g["name"]: g for g in glyphs}
+        self.assertEqual(by_name["viewMenu"]["data"], "M1,2h12M1,6h12M1,10h12")
+        # The shared frame is prepended, as Swift does with Self.frame.
+        self.assertTrue(by_name["graph"]["data"].startswith("M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5"))
+        self.assertTrue(by_name["graph"]["data"].endswith("M0.5,7.5h13M4,7.5v4M8,7.5v4"))
+        self.assertIsNone(by_name["kebab"]["stroke"])
+        self.assertEqual(by_name["gear"]["size"], (15, 15))
+        self.assertIn('fill="currentColor"', generate.glyph_svg(by_name["kebab"]))
+        self.assertIn('stroke="currentColor"', generate.glyph_svg(by_name["map"]))
+
+    def test_logos_come_from_the_swift_path_data(self):
+        logos = generate.parse_logos(generate.LOGOS.read_text())
+        self.assertEqual([l["name"] for l in logos], ["claude", "codex", "antigravity", "openCode", "theia"])
+        by_name = {l["name"]: l for l in logos}
+        self.assertEqual(by_name["openCode"]["view_box"], (0, 0, 24, 24))
+        self.assertEqual(by_name["openCode"]["paths"], ["M16,6H8v12h8V6zm4,16H4V2h16v20z"])
+        self.assertEqual(by_name["theia"]["view_box"], (0, 0, 64, 64))
+        self.assertEqual(len(by_name["theia"]["paths"]), 3)
+        self.assertTrue(by_name["claude"]["paths"][0].startswith("M4.709,15.955l4.72-2.647"))
+
+    def test_brand_mark_comes_from_the_swift_path_data(self):
+        mark = generate.parse_brand_mark(generate.BRAND_MARK.read_text())
+        self.assertEqual(mark["view_box"], (82.96, 82.13, 234.08, 231.72))
+        self.assertTrue(mark["data"].startswith("M292.106,82.1357C283.445,82.1357"))
+        self.assertTrue(mark["data"].endswith("Z"))
+
+    def test_map_colours_follow_the_flat_theme(self):
+        rendered = "\n".join(generate.render_map_rust(self.tokens))
+        # Flat light overrides the shared orb and purpleSoft with its blue.
+        self.assertIn('pub const MAP_ORB_SHARED: Rgba = ("#056bdc", 1.0);', rendered)
+        self.assertIn('pub const PURPLE_SOFT: Rgba = ("#0091fd", 1.0);', rendered)
+        self.assertIn('pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);', rendered)
+        self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);', rendered)
+        self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);', rendered)
+        self.assertIn('pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);', rendered)
+        self.assertIn('pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);', rendered)
+
+    def test_generated_output_is_deterministic(self):
+        first = generate.render_gtk(self.tokens)
+        self.assertEqual(first, generate.render_gtk(self.tokens))
+
+
+class HeroTokensTests(unittest.TestCase):
+    """Home's hero cards on Linux take the Mac's flat values from the JSON."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_grounds_are_the_card_tokens_not_the_map_gradient(self):
+        hero = "\n".join(generate.render_hero_rust(self.tokens))
+        self.assertIn('HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")])', hero)
+        self.assertIn('HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")])', hero)
+        self.assertIn('HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")])', hero)
+        self.assertIn('TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"]', hero)
+        self.assertIn('TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"]', hero)
+
+    def test_a_translucent_or_themed_ground_is_refused(self):
+        self.tokens['gradient']['heroMissions']['stops'][0]['alpha'] = 0.5
+        with self.assertRaisesRegex(generate.TokenError, 'heroMissions'):
+            generate.render_hero_rust(self.tokens)
+
+    def test_a_translucent_ink_is_refused(self):
+        self.tokens['color']['heroInk']['alpha'] = 0.9
+        with self.assertRaisesRegex(generate.TokenError, 'heroInk'):
+            generate.render_hero_rust(self.tokens)
+
+
+    def test_tile_values_are_the_macs(self):
+        rendered = "\n".join(generate.render_tile_rust(self.tokens))
+        # GlassTokens.Size.toolTile / toolTileLarge / toolLogo / toolLogoLarge.
+        for line in ("TOOL_TILE: f64 = 22.0", "TOOL_TILE_LARGE: f64 = 30.0",
+                     "TOOL_LOGO: f64 = 15.0", "TOOL_LOGO_LARGE: f64 = 20.0",
+                     "SPINNER: f64 = 12.0", "SPINNER_STROKE: f64 = 1.5", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6", "SKELETON_DIM: f64 = 0.5"):
+            self.assertIn(f"pub const {line};", rendered)
+        # The flat theme rounds a control at 11, the classic at 8.
+        self.assertIn("pub const RADIUS_CONTROL: f64 = 11.0;", rendered)
+        self.assertIn("pub const RADIUS_TILE: f64 = 6.0;", rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
+
 if __name__ == '__main__':
     unittest.main()

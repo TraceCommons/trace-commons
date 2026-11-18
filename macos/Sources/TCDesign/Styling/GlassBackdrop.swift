@@ -11,6 +11,12 @@ public enum GlassMaterial: Sendable, Equatable {
     /// (the map), which Apple keeps out of Liquid Glass.
     case opaque
 
+    /// True only while the debug screenshot hook rasterizes a window:
+    /// `ImageRenderer` cannot draw an `NSView`, so every pane and floating
+    /// surface is drawn painted, as under Reduce Transparency. That is also
+    /// the look the Linux shell's painted glass is compared against.
+    nonisolated(unsafe) public static var paintsForCapture = false
+
     /// The material this Mac draws for a pane in the navigation layer.
     ///
     /// Reduce Transparency, Increase Contrast and Reduce Motion are not
@@ -19,6 +25,7 @@ public enum GlassMaterial: Sendable, Equatable {
     /// takes a contrasting border under Increase Contrast), and Apple's
     /// guidance is to let them rather than swap in a fill of our own (R14).
     public static func current(content: Bool = false) -> GlassMaterial {
+        if paintsForCapture { return .opaque }
         if content && !GlassTheme.contentIsGlass { return .opaque }
         if #available(macOS 26.0, *) { return .liquidGlass }
         return .vibrancy

@@ -747,7 +747,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
-| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `ptyxis`, `konsole`, `xfce4_terminal`, `ghostty`, `kitty`, `wezterm`, `alacritty`, `foot`, `terminator`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
@@ -6256,15 +6256,20 @@ defaults and refusals.
 in, one of this platform's ids and nothing else: on macOS `terminal`
 (the default), `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`
 or `rex`; on Windows `windows_terminal` (the default); on Linux
-`gnome_terminal` (the default), `konsole`, `ghostty`, `kitty`, `wezterm` or
-`alacritty`. Another platform's id is refused like any other. Any other
+`gnome_terminal` (the default), `ptyxis`, `konsole`, `xfce4_terminal`,
+`ghostty`, `kitty`, `wezterm`, `alacritty`, `foot` or `terminator`. Another
+platform's id is refused like any other. Any other
 value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
 settings file holding a value this build does not know loads it as
 unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 `terminal_destination`, a launch is refused, and nothing falls back to
-the default. `set_managed_terminal` writes the same setting. The managed
-snapshot's `capabilities` carries `terminal_current` (the chosen id, or
-`null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
+the default. While `managed_terminal_chosen` is false and the default is
+not installed, the first installed app in picker order stands in for it,
+in the snapshot, a launch and tool setup alike; nothing is saved, and a
+terminal the person chose is never replaced. `set_managed_terminal` writes
+the same setting. The managed snapshot's `capabilities` carries
+`terminal_current` (the id a launch opens: the chosen one, the stand-in
+above, or `null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
 this computer; empty under Flatpak), `terminal_destination` (the
 chosen app's name: where tool setup opens, and what the install and update
 hints and the picker name) and `launch_destination` (where a session opens:
@@ -10018,8 +10023,10 @@ launcher on a saved key.
 
 ### `managed_tool_setup` — coding-tool installation and updates
 
-A local, explicit Terminal action, currently offered by native macOS when
-`managed_snapshot.capabilities.tool_setup` is true. Older daemons omit the
+A local, explicit Terminal action, offered when
+`managed_snapshot.capabilities.tool_setup` is true: on macOS, and on Linux
+outside a Flatpak sandbox (native macOS is the only shell that draws it
+today). Older daemons omit the
 optional capability and clients retain their official setup-guide links.
 
 Request parameters are exactly `tool: "claude" | "codex" | "opencode"` and
@@ -10038,9 +10045,13 @@ Fresh installs use the official standalone installers for Claude Code, Codex,
 and OpenCode's current V2 installer. Existing OpenCode installations use their
 own updater rather than being replaced by the fresh-install command. Updates preserve recognized
 Homebrew casks/npm prefixes; native Claude uses `update`, Codex uses its official
-installer, and OpenCode uses its own `upgrade`. The handoff uses the same bounded
+installer, and OpenCode uses its own `upgrade`. On macOS the handoff uses the same bounded
 AppleScript runner and selected Terminal/Ghostty/iTerm2 templates as managed
-sessions. The terminal stays open after the vendor command finishes. This does
+sessions. On Linux the chosen terminal is started with an argv vector, its own
+flags without a folder, then `/bin/bash`, `-lc` and the script as one element,
+as a session launch is. The script ends in a login shell (`$SHELL`, else
+`/bin/zsh` on macOS and `/bin/bash` on Linux), so the terminal stays open after
+the vendor command finishes. This does
 not change supported-version policy or auto-upgrade any tool on launch.
 
 Vendor references:

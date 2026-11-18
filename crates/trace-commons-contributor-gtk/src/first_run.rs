@@ -107,6 +107,9 @@ pub enum Action {
     SetPrivateAi(bool),
     GrantAutomatic {
         witness: Option<String>,
+        /// The Mac's `keep_folder_asks`: setup keeps folders set to Ask
+        /// asking; Settings' sharing choice asks the person first.
+        keep_folder_asks: bool,
     },
     MarkComplete,
     MarkWatchOnlyComplete,
@@ -141,9 +144,12 @@ impl Action {
                 "set_settings",
                 json!({"private_inference":on,"private_inference_offer_seen":true}),
             ),
-            Self::GrantAutomatic { witness } => (
+            Self::GrantAutomatic {
+                witness,
+                keep_folder_asks,
+            } => (
                 "grant_automatic_including_existing",
-                json!({"confirmed":true,"witness_signing_address":witness,"include_existing":true,"keep_folder_asks":true}),
+                json!({"confirmed":true,"witness_signing_address":witness,"include_existing":true,"keep_folder_asks":keep_folder_asks}),
             ),
             _ => return None,
         })
@@ -479,6 +485,7 @@ impl State {
         if grants {
             calls.push(Action::GrantAutomatic {
                 witness: self.witness.clone(),
+                keep_folder_asks: true,
             });
         }
         calls.extend(later);
@@ -690,7 +697,10 @@ mod tests {
             &action,
             &json!({"approved":0,"skipped":[{"session_id":"s","label":"session-still-active"}],"approved_entry_ids":[]})
         ));
-        let grant = Action::GrantAutomatic { witness: None };
+        let grant = Action::GrantAutomatic {
+            witness: None,
+            keep_folder_asks: true,
+        };
         assert!(acknowledged(
             &grant,
             &json!({"granted":true,"include_existing":true})

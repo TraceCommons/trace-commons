@@ -120,41 +120,51 @@ fn transcripts(n: u32) -> &'static str {
     }
 }
 
-pub const LOOK_INSIDE: &str = "Look inside";
-pub const NOT_THIS_ONE: &str = "Not this one";
-/// Says "for good" because it is. A dismissal is a decision about the
-/// conversation, not about the size it happened to be when the card was
-/// drawn, and there is no un-dismiss -- so the tooltip has to say so before
-/// the click, not leave the contributor to infer it from a card that never
-/// comes back. The second sentence is the reassurance that keeps the first
-/// from reading like an opt-out of the whole project.
-pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this trace for good, even if you keep working in \
-     it. This project will keep being offered.";
+/// The row's and folder's action words: the core's Traces table, the words
+/// the Mac draws, so the shells cannot drift.
+pub(crate) fn traces() -> trace_commons_contributor::preview_copy::MonitorTracesCopy {
+    trace_commons_contributor::preview_copy::monitor_traces_copy()
+}
 
-/// The one-click send on a queue row. See
-/// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click
-/// builds, pins, and approves, then raises the toast that says what
-/// happened -- see [`crate::toast`].
-///
-/// The tooltip says "approves", never "sends": nothing leaves the machine
-/// at click time, only at the watcher's next sweep -- [`UNDO_BODY`] states
-/// that for the undo bar, and a toast that once said "Sent." while still
-/// offering Undo was the same contradiction this tooltip must not repeat.
-pub const SUBMIT: &str = "Submit";
-pub const SUBMIT_TOOLTIP: &str = "Approves this trace now. Scrubbing runs first; the watcher \
-     sends it on its next sweep, and you can undo before then.";
+pub fn look_inside() -> &'static str {
+    traces().session_review.look_inside
+}
+
+/// A trace's dismiss, the Mac's row menu item (`tree.dismiss_session`).
+/// It asks first, in the core's words, as the Mac's `dismissModal` does.
+pub fn not_this_one() -> &'static str {
+    traces().tree.dismiss_session
+}
+
+/// The one-click send on a queue row (`tree.submit`), and its tooltip, in
+/// the core's words.
+pub fn submit() -> &'static str {
+    traces().tree.submit
+}
+
+pub fn submit_tooltip() -> &'static str {
+    traces().tree.submit_trace_tip
+}
 
 /// The same gesture at the project level, on the group's header rather than
 /// on a row. Calls `approve` with a `project_id` rather than an `entry_id`
 /// -- the daemon selects that project's pending entries, this shell never
 /// enumerates them itself.
-pub const SUBMIT_ALL: &str = "Submit all";
-pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting trace from this project now. \
-     Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
-     then.";
+/// The folder's Submit pill with the count it sends (`tree.submit_count`,
+/// the Mac's `submitTitle`).
+pub fn folder_submit(count: u64) -> String {
+    traces()
+        .tree
+        .submit_count
+        .replace("{count}", &count.to_string())
+}
+
+pub fn submit_all_tooltip() -> &'static str {
+    traces().tree.submit_tip
+}
 
 /// Stops a project being offered again and clears whatever it has waiting.
-/// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry
+/// Sits beside [`folder_submit`] on the same group header but must never carry
 /// its primary-action styling -- the two buttons take a contributor's queue
 /// in opposite directions.
 pub use trace_commons_contributor::project_copy::IGNORE_PROJECT;
@@ -529,16 +539,47 @@ pub const CLOSE: &str = "Close";
 pub const SENDING: &str = "Sending…";
 pub const UNDO: &str = "Undo";
 
-pub fn undo_headline(project_label: &str) -> String {
-    format!("Approved {project_label}. Still on this machine.")
+/// The undo bar's eyebrow, "APPROVAL SAVED" (`undo.approval_saved`).
+pub fn undo_eyebrow() -> &'static str {
+    traces().undo.approval_saved
 }
 
-/// Explains automatic sending and when approval can still be undone.
-pub const UNDO_BODY: &str =
-    "Approved traces will send automatically. You can undo until uploading starts.";
+/// The undo bar's title, the Mac's `InspectorPrompts.title`:
+/// "{label} approved".
+pub fn undo_headline(project_label: &str) -> String {
+    traces().undo.approved.replace("{label}", project_label)
+}
 
-/// Closes the notice without changing the approval.
-pub const LET_IT_SEND: &str = "Dismiss";
+/// Under the title, as the Mac's approval undo says it
+/// (`QueueLegacyWords.undoWillSend`).
+pub fn undo_body() -> &'static str {
+    trace_commons_contributor::shell_words_copy::queue_words().undo_will_send
+}
+
+/// The Mac's count-up ceiling (`AppModel.Undo.tickCeiling`).
+pub const UNDO_TICK_CEILING: i64 = 120;
+
+/// How long ago the approval was made, counting up and stopping at the
+/// ceiling (`QueueLegacyWords.approvedAgo`).
+pub fn approved_ago(seconds: i64) -> String {
+    let words = trace_commons_contributor::shell_words_copy::queue_words();
+    let (template, shown) = if seconds >= UNDO_TICK_CEILING {
+        (words.approved_ago_ceiling, UNDO_TICK_CEILING)
+    } else {
+        (words.approved_ago, seconds.max(0))
+    };
+    template.replace("{seconds}", &shown.to_string())
+}
+
+/// Closes the notice without changing the approval: the core's Dismiss,
+/// with the Mac's close label as its tooltip.
+pub fn undo_dismiss() -> &'static str {
+    traces().dismiss_action
+}
+
+pub fn undo_dismiss_tooltip() -> &'static str {
+    trace_commons_contributor::shell_words_copy::queue_words().close_notice_still_sends
+}
 
 // --- Credit ------------------------------------------------------------
 
@@ -876,24 +917,19 @@ pub use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
 
 // --- Settings: how it behaves --------------------------------------------
 //
-// The three timing knobs `set_settings` accepts, as a title and a unit
-// each. Every one of them is a promise the daemon keeps -- how long a
-// session must be quiet, how long an approval is held, how often a
-// contributor may be interrupted -- so each label says what the number does
-// to the contributor rather than naming the setting.
+// Two of the timing knobs `set_settings` accepts, as a title and a unit
+// each. Each is a promise the daemon keeps -- how long a session must be
+// quiet, how often a contributor may be interrupted -- so each label says
+// what the number does to the contributor rather than naming the setting.
+// The approval hold has no control here, as on the Mac: the daemon's
+// default is the Undo window.
 
 pub const KNOB_QUIESCENCE_TITLE: &str = "Quiet time before a trace counts as finished";
 pub const KNOB_QUIESCENCE_UNIT: &str = "minutes";
-pub const KNOB_HOLD_TITLE: &str = "How long you can take something back";
-pub const KNOB_HOLD_UNIT: &str = "seconds after you approve";
-
-/// A hold of zero is not a smaller undo window, it is no undo window at
-/// all, and the row says so rather than showing a bare `0`.
-pub const KNOB_HOLD_ZERO: &str = "No undo window. Approving sends on the next pass.";
 pub const KNOB_DIGEST_TITLE: &str = "How often you can be interrupted";
 pub const KNOB_DIGEST_UNIT: &str = "hours between notifications, at most";
 
-/// Where a change made here lands, said once under the three of them.
+/// Where a change made here lands, said once under the two of them.
 ///
 /// On Linux the watcher is usually a separate process, so "this window" is
 /// the wrong mental model for what was just changed -- and a contributor
@@ -1440,6 +1476,12 @@ pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
     " can't tell which folder these ran in, so they can never be contributed automatically. \
      You'll always be asked."
 );
+
+/// Shown when `set_project_mode` refuses, wherever a folder's setting is
+/// changed: the core's sentence, the one the Mac says.
+pub fn project_mode_failed() -> &'static str {
+    trace_commons_contributor::shell_words_copy::settings_words().project_mode_failed
+}
 
 // The first run's Tools, before the daemon starts. Its words are the core's
 // (`first_run_copy`, and `source_copy` for the tools' names). These two have

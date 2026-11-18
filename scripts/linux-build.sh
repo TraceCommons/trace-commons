@@ -78,14 +78,6 @@ case "${1:---build}" in
     # answer.
     run "bash /work/$CRATE_DIR/scripts/queue-shot.sh"
     ;;
-  --settings-shot)
-    # Photographs the Settings projects list with a mode selector open.
-    # Collapsed, the bucket's selector and an ordinary project's look the
-    # same; only an open one shows that "Contribute automatically" is absent
-    # from the row the daemon would refuse it on. ROW=ordinary takes the
-    # comparison shot.
-    run "ROW=${ROW:-bucket} bash /work/$CRATE_DIR/scripts/settings-shot.sh"
-    ;;
   --roots-answer)
     # Drives the roots window with xdotool and asserts that the two answers
     # reach daemon-settings.json as a Watch and an Off. The screenshot proves
