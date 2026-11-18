@@ -3013,13 +3013,13 @@ mod tests {
             map.x() - (main.x() + main.width()) >= 4.0,
             "a gap between the panes: {main:?} {map:?}"
         );
-        // Near the inspector's foot, where nothing but the pane draws: the
-        // map pane's foot holds the map's own drawing (its transfer plates
-        // and art), which lies over the pane's fill.
-        let inspector = &panes[2];
+        // The map draws over its pane (its field, art and transfer
+        // plates); the pane's own fill is what is measured here, so the
+        // map's drawing is taken out of the frame.
+        mounted.shell.map.root.set_opacity(0.0);
         let pane = (
-            (inspector.x() + 30.0) as i32,
-            (inspector.y() + inspector.height() - 30.0) as i32,
+            (map.x() + 30.0) as i32,
+            (map.y() + map.height() - 30.0) as i32,
         );
         ((gap_x, middle), pane)
     }
