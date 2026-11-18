@@ -242,7 +242,7 @@ These apply across slices.
   - (b) A Fluent look with the Mac's structure
   - Note: The owner's remark that decoration and motion are parity points to (a). Confirm it.
 - **G-3. App mark.** Which mark the app shows in the title bar, the tiles, the tray and the first-run stage. Asked once here; W2, W8 and W12 apply it.
-  - (a) The NEAR AI N everywhere, tiles too (Linux precedent: #2186, still open)
+  - (a) The NEAR AI N everywhere, tiles too (Linux precedent: the N for the app, tray and Flatpak icon, #2186, still open)
   - (b) The N in the app, tray and stage; the Turn stays on the MSIX tiles only
   - (c) Keep the Turn everywhere
 - **G-4. Surfaces no slice covers.** Mac surfaces outside W1-W15 (section "Surfaces no slice covers"), including three Insights decoration items.
@@ -523,7 +523,7 @@ W5 is the enabler: motion tokens and the clock stop land before any animated ite
 
 - **W5-D1. Glass material.** The Mac draws Liquid Glass under its panes. Windows has an opaque window.
   - (a) Painted glass only, from the flat tokens
-  - (b) Mica or Acrylic where the system supports it, with a painted fallback (Linux precedent: the owner chose real blur where the compositor allows, painted elsewhere; what landed paints only
+  - (b) Mica or Acrylic where the system supports it, with a painted fallback (Linux precedent: the owner chose real blur where the compositor allows, painted elsewhere; what landed paints only)
   - Note: Mica is unavailable on the Server 2025 test box, so (b) cannot be checked there; Acrylic support there is unverified.
 - **W5-D2. Glyphs and icons.** The Mac draws its own `GlassGlyph` paths (`TCDesign/Components/Glyphs.swift:8`) and about 30 SF Symbols, which are Apple-only. Windows uses Segoe `FontIcon` glyphs and hand-drawn Canvas icons.
   - (a) Export the Mac's own glyph paths, and map each SF Symbol to a Segoe Fluent Icons glyph in one checked-in table (Linux precedent: own glyph paths exported; stock Adwaita symbolic icons in a table for SF Symbols)
