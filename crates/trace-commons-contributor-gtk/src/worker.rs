@@ -99,6 +99,10 @@ pub struct Worker {
     pub events: async_channel::Receiver<DaemonEvent>,
     hosts_the_loop: std::cell::Cell<bool>,
     via_host_link: std::cell::Cell<bool>,
+    /// Reopens submitted whose attachment the window has not yet recorded
+    /// ([`Self::set_attachment`]). While any is, `via_host_link` may describe
+    /// a backend the next job will not reach.
+    reopens_pending: std::cell::Cell<u32>,
     next_id: std::cell::Cell<u64>,
     /// The contributor state directory this shell was started against.
     ///
@@ -132,6 +136,7 @@ impl Worker {
                 events,
                 hosts_the_loop: std::cell::Cell::new(false),
                 via_host_link: std::cell::Cell::new(false),
+                reopens_pending: std::cell::Cell::new(0),
                 next_id: std::cell::Cell::new(1),
                 dir,
             },
@@ -227,6 +232,7 @@ impl Worker {
             events,
             hosts_the_loop: std::cell::Cell::new(attachment.hosts),
             via_host_link: std::cell::Cell::new(attachment.via_host_link),
+            reopens_pending: std::cell::Cell::new(0),
             next_id: std::cell::Cell::new(1),
             dir: held,
         })
@@ -246,14 +252,26 @@ impl Worker {
         self.via_host_link.get()
     }
 
+    /// Where a folder declaration sent now would land: `Some(true)` on the
+    /// host daemon over the host link, `Some(false)` on a daemon that sees
+    /// this sandbox's paths, `None` while a reopen is queued or running and
+    /// it is not known yet.
+    pub fn declaration_target(&self) -> Option<bool> {
+        (self.reopens_pending.get() == 0).then(|| self.via_host_link.get())
+    }
+
     /// Record where the daemon is after a reopen.
     pub fn set_attachment(&self, attachment: Attachment) {
+        self.reopens_pending
+            .set(self.reopens_pending.get().saturating_sub(1));
         self.hosts_the_loop.set(attachment.hosts);
         self.via_host_link.set(attachment.via_host_link);
     }
 
     /// Replace the backend; see [`Job::Reopen`].
     pub fn reopen(&self, restart_unit: bool) -> u64 {
+        self.reopens_pending
+            .set(self.reopens_pending.get().saturating_add(1));
         self.submit(Job::Reopen { restart_unit })
     }
 

@@ -179,3 +179,57 @@ fn a_reopen_replaces_the_backend_and_reports_the_attachment() {
     drop(worker);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A folder declaration must not be mapped for one backend and sent to
+/// another. A reopen queued ahead of it replaces the backend on the worker
+/// thread before the window learns where the new one is, so until the
+/// window has recorded the reopen's attachment, where a declaration would
+/// land is unknown and none is sent.
+#[test]
+fn no_declaration_target_while_a_reopen_is_in_flight() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let dir = std::env::temp_dir().join(format!("tc-dt-{}", &suffix[..8]));
+    std::fs::create_dir(&dir).unwrap();
+    let socket = dir.join("a.sock");
+    let (entered, entering) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&opens);
+    let released = std::sync::Mutex::new(released);
+    let mut start = Box::pin(Worker::start_with(dir.clone(), move |_| {
+        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            // The second open, from the reopen: held until released.
+            entered.send(()).unwrap();
+            released.lock().unwrap().recv_timeout(DEADLINE).unwrap();
+        }
+        Ok(Backend::Attached {
+            socket: socket.clone(),
+        })
+    }));
+    let worker = finish(start.as_mut()).unwrap();
+    assert_eq!(worker.declaration_target(), Some(false));
+    let id = worker.reopen(false);
+    assert_eq!(
+        worker.declaration_target(),
+        None,
+        "a declaration was allowed while the reopen was queued"
+    );
+    entering.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        worker.declaration_target(),
+        None,
+        "a declaration was allowed while the reopen was running"
+    );
+    release.send(()).unwrap();
+    let (got, outcome) = worker.results.recv_blocking().unwrap();
+    assert_eq!(got, id);
+    let crate::worker::Outcome::Reopened { attachment, .. } = outcome else {
+        panic!("expected a reopen outcome");
+    };
+    // Answered, but not yet recorded by the window: still unknown.
+    assert_eq!(worker.declaration_target(), None);
+    worker.set_attachment(attachment);
+    assert_eq!(worker.declaration_target(), Some(attachment.via_host_link));
+    drop(worker);
+    let _ = std::fs::remove_dir_all(dir);
+}

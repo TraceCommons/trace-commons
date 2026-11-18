@@ -335,12 +335,22 @@ pub(super) type Declared = Option<(serde_json::Value, Result<serde_json::Value, 
 /// stands for, as Launch does, or not at all: `done` then gets `None`. The
 /// daemon in the sandbox opens the portal path itself. A window that moved
 /// off the host link while the portal answered sends nothing either.
+///
+/// Nothing is sent while a switch-over is under way
+/// (`Worker::declaration_target`): a reopen queued ahead of the
+/// declaration replaces the backend first, so a mapping decided for the
+/// backend the window last recorded could reach the other one -- a portal
+/// path to the host daemon, or a host path to the sandbox's.
 pub(super) fn declare_to_daemon(
     app: &Rc<super::App>,
     params: serde_json::Value,
     done: impl FnOnce(&Rc<super::App>, Declared) + 'static,
 ) {
-    if !crate::document_portal::declarations_need_mapping(&params, app.worker.via_host_link()) {
+    let Some(on_host) = app.worker.declaration_target() else {
+        done(app, None);
+        return;
+    };
+    if !crate::document_portal::declarations_need_mapping(&params, on_host) {
         send_declaration(app, params, done);
         return;
     }
@@ -353,7 +363,9 @@ pub(super) fn declare_to_daemon(
                 return;
             };
             match mapped {
-                Some(params) if app.worker.via_host_link() => send_declaration(&app, params, done),
+                Some(params) if app.worker.declaration_target() == Some(true) => {
+                    send_declaration(&app, params, done)
+                }
                 _ => done(&app, None),
             }
         },
