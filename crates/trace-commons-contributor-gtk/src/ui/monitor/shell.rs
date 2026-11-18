@@ -417,7 +417,10 @@ impl Shell {
         let mut tab_buttons: Vec<(Tab, gtk::ToggleButton)> = Vec::new();
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
             let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
-            let title = gtk::Label::new(Some(tab.title()));
+            let title = gtk::Label::builder()
+                .label(tab.title())
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .build();
             title.add_css_class("tc-type-body");
             content.append(&title);
             match tab {
@@ -2569,6 +2572,15 @@ mod tests {
             .expect("the strip's construction");
         assert!(strip.contains("strip.set_homogeneous(true);"));
         assert!(!strip.contains("gtk::Align::Start"));
+        // Four equal tabs must not set the main pane's minimum: no side
+        // padding, and titles that ellipsize.
+        assert!(rule(".tc-glass-tabs .tc-tab").contains("padding: 0;"));
+        let tabs = source
+            .split("for (index, tab) in Tab::ALL")
+            .nth(1)
+            .and_then(|rest| rest.split("strip.append(&button);").next())
+            .expect("the tabs' construction");
+        assert!(tabs.contains("EllipsizeMode::End"));
     }
 
     /// The toolbar is the Mac's: 28 by 24 toggles in a capsule, and a 28px

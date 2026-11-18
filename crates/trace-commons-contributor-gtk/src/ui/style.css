@@ -537,7 +537,9 @@ window.tc-glass-window {
    equally, over a 1pt rule that runs the strip's full width. The title is
    body type, medium, semibold when selected; the selected tab carries the
    tabEmber line on the rule (fading to nothing at either end) and the
-   tabEmberHalo glow behind its title, brightest at the rule. */
+   tabEmberHalo glow behind its title, brightest at the rule. The tabs
+   carry no side padding and their titles ellipsize, as the Mac's centred
+   titles do, so four equal tabs never set the main pane's minimum width. */
 .tc-glass-tabs {
   background: none;
   padding: 0 12px;
@@ -549,7 +551,7 @@ window.tc-glass-window {
   font-size: 1em;
   font-weight: 500;
   min-height: 38px;
-  padding: 0 12px;
+  padding: 0;
   margin-bottom: -1px;
   border-radius: 0;
   background-color: transparent;
