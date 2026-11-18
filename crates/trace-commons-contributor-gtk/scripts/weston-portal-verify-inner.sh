@@ -181,6 +181,7 @@ else
     ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
     ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
