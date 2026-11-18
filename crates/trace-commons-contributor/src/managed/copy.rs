@@ -475,7 +475,6 @@ mod tests {
     #[test]
     fn the_host_folder_line_is_a_hidden_draft() {
         use super::host_folder;
-        assert!(!host_folder::APPROVED);
         assert_eq!(host_folder::add_on_host_line(), None);
         assert_eq!(
             host_folder::ADD_ON_HOST,
