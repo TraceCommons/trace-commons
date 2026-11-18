@@ -961,11 +961,7 @@ fn run_macos(how: MacosLaunch, session: Uuid) -> Result<Vec<u8>, ManagedError> {
             }
             script
         }
-        MacosLaunch::Open(plan) => {
-            let mut open = std::process::Command::new(&plan.program);
-            open.args(&plan.args);
-            open
-        }
+        MacosLaunch::Open(plan) => plan.command(),
         MacosLaunch::Warp(tab) => return open_warp_tab(&tab, session).map(|()| Vec::new()),
         MacosLaunch::Rex(tab) => return super::rex::open_tab(&tab),
     };
@@ -985,6 +981,23 @@ fn run_macos(how: MacosLaunch, session: Uuid) -> Result<Vec<u8>, ManagedError> {
 struct Plan {
     program: PathBuf,
     args: Vec<std::ffi::OsString>,
+    /// The folder the terminal is started in, for a terminal told its
+    /// folder that way rather than by a flag.
+    cwd: Option<PathBuf>,
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
+impl Plan {
+    /// The process this plan starts: `program` with `args`, in `cwd` when
+    /// it names one.
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.program);
+        command.args(&self.args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        command
+    }
 }
 
 /// The helper's own arguments, after its path.
@@ -1174,7 +1187,12 @@ fn program_plan(
     if !program.is_absolute() || !cwd.is_absolute() {
         return Err(ManagedError::InvalidRequest);
     }
-    let mut args = terminal_args(app, Some(cwd)).ok_or(ManagedError::InvalidRequest)?;
+    // Konsole and kitty expand `$NAME` in a folder they are told by flag
+    // and open elsewhere when the result does not exist; told none, each
+    // opens in its working directory, so that is where they are started.
+    let started_in = matches!(app, TerminalApp::Konsole | TerminalApp::Kitty);
+    let mut args =
+        terminal_args(app, (!started_in).then_some(cwd)).ok_or(ManagedError::InvalidRequest)?;
     args.extend(command);
     if app == TerminalApp::WindowsTerminal
         && args.iter().any(|arg| arg.to_string_lossy().contains(';'))
@@ -1198,6 +1216,7 @@ fn program_plan(
     Ok(Plan {
         program: program.to_path_buf(),
         args,
+        cwd: started_in.then(|| cwd.to_path_buf()),
     })
 }
 
@@ -1233,6 +1252,7 @@ fn open_plan(
     Some(Plan {
         program: PathBuf::from("/usr/bin/open"),
         args,
+        cwd: None,
     })
 }
 
@@ -1529,6 +1549,7 @@ fn setup_plan(app: TerminalApp, program: &Path, body: &str) -> Result<Plan, Mana
     Ok(Plan {
         program: program.to_path_buf(),
         args,
+        cwd: None,
     })
 }
 
@@ -1637,8 +1658,8 @@ pub fn launch(
 /// Start a Windows or Linux terminal and leave it running.
 #[cfg(any(windows, target_os = "linux"))]
 fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
-    let mut process = std::process::Command::new(&plan.program)
-        .args(&plan.args)
+    let mut process = plan
+        .command()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1898,9 +1919,11 @@ mod tests {
             vec!["/usr/bin/herdr".into()],
         )
         .unwrap();
-        let mut expected = terminal_args(TerminalApp::Kitty, Some(cwd)).unwrap();
+        // kitty is started in the folder (`konsole_and_kitty_start_in_the_folder`).
+        let mut expected = terminal_args(TerminalApp::Kitty, None).unwrap();
         expected.push("/usr/bin/herdr".into());
         assert_eq!(plan.args, expected);
+        assert_eq!(plan.cwd.as_deref(), Some(cwd));
         assert_eq!(
             program_plan(
                 TerminalApp::Kitty,
@@ -2862,10 +2885,9 @@ mod tests {
             head(TerminalApp::GnomeTerminal),
             ["--working-directory=/home/x/My Projects/app", "--"]
         );
-        assert_eq!(
-            head(TerminalApp::Konsole),
-            ["--workdir", "/home/x/My Projects/app", "--hold", "-e"]
-        );
+        // Konsole and kitty are started in the folder: told it by flag,
+        // each expands `$NAME` in it (`konsole_and_kitty_start_in_the_folder`).
+        assert_eq!(head(TerminalApp::Konsole), ["--hold", "-e"]);
         assert_eq!(
             head(TerminalApp::Ghostty),
             [
@@ -2884,10 +2906,7 @@ mod tests {
                 "/home/x/My Projects/app"
             ]
         );
-        assert_eq!(
-            head(TerminalApp::Kitty),
-            ["--directory", "/home/x/My Projects/app", "--hold"]
-        );
+        assert_eq!(head(TerminalApp::Kitty), ["--hold"]);
         assert_eq!(
             head(TerminalApp::Wezterm),
             [
@@ -2965,6 +2984,18 @@ mod tests {
                 let tail = helper_tail();
                 assert!(plan.args.ends_with(&tail), "{app:?} {cwd:?}");
                 let head = &plan.args[..plan.args.len() - tail.len()];
+                if matches!(app, TerminalApp::Konsole | TerminalApp::Kitty) {
+                    // Started in the folder, which no argument names.
+                    assert_eq!(plan.cwd.as_deref(), Some(cwd.as_path()), "{app:?}");
+                    assert!(
+                        !head
+                            .iter()
+                            .any(|a| a.to_str().unwrap().contains("/home/x/")),
+                        "{app:?} {cwd:?}: {head:?}"
+                    );
+                    continue;
+                }
+                assert_eq!(plan.cwd, None, "{app:?}");
                 // The folder appears exactly once, whole, as the value of
                 // the working-directory flag: never split, never quoted.
                 let holding: Vec<_> = head
@@ -2976,6 +3007,42 @@ mod tests {
                 let value = held.strip_prefix("--working-directory=").unwrap_or(held);
                 assert_eq!(Path::new(value), cwd, "{app:?}");
             }
+        }
+    }
+
+    /// Konsole (`ShellCommand::expand` on `--workdir`) and kitty (on
+    /// `--directory`) expand `$NAME` in the folder they are told, and open
+    /// somewhere else when the result does not exist: on Ubuntu 26.04,
+    /// Konsole 25.12 opened `/tmp/a $HOME b` in the home folder and kitty
+    /// 0.45 in its own working directory, while a `$NAME` that is not set
+    /// was kept. Both open in their working directory when told no folder,
+    /// so they are started in it.
+    #[cfg(unix)]
+    #[test]
+    fn konsole_and_kitty_start_in_the_folder() {
+        let cwd = Path::new("/home/x/a $HOME b");
+        for app in [TerminalApp::Konsole, TerminalApp::Kitty] {
+            let plan = plan_for(app, cwd).unwrap();
+            assert_eq!(plan.cwd.as_deref(), Some(cwd), "{app:?}");
+            let command = plan.command();
+            assert_eq!(command.get_current_dir(), Some(cwd), "{app:?}");
+            for flag in ["--workdir", "--directory", "-d"] {
+                assert!(
+                    !plan.args.iter().any(|a| a == flag),
+                    "{app:?} names the folder by {flag}"
+                );
+            }
+        }
+        // Every other terminal is still told its folder by flag.
+        for app in [
+            TerminalApp::GnomeTerminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Alacritty,
+            TerminalApp::Foot,
+        ] {
+            let plan = plan_for(app, cwd).unwrap();
+            assert_eq!(plan.cwd, None, "{app:?}");
+            assert_eq!(plan.command().get_current_dir(), None, "{app:?}");
         }
     }
 
@@ -3057,8 +3124,11 @@ mod tests {
     fn a_non_utf8_folder_reaches_the_terminal_unchanged() {
         use std::os::unix::ffi::OsStrExt;
         let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/home/x/\xff\xfe dir"));
-        let plan = plan_for(TerminalApp::Konsole, cwd).unwrap();
+        let plan = plan_for(TerminalApp::Alacritty, cwd).unwrap();
         assert_eq!(plan.args[1], cwd.as_os_str());
+        // Konsole is started in it instead.
+        let plan = plan_for(TerminalApp::Konsole, cwd).unwrap();
+        assert_eq!(plan.command().get_current_dir(), Some(cwd));
     }
 
     #[test]
@@ -3366,8 +3436,8 @@ mod tests {
             .unwrap();
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
             let plan = plan(app, &program, &stub, &config, &folder, session, ticket).unwrap();
-            let mut child = std::process::Command::new(&plan.program)
-                .args(&plan.args)
+            let mut child = plan
+                .command()
                 .stdin(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
