@@ -825,8 +825,28 @@ fn check_project_config_in(
                 }
                 ToolId::Codex => {
                     let text = std::str::from_utf8(&bytes).map_err(|_| ManagedError::Conflict)?;
-                    let value: toml::Value =
+                    let mut value: toml::Value =
                         toml::from_str(text).map_err(|_| ManagedError::Conflict)?;
+                    // A folderless launch lands at home, where Codex's personal
+                    // config is also visible as project config. An MCP server's
+                    // string environment entry is scoped to its child process.
+                    if ancestor == cwd
+                        && home
+                            .and_then(|path| std::fs::canonicalize(path).ok())
+                            .as_deref()
+                            == Some(cwd)
+                        && let Some(servers) = value
+                            .get_mut("mcp_servers")
+                            .and_then(toml::Value::as_table_mut)
+                    {
+                        for env in servers.iter_mut().filter_map(|(_, server)| {
+                            server.get_mut("env").and_then(toml::Value::as_table_mut)
+                        }) {
+                            if env.get("CODEX_HOME").is_some_and(toml::Value::is_str) {
+                                env.remove("CODEX_HOME");
+                            }
+                        }
+                    }
                     if codex_auth_override(&value) {
                         return Err(ManagedError::Conflict);
                     }
@@ -1125,6 +1145,58 @@ mod tests {
             std::fs::write(path, body).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn codex_home_launch_accepts_a_personal_mcp_env_without_relaxing_auth_checks() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = std::fs::canonicalize(home.path()).unwrap();
+        let project = home_path.join("project");
+        let config = r#"
+[mcp_servers.fixture]
+command = "fixture"
+[mcp_servers.fixture.env]
+CODEX_HOME = "/personal-profile"
+"#;
+        for folder in [&home_path, &project] {
+            std::fs::create_dir_all(folder.join(".codex")).unwrap();
+            std::fs::write(folder.join(".codex/config.toml"), config).unwrap();
+        }
+        assert_eq!(
+            check_project_config_in(
+                ToolId::Codex,
+                ConnectionKind::NearAiSignIn,
+                &home_path,
+                Some(home.path()),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_project_config_in(
+                ToolId::Codex,
+                ConnectionKind::NearAiSignIn,
+                &project,
+                Some(home.path()),
+            ),
+            Err(ManagedError::Conflict)
+        );
+
+        for config in [
+            format!("model_provider = \"other\"\n{config}"),
+            format!("CODEX_HOME = \"/different-profile\"\n{config}"),
+            config.replace("\"/personal-profile\"", "false"),
+        ] {
+            std::fs::write(home_path.join(".codex/config.toml"), config).unwrap();
+            assert_eq!(
+                check_project_config_in(
+                    ToolId::Codex,
+                    ConnectionKind::NearAiSignIn,
+                    &home_path,
+                    Some(home.path()),
+                ),
+                Err(ManagedError::Conflict)
+            );
+        }
     }
 
     const NEAR_AI: [ConnectionKind; 2] = [ConnectionKind::NearAi, ConnectionKind::NearAiSignIn];
