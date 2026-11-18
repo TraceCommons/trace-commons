@@ -614,7 +614,7 @@ impl Shell {
                         let notice = *notice;
                         let fresh = !seen.borrow().contains(&(notice, card_text(&card)));
                         if started.get() && crate::ui::glass_motion::animations_enabled() {
-                            slide.arrive(fresh);
+                            slide.arrive(fresh, false);
                         } else {
                             slide.settle();
                         }

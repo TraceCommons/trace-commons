@@ -43,13 +43,19 @@ pub fn plate(level: usize, width: f64) -> (f64, f64, f64) {
     )
 }
 
-/// A card coming to the front, `t` seconds in: how far above its place it
-/// is (a card `height` tall), and its opacity. A new card slides from the
-/// top; a revealed one only fades.
-pub fn arrival(fresh: bool, t: f64, height: f64) -> (f64, f64) {
+/// A card coming to the front, `t` seconds in: how far it is from its
+/// place (a card `height` tall; negative is above), and its opacity. A new
+/// card slides from the side the stack hangs from, the top unless
+/// `from_foot`; a revealed one only fades.
+pub fn arrival(fresh: bool, t: f64, height: f64, from_foot: bool) -> (f64, f64) {
     let (response, damping) = SPRING;
     let p = glass_motion::spring(response, damping, t);
-    let offset = if fresh { -height * (1.0 - p) } else { 0.0 };
+    let side = if from_foot { 1.0 } else { -1.0 };
+    let offset = if fresh {
+        side * height * (1.0 - p)
+    } else {
+        0.0
+    };
     (offset, p.clamp(0.0, 1.0))
 }
 
@@ -59,6 +65,9 @@ mod plates {
     #[derive(Default)]
     pub struct Plates {
         pub behind: Cell<usize>,
+        /// Hung from the foot (the map's cards): the plates peek out above
+        /// the front card rather than below it.
+        pub bottom: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -85,13 +94,16 @@ mod plates {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let widget = self.obj();
             let width = f64::from(widget.width());
+            let height = f64::from(widget.height());
             let context = widget.style_context();
             // Back first, so the nearer plate is drawn over the farther.
             for level in (1..=self.behind.get()).rev() {
                 let (x, w, opacity) = plate(level, width);
+                let h = PEEK * level as f64;
+                let y = if self.bottom.get() { height - h } else { 0.0 };
                 snapshot.push_opacity(opacity);
-                snapshot.render_background(&context, x, 0.0, w, PEEK * level as f64);
-                snapshot.render_frame(&context, x, 0.0, w, PEEK * level as f64);
+                snapshot.render_background(&context, x, y, w, h);
+                snapshot.render_frame(&context, x, y, w, h);
                 snapshot.pop();
             }
         }
@@ -119,6 +131,16 @@ impl Plates {
         plates.add_css_class("tc-notice-plate");
         plates.set_can_target(false);
         plates.set_visible(false);
+        plates
+    }
+
+    /// Plates for a stack hung from the foot, peeking out above the front
+    /// card, in `class`'s style.
+    pub fn hung_from_foot(class: &str) -> Self {
+        let plates = Self::new();
+        plates.remove_css_class("tc-notice-plate");
+        plates.add_css_class(class);
+        plates.imp().bottom.set(true);
         plates
     }
 
@@ -205,8 +227,9 @@ impl Slide {
         self.imp().offset.get()
     }
 
-    /// Brings the card in: sliding from the top when `fresh`, else fading.
-    pub fn arrive(&self, fresh: bool) {
+    /// Brings the card in: sliding from the top (or the foot) when
+    /// `fresh`, else fading.
+    pub fn arrive(&self, fresh: bool, from_foot: bool) {
         // Not laid out yet when it has just been shown: its height for the
         // width it will have.
         let height = match self.height() {
@@ -220,7 +243,7 @@ impl Slide {
         let (response, damping) = SPRING;
         let length = glass_motion::spring_settles(response, damping);
         // The first frame is drawn before the clock's first tick.
-        let (offset, opacity) = arrival(fresh, 0.0, height);
+        let (offset, opacity) = arrival(fresh, 0.0, height, from_foot);
         self.imp().offset.set(offset);
         self.set_opacity(opacity);
         self.queue_allocate();
@@ -234,7 +257,7 @@ impl Slide {
                 let (offset, opacity) = if t >= length {
                     (0.0, 1.0)
                 } else {
-                    arrival(fresh, t, height)
+                    arrival(fresh, t, height, from_foot)
                 };
                 slide.imp().offset.set(offset);
                 slide.set_opacity(opacity);
@@ -273,19 +296,21 @@ mod tests {
     #[test]
     fn a_card_arrives_as_the_macs_does() {
         assert_eq!(SPRING, (0.36, 0.86));
-        let (offset, opacity) = arrival(true, 0.0, 120.0);
+        let (offset, opacity) = arrival(true, 0.0, 120.0, false);
         assert_eq!((offset, opacity), (-120.0, 0.0));
         // SwiftUI's spring at 0.1 s is 0.567733 of the way.
-        let (offset, opacity) = arrival(true, 0.1, 120.0);
+        let (offset, opacity) = arrival(true, 0.1, 120.0, false);
         assert!(
             (offset + 120.0 * (1.0 - 0.567_733)).abs() < 1e-4,
             "{offset}"
         );
         assert!((opacity - 0.567_733).abs() < 1e-5);
-        let (offset, opacity) = arrival(false, 0.1, 120.0);
+        let (offset, opacity) = arrival(false, 0.1, 120.0, false);
         assert_eq!(offset, 0.0);
         assert!((opacity - 0.567_733).abs() < 1e-5);
         // Past the overshoot the opacity holds at 1.
-        assert_eq!(arrival(true, 0.3, 120.0).1, 1.0);
+        assert_eq!(arrival(true, 0.3, 120.0, false).1, 1.0);
+        // Hung from the foot (the map's cards), a new card rises into place.
+        assert_eq!(arrival(true, 0.0, 120.0, true).0, 120.0);
     }
 }
