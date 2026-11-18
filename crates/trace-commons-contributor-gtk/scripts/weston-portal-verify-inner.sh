@@ -197,7 +197,7 @@ else
     ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
     ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
-    ui::tool_tile::tests::mounted_a_tile_is_the_macs_size_and_says_nothing \
+    ui::tool_tile::mounted::mounted_a_tile_is_the_macs_size_and_says_nothing \
     ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
     ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
     ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
