@@ -193,6 +193,15 @@ class GlassTokensTests(unittest.TestCase):
                 halo = generate.css_rgba(generate.flat_color(self.tokens, "tabEmberHalo", scheme), "test")
                 self.assertIn(f"@define-color tc_glass_tab_ember_halo {halo};", css)
 
+    def test_graph_inks_reach_rust_per_scheme(self):
+        # GlassBarGraph's lit dots: dataShared over dataKept, each scheme's
+        # flat value, for the cairo graph to draw with.
+        rust = "\n".join(generate.render_glass_rust(self.tokens))
+        for scheme in generate.SCHEMES:
+            for token, name in (("dataShared", "SHARED"), ("dataKept", "KEPT"), ("statusOff", "LABEL")):
+                hex_ = generate.flat_color(self.tokens, token, scheme)["hex"].upper()
+                self.assertIn(f'pub const {name}_{scheme.upper()}: &str = "{hex_}";', rust)
+
     def test_glyphs_come_from_the_swift_path_data(self):
         glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
         self.assertEqual([g["name"] for g in glyphs],

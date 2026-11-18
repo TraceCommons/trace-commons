@@ -277,6 +277,21 @@ pub mod glass {
         pub const EDGE_RAIL_INSET: i32 = 12;
         pub const EDGE_RAIL_GAP: i32 = 16;
     }
+    /// The graph's inks: shared and kept dots, and the bar labels.
+    pub mod data {
+        /// `dataShared`, light.
+        pub const SHARED_LIGHT: &str = "#7A2CF5";
+        /// `dataKept`, light.
+        pub const KEPT_LIGHT: &str = "#2F6BC4";
+        /// `statusOff`, light.
+        pub const LABEL_LIGHT: &str = "#8A8A90";
+        /// `dataShared`, dark.
+        pub const SHARED_DARK: &str = "#8A3DFF";
+        /// `dataKept`, dark.
+        pub const KEPT_DARK: &str = "#3A7BD5";
+        /// `statusOff`, dark.
+        pub const LABEL_DARK: &str = "#A9A9B0";
+    }
 }
 
 /// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.

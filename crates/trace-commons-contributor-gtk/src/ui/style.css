@@ -620,6 +620,53 @@ window.tc-glass-window {
   color: @tc_glass_toolbar_glyph;
 }
 
+/* --- The graph footer (`monitor::graph_footer`) ---------------------
+   `GlassLegendCell`: a capsule well `size.controlLarge` high, the word in
+   the secondary ink and the figure semibold and tabular in the primary.
+   `GlassPillIconButton`: a round glass control 30 wide and `size.control`
+   high, its glyph in the primary ink. */
+.tc-graph-legend-cell {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+}
+
+.tc-graph-legend-name {
+  color: @tc_glass_ink_secondary;
+  font-size: 0.923077em;
+}
+
+.tc-graph-legend-value {
+  color: @tc_glass_ink;
+  font-size: 0.923077em;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+.tc-graph-pill {
+  min-width: 30px;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  color: @tc_glass_ink;
+  font-weight: 500;
+}
+
+.tc-graph-pill:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-graph-pill:checked {
+  background-color: @tc_glass_control_selected;
+  color: @tc_glass_selected_ink;
+}
+
+.tc-graph-pill:disabled {
+  opacity: 0.45;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */

@@ -697,6 +697,16 @@ def render_glass_rust(tokens: dict) -> list[str]:
                 raise TokenError(f"{mod}.{key}: {value!r} is not a whole number of px")
             out.append(f"        pub const {snake(key).upper()}: i32 = {value};")
         out.append("    }")
+    # The graph's dot inks (`GlassBarGraph`): shared over kept, and the bar
+    # labels' statusOff, per scheme, for cairo to draw with.
+    out.append("    /// The graph's inks: shared and kept dots, and the bar labels.")
+    out.append("    pub mod data {")
+    for scheme in SCHEMES:
+        for token, name in (("dataShared", "SHARED"), ("dataKept", "KEPT"), ("statusOff", "LABEL")):
+            hex_ = flat_color(tokens, token, scheme)["hex"].upper()
+            out.append(f"        /// `{token}`, {scheme}.")
+            out.append(f'        pub const {name}_{scheme.upper()}: &str = "{hex_}";')
+    out.append("    }")
     out.append("}")
     return out
 
