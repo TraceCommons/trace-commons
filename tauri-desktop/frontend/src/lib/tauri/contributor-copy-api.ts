@@ -225,21 +225,6 @@ export type ContributorDisclosureCopy = {
     watcher_starting: string;
     watcher_start_failed: string;
   };
-  privacy_scan: {
-    title: string;
-    local_always: string;
-    offer: string;
-    disclosure: string;
-    local_only: string;
-    with_near: string;
-    recovery_title: string;
-    recovery_detail: string;
-    recovery_action: string;
-    recovery_confirm: string;
-    recovery_working: string;
-    recovery_failed: string;
-    recovery_cancel: string;
-  };
   source_settings: {
     heading: string;
     explanation: string;
@@ -349,7 +334,6 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
   const privateInference = record(value.private_inference, "Private AI copy");
   const onboarding = record(value.onboarding, "first contribution copy");
   const onboardingShell = record(value.onboarding_shell, "onboarding copy");
-  const privacyScan = record(value.privacy_scan, "privacy scan copy");
   const sourceSettings = record(value.source_settings, "source settings copy");
   const sourceTools = record(sourceSettings.tools, "source settings tools");
   const sourceCheckPayload = record(value.source_check_lines, "source check lines");
@@ -425,21 +409,6 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       roots_required: string(onboardingShell, "roots_required"),
       watcher_starting: string(onboardingShell, "watcher_starting"),
       watcher_start_failed: string(onboardingShell, "watcher_start_failed"),
-    },
-    privacy_scan: {
-      title: string(privacyScan, "title"),
-      local_always: string(privacyScan, "local_always"),
-      offer: string(privacyScan, "offer"),
-      disclosure: string(privacyScan, "disclosure"),
-      local_only: string(privacyScan, "local_only"),
-      with_near: string(privacyScan, "with_near"),
-      recovery_title: string(privacyScan, "recovery_title"),
-      recovery_detail: string(privacyScan, "recovery_detail"),
-      recovery_action: string(privacyScan, "recovery_action"),
-      recovery_confirm: string(privacyScan, "recovery_confirm"),
-      recovery_working: string(privacyScan, "recovery_working"),
-      recovery_failed: string(privacyScan, "recovery_failed"),
-      recovery_cancel: string(privacyScan, "recovery_cancel"),
     },
     source_settings: {
       heading: string(sourceSettings, "heading"),

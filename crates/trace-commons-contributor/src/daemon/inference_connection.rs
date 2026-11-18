@@ -1801,14 +1801,14 @@ mod tests {
         let concurrent_write = async {
             entered.notified().await;
             let mut cfg = config(&s);
-            cfg.pii_filter = Some("written-meanwhile".into());
+            cfg.public_bio = Some("written-meanwhile".into());
             s.store.save_config(&cfg).unwrap();
             release.notify_one();
         };
         let (response, ()) = tokio::join!(install(&s, &server), concurrent_write);
         response.result.expect("installed");
         let after = config(&s);
-        assert_eq!(after.pii_filter.as_deref(), Some("written-meanwhile"));
+        assert_eq!(after.public_bio.as_deref(), Some("written-meanwhile"));
         assert!(after.witness.is_some());
     }
 

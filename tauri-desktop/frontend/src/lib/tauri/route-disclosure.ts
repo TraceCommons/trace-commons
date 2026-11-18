@@ -27,7 +27,6 @@ export type WitnessOrigin =
 
 export type LocalFilter =
   | "none"
-  | "near_ai"
   | "self_hosted"
   | "sidecar"
   | "invalid";
@@ -110,7 +109,6 @@ const ORIGINS: readonly string[] = [
 ];
 const FILTERS: readonly string[] = [
   "none",
-  "near_ai",
   "self_hosted",
   "sidecar",
   "invalid",

@@ -380,8 +380,8 @@ What replaces the restriction is **visibility, not gatekeeping**:
   approval -- `approve: {"all": true}` and `approve: {"project_id": ...}`
   alike -- appends a local, hash-only audit entry, readable via
   `list_audit`. A project-wide approval that matched nothing appends no
-  entry, because nothing was approved. So do `set_consent_scopes` and
-  `acknowledge_near_ai_notice`, and so does `cancel: {"project_id": ...}`
+  entry, because nothing was approved. So does `set_consent_scopes`,
+  and so does `cancel: {"project_id": ...}`
   -- undoing a batch approval is the same class of act as making one.
 - The action and its audit entry are **one fail-closed unit**. If the entry
   cannot be persisted -- disk full, permissions, a corrupt log -- the action
@@ -488,9 +488,13 @@ something it can corroborate, rather than to a string a client invented.
 - `get_settings` reports five booleans -- `near_ai_configured`,
   `near_ai_inference_configured`, `near_ai_session_retained`,
   `claude_root_configured`, `codex_root_configured` -- and never the
-  underlying values. The first three are credentials and are **different
-  credentials for different services**, which their near-identical names do
-  not convey: `near_ai_configured` is the privacy-filter API key,
+  underlying values. `near_ai_configured` is **always `false`**: it reported
+  the credential of the client-side NEAR AI second scan, which is retired
+  (an older settings file's `near_ai` credential is never read, never crosses
+  the socket, and is dropped on the next save). It stays on the wire because
+  older shells decode it and gate their scan step on it. The next two are
+  credentials and are **different credentials for different services**,
+  which their near-identical names do not convey:
   `near_ai_inference_configured` is the NEAR AI inference key this daemon
   mints for a contributor, and `near_ai_session_retained` is the NEAR AI
   session kept alongside that key so the account balance can be read. The
@@ -575,9 +579,9 @@ The exemption also covers **the previewed envelope at rest**. A successful
 0700 state directory (`daemon-approved-envelope-{entry_id}.json`, 0600,
 atomic), and the upload sends exactly those bytes rather than building a
 second envelope. That is what makes preview and upload agree under a
-privacy filter that does not reproduce its own output: with
-`pii_filter = "near-ai"` an LLM-backed filter returns different spans for
-identical text, and any design that rebuilt-and-compared refused every
+privacy filter that does not reproduce its own output: an LLM-backed
+filter (the pilot once ran one on the client; any attached filter can
+behave this way) returns different spans for identical text, and any design that rebuilt-and-compared refused every
 previewed entry forever. The stored bytes are held to the same bounds as
 the rest of the exemption, plus three of their own:
 
@@ -733,7 +737,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
-| `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at`, `change_24h_nanos`, `change_24h_text`, `received_total_nanos` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
 | `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
@@ -834,7 +837,7 @@ number. The JSON is `{title, detail, action, action_kind, severity}`:
   It cannot be derived from `action`: an unsupported OpenCode export is
   actionable with no button.
 - `action_kind` is a stable kind for the button, present exactly when
-  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `action` is: `reconnect` or `review_queue` (Swift's
   `reviewsQueue`). Switch on it, never on the button's words.
 - `opencode-export-version-unsupported` is answered with the source settings'
   own version sentence (`source_copy`), not the generic banner.
@@ -7062,10 +7065,12 @@ as `not_recorded` rather than inheriting a stale answer. Configs written before
 the record existed read the same way. The record is not an input to
 `input_fingerprint`.
 
-`local_filter` is present only when `route` is `local`: `none`, `near_ai`,
+`local_filter` is present only when `route` is `local`: `none`,
 `self_hosted`, `sidecar`, or `invalid` (a setting the redactor refuses to
-build, so nothing is sent). It is the config's `pii_filter` when set, and
-otherwise the environment's backend.
+build, so nothing is sent). It is the environment's backend. The retired
+client-side NEAR AI scan reads as `none` whatever an old config or the
+environment says, because the redactor never attaches it; `near_ai` is no
+longer sent.
 
 **What this does not report, because this client does not know it:** which
 privacy filter the witness itself calls (it is set in the configuration the
@@ -7940,36 +7945,21 @@ The CLI's `unenroll` (with `--yes` to skip its confirmation) calls this;
 `consent scopes` calls `set_consent_scopes` with the floor scope named, so an
 enrollment made with `login --default` leaves the consent hold.
 
-### `acknowledge_near_ai_notice`
+### `acknowledge_near_ai_notice` (retired)
 
-Records that the NEAR AI first-use privacy disclosure was shown to the
-contributor in a UI, and clears the `near-ai-notice-not-acknowledged` health
-label so the daemon will start using that filter. This is the only way an
-app-only contributor (one who never touches the CLI, which shows the same
-notice on stdout) can get past that gate. Because this asserts, on the
-caller's unverified word, that a disclosure was actually shown to someone,
-it is audited (`near-ai-notice-acknowledged`) -- an application must not
-call it without actually having shown the notice text first.
+Removed with the client-side NEAR AI second scan. A call gets the ordinary
+`unknown_method` / `unknown-method` answer, changes nothing and writes no
+audit row; no shipped shell calls it, because each gated the call on
+`near_ai_configured` (now always `false`) or on the
+`near-ai-notice-not-acknowledged` health label, which is never raised again.
+Older audit rows with the action `near-ai-notice-acknowledged` still render.
 
-Acknowledging also re-offers every session the gate had refused, and
-`reoffered` is how many. A session sent while the notice was outstanding is
-refused with `near-ai-notice-not-acknowledged`, which is a refusal about
-timing rather than about the session -- but a refused entry is never moved
-again, and the watcher does not re-offer a session whose file is unchanged,
-so without this those sessions were lost for good. They return as `Pending`
-with their old approval cleared, because that approval was given before the
-disclosure it depended on: an `auto_upload` folder re-approves them on the
-next poll, and any other folder asks again. A `queue_changed` event is
-published when any move.
-
-A refused entry whose file already has a live entry (the session grew while
-it sat refused, and the watcher offered the new content) is not revived: it
-is marked `superseded` with `session-changed-after-offer`, and is not counted
-in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
-runs on every daemon tick once the notice marker exists, so a notice
-acknowledged through the CLI, which writes the marker without calling this
-method, gets the same result. It runs whether or not the daemon is paused,
-quiesced for an update, or in dry-run, since it sends nothing.
+A queue an older build wrote may still hold entries refused with
+`near-ai-notice-not-acknowledged`. The daemon re-offers them on every tick:
+they return to `Pending`, not approved, so whether they are sent is decided
+afresh by the contributor or by a standing grant. It runs whether or not the
+daemon is paused, quiesced for an update, or in dry-run, since it sends
+nothing.
 
 ### `near_ai_balance`
 
@@ -9403,7 +9393,6 @@ nothing for an interval that is not whole hours.
 | `pii-filter-unavailable` | filter configured but unreachable | yes |
 | `claim-mint-failed` | issuer refused or failed | yes |
 | `ingest-unreachable` | upload failed after retries | yes |
-| `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
 | `witness-saturated` | approved sessions held because the privacy witness is at capacity; also the `reason_label` on each held entry | yes |
@@ -9423,16 +9412,15 @@ applies, the daemon shows the one with the **highest precedence** below,
 listed highest first:
 
 1. `not-logged-in`
-2. `near-ai-notice-not-acknowledged`
-3. `privacy-filter-canary-failed`
-4. `pii-filter-unavailable`
-5. `claim-mint-failed`
-6. `ingest-unreachable`
-7. `queue-full`
-8. `witness-saturated`
-9. `automatic-contribution-held`
-10. `admission-limit-reached`
-11. `session-too-large`
+2. `privacy-filter-canary-failed`
+3. `pii-filter-unavailable`
+4. `claim-mint-failed`
+5. `ingest-unreachable`
+6. `queue-full`
+7. `witness-saturated`
+8. `automatic-contribution-held`
+9. `admission-limit-reached`
+10. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an

@@ -52,7 +52,9 @@ pub(crate) fn bootstrap_settings(state: &State<'_, AppState>) -> Result<serde_js
         "cline_source_mode": source_mode(settings.cline_source.as_ref()),
         "opencode_source_mode": source_mode(settings.opencode_source.as_ref()),
         "local_notifications": settings.local_notifications,
-        "near_ai_configured": settings.near_ai.is_some(),
+        // The retired client-side NEAR AI second scan: always off. Kept on
+        // the wire for the frontends that still read it.
+        "near_ai_configured": false,
         "near_ai_inference_configured": settings.near_ai_inference.is_some(),
         "near_ai_session_retained": settings.near_ai_session.is_some(),
     }))

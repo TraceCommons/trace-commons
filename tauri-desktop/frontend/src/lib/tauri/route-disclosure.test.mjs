@@ -63,7 +63,7 @@ function localRoute() {
     facts: {
       route: "local",
       witness: null,
-      local_filter: "near_ai",
+      local_filter: "sidecar",
       receipts,
       attested_bodies: false,
     },
@@ -71,7 +71,7 @@ function localRoute() {
       title: "TITLE",
       route: "LOCAL",
       witness: null,
-      local_filter: "NEAR AI FILTER",
+      local_filter: "SIDECAR FILTER",
       receipts: null,
       attested_bodies: null,
       session,
@@ -92,8 +92,8 @@ test("the witness route carries the witness, its pins and its origin line", () =
 
 test("the local route carries its filter line and no witness", () => {
   const parsed = parseRouteDisclosure(localRoute());
-  assert.equal(parsed.facts.local_filter, "near_ai");
-  assert.equal(parsed.copy.local_filter, "NEAR AI FILTER");
+  assert.equal(parsed.facts.local_filter, "sidecar");
+  assert.equal(parsed.copy.local_filter, "SIDECAR FILTER");
   assert.equal(parsed.copy.witness, null);
 });
 

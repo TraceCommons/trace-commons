@@ -83,7 +83,6 @@ fn configured_shared(
             user_subject: "synthetic-subject".to_string(),
             device_key_id: "synthetic-device".to_string(),
             consent_scopes: Vec::new(),
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,

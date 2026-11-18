@@ -21,10 +21,10 @@ export function OnboardingPage({
   const roots = useSourceRoots();
   const [showScrubDisclosure, setShowScrubDisclosure] = useState(false);
   const busy = onboarding.state === "loading" || onboarding.state === "busy";
-  const showPrivacy =
-    settings.state === "ready"
-      ? settings.data?.near_ai_configured === true
-      : null;
+  // The optional NEAR AI second scan is retired, so its step is never
+  // shown. Still `null` until settings load, as the steps that wait on it
+  // expect.
+  const showPrivacy = settings.state === "ready" ? false : null;
   const scrubber = useScrubberPatterns(showScrubDisclosure);
   // On a step change, move focus to the new step's heading, so keyboard and
   // screen-reader users land on the step rather than on the page body. Not
@@ -45,7 +45,7 @@ export function OnboardingPage({
     connect: "Connect a commons",
     consent: "Choose your consent",
     path: "Choose how to contribute",
-    privacy: "Extra scrub before sending?",
+    privacy: "Connect inference",
     inference: "Connect inference",
     disclosure_scrub: "What automatic contributing removes",
     disclosure_witness: "Where traces go",
@@ -61,7 +61,7 @@ export function OnboardingPage({
     consent:
       "Nothing is pre-selected. Tick the required scope yourself to continue.",
     path: "Neither option is chosen for you.",
-    privacy: "Local scrubbing runs either way. A second scanner is optional.",
+    privacy: "Optional. Skipping changes nothing.",
     inference: "Optional. Skipping changes nothing.",
     disclosure_scrub: "Read this before turning anything on.",
     disclosure_witness: "Read from this device's current settings.",

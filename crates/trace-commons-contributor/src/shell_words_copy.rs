@@ -425,7 +425,6 @@ pub struct SettingsWords {
     pub not_connected: &'static str,
     /// Approved by the owner 2026-11-04 (Settings copy pass 2, P26).
     pub queued_nothing_sent: &'static str,
-    pub extra_scan_configured: &'static str,
     pub session_finished_after: &'static str,
     /// Cut: empty. The notification schedule's own help
     /// (`nudge_copy::SETTING_DIGEST_HELP_INTERVAL`) says it.
@@ -492,7 +491,6 @@ pub fn settings_words() -> SettingsWords {
         connected: "Connected",
         not_connected: "Not connected",
         queued_nothing_sent: "Nothing is sent until you set up this app.",
-        extra_scan_configured: "Extra privacy scan configured",
         session_finished_after: "A trace counts as finished after {seconds} seconds of quiet.",
         at_most_one_notification: "",
         at_most_one_notification_one: "",
