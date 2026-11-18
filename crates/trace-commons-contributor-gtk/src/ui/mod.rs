@@ -13,6 +13,7 @@ mod css_contract;
 mod first_run;
 mod first_run_screens;
 mod first_run_stage;
+mod first_run_stage_paint;
 mod first_run_terms;
 mod first_run_tools;
 pub mod funding;
