@@ -1798,7 +1798,13 @@ fn draw_mark(
 }
 
 /// A short bold mark centred on `centre`, in the current source.
-fn centred_text(cr: &gtk::cairo::Context, text: &str, centre: Point, size: f64, family: &str) {
+pub(super) fn centred_text(
+    cr: &gtk::cairo::Context,
+    text: &str,
+    centre: Point,
+    size: f64,
+    family: &str,
+) {
     cr.select_font_face(
         family,
         gtk::cairo::FontSlant::Normal,

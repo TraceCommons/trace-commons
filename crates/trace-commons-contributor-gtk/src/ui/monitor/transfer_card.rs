@@ -9,16 +9,96 @@
 //! Deliberate platform differences:
 //! - The memory line in Details says "Memory files stay on this computer."
 //!   (`memory_stays_computer`) where the Mac's says "this Mac".
-//! - The coin carries the tool's initials, not its logo (the look slice),
-//!   and a batch from several tools carries none.
+//! - A batch from several tools shows the stock stacked-pages icon where
+//!   the Mac draws its `square.stack` symbol (owner, 2026-11-18: stock
+//!   symbolic icons for the Mac's SF Symbols).
 //! - The cards are a short column, newest nearest the legend, not the
 //!   Mac's peeking stack; at most `Player::VISIBLE` are drawn.
 
 use adw::prelude::*;
 use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
-use super::map_scene;
+use super::map::{self, MapColours, MarkFont};
+use super::map_scene::{self, Point};
+use super::tool_art;
+use super::traces_tree::SourceKind;
 use super::transfers::{self, MapTransfer, Tone};
+
+/// The coin's side (`GlassNoticeMark.side`).
+pub const COIN_SIDE: i32 = 30;
+
+/// What the card's coin carries (`TraceTransferCard.toolMark`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardMark {
+    /// A tool this shell knows: its logo or initials, in its tint.
+    Tool(SourceKind),
+    /// Another tool: two letters of its name, in the primary ink.
+    Other(String),
+    /// A batch from several tools: no tool's mark.
+    Mixed,
+}
+
+pub fn card_mark(transfer: &MapTransfer) -> CardMark {
+    if transfer.mixed_tools {
+        return CardMark::Mixed;
+    }
+    match SourceKind::from_wire(&transfer.tool) {
+        Some(kind) => CardMark::Tool(kind),
+        None => CardMark::Other(map_scene::initials(&transfer.tool)),
+    }
+}
+
+/// The coin as `TraceTransferCard.coin` draws it, `COIN_SIDE` across at
+/// the context's origin: an opaque face, a 2-point rim in the tool's tint
+/// inside its edge, and the logo 14 across or the initials, monospaced 10
+/// bold, in the tint. A mixed batch's coin is drawn as a stock icon
+/// instead, so here only its face.
+pub fn draw_coin(cr: &gtk::cairo::Context, mark: &CardMark, colours: &MapColours) {
+    let side = f64::from(COIN_SIDE);
+    let centre = Point::new(side / 2.0, side / 2.0);
+    map::circle(cr, centre, side / 2.0);
+    map::source(cr, &colours.pane_opaque, 1.0);
+    let _ = cr.fill();
+    let (tint, logo, initials) = match mark {
+        CardMark::Tool(kind) => {
+            let art = tool_art::tool_art(*kind);
+            (colours.tint(art.tint), art.logo, art.initials.to_string())
+        }
+        CardMark::Other(letters) => (colours.text_primary, None, letters.clone()),
+        CardMark::Mixed => return,
+    };
+    map::circle(cr, centre, side / 2.0 - 1.0);
+    cr.set_line_width(2.0);
+    map::source(cr, &tint, 1.0);
+    let _ = cr.stroke();
+    map::source(cr, &tint, 1.0);
+    match logo {
+        Some(logo) => logo.fill(cr, (centre.x - 7.0, centre.y - 7.0), 14.0),
+        None => {
+            let font = MarkFont::coin(10.0 / 12.0);
+            map::centred_text(cr, &initials, centre, font.size, font.family);
+        }
+    }
+}
+
+/// The card's coin, drawn in the current scheme.
+fn coin(mark: CardMark) -> gtk::Widget {
+    if mark == CardMark::Mixed {
+        let icon = gtk::Image::from_icon_name("edit-copy-symbolic");
+        icon.set_pixel_size(16);
+        icon.set_size_request(COIN_SIDE, COIN_SIDE);
+        icon.add_css_class("dim-label");
+        return icon.upcast();
+    }
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(COIN_SIDE);
+    area.set_content_height(COIN_SIDE);
+    area.set_draw_func(move |_, cr, _, _| {
+        let dark = adw::StyleManager::default().is_dark();
+        draw_coin(cr, &mark, &MapColours::scheme(dark));
+    });
+    area.upcast()
+}
 
 /// One card. `from_map` is the folder's name on the map, for a transfer
 /// that carries none; `on_close` runs on its X.
@@ -40,9 +120,7 @@ pub fn card(
     card.update_property(&[gtk::accessible::Property::Label(&title)]);
 
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let mark = gtk::Label::new(Some(
-        &tool.as_deref().map(map_scene::initials).unwrap_or_default(),
-    ));
+    let mark = coin(card_mark(transfer));
     mark.add_css_class("tc-map-transfer-mark");
     mark.set_valign(gtk::Align::Center);
     mark.set_accessible_role(gtk::AccessibleRole::Presentation);
@@ -139,6 +217,8 @@ pub fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::monitor::map::MapColours;
+    use crate::ui::monitor::tool_art::Tint;
     use crate::ui::monitor::transfers::Action;
 
     fn descendants(root: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
@@ -148,6 +228,80 @@ mod tests {
             out.push(widget.clone());
             descendants(&widget, out);
         }
+    }
+
+    /// The card's coin carries what `TraceTransferCard.toolMark` gives it:
+    /// a known tool's own mark (Codex its logo, Gemini CLI "Gm", Cline
+    /// "Cl"), another tool two letters of its name, and a batch from
+    /// several tools no tool's mark.
+    #[test]
+    fn the_coin_carries_the_tools_own_mark() {
+        let mark = |tool: &str, mixed: bool| {
+            let mut transfer = MapTransfer::new("t1", "folder", tool, Action::Contribute);
+            transfer.mixed_tools = mixed;
+            card_mark(&transfer)
+        };
+        assert_eq!(mark("codex", false), CardMark::Tool(SourceKind::Codex));
+        assert_eq!(
+            mark("gemini-cli", false),
+            CardMark::Tool(SourceKind::GeminiCli)
+        );
+        assert_eq!(mark("aider", false), CardMark::Other("Ai".into()));
+        assert_eq!(mark("codex", true), CardMark::Mixed);
+    }
+
+    /// The pixels of a coin drawn 30 across (`GlassNoticeMark.side`) in
+    /// the light scheme, unpremultiplied, with any alpha.
+    fn coin_pixels(mark: &CardMark) -> Vec<[u8; 4]> {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 30, 30).unwrap();
+        {
+            let cr = gtk::cairo::Context::new(&surface).unwrap();
+            draw_coin(&cr, mark, &MapColours::scheme(false));
+        }
+        surface.flush();
+        let data = surface.data().unwrap();
+        data.chunks(4)
+            .filter(|px| px[3] > 200)
+            .map(|px| {
+                let a = f64::from(px[3]) / 255.0;
+                let c = |v: u8| (f64::from(v) / a).round().min(255.0) as u8;
+                [c(px[2]), c(px[1]), c(px[0]), px[3]]
+            })
+            .collect()
+    }
+
+    fn near(px: [u8; 4], colour: &gtk::gdk::RGBA) -> bool {
+        let target = [colour.red(), colour.green(), colour.blue()];
+        (0..3).all(|k| (f32::from(px[k]) - target[k] * 255.0).abs() <= 14.0)
+    }
+
+    /// The coin is the Mac's: an opaque face, a 2-point rim in the tool's
+    /// tint, and the tool's logo (14 across) or initials in that tint. A
+    /// tool with a logo paints more of its tint inside the rim than the rim
+    /// alone; Gemini CLI's initials are in the Antigravity tint.
+    #[test]
+    fn the_coin_is_drawn_in_the_tools_tint() {
+        let colours = MapColours::scheme(false);
+        let codex = coin_pixels(&CardMark::Tool(SourceKind::Codex));
+        let tint = colours.tint(Tint::Codex);
+        let face = codex
+            .iter()
+            .filter(|px| near(**px, &colours.pane_opaque))
+            .count();
+        assert!(face > 150, "the face drew {face} pixels");
+        let inside = |pixels: &[[u8; 4]], colour: &gtk::gdk::RGBA| {
+            pixels.iter().filter(|px| near(**px, colour)).count()
+        };
+        let rim_only = inside(&coin_pixels(&CardMark::Mixed), &tint);
+        assert!(
+            inside(&codex, &tint) > 150,
+            "Codex's rim and logo drew {} pixels in its tint",
+            inside(&codex, &tint)
+        );
+        assert_eq!(rim_only, 0, "a mixed batch's coin carries no tool's tint");
+        let gemini = coin_pixels(&CardMark::Tool(SourceKind::GeminiCli));
+        assert!(inside(&gemini, &colours.tint(Tint::Antigravity)) > 80);
     }
 
     /// The memory well in Details carries the Mac's lock beside the files.

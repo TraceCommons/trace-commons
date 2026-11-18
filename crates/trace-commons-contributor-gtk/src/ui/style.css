@@ -475,14 +475,6 @@ row:selected {
 }
 
 /* The tool's coin on the card: its initials in a ring. */
-.tc-map-transfer-mark {
-  min-width: 26px;
-  min-height: 26px;
-  border: 2px solid @tc_line_divider;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 700;
-}
 
 /* The tool's memory files and that they stay on this computer, in the
    card's Details: a well, as the Mac's `TraceTransferCard` draws it. */
