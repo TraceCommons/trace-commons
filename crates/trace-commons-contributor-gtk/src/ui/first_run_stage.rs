@@ -14,7 +14,6 @@
 //! The stage carries no words: everything it draws is decorative, as the
 //! Mac hides it from assistive tech.
 
-#![allow(dead_code)] // TEMP until the painter lands
 use crate::first_run::{Sharing, Step};
 
 /// A point in the canvas, in points.
@@ -561,7 +560,7 @@ pub mod traces {
 
     /// Whether the orbs flow down the streams `elapsed` seconds in.
     pub fn flowing(elapsed: f64, reduce_motion: bool) -> bool {
-        !reduce_motion && elapsed >= 0.5 && elapsed < COUNT_DELAY + COUNT_DURATION + 0.4
+        !reduce_motion && (0.5..COUNT_DELAY + COUNT_DURATION + 0.4).contains(&elapsed)
     }
 }
 

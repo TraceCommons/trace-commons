@@ -514,3 +514,34 @@ row:selected {
   color: @tc_ink;
   text-decoration: underline;
 }
+
+/* --- The first run's stage ---------------------------------------------
+   The first-run window draws its scene under everything
+   (`first_run_stage_view`), so its ground and header are clear and the
+   scene shows through, as the Mac's first run has no window chrome. The
+   thread's titles: the current step in the primary ink, semibold; a
+   passed one in the secondary ink, a button back to it; one still to come
+   in the tertiary ink (`FirstRunStepThread`). */
+.tc-first-run-stage {
+  background-color: transparent;
+}
+.tc-first-run-stage headerbar {
+  background: none;
+  box-shadow: none;
+}
+.tc-thread-title {
+  padding: 0 10px;
+  font-weight: 500;
+  color: alpha(@tc_ink, 0.84);
+}
+.tc-thread-title.tc-thread-current {
+  font-weight: 600;
+  color: @tc_ink;
+}
+.tc-thread-title.tc-thread-passed {
+  color: alpha(@tc_ink, 0.88);
+}
+.tc-thread-back {
+  padding: 0;
+  min-height: 0;
+}

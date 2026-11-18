@@ -14,7 +14,6 @@
 //! nothing, or a few widening translucent passes; the comparison renders
 //! measure what that leaves.
 
-#![allow(dead_code)] // TEMP until the view lands
 use std::f64::consts::{PI, TAU};
 
 use gtk::cairo;
@@ -30,7 +29,8 @@ pub struct Rgba(pub f64, pub f64, pub f64, pub f64);
 
 impl Rgba {
     fn from_token((hex, alpha): tokens::Rgba) -> Self {
-        let channel = |i: usize| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0)) / 255.0;
+        let channel =
+            |i: usize| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0)) / 255.0;
         Self(channel(1), channel(3), channel(5), alpha)
     }
     /// The colour at `alpha` times its own.
@@ -126,7 +126,14 @@ fn rounded(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 
 /// A soft shadow under a rounded rectangle: SwiftUI's `.shadow(radius:)`,
 /// as a few widening translucent passes.
-fn soft_shadow(cr: &cairo::Context, rect: (f64, f64, f64, f64), corner: f64, blur: f64, dy: f64, c: Rgba) {
+fn soft_shadow(
+    cr: &cairo::Context,
+    rect: (f64, f64, f64, f64),
+    corner: f64,
+    blur: f64,
+    dy: f64,
+    c: Rgba,
+) {
     if c.3 <= 0.0 || blur <= 0.0 {
         return;
     }
@@ -209,7 +216,14 @@ pub fn backdrop(cr: &cairo::Context, w: f64, h: f64, p: &Palette, phase: f64) {
 /// One stretch of the thread, `width` across with its top-left at `origin`:
 /// the dotted rule, and over it the glowing stretch, `grown` (0 to 1) of
 /// its width, lit at its lead end when it leads.
-pub fn thread_segment(cr: &cairo::Context, origin: Point, width: f64, segment: Segment, grown: f64, p: &Palette) {
+pub fn thread_segment(
+    cr: &cairo::Context,
+    origin: Point,
+    width: f64,
+    segment: Segment,
+    grown: f64,
+    p: &Palette,
+) {
     let (x, y) = origin;
     cr.set_line_width(2.0);
     cr.set_dash(&[2.0, 4.0], 0.0);
@@ -224,11 +238,30 @@ pub fn thread_segment(cr: &cairo::Context, origin: Point, width: f64, segment: S
         return;
     }
     // Its glow (`.shadow(color: glow 0.35, radius: 4 or 5)`).
-    let blur = if segment == Segment::Leading { 5.0 } else { 4.0 };
-    soft_shadow(cr, (x, y, fill, 3.0), 1.5, blur, 0.0, p.glow.with(0.35 * 0.5));
+    let blur = if segment == Segment::Leading {
+        5.0
+    } else {
+        4.0
+    };
+    soft_shadow(
+        cr,
+        (x, y, fill, 3.0),
+        1.5,
+        blur,
+        0.0,
+        p.glow.with(0.35 * 0.5),
+    );
     let g = cairo::LinearGradient::new(x, y, x + fill, y);
     stop(&g, 0.0, p.glow);
-    stop(&g, 1.0, if segment == Segment::Leading { p.beam_core } else { p.glow });
+    stop(
+        &g,
+        1.0,
+        if segment == Segment::Leading {
+            p.beam_core
+        } else {
+            p.glow
+        },
+    );
     let _ = cr.set_source(&g);
     rounded(cr, x, y, fill, 3.0, 1.5);
     let _ = cr.fill();
@@ -252,7 +285,15 @@ fn mark_transform(cr: &cairo::Context, origin: Point, side: f64) {
 /// `GlassBrandMarkDrawing` in a square `side` across at `origin`: filled
 /// in the glow, inked as far as `drawn` along the marker line, the light
 /// band at `shine`, and the pen tip at the stroke's front while it draws.
-pub fn brand_mark(cr: &cairo::Context, origin: Point, side: f64, drawn: f64, shine: Option<f64>, tip: bool, p: &Palette) {
+pub fn brand_mark(
+    cr: &cairo::Context,
+    origin: Point,
+    side: f64,
+    drawn: f64,
+    shine: Option<f64>,
+    tip: bool,
+    p: &Palette,
+) {
     if drawn <= 0.0 {
         return;
     }
@@ -337,7 +378,15 @@ impl Default for Hub {
 
 /// `FirstRunHub` in `frame`: the breathing glow behind the mark, then the
 /// mark. `time` is the breathing clock.
-pub fn hub(cr: &cairo::Context, frame: Frame, look: Hub, time: f64, reduce_motion: bool, alpha: f64, p: &Palette) {
+pub fn hub(
+    cr: &cairo::Context,
+    frame: Frame,
+    look: Hub,
+    time: f64,
+    reduce_motion: bool,
+    alpha: f64,
+    p: &Palette,
+) {
     let side = frame.side;
     let disc = side * 220.0 / 132.0;
     let (scale, opacity) = stage::breathing(time, look.charged, reduce_motion);
@@ -379,7 +428,14 @@ fn tool_mark(kind: &str, p: &Palette) -> (Option<Artwork>, Rgba, &'static str) {
 
 /// `FirstRunToolFace` in `frame`: the raised tile, its shadow, the logo in
 /// its tint or its initials, and the glow round it while `lit`.
-pub fn tool_face(cr: &cairo::Context, frame: Frame, kind: &str, lit: bool, alpha: f64, p: &Palette) {
+pub fn tool_face(
+    cr: &cairo::Context,
+    frame: Frame,
+    kind: &str,
+    lit: bool,
+    alpha: f64,
+    p: &Palette,
+) {
     if alpha <= 0.0 || frame.side <= 0.0 {
         return;
     }
@@ -388,7 +444,14 @@ pub fn tool_face(cr: &cairo::Context, frame: Frame, kind: &str, lit: bool, alpha
     let corner = side * 14.0 / 52.0;
     cr.push_group();
     if lit {
-        soft_shadow(cr, (x, y, side, side), corner, side * 11.0 / 52.0, 0.0, p.glow.with(0.35 * 0.6));
+        soft_shadow(
+            cr,
+            (x, y, side, side),
+            corner,
+            side * 11.0 / 52.0,
+            0.0,
+            p.glow.with(0.35 * 0.6),
+        );
     }
     soft_shadow(
         cr,
@@ -406,7 +469,11 @@ pub fn tool_face(cr: &cairo::Context, frame: Frame, kind: &str, lit: bool, alpha
     match logo {
         Some(art) => art.fill(cr, (x + side / 4.0, y + side / 4.0), side / 2.0),
         None => {
-            cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+            cr.select_font_face(
+                "sans-serif",
+                cairo::FontSlant::Normal,
+                cairo::FontWeight::Bold,
+            );
             cr.set_font_size((side * 16.0 / 52.0).max(6.0));
             if let Ok(e) = cr.text_extents(initials) {
                 cr.move_to(
@@ -439,7 +506,15 @@ pub fn orb(cr: &cairo::Context, center: Point, diameter: f64, alpha: f64, p: &Pa
     let _ = cr.fill();
 }
 
-fn dashed_circle(cr: &cairo::Context, center: Point, radius: f64, width: f64, dash: [f64; 2], turn: f64, c: Rgba) {
+fn dashed_circle(
+    cr: &cairo::Context,
+    center: Point,
+    radius: f64,
+    width: f64,
+    dash: [f64; 2],
+    turn: f64,
+    c: Rgba,
+) {
     let _ = cr.save();
     cr.translate(center.0, center.1);
     cr.rotate(turn.to_radians());
@@ -489,7 +564,10 @@ pub fn tools_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
         center,
         radius,
         1.5 * radius / stage::ring::LOOSE_RADIUS,
-        [3.0 * radius / stage::ring::LOOSE_RADIUS, 7.0 * radius / stage::ring::LOOSE_RADIUS],
+        [
+            3.0 * radius / stage::ring::LOOSE_RADIUS,
+            7.0 * radius / stage::ring::LOOSE_RADIUS,
+        ],
         stage::ring::turn(scene.time, scene.reduce_motion),
         p.rule.alpha(opacity),
     );
@@ -601,8 +679,14 @@ fn beam(cr: &cairo::Context, from: Point, to: Point, time: f64, reduce_motion: b
     };
     // The Mac blurs each layer; a blurred stroke is about its width plus
     // twice the blur, at a lower peak.
-    line(24.0 + 6.0 * breath + 14.0, &body((0.34 + 0.16 * breath) * 0.55));
-    line(9.0 + 2.0 * breath + 5.0, &body((0.55 + 0.17 * breath) * 0.7));
+    line(
+        24.0 + 6.0 * breath + 14.0,
+        &body((0.34 + 0.16 * breath) * 0.55),
+    );
+    line(
+        9.0 + 2.0 * breath + 5.0,
+        &body((0.55 + 0.17 * breath) * 0.7),
+    );
     line(2.6 + 1.8, &body(0.8));
     let pulses = cairo::LinearGradient::new(from.0, from.1, to.0, to.1);
     stop(&pulses, 0.0, p.beam_core.with(0.95));
@@ -624,7 +708,14 @@ pub fn tile_flash(cr: &cairo::Context, frame: Frame, flash: f64, p: &Palette) {
         (1.0 - flash) / 0.6
     };
     let s = side * scale;
-    rounded(cr, frame.center.0 - s / 2.0 + 1.0, frame.center.1 - s / 2.0 + 1.0, s - 2.0, s - 2.0, 19.0 * scale);
+    rounded(
+        cr,
+        frame.center.0 - s / 2.0 + 1.0,
+        frame.center.1 - s / 2.0 + 1.0,
+        s - 2.0,
+        s - 2.0,
+        19.0 * scale,
+    );
     cr.set_line_width(2.0);
     source(cr, p.glow.alpha(opacity));
     let _ = cr.stroke();
@@ -669,7 +760,9 @@ pub fn traces_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
         cr.set_dash(&[2.0, 5.0], 0.0);
         source(cr, p.rule);
         cr.move_to(curve[0].0, curve[0].1);
-        cr.curve_to(curve[1].0, curve[1].1, curve[2].0, curve[2].1, curve[3].0, curve[3].1);
+        cr.curve_to(
+            curve[1].0, curve[1].1, curve[2].0, curve[2].1, curve[3].0, curve[3].1,
+        );
         let _ = cr.stroke();
         cr.set_dash(&[], 0.0);
         if tr::flowing(elapsed, scene.reduce_motion) {
@@ -743,7 +836,14 @@ pub fn uses_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
     // The gate.
     let look = t.map_or(us::GATE_REST, |t| us::gate(scene.sharing, t));
     let gate = (us::GATE_X, y);
-    soft_shadow(cr, (gate.0 - 29.0, gate.1 - 29.0, 58.0, 58.0), 29.0, 10.0, 8.0, p.tile_shadow.alpha(0.5));
+    soft_shadow(
+        cr,
+        (gate.0 - 29.0, gate.1 - 29.0, 58.0, 58.0),
+        29.0,
+        10.0,
+        8.0,
+        p.tile_shadow.alpha(0.5),
+    );
     cr.arc(gate.0, gate.1, 29.0, 0.0, TAU);
     source(cr, p.card_solid);
     let _ = cr.fill();
@@ -861,7 +961,11 @@ pub fn live_tile(
     } else {
         stage::ring::bob(kind, scene.time)
     };
-    let center = stage::point((stage::CANVAS.0 / 2.0, stage::ring::CENTER_Y), place.radius, place.angle);
+    let center = stage::point(
+        (stage::CANVAS.0 / 2.0, stage::ring::CENTER_Y),
+        place.radius,
+        place.angle,
+    );
     Some((
         Frame {
             center: (center.0, center.1 + bob * place.scale),
@@ -894,13 +998,29 @@ pub fn hub_look(step: crate::first_run::Step, scene: &Scene, welcome_elapsed: f6
 
 /// A whole step graphic, settled or mid-scan, its actors where the step
 /// puts them: the comparison renders draw this.
-pub fn step_graphic(cr: &cairo::Context, step: crate::first_run::Step, scene: &Scene, welcome_elapsed: f64, p: &Palette) {
+#[cfg(test)]
+pub fn step_graphic(
+    cr: &cairo::Context,
+    step: crate::first_run::Step,
+    scene: &Scene,
+    welcome_elapsed: f64,
+    p: &Palette,
+) {
     step_back(cr, step, scene, p);
     let hub_frame = stage::hub_frame(step);
-    hub(cr, hub_frame, hub_look(step, scene, welcome_elapsed), scene.time, scene.reduce_motion, 1.0, p);
+    hub(
+        cr,
+        hub_frame,
+        hub_look(step, scene, welcome_elapsed),
+        scene.time,
+        scene.reduce_motion,
+        1.0,
+        p,
+    );
     for kind in stage::RING_ORDER {
         if let Some((frame, alpha, flash)) = live_tile(step, kind, scene) {
-            let lit = step == crate::first_run::Step::Tools && scene.tools.watched.iter().any(|w| w == kind);
+            let lit = step == crate::first_run::Step::Tools
+                && scene.tools.watched.iter().any(|w| w == kind);
             tool_face(cr, frame, kind, lit, alpha, p);
             if let Some(flash) = flash {
                 tile_flash(cr, frame, flash, p);
@@ -930,7 +1050,10 @@ mod tests {
     #[test]
     fn the_palette_is_the_flat_themes() {
         let dark = Palette::scheme(true);
-        assert_eq!(dark.scene_base, Rgba(7.0 / 255.0, 10.0 / 255.0, 26.0 / 255.0, 1.0));
+        assert_eq!(
+            dark.scene_base,
+            Rgba(7.0 / 255.0, 10.0 / 255.0, 26.0 / 255.0, 1.0)
+        );
         assert_eq!(dark.glow, Rgba(0.0, 145.0 / 255.0, 253.0 / 255.0, 1.0));
         assert_eq!(dark.rule.3, 0.18);
         let light = Palette::scheme(false);
@@ -1049,7 +1172,15 @@ mod tests {
                         center: (120.0, 120.0),
                         side: 132.0,
                     };
-                    hub(cr, frame, hub_look(Step::Welcome, &scene, e), time, false, 1.0, &p);
+                    hub(
+                        cr,
+                        frame,
+                        hub_look(Step::Welcome, &scene, e),
+                        time,
+                        false,
+                        1.0,
+                        &p,
+                    );
                 });
             }
             for (name, charged) in [("hub", false), ("hub-charged", true)] {
@@ -1079,7 +1210,9 @@ mod tests {
                     tool_face(cr, frame, kind, kind == "codex", 1.0, &p);
                 });
             }
-            write(&format!("orb-{scheme}"), 18, 18, &|cr| orb(cr, (9.0, 9.0), 18.0, 1.0, &p));
+            write(&format!("orb-{scheme}"), 18, 18, &|cr| {
+                orb(cr, (9.0, 9.0), 18.0, 1.0, &p)
+            });
             for e in [0.5, 1.6, 2.4, 4.5] {
                 let scene = Scene {
                     tools: stage::ToolsSeen {
@@ -1111,13 +1244,22 @@ mod tests {
                     };
                     let h = stage::graphic_height(step);
                     // The step graphic in its canvas strip.
-                    write(&format!("graphic-{step:?}-{at}-{scheme}"), 860, h.ceil() as i32, &|cr| {
-                        step_graphic(cr, step, &scene, at, &p)
-                    });
+                    write(
+                        &format!("graphic-{step:?}-{at}-{scheme}"),
+                        860,
+                        h.ceil() as i32,
+                        &|cr| step_graphic(cr, step, &scene, at, &p),
+                    );
                     // The stage at the window's default size: the scene,
                     // then the graphic scaled to fit, under the thread.
                     write(&format!("stage-{step:?}-{at}-{scheme}"), 680, 720, &|cr| {
-                        backdrop(cr, 680.0, 720.0, &p, stage::backdrop_phase(time + at, false));
+                        backdrop(
+                            cr,
+                            680.0,
+                            720.0,
+                            &p,
+                            stage::backdrop_phase(time + at, false),
+                        );
                         let scale = stage::fit_scale(680.0, 720.0);
                         let _ = cr.save();
                         cr.translate(0.0, 92.0);

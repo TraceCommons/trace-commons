@@ -132,24 +132,9 @@ pub(super) fn private_ai_body(connectable: &[Found], found: usize) -> gtk::Box {
     root
 }
 
-fn ink(widget: &gtk::Widget) -> gtk::gdk::RGBA {
-    #[allow(deprecated)]
-    widget.style_context().color()
-}
-
-fn dash(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
-    cr.set_source_rgba(
-        f64::from(colour.red()),
-        f64::from(colour.green()),
-        f64::from(colour.blue()),
-        alpha,
-    );
-    cr.set_line_width(2.0);
-    cr.set_dash(&[5.0, 6.0], 0.0);
-}
-
-/// The Private AI routes: one dashed curve from each named tool into the
-/// hub, and one on from the hub to the destination's pill.
+/// The Private AI routes' words: each tool that can connect, and the
+/// destination's pill. The routes themselves, the tiles and the N are the
+/// stage's (`first_run_stage`), drawn above the title as the Mac does.
 fn route_diagram(names: &[&'static str], destination: &str) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_halign(gtk::Align::Center);
@@ -162,34 +147,6 @@ fn route_diagram(names: &[&'static str], destination: &str) -> gtk::Box {
         column.append(&label);
     }
     row.append(&column);
-    let area = gtk::DrawingArea::builder()
-        .content_width(200)
-        .content_height(names.len().max(1) as i32 * 34)
-        .build();
-    let count = names.len();
-    area.set_draw_func(move |area, cr, width, height| {
-        let colour = ink(area.upcast_ref());
-        let (w, h) = (f64::from(width), f64::from(height));
-        let hub = (w * 0.6, h / 2.0);
-        dash(cr, &colour, 0.6);
-        for index in 0..count {
-            let y = if count > 1 {
-                h * (index as f64 + 0.5) / count as f64
-            } else {
-                h / 2.0
-            };
-            cr.move_to(0.0, y);
-            cr.curve_to(w * 0.3, y, w * 0.35, hub.1, hub.0 - 14.0, hub.1);
-            let _ = cr.stroke();
-        }
-        cr.move_to(hub.0 + 14.0, hub.1);
-        cr.line_to(w, hub.1);
-        let _ = cr.stroke();
-        cr.set_dash(&[], 0.0);
-        cr.arc(hub.0, hub.1, 12.0, 0.0, std::f64::consts::TAU);
-        let _ = cr.fill();
-    });
-    row.append(&area);
     let pill = gtk::Label::new(Some(destination));
     pill.add_css_class("tc-chip");
     pill.set_valign(gtk::Align::Center);
@@ -207,42 +164,18 @@ pub(super) fn column(child: &impl IsA<gtk::Widget>) -> adw::Clamp {
         .build()
 }
 
-/// The Uses flow: this machine, a dashed line through the review gate to
-/// the commons. The gate reads the core's "You review" on Ask and the mode
+/// The Uses flow's captions: this machine, the review gate and the
+/// commons, under the stage's flow (`first_run_stage`), which draws the
+/// line, the gate, the orb and the N. Thirds of the column, so each sits
+/// under its node as the Mac's sit under theirs. The gate reads the core's "You review" on Ask and the mode
 /// table's Automatic on Automatic. The Mac's caption under this machine is
 /// "This Mac", which no shared word replaces yet, so it has none here.
 pub(super) fn uses_flow(gate: &str) -> gtk::Box {
     let copy = first_run_copy();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    root.set_halign(gtk::Align::Center);
-    let area = gtk::DrawingArea::builder()
-        .content_width(360)
-        .content_height(56)
-        .build();
-    area.set_draw_func(|area, cr, width, height| {
-        let colour = ink(area.upcast_ref());
-        let (w, h) = (f64::from(width), f64::from(height));
-        let y = h / 2.0;
-        let xs = [w * 0.15, w * 0.5, w * 0.85];
-        dash(cr, &colour, 0.5);
-        cr.move_to(xs[0] + 16.0, y);
-        cr.line_to(xs[2] - 16.0, y);
-        let _ = cr.stroke();
-        cr.set_dash(&[], 0.0);
-        for (index, x) in xs.iter().enumerate() {
-            cr.arc(
-                *x,
-                y,
-                if index == 1 { 18.0 } else { 14.0 },
-                0.0,
-                std::f64::consts::TAU,
-            );
-            let _ = cr.stroke();
-        }
-    });
-    root.append(&area);
     let captions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     captions.set_homogeneous(true);
+    captions.set_hexpand(true);
     // The Mac's "This Mac", for any computer (owner, 2026-11-17).
     for text in [copy.uses.this_computer, gate, copy.uses.the_commons] {
         let label = gtk::Label::new(Some(text));

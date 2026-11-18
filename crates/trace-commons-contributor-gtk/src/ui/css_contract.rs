@@ -22,6 +22,10 @@ mod tests {
         ("first_run.rs", include_str!("first_run.rs")),
         ("first_run_screens.rs", include_str!("first_run_screens.rs")),
         ("first_run_tools.rs", include_str!("first_run_tools.rs")),
+        (
+            "first_run_stage_view.rs",
+            include_str!("first_run_stage_view.rs"),
+        ),
         ("insights.rs", include_str!("insights.rs")),
         (
             "insights_analytics.rs",
