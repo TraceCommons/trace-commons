@@ -112,26 +112,51 @@ pub mod test_filter_hook {
 
     use trace_commons_protocol::trace_contribution::PrivacyFilterAdapter;
 
-    type Hooks = Vec<(String, Arc<dyn PrivacyFilterAdapter>)>;
-    static HOOKS: Mutex<Hooks> = Mutex::new(Vec::new());
+    /// Builds the adapter afresh for every redactor, as a real build does:
+    /// an adapter may remember its answers, and one shared across builds
+    /// would make a filter that does not repeat itself look as if it did.
+    pub type AdapterFactory = Arc<dyn Fn() -> Arc<dyn PrivacyFilterAdapter> + Send + Sync>;
 
-    /// Attach `adapter` to every redactor built for a transcript whose
-    /// `cwd` is exactly `cwd`, for the rest of the process.
-    pub fn attach_for_cwd(cwd: impl Into<String>, adapter: Arc<dyn PrivacyFilterAdapter>) {
+    static HOOKS: Mutex<Vec<(String, AdapterFactory)>> = Mutex::new(Vec::new());
+
+    /// Attach a filter made by `factory` to every redactor built for a
+    /// transcript whose `cwd` is exactly `cwd`, for the rest of the process.
+    pub fn attach_for_cwd(cwd: impl Into<String>, factory: AdapterFactory) {
         let cwd = cwd.into();
         let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
         hooks.retain(|(c, _)| *c != cwd);
-        hooks.push((cwd, adapter));
+        hooks.push((cwd, factory));
+    }
+
+    /// [`attach_for_cwd`] with an HTTP privacy classifier at `base_url`
+    /// (the `/privacy/classify` contract), the shape every caller uses.
+    pub fn attach_http_classifier_for_cwd(cwd: impl Into<String>, base_url: String) {
+        attach_for_cwd(
+            cwd,
+            Arc::new(move || -> Arc<dyn PrivacyFilterAdapter> {
+                Arc::new(
+                    trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
+                        base_url.clone(),
+                        "openai/privacy-filter".to_string(),
+                        "test-key".to_string(),
+                        std::time::Duration::from_millis(10_000),
+                        1024 * 1024,
+                    )
+                    .expect("a test classifier adapter"),
+                )
+            }),
+        );
     }
 
     pub(crate) fn for_cwd(cwd: Option<&str>) -> Option<Arc<dyn PrivacyFilterAdapter>> {
         let cwd = cwd?;
-        HOOKS
+        let factory = HOOKS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .find(|(c, _)| c == cwd)
-            .map(|(_, a)| a.clone())
+            .map(|(_, f)| f.clone())?;
+        Some(factory())
     }
 }
 

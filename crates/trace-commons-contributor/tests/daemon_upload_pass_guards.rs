@@ -100,18 +100,9 @@ impl Harness {
     /// directory no other test uses.
     async fn with_broken_privacy_filter(project: &str) -> Self {
         let filter_base = spawn(noop_privacy_filter()).await;
-        trace_commons_contributor::envelope::test_filter_hook::attach_for_cwd(
+        trace_commons_contributor::envelope::test_filter_hook::attach_http_classifier_for_cwd(
             format!("/Users/testuser/code/{project}"),
-            Arc::new(
-                trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
-                    filter_base,
-                    "openai/privacy-filter".to_string(),
-                    "test-key".to_string(),
-                    std::time::Duration::from_millis(10_000),
-                    1024 * 1024,
-                )
-                .unwrap(),
-            ),
+            filter_base,
         );
         Self::build().await
     }

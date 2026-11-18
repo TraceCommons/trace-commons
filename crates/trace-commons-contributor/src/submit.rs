@@ -4969,19 +4969,7 @@ mod tests {
         // an environment-attached (sidecar or self-hosted) filter, keyed to a
         // transcript directory no other test uses.
         let cwd = "/Users/testuser/code/transient-filter-failure";
-        crate::envelope::test_filter_hook::attach_for_cwd(
-            cwd,
-            std::sync::Arc::new(
-                trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
-                    classifier,
-                    "openai/privacy-filter".to_string(),
-                    "test-key".to_string(),
-                    std::time::Duration::from_millis(10_000),
-                    1024 * 1024,
-                )
-                .unwrap(),
-            ),
-        );
+        crate::envelope::test_filter_hook::attach_http_classifier_for_cwd(cwd, classifier);
         let root = tempfile::tempdir().unwrap();
         let project = root
             .path()

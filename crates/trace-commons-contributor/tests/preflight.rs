@@ -525,34 +525,12 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     );
 }
 
+/// Every route that once turned on the retired client-side NEAR AI second
+/// scan, all at once -- the CLI flag, the credential in the environment, and
+/// the environment's backend switch -- with a classifier listening: the run
+/// succeeds, the classifier hears nothing, and no notice or marker appears.
 #[test]
-fn failed_near_ai_dry_run_keeps_notice_and_device_state_unburned() {
-    let fixture_dir = tempfile::tempdir().unwrap();
-    let config_dir = tempfile::tempdir().unwrap();
-    write_enrolled_config(config_dir.path());
-    let trajectory = write_trajectory(fixture_dir.path(), "inspect this session");
-    let output = json_submit_command(config_dir.path(), &trajectory, true)
-        .arg("--pii-filter")
-        .arg("near-ai")
-        .output()
-        .unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert!(!output.status.success());
-    assert_eq!(document["results"][0]["reason"], "pii-filter-unavailable");
-    assert!(
-        document["notices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|notice| notice.as_str().unwrap_or_default().contains("NEAR AI"))
-    );
-    assert!(!config_dir.path().join("near-ai-notice-shown").exists());
-    assert!(!config_dir.path().join("device.pk8").exists());
-}
-
-#[test]
-fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
+fn the_retired_near_ai_scan_sends_a_classifier_nothing() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
     write_enrolled_config(config_dir.path());
@@ -561,6 +539,7 @@ fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
     let output = json_submit_command(config_dir.path(), &trajectory, true)
         .arg("--pii-filter")
         .arg("near-ai")
+        .env("TRACE_PRIVACY_FILTER_BACKEND", "near-ai")
         .env("TRACE_NEAR_AI_PRIVACY_API_KEY", "test-key")
         .env("TRACE_NEAR_AI_PRIVACY_BASE_URL", base_url)
         .output()
@@ -574,8 +553,17 @@ fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(requests.load(Ordering::SeqCst) > 0);
-    assert!(config_dir.path().join("near-ai-notice-shown").exists());
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "no message text may be sent to a NEAR AI classifier from the client"
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !document.to_string().contains("NEAR AI"),
+        "no notice names the retired scan: {document}"
+    );
+    assert!(!config_dir.path().join("near-ai-notice-shown").exists());
     assert!(!config_dir.path().join("device.pk8").exists());
 }
 

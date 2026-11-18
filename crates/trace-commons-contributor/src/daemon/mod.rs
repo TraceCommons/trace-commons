@@ -4292,18 +4292,9 @@ mod tests {
             // (unique per test: it is under its temp dir), standing in for an
             // environment-attached filter, so the transient-failure paths
             // below have something to fail.
-            crate::envelope::test_filter_hook::attach_for_cwd(
+            crate::envelope::test_filter_hook::attach_http_classifier_for_cwd(
                 project_cwd.clone(),
-                Arc::new(
-                    trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
-                        classifier,
-                        "openai/privacy-filter".to_string(),
-                        "test-key".to_string(),
-                        std::time::Duration::from_millis(10_000),
-                        1024 * 1024,
-                    )
-                    .unwrap(),
-                ),
+                classifier,
             );
             let project_key = policy::project_key_for(Some(&project_cwd));
             assert_ne!(project_key, policy::UNKNOWN_PROJECT_KEY);
