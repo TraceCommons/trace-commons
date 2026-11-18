@@ -382,13 +382,17 @@ pub fn insights_bars(bars: &[(String, u64)], name: impl Fn(&str) -> String) -> g
 }
 
 /// Where the bars sit on a card of `width` by `height`: centred in the
-/// graphic's column at the trailing edge, their feet on the card's bottom
-/// edge, then pushed right and down by `bars::OFFSET`.
+/// graphic's column at the trailing edge, then pushed right and down by
+/// `bars::OFFSET`. As on the Mac, the graphic's column takes the taller of
+/// the card and the graphic and is centred on the card: a graphic shorter
+/// than the card stands on its bottom edge, a taller one hangs as far
+/// below it as above.
 pub fn place_bars(width: i32, height: i32, graphic_width: i32, graphic_height: i32) -> (i32, i32) {
     let centre = width as f64 - card::GRAPHIC_WIDTH / 2.0 + hero_art::bars::OFFSET.0;
+    let feet = (height as f64 + height.max(graphic_height) as f64) / 2.0;
     (
         (centre - graphic_width as f64 / 2.0).round() as i32,
-        (height as f64 + hero_art::bars::OFFSET.1).round() as i32 - graphic_height,
+        (feet + hero_art::bars::OFFSET.1).floor() as i32 - graphic_height,
     )
 }
 
@@ -399,10 +403,14 @@ mod tests {
     #[test]
     fn the_bars_stand_where_the_macs_do() {
         // A 600 by 156 card, four bars 52 wide 14 apart, 214 tall with
-        // their names: centred on 600 - 105 + 30, feet 40 below the edge.
+        // their names: centred on 600 - 105 + 30. Taller than the card, the
+        // graphic's frame takes its height and is centred on the card's,
+        // so its feet are (156 + 214) / 2 below the top, then 40 more.
         let (x, y) = place_bars(600, 156, 250, 214);
         assert_eq!(x, 525 - 125);
-        assert_eq!(y, 156 + 40 - 214);
+        assert_eq!(y, (156 + 214) / 2 + 40 - 214);
+        // Shorter than the card, its feet are on the card's bottom edge.
+        assert_eq!(place_bars(600, 156, 250, 100).1, 156 + 40 - 100);
     }
 
     #[test]

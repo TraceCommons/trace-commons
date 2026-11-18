@@ -155,6 +155,12 @@ pub fn refresh(app: &Rc<App>) {
 ///
 /// Gated on [`crate::balance::BalanceView::figures_carry_the_row`], which is
 /// the shared table's own answer rather than a label matched on here.
+/// The toned row's words for `balance`, as a read draws them: what Home
+/// puts back when a count stops.
+pub fn head_text(balance: &crate::model::NearAiBalance) -> String {
+    head(&crate::balance::view(balance)).to_owned()
+}
+
 fn head(row: &crate::balance::BalanceView) -> &str {
     if row.figures_carry_the_row() {
         &row.remaining_line

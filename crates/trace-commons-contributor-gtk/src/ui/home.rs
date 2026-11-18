@@ -47,6 +47,8 @@ pub struct HomeView {
     overlay: gtk::Overlay,
     burst: gtk::DrawingArea,
     flourish: Rc<Flourish>,
+    /// The latest Balance read, checked when the card is shown.
+    latest: Rc<RefCell<Option<model::NearAiBalance>>>,
 }
 
 impl HomeView {
@@ -205,6 +207,7 @@ impl HomeView {
             overlay,
             burst,
             flourish: Rc::new(Flourish::default()),
+            latest: Rc::new(RefCell::new(None)),
         };
         view.render_inference(None);
         view.render_glance(None);
@@ -222,6 +225,18 @@ impl HomeView {
                 }
             });
         }
+        let weak = Rc::downgrade(app);
+        self.balance.card.connect_map(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.home.check_balance();
+            }
+        });
+        let weak = Rc::downgrade(app);
+        self.balance.card.connect_unmap(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.home.stop_flourish();
+            }
+        });
         if let Some((_, hero)) = &self.campaign
             && let Some(close) = &hero.close
         {
@@ -374,17 +389,34 @@ impl HomeView {
         }
     }
 
-    /// A Balance read that answered: marks NEAR AI credit that arrived
-    /// since the figure last shown (`BalanceArrivalFlourish`). The coins
-    /// burst as the count starts; under reduced motion they are drawn
-    /// still for a moment and the figure does not count.
+    /// A Balance read that answered. It is checked for NEAR AI credit
+    /// arriving only while the Balance card is on screen, as the Mac checks
+    /// when its tile is drawn; otherwise it waits for the card to be shown
+    /// (`check_balance`), so credit is never marked where nobody sees it.
     pub fn balance_read(&self, balance: &model::NearAiBalance) {
+        *self.latest.borrow_mut() = Some(balance.clone());
+        if self.balance.card.is_mapped() {
+            self.check_balance();
+        }
+    }
+
+    /// Marks credit that arrived since the figure last shown
+    /// (`BalanceArrivalFlourish`): the coins burst as the count starts;
+    /// under reduced motion they are drawn still for a moment and the
+    /// figure does not count.
+    pub fn check_balance(&self) {
+        let Some(balance) = self.latest.borrow().clone() else {
+            return;
+        };
         let now = arrival::Reading {
             received_nanos: balance.received_total_nanos,
             remaining_nanos: balance.remaining_nanos,
         };
         let reduce = !hero_card::animations_enabled();
         let shown = self.prefs.borrow().balance_shown;
+        if shown == Some(now) {
+            return;
+        }
         let effect = arrival::effect(shown, now, reduce);
         if now.received_nanos.is_some() {
             self.prefs.borrow_mut().balance_shown = Some(now);
@@ -395,7 +427,33 @@ impl HomeView {
             arrival::Effect::Highlight => self.burst(reduce),
             arrival::Effect::CountUp { from, to } => {
                 self.burst(false);
-                self.count_up(balance, from, to);
+                self.count_up(&balance, from, to);
+            }
+        }
+    }
+
+    /// The card left the screen: the coins and the count stop, and the row
+    /// shows the latest read.
+    pub fn stop_flourish(&self) {
+        let flourish = &self.flourish;
+        for timer in [&flourish.end, &flourish.count] {
+            if let Some(id) = timer.borrow_mut().take() {
+                id.remove();
+            }
+        }
+        if let Some(id) = flourish.tick.borrow_mut().take() {
+            id.remove();
+        }
+        flourish.start.set(None);
+        self.burst.set_visible(false);
+        self.restore_head();
+    }
+
+    fn restore_head(&self) {
+        if let Some(latest) = self.latest.borrow().as_ref() {
+            let text = balance::head_text(latest);
+            if !text.is_empty() {
+                (self.balance.head_writer())(&text);
             }
         }
     }
@@ -458,6 +516,7 @@ impl HomeView {
         let template = balance.clone();
         let section = self.balance.head_writer();
         let flourish = Rc::downgrade(&self.flourish);
+        let latest = Rc::downgrade(&self.latest);
         let mut next = 0;
         let id = glib::timeout_add_local(
             std::time::Duration::from_millis(arrival::FRAME_MS),
@@ -465,6 +524,14 @@ impl HomeView {
                 let Some(step) = steps.get(next) else {
                     if let Some(flourish) = flourish.upgrade() {
                         flourish.count.borrow_mut().take();
+                    }
+                    // A read that came in while counting is what stays.
+                    if let Some(text) = latest
+                        .upgrade()
+                        .and_then(|latest| latest.borrow().as_ref().map(balance::head_text))
+                        .filter(|text| !text.is_empty())
+                    {
+                        section(&text);
                     }
                     return glib::ControlFlow::Break;
                 };
@@ -714,12 +781,35 @@ mod tests {
             received_total_nanos: Some(received),
             ..Default::default()
         };
+        // Read while Home is not on screen: nothing is checked yet.
         fresh.balance_read(&read(10, 100));
-        assert!(!fresh.bursting(), "a first reading marks nothing");
+        assert!(!fresh.bursting());
+        let window = gtk::Window::builder()
+            .default_width(700)
+            .default_height(900)
+            .child(&fresh.root)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        while !fresh.balance.card.is_mapped() {
+            context.iteration(true);
+        }
+        // Shown: the first reading is remembered and marks nothing.
+        fresh.check_balance();
+        assert!(!fresh.bursting());
         fresh.balance_read(&read(10, 90));
-        assert!(!fresh.bursting(), "spending marks nothing");
+        // Spending moves the figure, not the received total: nothing.
+        assert!(!fresh.bursting());
         fresh.balance_read(&read(20, 190));
         assert!(fresh.bursting());
+        // Off screen, the coins stop.
+        window.set_child(None::<&gtk::Widget>);
+        while fresh.balance.card.is_mapped() {
+            context.iteration(true);
+        }
+        fresh.stop_flourish();
+        assert!(!fresh.bursting());
+        window.close();
         let _ = std::fs::remove_file(&state);
         crate::home_cards::set_test_file(None);
     }
