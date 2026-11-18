@@ -131,6 +131,13 @@ impl GrantOwner {
         self.seen = None;
     }
 
+    /// A sign-out or unenroll finished (the Mac's
+    /// `finishAccountReadBoundary`): a write pressed before it is not
+    /// applied, even when no status has yet named a different account.
+    pub(crate) fn boundary(&mut self) {
+        self.generation += 1;
+    }
+
     /// Whether the owner is known without asking again: a read named an
     /// account (the Mac's `status.accountScope != nil`).
     pub(crate) fn named(&self) -> bool {
@@ -956,6 +963,22 @@ mod tests {
         // A failed status read establishes no owner.
         older.forget();
         assert_eq!(older.begin(), None);
+    }
+
+    /// An unenroll is a boundary on its own (`finishAccountReadBoundary`):
+    /// a write pressed before it is stale even if the next status names
+    /// the same account, and one pressed after it is current.
+    #[test]
+    fn an_unenroll_ends_the_writes_pressed_before_it() {
+        let mut owner = GrantOwner::default();
+        owner.observe(Some("acct-a"));
+        let before = owner.begin().expect("settled");
+        owner.boundary();
+        assert!(!owner.is_current(before));
+        owner.observe(Some("acct-a"));
+        assert!(!owner.is_current(before));
+        let after = owner.begin().expect("settled");
+        assert!(owner.is_current(after));
     }
 
     /// While an override is in force the radios show nothing picked: the

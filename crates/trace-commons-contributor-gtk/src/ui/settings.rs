@@ -1186,6 +1186,9 @@ fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
         let mut state = app.settings.set_up_again.get();
         state.finish(result.is_ok());
         app.settings.set_up_again.set(state);
+        // A sharing write pressed before the unenroll is not applied after
+        // it (the Mac's `finishAccountReadBoundary`).
+        app.settings.sharing.owner.borrow_mut().boundary();
         if let Ok(answer) = &result {
             // The NEAR AI sign-in goes with the enrollment (#1843): say so
             // only when it did not, as macOS does.

@@ -103,11 +103,33 @@ pub(crate) fn body(copy: &SentTracesTrainingCopy, count: u64) -> String {
     }
 }
 
+/// Which status read is the latest (the Mac's `SentTracesTrainingModel`
+/// `generation`): a reply to an older read raises nothing.
+#[derive(Debug, Default)]
+pub(crate) struct Reads {
+    generation: Cell<u64>,
+}
+
+impl Reads {
+    /// A status read starts; the generation its reply must still match.
+    pub(crate) fn begin(&self) -> u64 {
+        let next = self.generation.get().wrapping_add(1);
+        self.generation.set(next);
+        next
+    }
+
+    pub(crate) fn is_current(&self, read: u64) -> bool {
+        self.generation.get() == read
+    }
+}
+
 // --- The sheet ---------------------------------------------------------------
 
 thread_local! {
     /// A sheet is up or its grant is in flight: no second one is raised.
     static OPEN: Cell<bool> = const { Cell::new(false) };
+    /// The latest status read.
+    static READS: Reads = Reads::default();
 }
 
 /// Train coding models was just turned on: read the eligible traces and,
@@ -117,10 +139,14 @@ pub(crate) fn offer_after_turn_on(app: &Rc<App>) {
     if OPEN.with(Cell::get) {
         return;
     }
+    let read = READS.with(Reads::begin);
     app.call(
         "model_training_consent_status",
         serde_json::json!({}),
         move |app, result| {
+            if !READS.with(|reads| reads.is_current(read)) {
+                return;
+            }
             if let Some(count) = eligible(&result) {
                 raise(app, copy, count, false);
             }

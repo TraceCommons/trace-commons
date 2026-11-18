@@ -58,3 +58,15 @@ fn the_sheet_says_the_cores_words() {
     partial.scope = " ";
     assert!(!complete(&partial));
 }
+
+/// A status reply raises the sheet only while its read is the latest
+/// (`SentTracesTrainingModel.refresh`'s generation check): a slower reply
+/// to an earlier offer is dropped.
+#[test]
+fn only_the_latest_status_read_may_raise_the_sheet() {
+    let reads = Reads::default();
+    let first = reads.begin();
+    let second = reads.begin();
+    assert!(!reads.is_current(first));
+    assert!(reads.is_current(second));
+}
