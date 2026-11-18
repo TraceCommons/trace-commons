@@ -772,10 +772,16 @@ def render_logos_rust(logos: list[dict], mark: dict) -> list[str]:
         const = snake(logo["name"]).upper()
         box = ", ".join(rust_float(v) for v in logo["view_box"])
         out.append(f"    pub const {const}_VIEW_BOX: [f64; 4] = [{box}];")
-        out.append(f"    pub const {const}: &[&str] = &[")
-        for path in logo["paths"]:
-            out.append(f'        "{path}",')
-        out.append("    ];")
+        # On one line where rustfmt would keep it on one, so `cargo fmt`
+        # leaves the generated file as it is.
+        one_line = f"    pub const {const}: &[&str] = &[" + ", ".join(f'"{p}"' for p in logo["paths"]) + "];"
+        if len(one_line) <= 100:
+            out.append(one_line)
+        else:
+            out.append(f"    pub const {const}: &[&str] = &[")
+            for path in logo["paths"]:
+                out.append(f'        "{path}",')
+            out.append("    ];")
     box = ", ".join(rust_float(v) for v in mark["view_box"])
     out.append(f"    pub const BRAND_MARK_VIEW_BOX: [f64; 4] = [{box}];")
     out.append(f'    pub const BRAND_MARK: &str = "{mark["data"]}";')
