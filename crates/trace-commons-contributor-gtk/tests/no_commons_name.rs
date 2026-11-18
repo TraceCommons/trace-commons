@@ -16,23 +16,6 @@
 
 use std::path::{Path, PathBuf};
 
-const METAINFO: &str =
-    "crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml";
-
-/// Lines that keep the name for now, each with why. All three are in the
-/// metainfo and are listed in the PR for the owner rather than reworded:
-/// replacing a developer name asserts who the developer is, one is a past
-/// release's notes, and the description names the commons itself, where
-/// the app's name would not read as a sentence.
-const ALLOWED_LINES: &[(&str, &str)] = &[
-    (METAINFO, "<name>Trace Commons</name>"),
-    (
-        METAINFO,
-        "<p>The app is now called Near.ai. Trace Commons remains the name of the commons your traces are contributed to.",
-    ),
-    (METAINFO, "to Trace Commons, an open corpus"),
-];
-
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -146,12 +129,6 @@ fn nothing_this_shell_shows_names_the_commons() {
             .replace('\\', "/");
         let source = std::fs::read_to_string(file).expect("read source");
         for (line, text) in findings(&source) {
-            if ALLOWED_LINES
-                .iter()
-                .any(|(f, needle)| *f == rel && text.contains(needle))
-            {
-                continue;
-            }
             offenders.push(format!("{rel}:{line}: {text}"));
         }
     }
