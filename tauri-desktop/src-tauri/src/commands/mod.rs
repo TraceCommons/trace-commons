@@ -66,7 +66,6 @@ pub(crate) fn handler<R: tauri::Runtime>()
         consent::scrubber_pattern_names,
         consent::enroll_with_invite,
         consent::set_consent_scopes,
-        consent::acknowledge_near_ai_notice,
         consent::grant_void_notice,
         consent::witness_capacity_notice,
         consent::acknowledge_grant_voids,

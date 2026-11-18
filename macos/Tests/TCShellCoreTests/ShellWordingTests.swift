@@ -60,7 +60,7 @@ final class ShellWordingTests: XCTestCase {
         // unchanged, and its buttons are the core's; the counts' fallback
         // for a daemon that sends no text is what is left.
         "TraceCommonsApp/Notifier.swift": 1,
-        "TraceCommonsApp/SelfTest.swift": 14,
+        "TraceCommonsApp/SelfTest.swift": 13,
 
         // The SwiftUI views, which carry their own labels and help text.
         // R15 deleted ActionMessageBanner.swift (2: its dismiss word moved to
@@ -113,7 +113,6 @@ final class ShellWordingTests: XCTestCase {
         // K3 (#1173): the copy tables that used to be written here.
         "TCBridge/TCCoreCopy.swift",
         "TCShellCore/AutomaticGrantCopy.swift",
-        "TCShellCore/PrivacyScanCopy.swift",
         "TCShellCore/ProjectArmingCopy.swift",
         "TCShellCore/ProjectIgnoreCopy.swift",
         "TCShellCore/QuitPrompt.swift",

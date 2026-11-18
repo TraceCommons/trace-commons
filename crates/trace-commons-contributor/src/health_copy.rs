@@ -52,8 +52,6 @@ pub enum HealthSeverity {
 pub enum HealthActionKind {
     /// Sign in again.
     Reconnect,
-    /// Show the privacy scan's first-use notice so it can be acknowledged.
-    PrivacyScanNotice,
     /// Open the queue (Swift's `reviewsQueue`).
     ReviewQueue,
 }
@@ -145,18 +143,6 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             "",
             Some(("Reconnect", HealthActionKind::Reconnect)),
         ),
-        health::LABEL_NEAR_AI_NOTICE_PENDING => {
-            // The recovery prompt's words are the core's own
-            // (`privacy_scan_copy`), the same ones onboarding's scan screen
-            // reads; this delegates rather than repeating them so the two
-            // surfaces cannot drift apart.
-            let copy = crate::privacy_scan_copy::privacy_scan_copy();
-            HealthLineCopy::actionable(
-                copy.recovery_title,
-                copy.recovery_detail,
-                Some((copy.recovery_action, HealthActionKind::PrivacyScanNotice)),
-            )
-        }
         health::LABEL_CANARY_FAILED => {
             HealthLineCopy::waiting("Privacy scan failed its self-test.", "")
         }
@@ -356,10 +342,6 @@ mod tests {
     fn only_labels_with_a_real_recovery_step_carry_an_action() {
         for (label, kind) in [
             (health::LABEL_NOT_LOGGED_IN, HealthActionKind::Reconnect),
-            (
-                health::LABEL_NEAR_AI_NOTICE_PENDING,
-                HealthActionKind::PrivacyScanNotice,
-            ),
             (health::LABEL_QUEUE_FULL, HealthActionKind::ReviewQueue),
         ] {
             let copy = health_copy_for_label(label, None);
@@ -408,7 +390,6 @@ mod tests {
         use HealthSeverity::{Actionable, Waiting};
         for (label, severity) in [
             (health::LABEL_NOT_LOGGED_IN, Actionable),
-            (health::LABEL_NEAR_AI_NOTICE_PENDING, Actionable),
             (health::LABEL_CANARY_FAILED, Waiting),
             (health::LABEL_PII_FILTER_UNAVAILABLE, Waiting),
             (health::LABEL_CLAIM_MINT_FAILED, Waiting),
@@ -447,15 +428,6 @@ mod tests {
         assert!(detail(Some(1_234_567)).contains("1,234,567"));
         let unknown = detail(None);
         assert!(!unknown.chars().any(|c| c.is_ascii_digit()), "{unknown}");
-    }
-
-    #[test]
-    fn the_near_ai_recovery_matches_the_privacy_scan_copy_source() {
-        let copy = health_copy_for_label(health::LABEL_NEAR_AI_NOTICE_PENDING, None);
-        let source = crate::privacy_scan_copy::privacy_scan_copy();
-        assert_eq!(copy.title, source.recovery_title);
-        assert_eq!(copy.detail, source.recovery_detail);
-        assert_eq!(copy.action.as_deref(), Some(source.recovery_action));
     }
 
     #[test]

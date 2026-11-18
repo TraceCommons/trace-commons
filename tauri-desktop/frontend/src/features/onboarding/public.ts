@@ -1,6 +1,5 @@
 export {
   type AutomaticGrant,
-  acknowledgeNearAiNotice,
   getAutomaticGrant,
   getConsentOptions,
   setConsentScopes,

@@ -526,3 +526,46 @@ row:selected {
 stackswitcher.tc-compact-switcher > button.text-button {
   min-width: 0;
 }
+
+/* --- First run, roots and onboarding text ---------------------------
+   These windows sit on `.tc-root`, which follows the desktop scheme, so
+   their type takes `@tc_ink` and follows it too. The `tc-brand-*` type
+   classes are light-only (a #000000 foreground and no ground) and belong on
+   a brand paper surface, never on these windows. A label inside a
+   `.tc-brand-notice` box still gets the box's own ink, because the brand
+   sheet loads at a higher priority than this one.
+   Title and body are separate classes on separate labels so neither size
+   depends on declaration order. */
+
+.tc-flow-title {
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.95px;
+  color: @tc_ink;
+}
+
+.tc-flow-body {
+  font-size: 13px;
+  font-weight: 500;
+  color: @tc_ink;
+}
+
+.tc-flow-emphasis {
+  font-size: 13px;
+  font-weight: 700;
+  color: @tc_ink;
+}
+
+.tc-flow-link,
+.tc-flow-link label {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-height: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: @tc_ink;
+  text-decoration: underline;
+}

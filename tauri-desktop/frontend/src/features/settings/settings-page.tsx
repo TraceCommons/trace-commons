@@ -253,11 +253,6 @@ export function SettingsPage({
               <h2>Connection posture</h2>
             </div>
             <SettingRow
-              label="Privacy filter"
-              value={settingValue(snapshot, "near_ai_configured", "false")}
-              detail="Presence only; secret never crosses IPC"
-            />
-            <SettingRow
               label="Inference access"
               value={settingValue(
                 snapshot,

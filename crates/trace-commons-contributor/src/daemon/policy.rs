@@ -2908,7 +2908,7 @@ mod tests {
     fn grant_terms_with(ingest_url: &str) -> super::super::grant_terms::GrantTerms {
         let mut cfg = crate::commands::unenrolled_preview_config();
         cfg.ingest_url = ingest_url.to_string();
-        super::super::grant_terms::GrantTerms::current(&cfg, None, false, "none")
+        super::super::grant_terms::GrantTerms::current(&cfg, false, "none")
     }
 
     const SRC: &str = "claude-code /root";

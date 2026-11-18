@@ -44,13 +44,18 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ContributorConfig;
-use crate::envelope::NearAiSettings;
 
 /// The environment-attached privacy filter, as `GrantTerms` records it: its
 /// kind and a hash of where it sends prose (see `env_filter_term`), or
-/// `"invalid"` for a backend named without its credentials.
+/// `"invalid"` for a backend named without its credentials. The retired
+/// `near-ai` backend attaches nothing on this client (see
+/// `crate::retired_second_scan`), so it records as `"none"`, the same as
+/// the redactor builds it.
 pub fn env_filter_backend() -> String {
     use trace_commons_protocol::trace_contribution as tc;
+    if crate::retired_second_scan::env_names_it() {
+        return "none".to_string();
+    }
     match tc::privacy_filter_backend_from_env() {
         Ok(tag) => env_filter_term(
             tag.label(),
@@ -86,6 +91,9 @@ pub struct GrantTerms {
     pub user_subject: String,
     pub device_key_id: String,
     pub consent_scopes: BTreeSet<String>,
+    /// Retired 2026-11 with the client-side NEAR AI second scan. Kept so
+    /// stored grants parse and a grant made under the scan voids once
+    /// (`VOID_FILTER`): [`GrantTerms::current`] always reports `None`.
     pub pii_filter: Option<String>,
     /// The privacy filter the environment attaches on its own
     /// (`TRACE_PRIVACY_FILTER_BACKEND`), resolved as the redactor resolves it:
@@ -95,6 +103,8 @@ pub struct GrantTerms {
     /// pointed elsewhere voids as the config-side classifier does. See
     /// `env_filter_backend`.
     pub env_filter_backend: String,
+    /// The retired scan's classifier: these three are kept for the same
+    /// reason as `pii_filter`, and are always absent now.
     pub classifier_base_url: Option<String>,
     pub classifier_model: Option<String>,
     pub classifier_present: bool,
@@ -171,22 +181,17 @@ impl GrantTerms {
     /// The terms in force under `cfg`, a config the caller already read, so
     /// a check made against that config and the terms captured agree.
     pub fn in_force_for(shared: &super::ipc::DaemonShared, cfg: &ContributorConfig) -> Self {
-        let (near_ai, attested_bodies) = {
-            let s = shared.settings.lock().expect("settings lock");
-            (s.near_ai.clone(), s.ironwire_attested_bodies)
-        };
-        Self::current(
-            cfg,
-            near_ai.as_ref(),
-            attested_bodies,
-            &env_filter_backend(),
-        )
+        let attested_bodies = shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .ironwire_attested_bodies;
+        Self::current(cfg, attested_bodies, &env_filter_backend())
     }
 
     /// The terms in force now.
     pub fn current(
         cfg: &ContributorConfig,
-        near_ai: Option<&NearAiSettings>,
         attested_bodies: bool,
         env_filter_backend: &str,
     ) -> Self {
@@ -201,11 +206,13 @@ impl GrantTerms {
             user_subject: cfg.user_subject.clone(),
             device_key_id: cfg.device_key_id.clone(),
             consent_scopes: cfg.consent_scopes.iter().cloned().collect(),
-            pii_filter: cfg.pii_filter.clone(),
+            // The retired client-side scan: never in force now. A grant
+            // made under it compares as a removed filter and voids once.
+            pii_filter: None,
             env_filter_backend: env_filter_backend.to_string(),
-            classifier_present: near_ai.is_some(),
-            classifier_base_url: near_ai.and_then(|n| n.base_url.clone()),
-            classifier_model: near_ai.and_then(|n| n.model.clone()),
+            classifier_present: false,
+            classifier_base_url: None,
+            classifier_model: None,
             receipt_endpoint: cfg.inference_receipt_endpoint.clone(),
             witness_url: witness.map(|w| w.url.clone()),
             witness_signing_address: witness.map(|w| w.signing_address.clone()),
@@ -334,17 +341,11 @@ mod tests {
             user_subject: "alice".to_string(),
             device_key_id: "sha256:aa".to_string(),
             consent_scopes: vec!["debugging_evaluation".to_string()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
             public_since: None,
             witness: None,
-        };
-        let classifier = NearAiSettings {
-            api_key: "k".to_string(),
-            base_url: Some("https://classifier.invalid".to_string()),
-            model: Some("m".to_string()),
         };
         let witness = crate::config::WitnessSettings {
             admission_evidence: false,
@@ -352,7 +353,7 @@ mod tests {
             signing_address: "0x0000000000000000000000000000000000000001".to_string(),
             expected_measurements: Vec::new(),
         };
-        type Inputs = (ContributorConfig, Option<NearAiSettings>, bool, String);
+        type Inputs = (ContributorConfig, bool, String);
         let host_a = env_filter_term("self_hosted", Some("self-hosted\nhttps://a.invalid"));
         let host_b = env_filter_term("self_hosted", Some("self-hosted\nhttps://b.invalid"));
         let changes: Vec<(&str, Box<dyn Fn(&mut Inputs)>)> = vec![
@@ -366,10 +367,6 @@ mod tests {
                 Box::new(|i| i.0.consent_scopes.push("model_training".into())),
             ),
             (
-                "pii filter",
-                Box::new(|i| i.0.pii_filter = Some("other".into())),
-            ),
-            (
                 "receipt endpoint",
                 Box::new(|i| i.0.inference_receipt_endpoint = Some("https://r.invalid".into())),
             ),
@@ -377,26 +374,21 @@ mod tests {
                 let witness = witness.clone();
                 Box::new(move |i| i.0.witness = Some(witness.clone()))
             }),
-            ("classifier", {
-                let classifier = classifier.clone();
-                Box::new(move |i| i.1 = Some(classifier.clone()))
-            }),
-            ("attested bodies", Box::new(|i| i.2 = true)),
+            ("attested bodies", Box::new(|i| i.1 = true)),
             ("environment filter attached", {
                 let host_a = host_a.clone();
-                Box::new(move |i| i.3 = host_a.clone())
+                Box::new(move |i| i.2 = host_a.clone())
             }),
         ];
-        let terms = |i: &Inputs| GrantTerms::current(&i.0, i.1.as_ref(), i.2, &i.3);
-        let fingerprint =
-            |i: &Inputs| input_fingerprint_with_env_filter(&i.0, i.1.as_ref(), i.2, &i.3);
-        let base: Inputs = (cfg, None, false, "none".to_string());
+        let terms = |i: &Inputs| GrantTerms::current(&i.0, i.1, &i.2);
+        let fingerprint = |i: &Inputs| input_fingerprint_with_env_filter(&i.0, i.1, &i.2);
+        let base: Inputs = (cfg, false, "none".to_string());
         // The environment's filter pointed at another host, from a base that
         // already has one.
         let mut on_a = base.clone();
-        on_a.3 = host_a.clone();
+        on_a.2 = host_a.clone();
         let mut on_b = base.clone();
-        on_b.3 = host_b;
+        on_b.2 = host_b;
         assert!(!terms(&on_b).widening_from(&terms(&on_a)).is_empty());
         assert_ne!(
             fingerprint(&on_b),
@@ -417,6 +409,38 @@ mod tests {
     #[test]
     fn unchanged_terms_do_not_void() {
         assert!(widening(|_| {}).is_empty());
+    }
+
+    /// The retired client-side scan is never a term in force, whatever an
+    /// older config held. A grant made without it still holds; a grant made
+    /// under it voids once, as a removed filter.
+    #[test]
+    fn the_retired_scan_is_never_in_force_and_a_grant_made_under_it_voids_once() {
+        let cfg: ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.invalid",
+            "ingest_url": "https://ingest.invalid",
+            "audience": "aud",
+            "tenant_id": "tenant-1",
+            "instance_id": "instance-1",
+            "user_subject": "alice",
+            "device_key_id": "sha256:aa",
+            "consent_scopes": ["debugging_evaluation"],
+            "pii_filter": "near-ai",
+        }))
+        .unwrap();
+        let now = GrantTerms::current(&cfg, false, "none");
+        assert_eq!(now.pii_filter, None);
+        assert!(!now.classifier_present);
+        assert_eq!(now.classifier_base_url, None);
+        assert_eq!(now.classifier_model, None);
+
+        let mut without = now.clone();
+        assert!(now.widening_from(&without).is_empty());
+        without.pii_filter = Some("near-ai".into());
+        without.classifier_present = true;
+        without.classifier_base_url = Some("https://classifier.invalid".into());
+        assert_eq!(now.widening_from(&without), [VOID_FILTER]);
     }
 
     #[test]
