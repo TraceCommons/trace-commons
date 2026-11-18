@@ -1,19 +1,22 @@
-//! The Mac's toolbar glyphs, drawn in GTK.
+//! The Mac's toolbar glyphs, tool logos and NEAR AI mark, drawn in GTK.
 //!
-//! `brand_tokens::glyph` holds each glyph as an SVG, exported by
+//! `brand_tokens::glyph` holds each toolbar glyph as an SVG, exported by
 //! `scripts/design-tokens/generate.py` from the path data in
-//! `macos/Sources/TCDesign/Components/Glyphs.swift`. This file reads those
-//! strings (no SVG loader, no icon theme) and strokes or fills the path with
-//! cairo in the widget's own foreground colour, so a glyph follows the
-//! button's state and the scheme the way a symbolic icon does.
+//! `macos/Sources/TCDesign/Components/Glyphs.swift`; `brand_tokens::logo`
+//! holds the tool logos and the mark, exported from `GlassLogoPaths.swift`
+//! and `GlassBrandMark.swift`. This file reads those strings (no SVG
+//! loader, no icon theme) and strokes or fills the path with cairo: a
+//! glyph in the widget's own foreground colour, so it follows the button's
+//! state and the scheme the way a symbolic icon does; a logo (`Artwork`)
+//! in the colour its caller sets.
 //!
-//! The path data uses only `M L H V A Z` and their relative forms, which is
-//! all this parses; any other command makes the glyph not parse, and the
-//! tests below fail for it.
+//! `parse_path` reads the whole path grammar, `M L H V C S Q T A Z` and
+//! their relative forms, as `SVGPathData` does on the Mac; malformed data
+//! does not parse, and the tests below fail for it.
 
 use gtk::prelude::*;
 
-use crate::ui::style::brand_tokens::glyph;
+use crate::ui::style::brand_tokens::{glyph, logo};
 
 /// One segment of a path, in absolute coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +30,8 @@ pub enum Segment {
         sweep: bool,
         to: (f64, f64),
     },
+    /// A cubic Bezier: its two control points and its end.
+    Cubic((f64, f64), (f64, f64), (f64, f64)),
     Close,
 }
 
@@ -117,73 +122,103 @@ impl Numbers<'_> {
     }
 }
 
-/// Parses SVG path data into absolute segments, or `None` for a command
-/// outside `M L H V A Z`.
+/// Parses SVG path data into absolute segments: the whole path grammar
+/// (`M L H V C S Q T A Z`, absolute and relative, implicit repeats), as
+/// `SVGPathData` on the Mac reads it. A quadratic becomes the cubic with
+/// the same curve. `None` for malformed data, so artwork that would draw
+/// half a mark draws nothing and its test fails.
 pub fn parse_path(data: &str) -> Option<Vec<Segment>> {
     let mut input = Numbers { rest: data };
     let mut out = Vec::new();
     let (mut x, mut y) = (0.0, 0.0);
     let (mut start_x, mut start_y) = (0.0, 0.0);
+    // The previous segment's last control point, for `S` and `T`.
+    let mut last_cubic: Option<(f64, f64)> = None;
+    let mut last_quad: Option<(f64, f64)> = None;
     while let Some(command) = input.next_command() {
         let relative = command.is_ascii_lowercase();
-        let (dx, dy) = if relative { (x, y) } else { (0.0, 0.0) };
-        match command.to_ascii_uppercase() {
-            'Z' => {
-                out.push(Segment::Close);
-                (x, y) = (start_x, start_y);
-            }
-            'M' | 'L' => {
-                let mut first = command.eq_ignore_ascii_case(&'M');
-                loop {
-                    let (px, py) = input.pair()?;
-                    let (dx, dy) = if relative { (x, y) } else { (0.0, 0.0) };
-                    (x, y) = (dx + px, dy + py);
-                    if first {
+        let upper = command.to_ascii_uppercase();
+        if upper == 'Z' {
+            out.push(Segment::Close);
+            (x, y) = (start_x, start_y);
+            last_cubic = None;
+            last_quad = None;
+            continue;
+        }
+        let mut first = true;
+        loop {
+            let (ox, oy) = if relative { (x, y) } else { (0.0, 0.0) };
+            let at = |p: (f64, f64)| (ox + p.0, oy + p.1);
+            let mut cubic = None;
+            let mut quad = None;
+            match upper {
+                'M' | 'L' => {
+                    (x, y) = at(input.pair()?);
+                    if upper == 'M' && first {
                         out.push(Segment::Move(x, y));
                         (start_x, start_y) = (x, y);
-                        first = false;
                     } else {
                         out.push(Segment::Line(x, y));
                     }
-                    if !input.has_number() {
-                        break;
-                    }
                 }
+                'H' => {
+                    x = ox + input.number()?;
+                    out.push(Segment::Line(x, y));
+                }
+                'V' => {
+                    y = oy + input.number()?;
+                    out.push(Segment::Line(x, y));
+                }
+                'C' | 'S' => {
+                    let a = if upper == 'C' {
+                        at(input.pair()?)
+                    } else {
+                        last_cubic.map_or((x, y), |(cx, cy)| (2.0 * x - cx, 2.0 * y - cy))
+                    };
+                    let b = at(input.pair()?);
+                    let to = at(input.pair()?);
+                    out.push(Segment::Cubic(a, b, to));
+                    cubic = Some(b);
+                    (x, y) = to;
+                }
+                'Q' | 'T' => {
+                    let control = if upper == 'Q' {
+                        at(input.pair()?)
+                    } else {
+                        last_quad.map_or((x, y), |(cx, cy)| (2.0 * x - cx, 2.0 * y - cy))
+                    };
+                    let to = at(input.pair()?);
+                    let third = |from: f64, c: f64| from + 2.0 / 3.0 * (c - from);
+                    out.push(Segment::Cubic(
+                        (third(x, control.0), third(y, control.1)),
+                        (third(to.0, control.0), third(to.1, control.1)),
+                        to,
+                    ));
+                    quad = Some(control);
+                    (x, y) = to;
+                }
+                'A' => {
+                    let radius = input.pair()?;
+                    let rotation = input.number()?;
+                    let large = input.flag()?;
+                    let sweep = input.flag()?;
+                    (x, y) = at(input.pair()?);
+                    out.push(Segment::Arc {
+                        radius,
+                        rotation,
+                        large,
+                        sweep,
+                        to: (x, y),
+                    });
+                }
+                _ => return None,
             }
-            'H' => loop {
-                x = dx + input.number()?;
-                out.push(Segment::Line(x, y));
-                if !input.has_number() {
-                    break;
-                }
-            },
-            'V' => loop {
-                y = dy + input.number()?;
-                out.push(Segment::Line(x, y));
-                if !input.has_number() {
-                    break;
-                }
-            },
-            'A' => loop {
-                let radius = input.pair()?;
-                let rotation = input.number()?;
-                let large = input.flag()?;
-                let sweep = input.flag()?;
-                let (px, py) = input.pair()?;
-                let (dx, dy) = if relative { (x, y) } else { (0.0, 0.0) };
-                (x, y) = (dx + px, dy + py);
-                out.push(Segment::Arc {
-                    radius,
-                    rotation,
-                    large,
-                    sweep,
-                    to: (x, y),
-                });
-                if !input.has_number() {
-                    break;
-                }
-            },
-            _ => return None,
+            last_cubic = cubic;
+            last_quad = quad;
+            first = false;
+            if !input.has_number() {
+                break;
+            }
         }
     }
     input.skip();
@@ -243,13 +278,27 @@ impl Glyph {
     }
 
     fn trace(&self, cr: &gtk::cairo::Context) {
-        cr.new_path();
+        trace_segments(cr, &self.segments);
+    }
+}
+
+/// Adds `segments` to `cr`'s path, after clearing it.
+pub fn trace_segments(cr: &gtk::cairo::Context, segments: &[Segment]) {
+    cr.new_path();
+    append_segments(cr, segments);
+}
+
+/// Adds `segments` to `cr`'s path, keeping what is on it.
+pub fn append_segments(cr: &gtk::cairo::Context, segments: &[Segment]) {
+    {
         let (mut x, mut y) = (0.0, 0.0);
-        for segment in &self.segments {
+        let mut start = (0.0, 0.0);
+        for segment in segments {
             match *segment {
                 Segment::Move(px, py) => {
                     cr.move_to(px, py);
                     (x, y) = (px, py);
+                    start = (px, py);
                 }
                 Segment::Line(px, py) => {
                     cr.line_to(px, py);
@@ -265,7 +314,14 @@ impl Glyph {
                     arc_to(cr, (x, y), radius, rotation, large, sweep, to);
                     (x, y) = to;
                 }
-                Segment::Close => cr.close_path(),
+                Segment::Cubic(a, b, to) => {
+                    cr.curve_to(a.0, a.1, b.0, b.1, to.0, to.1);
+                    (x, y) = to;
+                }
+                Segment::Close => {
+                    cr.close_path();
+                    (x, y) = start;
+                }
             }
         }
     }
@@ -327,6 +383,108 @@ fn arc_to(
         cr.arc_negative(0.0, 0.0, 1.0, start, end);
     }
     let _ = cr.restore();
+}
+
+/// Filled artwork the Mac ships as SVG path data: a tool's logo or the
+/// NEAR AI mark, in its own viewBox (x, y, width, height).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Artwork {
+    pub view_box: [f64; 4],
+    pub paths: &'static [&'static str],
+}
+
+impl Artwork {
+    /// The tool logos (`GlassToolLogoID`), by the Mac's names.
+    pub const TOOLS: [(&'static str, Artwork); 5] = [
+        (
+            "claude",
+            Artwork {
+                view_box: logo::CLAUDE_VIEW_BOX,
+                paths: logo::CLAUDE,
+            },
+        ),
+        (
+            "codex",
+            Artwork {
+                view_box: logo::CODEX_VIEW_BOX,
+                paths: logo::CODEX,
+            },
+        ),
+        (
+            "antigravity",
+            Artwork {
+                view_box: logo::ANTIGRAVITY_VIEW_BOX,
+                paths: logo::ANTIGRAVITY,
+            },
+        ),
+        (
+            "openCode",
+            Artwork {
+                view_box: logo::OPEN_CODE_VIEW_BOX,
+                paths: logo::OPEN_CODE,
+            },
+        ),
+        (
+            "theia",
+            Artwork {
+                view_box: logo::THEIA_VIEW_BOX,
+                paths: logo::THEIA,
+            },
+        ),
+    ];
+
+    /// The NEAR AI mark (`GlassBrandMark`).
+    pub fn brand_mark() -> Self {
+        Self {
+            view_box: logo::BRAND_MARK_VIEW_BOX,
+            paths: &[logo::BRAND_MARK],
+        }
+    }
+
+    /// Every path's segments, one after another; `None` if any is malformed.
+    pub fn segments(&self) -> Option<Vec<Segment>> {
+        let mut out = Vec::new();
+        for data in self.paths {
+            out.extend(parse_path(data)?);
+        }
+        Some(out)
+    }
+
+    /// `segments`, read once per artwork and kept: the map fills a logo
+    /// on every frame of a run.
+    pub fn cached_segments(&self) -> Option<std::rc::Rc<Vec<Segment>>> {
+        type Kept = std::collections::HashMap<(usize, usize), Option<std::rc::Rc<Vec<Segment>>>>;
+        thread_local! {
+            static KEPT: std::cell::RefCell<Kept> = std::cell::RefCell::default();
+        }
+        // The path data is static: its address names it.
+        let key = (self.paths.as_ptr() as usize, self.paths.len());
+        KEPT.with(|kept| {
+            kept.borrow_mut()
+                .entry(key)
+                .or_insert_with(|| self.segments().map(std::rc::Rc::new))
+                .clone()
+        })
+    }
+
+    /// Fills the artwork into the square `side` across with its top-left
+    /// at `origin`, aspect kept and centred, non-zero as SVG fills it, in
+    /// the colour already set on `cr`.
+    pub fn fill(&self, cr: &gtk::cairo::Context, origin: (f64, f64), side: f64) {
+        let Some(segments) = self.cached_segments() else {
+            return;
+        };
+        let [bx, by, bw, bh] = self.view_box;
+        let scale = (side / bw).min(side / bh);
+        let _ = cr.save();
+        cr.translate(origin.0 + side / 2.0, origin.1 + side / 2.0);
+        cr.scale(scale, scale);
+        cr.translate(-(bx + bw / 2.0), -(by + bh / 2.0));
+        trace_segments(cr, &segments);
+        cr.set_fill_rule(gtk::cairo::FillRule::Winding);
+        let _ = cr.fill();
+        let _ = cr.restore();
+    }
 }
 
 /// A glyph as a widget, at the size the Mac draws it, in its parent's
@@ -399,6 +557,7 @@ mod tests {
                 let points: Vec<(f64, f64)> = match *segment {
                     Segment::Move(x, y) | Segment::Line(x, y) => vec![(x, y)],
                     Segment::Arc { to, .. } => vec![to],
+                    Segment::Cubic(a, b, to) => vec![a, b, to],
                     Segment::Close => vec![],
                 };
                 for (x, y) in points {
@@ -447,7 +606,107 @@ mod tests {
                 Segment::Line(9.5, 2.5),
             ]
         );
-        assert_eq!(parse_path("M1,1C2,2,3,3,4,4"), None);
+        assert_eq!(parse_path("M1,1Q2,2"), None);
+    }
+
+    #[test]
+    fn curves_are_absolute_cubics() {
+        assert_eq!(
+            parse_path("M1,1C2,2,3,3,4,4").unwrap(),
+            [
+                Segment::Move(1.0, 1.0),
+                Segment::Cubic((2.0, 2.0), (3.0, 3.0), (4.0, 4.0)),
+            ]
+        );
+        // A relative `c`, then an `s` whose first control point is the
+        // last one reflected about the current point.
+        assert_eq!(
+            parse_path("M1,1c1,0,2,1,2,2s1,2,2,2").unwrap(),
+            [
+                Segment::Move(1.0, 1.0),
+                Segment::Cubic((2.0, 1.0), (3.0, 2.0), (3.0, 3.0)),
+                Segment::Cubic((3.0, 4.0), (4.0, 5.0), (5.0, 5.0)),
+            ]
+        );
+        // A quadratic is the cubic with the same curve, and `t` reflects
+        // its control point.
+        assert_eq!(
+            parse_path("M0,0Q3,3,6,0T12,0").unwrap(),
+            [
+                Segment::Move(0.0, 0.0),
+                Segment::Cubic((2.0, 2.0), (4.0, 2.0), (6.0, 0.0)),
+                Segment::Cubic((8.0, -2.0), (10.0, -2.0), (12.0, 0.0)),
+            ]
+        );
+        // After `z` the current point is the subpath's start (OpenCode).
+        assert_eq!(
+            parse_path("M16,6H8v12h8V6zm4,16").unwrap()[5..],
+            [Segment::Close, Segment::Move(20.0, 22.0)]
+        );
+    }
+
+    #[test]
+    fn every_logo_and_the_mark_parse() {
+        for (name, artwork) in Artwork::TOOLS {
+            let parsed = artwork.segments();
+            assert!(parsed.is_some(), "{name} does not parse");
+        }
+        let mark = Artwork::brand_mark();
+        let segments = mark.segments().expect("the NEAR AI mark parses");
+        assert!(matches!(segments.first(), Some(Segment::Move(..))));
+        assert_eq!(mark.view_box, [82.96, 82.13, 234.08, 231.72]);
+    }
+
+    /// A logo's path data is read once, not on every frame it is drawn:
+    /// the second reading hands back the first one's segments.
+    #[test]
+    fn a_logos_segments_are_read_once() {
+        for (name, artwork) in Artwork::TOOLS {
+            let first = artwork.cached_segments().expect("parses");
+            let again = artwork.cached_segments().expect("parses");
+            assert!(std::rc::Rc::ptr_eq(&first, &again), "{name} was read twice");
+            assert_eq!(*first, artwork.segments().unwrap());
+        }
+        let mark = Artwork::brand_mark();
+        assert!(std::rc::Rc::ptr_eq(
+            &mark.cached_segments().unwrap(),
+            &Artwork::brand_mark().cached_segments().unwrap()
+        ));
+    }
+
+    #[test]
+    fn every_logo_paints_inside_its_frame() {
+        for (name, artwork) in Artwork::TOOLS {
+            let side = 80;
+            let margin = 8;
+            let full = side + 2 * margin;
+            let mut surface =
+                cairo::ImageSurface::create(cairo::Format::ARgb32, full, full).unwrap();
+            {
+                let cr = cairo::Context::new(&surface).unwrap();
+                cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+                artwork.fill(&cr, (f64::from(margin), f64::from(margin)), f64::from(side));
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let (mut inside, mut outside) = (0, 0);
+            for y in 0..full {
+                for x in 0..full {
+                    if data[y as usize * stride + x as usize * 4 + 3] > 32 {
+                        let framed = (margin..margin + side).contains(&x)
+                            && (margin..margin + side).contains(&y);
+                        if framed {
+                            inside += 1;
+                        } else {
+                            outside += 1;
+                        }
+                    }
+                }
+            }
+            assert!(inside > 200, "{name} painted only {inside} pixels");
+            assert_eq!(outside, 0, "{name} painted outside its frame");
+        }
     }
 
     /// The number of painted pixels, and whether any lies outside the

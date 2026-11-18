@@ -7,12 +7,14 @@
 //! dock's ring, and the light going once round a coin's rim. Drawn under
 //! the pile, as on the Mac, except the rim light, which is drawn over it.
 //!
-//! Deliberate platform differences, until the look slice:
-//! - The orbs' glow is a soft radial halo; cairo has no blur filter.
-//! - The shared and kept colours are the shell's accent and its Ask
-//!   status, where the Mac has its own map-orb tokens (blue and orange).
-//! - Only the launch style is drawn (see `transfers`), so a contributed
-//!   trace never rises to an orb here.
+//! Colours are the Mac's own map tokens (`Palette::map`): the shared and
+//! kept orbs, the rocket's steel, accent and porthole, the dock's ring.
+//!
+//! Deliberate platform differences:
+//! - The orbs' and the rocket's glow are soft radial halos; cairo has no
+//!   blur filter.
+//! - On the standard map a rising trace's trail is faded step by step as
+//!   groups, where the Mac fades a layer per step: the same result.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -21,15 +23,16 @@ use gtk::gdk::RGBA;
 
 use super::map::{Palette, circle, source};
 use super::map_scene::{Arc, ArcStyle, MapGeometry, Point, Scene, ToolStack};
-use super::transfers::{Action, Leg, Run, ease, point_on};
+use super::transfers::{Action, Leg, MapStyle, Run, ease, point_on};
 
-/// A run's colour: the accent for traces being shared, the Ask colour for
-/// traces kept or dismissed.
+/// A run's colour (owner, 2026-10-20): blue for traces being shared,
+/// orange for traces kept on this computer; a dismissed trace is not
+/// shared, so it takes the kept colour (`MapTransferDrawing.glowToken`).
 pub fn glow(action: Option<Action>, palette: &Palette) -> RGBA {
     if action == Some(Action::Contribute) {
-        palette.accent
+        palette.map.orb_shared
     } else {
-        palette.ask
+        palette.map.orb_kept
     }
 }
 
@@ -100,13 +103,27 @@ pub fn draw(
         .find(|arc| arc.from == port)
         .copied();
     let rest = rocket_rest(hub);
-    let pulse_at = if contributing { rest } else { hub };
+    // On the standard map a contributed trace rises from the laptop's
+    // screen to the orb's base, and the library takes it in.
+    let screen = Point::new(hub.x, hub.y - super::map::LAPTOP_SCREEN_TOP);
+    let orb_base = Point::new(library.x, library.y + orb_radius());
+    let pulse_at = if run.rises() {
+        library
+    } else if contributing {
+        rest
+    } else {
+        hub
+    };
 
     for (index, transfer) in run.transfers.iter().enumerate() {
         match run.leg(index, t) {
             Leg::Waiting | Leg::Orbit(_) => {}
-            // The standard map's rise; this shell draws the launch style.
-            Leg::Ascent(_) => {}
+            Leg::Ascent(p) => {
+                if p < 0.3 {
+                    pulse(cr, fit.point(screen), p / 0.3, &colour, s * 0.6);
+                }
+                rise(cr, screen, orb_base, p, &colour, fit);
+            }
             Leg::Inbound(p) => {
                 if let Some(arc) = folder_arc(&transfer.folder, scene) {
                     orb(cr, fit.point(point_on(&arc, ease(p))), &colour, s);
@@ -125,10 +142,50 @@ pub fn draw(
         }
     }
 
-    if contributing {
+    if contributing && run.style == MapStyle::Launch {
         return rocket(cr, run, t, rest, library, fit, palette);
     }
+    if run.rises() {
+        return dock(
+            cr,
+            fit.point(library),
+            t - run.all_arrived(),
+            s,
+            run,
+            palette,
+        );
+    }
     None
+}
+
+/// The library orb's radius on the standard map, in design units
+/// (`MapTransferDrawing.orbRadius`).
+fn orb_radius() -> f64 {
+    super::orb::FRAME / 2.0 * (1.0 - super::orb::INSET)
+}
+
+/// A trace rising from the laptop's screen to the orb's base: slowly away,
+/// then faster, with a short fading trail (`MapTransferDrawing.rise`).
+fn rise(cr: &Context, start: Point, end: Point, progress: f64, colour: &RGBA, fit: &MapGeometry) {
+    let s = fit.scale;
+    for step in (0..=3).rev() {
+        let lag = f64::from(step) * 0.045;
+        let along = (progress - lag).max(0.0).powf(1.7);
+        let at = Point::new(
+            start.x + (end.x - start.x) * along,
+            start.y + (end.y - start.y) * along,
+        );
+        // Each step of the trail faded as a whole, as the Mac's layer is.
+        cr.push_group();
+        orb(
+            cr,
+            fit.point(at),
+            colour,
+            s * (1.0 - f64::from(step) * 0.18),
+        );
+        let _ = cr.pop_group_to_source();
+        let _ = cr.paint_with_alpha(1.0 - f64::from(step) * 0.28);
+    }
 }
 
 /// The light going once round the rim of each coin a trace is in,
@@ -156,9 +213,16 @@ pub fn rim_lights(
     }
 }
 
-/// The rocket standing on the pad between contributions, unlit.
-pub fn resting_rocket(cr: &Context, scene: &Scene, fit: &MapGeometry, palette: &Palette) {
-    if scene.stack.is_none() {
+/// The rocket standing on the pad between contributions, unlit; none on
+/// the standard map, which has no rocket.
+pub fn resting_rocket(
+    cr: &Context,
+    scene: &Scene,
+    fit: &MapGeometry,
+    palette: &Palette,
+    style: MapStyle,
+) {
+    if scene.stack.is_none() || style == MapStyle::Standard {
         return;
     }
     let rest = rocket_rest(hub(scene));
@@ -295,7 +359,7 @@ fn rocket(
     let (glow_colour, glow_radius) = if flight.is_some() {
         (flame_outer(), 8.0 * s)
     } else if charge > 0 {
-        (palette.accent, (5.0 + charge as f64 * 4.0) * s)
+        (palette.map.orb_shared, (5.0 + charge as f64 * 4.0) * s)
     } else {
         (flame_outer().with_alpha(0.5), 5.0 * s)
     };
@@ -356,14 +420,15 @@ fn draw_rocket(
         let _ = cr.fill();
         let _ = cr.restore();
     }
-    let outline = palette.ink(0.6);
+    let outline = palette.map.status_off;
+    let accent = palette.map.purple_soft;
     cr.set_line_width(0.9);
     nozzle_path(cr);
     source(cr, &outline, 1.0);
     let _ = cr.fill_preserve();
     let _ = cr.stroke();
     fins_path(cr);
-    source(cr, &palette.accent, 1.0);
+    source(cr, &accent, 1.0);
     let _ = cr.fill_preserve();
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
@@ -371,14 +436,14 @@ fn draw_rocket(
     source(cr, &RGBA::new(0.95, 0.95, 0.95, 1.0), 1.0);
     let _ = cr.fill();
     nose_path(cr);
-    source(cr, &palette.accent, 1.0);
+    source(cr, &accent, 1.0);
     let _ = cr.fill();
     body_path(cr);
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
     // The porthole.
     circle(cr, Point::new(18.6, 9.0), 2.0);
-    source(cr, &palette.accent, 0.7);
+    source(cr, &palette.map.blue, 1.0);
     let _ = cr.fill_preserve();
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
@@ -480,7 +545,7 @@ fn dock(
         let p = since / 1.1;
         circle(cr, centre, (28.0 + 26.0 * p) * s);
         cr.set_line_width(3.0 * s);
-        source(cr, &palette.accent, 0.75 * (1.0 - p));
+        source(cr, &palette.map.blue, 0.75 * (1.0 - p));
         let _ = cr.stroke();
     }
     (since < Run::LINGER).then(|| DockLabel {
@@ -494,7 +559,7 @@ mod tests {
     use super::*;
     use crate::ui::monitor::map_scene::{CommonsGate, Contributions, ScreenState};
     use crate::ui::monitor::traces_tree::TracesTree;
-    use crate::ui::monitor::transfers::{MapStyle, MapTransfer};
+    use crate::ui::monitor::transfers::MapTransfer;
 
     fn scene() -> Scene {
         let entries = vec![crate::model::QueueEntry {
@@ -538,18 +603,94 @@ mod tests {
         assert!(library(&scene).y < rest.y, "the library is above it");
     }
 
-    /// A contribution is drawn in the accent, a keep or a dismissal not.
+    /// A contribution is drawn in the shared orb's blue, a keep or a
+    /// dismissal in the kept orb's orange (`MapTransferDrawing.glowToken`).
     #[test]
     fn a_run_takes_its_actions_colour() {
         let palette = Palette::fixed();
-        assert_eq!(glow(Some(Action::Contribute), &palette), palette.accent);
-        assert_eq!(glow(Some(Action::Keep), &palette), palette.ask);
-        assert_eq!(glow(Some(Action::Dismiss), &palette), palette.ask);
+        assert_eq!(
+            glow(Some(Action::Contribute), &palette),
+            palette.map.orb_shared
+        );
+        assert_eq!(glow(Some(Action::Keep), &palette), palette.map.orb_kept);
+        assert_eq!(glow(Some(Action::Dismiss), &palette), palette.map.orb_kept);
+        assert_eq!(glow(None, &palette), palette.map.orb_kept);
         let run = Run::new(
             vec![MapTransfer::new("1", "p", "codex", Action::Keep)],
             0.0,
             MapStyle::Launch,
         );
         assert_eq!(run.action(), Action::Keep);
+    }
+
+    /// Drawn alpha at `(x, y)` (design units at scale 1) of `draw`.
+    fn alpha_at(points: &[Point], draw: impl Fn(&Context)) -> Vec<u8> {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 1400, 1400).unwrap();
+        {
+            let cr = Context::new(&surface).unwrap();
+            draw(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        points
+            .iter()
+            .map(|p| data[p.y as usize * stride + p.x as usize * 4 + 3])
+            .collect()
+    }
+
+    /// On the standard map there is no rocket (`MapTransferDrawing`): none
+    /// stands on the hub between runs, and a contribution rises on its own
+    /// from the laptop's screen (36 above this computer) to the orb's base,
+    /// then the library takes it in with a pulse and says "+N"; on the
+    /// rocket map the rocket stands on the pad.
+    #[test]
+    fn on_the_standard_map_traces_rise_to_the_orb_and_no_rocket_stands() {
+        let scene = scene();
+        let fit = MapGeometry::new(super::super::map_scene::SIZE, 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let rest = fit.point(rocket_rest(hub(&scene)));
+        let standing = |style| {
+            alpha_at(&[rest], |cr| {
+                resting_rocket(cr, &scene, &fit, &palette, style)
+            })[0]
+        };
+        assert!(standing(MapStyle::Launch) > 0, "the rocket map's rocket");
+        assert_eq!(
+            standing(MapStyle::Standard),
+            0,
+            "a rocket on the standard map"
+        );
+
+        let transfer = MapTransfer::new("1", "p", "codex", Action::Contribute);
+        let run = Run::new(vec![transfer], 0.0, MapStyle::Standard);
+        assert!(run.rises());
+        // Halfway up its rise: between the screen and the orb's base.
+        let into_ascent = Run::INBOUND + Run::ORBIT + Run::OUTBOUND + Run::ASCENT * 0.6;
+        let hub = hub(&scene);
+        let library = library(&scene);
+        let screen = Point::new(hub.x, hub.y - 36.0);
+        let base = Point::new(library.x, library.y + 104.0 / 2.0 * (1.0 - 0.29));
+        let along = 0.6_f64.powf(1.7);
+        let at = fit.point(Point::new(
+            screen.x + (base.x - screen.x) * along,
+            screen.y + (base.y - screen.y) * along,
+        ));
+        let rising = alpha_at(&[at, rest], |cr| {
+            draw(cr, &scene, &run, into_ascent, &fit, &palette);
+        });
+        assert!(rising[0] > 100, "no trace rising at {at:?}: {}", rising[0]);
+        assert_eq!(rising[1], 0, "a rocket on the standard map's pad");
+        // Once it has arrived the library says how many.
+        let after = run.all_arrived() + 0.2;
+        let label = std::cell::RefCell::new(None);
+        alpha_at(&[], |cr| {
+            label.replace(draw(cr, &scene, &run, after, &fit, &palette));
+        });
+        let label = label.take().expect("the library's +N");
+        assert_eq!(label.text, "+1");
+        let centre = fit.point(library);
+        assert_eq!(label.at, Point::new(centre.x + 40.0, centre.y - 30.0));
     }
 }

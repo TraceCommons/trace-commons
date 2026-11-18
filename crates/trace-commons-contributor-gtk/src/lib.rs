@@ -21,6 +21,7 @@ pub mod attestation;
 pub mod autostart;
 pub mod backend;
 pub mod balance;
+// Recorded sample data in place of a daemon; never in a release build.
 pub mod certificate;
 pub mod copy;
 mod dbus;
@@ -29,6 +30,7 @@ pub mod edge;
 pub mod eligibility;
 pub mod first_run;
 pub mod home;
+pub mod home_cards;
 pub mod model;
 pub mod notify;
 pub mod original_search;
@@ -37,6 +39,8 @@ pub mod portal;
 pub mod queue_folders;
 pub mod redaction_labels;
 pub mod redaction_summary;
+#[cfg(debug_assertions)]
+pub mod sample;
 pub mod shield;
 pub mod toast;
 pub mod transcript_paging;

@@ -249,8 +249,10 @@ Settings, over the installed apps, starting on the current choice
 `capabilities.terminal_chosen` (true or false; an older daemon that omits it
 never asks). Open saves the pick as the default (`set_managed_terminal`),
 then launches, so the session opens there and the next dialog starts on it.
-With one terminal installed nothing is asked. Windows, Linux and Tauri pick
-only in Settings today.
+With one terminal installed nothing is asked. The GTK shell and the Windows
+app draw the same row in their Launch dialog (#1891). In GTK the launch-scope
+line beneath it names the terminal picked in the dialog, as on macOS. Tauri
+picks only in Settings today.
 
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented
@@ -263,9 +265,33 @@ tool in the session's folder itself.
 The settings key is `managed_terminal`; a daemon refuses another platform's
 id. The default is what shipped before the choice: Terminal on macOS and
 Windows Terminal on Windows. Linux shipped `x-terminal-emulator`, which fails
-the test, so the Linux default is GNOME Terminal; on a computer without it a
-launch is refused with "{terminal} wasn't found on this computer. Choose
-another in Settings." until another is chosen.
+the test, so the Linux default is GNOME Terminal.
+
+**Tool setup.** **Install** and **Update** open in the same terminal on
+macOS and on Linux outside Flatpak; the GTK shell does not draw them yet.
+
+**A missing default.** While the person has not chosen a terminal
+(`managed_terminal_chosen` false) and the default is not installed, the
+first installed terminal in picker order stands in for it: in the
+snapshot's `terminal_current`, `terminal_destination` and
+`launch_destination`, in a launch and in tool setup. Nothing is saved and
+no notice is shown; the picker shows the stand-in selected, and the default
+returns once it is installed. A terminal the person chose, and a stored
+value this build does not know, are never replaced: a launch in either
+when it was not found is refused with "{terminal} wasn't found on this
+computer. Choose another in Settings." Decided 2026-11-17 for the Linux
+launch work, on this evidence: GNOME replaced GNOME Terminal with Ptyxis
+(Ubuntu 25.10 and later, Fedora), so a stock GNOME desktop had an offered
+terminal and still refused every launch; macOS never reaches the rule
+(Terminal ships with it) and still refuses a chosen app it cannot find
+(`launch_macos`: "Never falls back to another app"); Windows offers one
+terminal; and the Windows and macOS shells already propose the first
+offered terminal when the current id is not among them
+(`ProposedTerminalIndex`, `proposedTerminal`). The Linux picker order is
+therefore also the fallback order: GNOME Terminal, Ptyxis, Konsole, Xfce
+Terminal, Ghostty, kitty, WezTerm, Alacritty, foot, Terminator. foot is
+counted only when `WAYLAND_DISPLAY` is set, so under X11 it is neither
+offered nor a stand-in.
 
 | Platform | Terminal | id | How the command and folder reach it | Evidence |
 | --- | --- | --- | --- | --- |
@@ -284,6 +310,10 @@ another in Settings." until another is chosen.
 | Linux | WezTerm | `wezterm` | `wezterm --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | `start`: `--cwd` "Specify the current working directory for the initially spawned program", `--always-new-process` "don't try to ask an existing wezterm GUI instance to start the command", and the program after `--`, <https://wezterm.org/cli/start.html>; `--config 'exit_behavior="Hold"'`, <https://wezterm.org/config/files.html>, "keep the pane open after the program exits", <https://wezterm.org/config/lua/config/exit_behavior.html> |
 | Linux | Alacritty | `alacritty` | `alacritty --working-directory <folder> --hold -e <helper> <args>` | `--working-directory` "Start the shell in the specified working directory"; `--hold` "Remain open after child process exits"; `-e, --command` "Command and args to execute (must be last argument)", alacritty(1), <https://manpages.debian.org/trixie/alacritty/alacritty.1.en.html> |
 | Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
+| Linux | Ptyxis | `ptyxis` | `ptyxis --working-directory=<folder> -- <helper> <args>`. A folder holding `%`, `#` or `?` is refused: Ptyxis makes the folder `file://<folder>` with nothing escaped (`src/ptyxis-application.c`) and turns that back into a path with `g_file_new_for_uri` and `g_file_peek_path` (`src/ptyxis-client.c`), which unescapes `%41` to `A` and does not read a `#` as part of a local path; `?` is refused as a precaution. A path it cannot read opens the home folder instead. Whether plain spaces and quotes survive that round trip is checked only by the Linux smoke test below. The command after `--` is quoted by Ptyxis with `g_shell_quote` and parsed back with `g_shell_parse_argv` (`src/main.c`), an exact round trip with no expansion, and `--` implies a new instance. No option holds the window | `-d, --working-directory` "Set the current working directory for a new tab [--tab], window [--window], or custom command [-- COMMAND...]"; synopsis `[-- PROGRAM ARGUMENTS]`; `--standalone`: "Single instance mode is implied when running a -- command", ptyxis(1), <https://manpages.debian.org/testing/ptyxis/ptyxis.1.en.html>; source <https://gitlab.gnome.org/chergert/ptyxis> |
+| Linux | Xfce Terminal | `xfce4_terminal` | `xfce4-terminal --working-directory=<folder> --hold -x <helper> <args>`. A running instance receives the whole argv over D-Bus and parses it again (`terminal/main.c`), so the command stays argv | `--working-directory=directory` "Set directory as the working directory for the terminal"; `-H, --hold` "Causes the terminal to be kept around after the child command has terminated"; `-x, --execute` "Execute the remainder of the command line inside the terminal", <https://docs.xfce.org/apps/xfce4-terminal/command-line>; `-x` copies the rest of argv as the command (`g_strdupv`, `terminal/terminal-options.c`), unlike `-e`, which is shell-parsed |
+| Linux | foot | `foot` | `foot --working-directory=<folder> --hold <helper> <args>`. Wayland only | synopsis `foot [OPTIONS] <command> [COMMAND OPTIONS]`; `--working-directory` "Initial working directory for the client application"; `--hold` "Remain open after child process exits"; "All trailing (non-option) arguments are treated as a command, and its arguments, to execute", foot(1), <https://codeberg.org/dnkl/foot/src/branch/master/doc/foot.1.scd>; option parsing stops at the first non-option (`+` in the `getopt_long` string, `main.c`) |
+| Linux | Terminator | `terminator` | `terminator --no-dbus --working-directory=<folder> -x <helper> <args>`. `--no-dbus` because a running Terminator handed the command over D-Bus joins it with spaces into one string a shell runs (`terminatorlib/optionparse.py`, `' '.join`); started alone, the list is spawned as argv (`terminatorlib/terminal.py`). No option holds the window | `-x, --execute` "Run the rest of the command line instead of the default shell or profile specified command"; `--working-directory` "Set the terminal's working directory"; `-u, --no-dbus` "Disable DBus", terminator(1), <https://manpages.debian.org/testing/terminator/terminator.1.en.html>; `-x` keeps the rest as a list (`nargs=argparse.REMAINDER`, `terminatorlib/optionparse.py`), source <https://github.com/gnome-terminator/terminator> |
 
 **Group sessions in herdr.** A switch under the picker (settings key
 `managed_herdr`, off by default; owner decisions D3-D6, 2026-11-03) opens
@@ -324,8 +354,8 @@ by semicolons"). A launch whose folder, helper path or config folder holds a
   (<https://www.debian.org/doc/debian-policy/ch-customized-programs.html>),
   so the alternative cannot be relied on to take one.
 
-**What this costs.** A Linux computer with none of GNOME Terminal, Konsole or
-Ghostty (an XFCE, Sway or i3 desktop, say) could launch through
+**What this costs.** A Linux computer with none of the ten terminals above
+(an xterm-only or Tilix-only desktop, say) could launch through
 `x-terminal-emulator` before and cannot now: the picker offers nothing and
 is not drawn, and the managed-sessions screen shows its "unavailable" line
 with Launch off, until another terminal is added by the test above. The
@@ -341,9 +371,14 @@ Launch is never turned off this way, because Terminal is always there.
   daemon was started, and that cannot be checked without a Windows run. It
   can be added once a Windows smoke test shows the session gets the console.
   `cmd.exe` takes its command only as one string.
-- Other Linux terminals (foot, xfce4-terminal, Tilix) have not been
-  evaluated; each can be added once its documented flags are checked
-  against the test above.
+- Tilix, as of 2026-11-17. Its only command option, `-e, --command`
+  ("Execute all text after this parameter as a command", tilix(1),
+  <https://manpages.debian.org/testing/tilix/tilix.1.en.html>), does not
+  keep argv: before parsing, Tilix joins every argument after `-e` or `-x`
+  into one string, double-quoting only those that contain a space and
+  escaping only `"` (`source/app.d`, <https://github.com/gnunn1/tilix>), and
+  passes that string on as its `--command` value. The command reaches it as
+  one string rather than as argv, so it fails the test.
 - Warp (macOS), as of 2026-10-30. It has no AppleScript dictionary and no
   command line that opens a local window with a command
   (<https://github.com/warpdotdev/warp/issues/3364>; the `oz` CLI runs
@@ -362,8 +397,15 @@ Launch is never turned off this way, because Terminal is always there.
   command and a folder.
 
 Every launch path except macOS Terminal still needs the release smoke test
-below on its platform: none of the Windows or Linux terminals is started by
-the test suite.
+below on its platform. No CI job starts a Windows or Linux terminal. On a
+Linux desktop, `scripts/linux/managed-terminal-launch-smoke.sh` runs the
+ignored test
+`managed::terminal::tests::real_linux_terminals_receive_the_folder_and_every_argument`:
+for each offered terminal installed there, it opens the terminal's real
+launch argv with a stub helper that writes its working directory and its
+arguments to a file, and checks that a folder holding spaces, both quotes,
+`$`, a backtick and a leading dash, and every argument, arrived whole. It
+fails when no terminal was started.
 
 ## OpenCode sessions
 

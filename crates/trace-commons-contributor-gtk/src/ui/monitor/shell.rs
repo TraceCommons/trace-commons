@@ -47,6 +47,7 @@ use trace_commons_contributor::preview_copy::monitor_screens_copy;
 use super::graph_footer::{GraphData, GraphFooter};
 use super::inspector::{Inspector, Selection};
 use super::map::TraceMap;
+use super::map_scene::MapStyle;
 use super::notices::{self, Notice};
 use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
@@ -491,7 +492,14 @@ impl Shell {
                 ))
             });
             frame.set_visible(false);
-            slot.append(&frame);
+            // The card comes to the front as on the Mac: a new one slides
+            // in from the top, a revealed one fades (`popover_stack`).
+            let slide = crate::ui::popover_stack::Slide::new(&frame);
+            frame
+                .bind_property("visible", &slide, "visible")
+                .sync_create()
+                .build();
+            slot.append(&slide);
             notice_stack.append(&slot);
             notice_slots.push(NoticeSlot {
                 notice,
@@ -501,21 +509,10 @@ impl Shell {
                 close,
             });
         }
-        // The cards behind the front one, peeking out under it.
-        let mut plates = Vec::new();
-        for level in 1..=notices::BEHIND {
-            let plate = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            plate.add_css_class("tc-notice-plate");
-            plate.set_height_request(notices::PEEK);
-            let inset = style::space::XL + style::space::S * level as i32;
-            plate.set_margin_start(inset);
-            plate.set_margin_end(inset);
-            plate.set_can_target(false);
-            plate.set_visible(false);
-            plate.update_state(&[gtk::accessible::State::Hidden(true)]);
-            notice_stack.append(&plate);
-            plates.push(plate);
-        }
+        // The cards behind the front one, peeking out under it, each 4% a
+        // level narrower (`popover_stack::Plates`).
+        let plates = crate::ui::popover_stack::Plates::new();
+        notice_stack.append(&plates);
         // Each card shows and hides itself and says what it says, and its X
         // closes it; the stack follows all three. The words are watched on
         // every label in the card, so a closed card whose words change comes
@@ -545,8 +542,14 @@ impl Shell {
                     )
                 })
                 .collect();
-            let plates: Vec<gtk::glib::WeakRef<gtk::Box>> =
-                plates.iter().map(|plate| plate.downgrade()).collect();
+            let plates = plates.downgrade();
+            // The cards the stack has held, so a card revealed by a close is
+            // told apart from one that has just arrived; the front last
+            // drawn; and whether the stack has drawn before (the first
+            // front is simply there).
+            let seen: RefCell<Vec<(Notice, String)>> = RefCell::default();
+            let last_front: Cell<Option<usize>> = Cell::new(None);
+            let started = Cell::new(false);
             let hook = Rc::clone(&itself);
             let follow: Rc<dyn Fn()> = Rc::new(move || {
                 let Some(scroller) = scroller.upgrade() else {
@@ -602,11 +605,38 @@ impl Shell {
                     }
                     mark_surface(&card, x);
                 }
-                for (level, plate) in plates.iter().enumerate() {
-                    if let Some(plate) = plate.upgrade() {
-                        plate.set_visible(level < stack.behind);
+                if let Some(plates) = plates.upgrade() {
+                    plates.set_behind(stack.behind);
+                }
+                // A card new to the front slides in, a revealed one fades.
+                if stack.front != last_front.get() {
+                    if let Some((notice, _, _, card, _)) = stack.front.and_then(|i| cards.get(i))
+                        && let Some(card) = card.upgrade()
+                        && let Some(slide) = card
+                            .ancestor(crate::ui::popover_stack::Slide::static_type())
+                            .and_downcast::<crate::ui::popover_stack::Slide>()
+                    {
+                        let notice = *notice;
+                        let fresh = !seen.borrow().contains(&(notice, card_text(&card)));
+                        if started.get() && crate::ui::glass_motion::animations_enabled() {
+                            slide.arrive(fresh, false);
+                        } else {
+                            slide.settle();
+                        }
+                    }
+                    last_front.set(stack.front);
+                }
+                for (index, (notice, _, _, card, _)) in cards.iter().enumerate() {
+                    if open.get(index) == Some(&true)
+                        && let Some(card) = card.upgrade()
+                    {
+                        let key = (*notice, card_text(&card));
+                        if !seen.borrow().contains(&key) {
+                            seen.borrow_mut().push(key);
+                        }
                     }
                 }
+                started.set(true);
                 scroller.set_visible(stack.front.is_some());
                 if let Some(card) = front {
                     renew_request_modes(&card, scroller.upcast_ref());
@@ -719,6 +749,8 @@ impl Shell {
             prefs.save();
         }
         root.set_kept_widths(prefs.main_width, prefs.map_width);
+        // The Traces map's style, as the person last chose it.
+        map.set_style(prefs.map_style());
 
         let shell = Self {
             root,
@@ -781,8 +813,7 @@ impl Shell {
         }
     }
 
-    /// The map pane's view. The Private AI view is a later slice; the pane
-    /// draws an empty field for it.
+    /// The map pane's view: the Traces map or the Private AI map.
     pub fn map_view(&self) -> MapView {
         self.state.map_view.get()
     }
@@ -913,6 +944,18 @@ impl Shell {
             *prefs
         };
         prefs.save();
+    }
+
+    /// The Traces map's style (Settings): the rocket and station, or the
+    /// laptop and the orb. One owner keeps it with the panes' choices, so
+    /// a later save of those never undoes it.
+    pub fn map_style(&self) -> MapStyle {
+        self.state.prefs.borrow().map_style()
+    }
+
+    pub fn set_map_style(&self, style: MapStyle) {
+        self.update_prefs(|prefs| prefs.set_map_style(style));
+        self.map.set_style(style);
     }
 
     pub fn set_inspector_shown(&self, _app: &Rc<App>, shown: bool) {
@@ -1644,6 +1687,11 @@ mod tests {
     /// `App`: the shell's own rules need neither.
     fn mounted(missions: bool) -> Mounted {
         adw::init().expect("GTK display");
+        // These tests read where cards are; a card still sliding in would
+        // be offset. The test of the arrival turns motion on itself.
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_enable_animations(false);
+        }
         let window = adw::ApplicationWindow::builder().build();
         let page = || gtk::Box::new(gtk::Orientation::Vertical, 0);
         let (home, inference, traces, history, insights, drafts, settings) =
@@ -2017,8 +2065,84 @@ mod tests {
         descendants(notice_scroller(shell).upcast_ref(), &mut found);
         found
             .iter()
-            .filter(|widget| widget.has_css_class("tc-notice-plate") && widget.is_visible())
-            .count()
+            .filter_map(|widget| widget.downcast_ref::<crate::ui::popover_stack::Plates>())
+            .filter(|plates| plates.is_visible())
+            .map(|plates| plates.behind())
+            .sum()
+    }
+
+    /// The card a slot's frame moves in.
+    fn slide(shell: &Shell, notice: Notice) -> crate::ui::popover_stack::Slide {
+        slot(shell, notice)
+            .frame
+            .parent()
+            .and_downcast::<crate::ui::popover_stack::Slide>()
+            .expect("every card is held by a slide")
+    }
+
+    /// `GlassPopoverStack`'s arrival: a card new to the stack slides in from
+    /// the top as it fades in; one revealed by closing the card in front of
+    /// it only fades; with animations off a card is simply there.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_new_card_slides_in_and_a_revealed_one_fades() {
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        mounted.window.present();
+        shell.pick_tab(Tab::Traces);
+        let card = |notice: Notice| {
+            mounted
+                .notices
+                .iter()
+                .find(|(kind, _)| *kind == notice)
+                .map(|(_, card)| card.clone())
+                .unwrap()
+        };
+        for (_, card) in &mounted.notices {
+            card.set_size_request(-1, 120);
+            card.set_visible(false);
+        }
+        pump();
+        let settings = gtk::Settings::default().expect("settings");
+        settings.set_gtk_enable_animations(true);
+
+        // A card the stack has never held slides in from above its place.
+        // The stack remembers every card it has held, as the Mac's `seen`
+        // does, and these empty cards were all shown once while the shell
+        // was built, so this one gets words it has never had.
+        card(Notice::Health).append(&gtk::Label::new(Some("A card never shown")));
+        card(Notice::Health).set_visible(true);
+        let health = slide(shell, Notice::Health);
+        let slid = Cell::new(false);
+        pump_until(|| {
+            slid.set(slid.get() || health.offset() < -1.0);
+            slid.get() && health.offset() == 0.0 && health.opacity() == 1.0
+        });
+        assert!(slid.get(), "a new card did not slide in");
+        assert_eq!((health.offset(), health.opacity()), (0.0, 1.0));
+
+        // A newer card in front of it slides in too; closing that one
+        // reveals the Health card, which fades where it is.
+        card(Notice::Undo).set_visible(true);
+        pump_until(|| slide(shell, Notice::Undo).offset() == 0.0);
+        card(Notice::Undo).set_visible(false);
+        let faded = Cell::new(false);
+        let moved = Cell::new(false);
+        pump_until(|| {
+            faded.set(faded.get() || health.opacity() < 1.0);
+            moved.set(moved.get() || health.offset() != 0.0);
+            faded.get() && health.opacity() == 1.0
+        });
+        assert!(faded.get(), "a revealed card did not fade in");
+        assert!(!moved.get(), "a revealed card slid");
+
+        // Under reduced motion a new card is there at once.
+        settings.set_gtk_enable_animations(false);
+        card(Notice::Health).set_visible(false);
+        card(Notice::Consent).set_visible(true);
+        pump();
+        let consent = slide(shell, Notice::Consent);
+        assert_eq!((consent.offset(), consent.opacity()), (0.0, 1.0));
     }
 
     /// The Mac's placement (owner decision 1, chosen again 2026-11-17):

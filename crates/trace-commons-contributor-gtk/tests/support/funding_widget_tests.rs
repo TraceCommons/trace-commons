@@ -155,7 +155,9 @@ impl Fixture {
                 | "consent_options"
                 // Settings' bulk change asks which modes it may set;
                 // refused, its menu offers nothing.
-                | "plan_project_modes" => {
+                | "plan_project_modes"
+                // Home's Insights hero; refused, it draws its teaser.
+                | "insights_glance" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),

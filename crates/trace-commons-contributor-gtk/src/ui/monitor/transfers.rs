@@ -23,9 +23,9 @@
 //! Deliberate platform differences:
 //! - This shell has no `keep` action, so nothing feeds `kept` yet; it is
 //!   ported and tested so a keep plays the Mac's run once one exists.
-//! - This shell draws the launch style only (the pad and the rocket, the
-//!   Mac's default); it has no style switch. The standard map's rise is
-//!   ported with the run so the two stay one rule.
+//! - The map's style is the Settings switch's (`PanePrefs::map_style`),
+//!   the rocket by default, as on the Mac; a run keeps the style it began
+//!   with.
 
 use std::collections::HashSet;
 
@@ -44,14 +44,7 @@ pub enum Action {
     Dismiss,
 }
 
-/// The Traces map's style: the pad, rocket and station, or the laptop and
-/// the library orb. This shell draws `Launch`, the Mac's default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MapStyle {
-    #[default]
-    Launch,
-    Standard,
-}
+pub use super::map_scene::MapStyle;
 
 /// A trace the Traces map shows moving, built only from what the core
 /// reported, never from a guess.
@@ -580,15 +573,15 @@ pub struct RestingMotion {
 /// Moving dashes redraw at 30 frames a second.
 pub const DASH_INTERVAL: f64 = 1.0 / 30.0;
 /// The library's own rate, `GlassLibraryStation.frameInterval`.
-pub const LIBRARY_INTERVAL: f64 = 1.0 / 20.0;
+pub const LIBRARY_INTERVAL: f64 = super::station::FRAME_INTERVAL;
 /// A run redraws at 60 frames a second.
 pub const RUN_INTERVAL: f64 = 1.0 / 60.0;
 
 /// How the map's resting clock runs: at 30 frames a second while arcs
 /// carry moving dashes, at the library's rate while only the library
 /// turns, and not at all when nothing moves or under reduced motion. An
-/// unhealthy map draws its flows still. This shell's library does not
-/// turn yet (the look slice), so it passes `library: false`.
+/// unhealthy map draws its flows still. `library` is whether the Traces
+/// map's station is on the map (`map::library_turns`).
 pub fn resting_motion(
     reduce_motion: bool,
     flows: bool,

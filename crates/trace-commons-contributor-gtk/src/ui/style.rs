@@ -486,8 +486,9 @@ fn stylesheet(dark: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     format!(
-        "{brand}\n{glass}\n{tokens}\n{}\n{insights}",
-        include_str!("style.css")
+        "{brand}\n{glass}\n{tokens}\n{}\n{insights}\n{}",
+        include_str!("style.css"),
+        super::hero_art::css()
     )
 }
 
@@ -739,6 +740,10 @@ pub struct Inks {
     /// The hit's own text colour, set only in the skin; the standard look
     /// keeps the label's ink.
     pub highlight_ink: Option<String>,
+    /// The Omarchy palette these inks came from; `None` in the standard
+    /// look. The Traces map draws its every role from it in the skin
+    /// (`monitor::map::MapColours::resolve`).
+    pub skin: Option<omarchy::Palette>,
 }
 
 impl Inks {
@@ -767,6 +772,7 @@ impl Inks {
                 highlight: s("#DCAA43"),
                 highlight_alpha: s("32%"),
                 highlight_ink: None,
+                skin: None,
             }
         } else {
             use brand_tokens::light as t;
@@ -789,6 +795,7 @@ impl Inks {
                 highlight: s("#B9821F"),
                 highlight_alpha: s("28%"),
                 highlight_ink: None,
+                skin: None,
             }
         }
     }
@@ -813,6 +820,7 @@ impl Inks {
             highlight: p.highlight.hex(),
             highlight_alpha: omarchy::HIGHLIGHT_ALPHA.to_string(),
             highlight_ink: Some(p.highlight_ink.hex()),
+            skin: Some(p.clone()),
         }
     }
 }

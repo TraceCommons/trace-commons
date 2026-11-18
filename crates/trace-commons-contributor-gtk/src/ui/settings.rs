@@ -38,6 +38,7 @@ use trace_commons_contributor::account_contribution::{
     REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
 };
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
+use trace_commons_contributor::preview_copy::monitor_screens_copy;
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
 /// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
@@ -120,6 +121,11 @@ pub struct SettingsView {
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
+    /// The Traces map's style: on, the rocket and station.
+    map_style_switch: gtk::Switch,
+    /// Home's "Show promotions" (the Mac's General section): off, Home's
+    /// campaign card never shows.
+    pub promotions_switch: gtk::Switch,
     /// The edge rail's switch (`ui::edge_surfaces`).
     pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
     /// Scrolls Settings to a section, for the edge rail's and the
@@ -665,6 +671,11 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The Traces map's style (the Mac's General section; this shell
+        // has none, so beside the other choices about this computer's
+        // window): the rocket and station, or the laptop and the orb.
+        let (map_style_card, map_style_switch) = map_style_card();
+        sections.body(Section::Startup).append(&map_style_card);
         // The Linux app's Appearance choice (Omarchy skin spec, D2): a card
         // of its own under Startup, since the sections are pinned to the
         // macOS groups. It writes only the shell's own preference file.
@@ -675,6 +686,37 @@ impl SettingsView {
         // gives it; shown once the session is known to support a rail.
         let edge_rail = super::edge_surfaces::rail_switch();
         sections.body(Section::Startup).append(&edge_rail.card);
+
+        // Home's promotion switch, as the Mac's General section has it: the
+        // core's card heading, the switch and the line under it.
+        let home_words = &monitor_screens_copy().home_history;
+        let promotions_card = style::card(gtk::Orientation::Vertical, space::S);
+        let promotions_heading = gtk::Label::builder()
+            .label(home_words.promotions_title)
+            .xalign(0.0)
+            .build();
+        promotions_heading.add_css_class("heading");
+        promotions_card.append(&promotions_heading);
+        let promotions_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let promotions_label = gtk::Label::builder()
+            .label(home_words.promotions_toggle)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        promotions_label.add_css_class("tc-body");
+        let promotions_switch = gtk::Switch::builder()
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Center)
+            .active(crate::home_cards::HomePrefs::load().shows_promotions)
+            .build();
+        promotions_switch.update_property(&[gtk::accessible::Property::Label(
+            home_words.promotions_toggle,
+        )]);
+        promotions_row.append(&promotions_label);
+        promotions_row.append(&promotions_switch);
+        promotions_card.append(&promotions_row);
+        style::append_meta(&promotions_card, home_words.promotions_caption);
+        sections.body(Section::Startup).append(&promotions_card);
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
@@ -712,6 +754,8 @@ impl SettingsView {
             autostart_body,
             autostart_row,
             autostart_switch,
+            map_style_switch,
+            promotions_switch,
             edge_rail,
             select_section,
             background_state: RefCell::new(None),
@@ -774,7 +818,55 @@ impl SettingsView {
     }
 }
 
+/// The Traces map's style card, as the Mac's General section draws it
+/// (`GeneralSection.mapStyleCard`): its title, the switch, on for the
+/// rocket and station, and the caption under it. All in shared copy.
+pub(crate) fn map_style_card() -> (gtk::Box, gtk::Switch) {
+    let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    card.append(&style::eyebrow(flow.style_title));
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(flow.style_toggle)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-body");
+    let switch = gtk::Switch::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .active(true)
+        .build();
+    switch.update_property(&[gtk::accessible::Property::Label(flow.style_toggle)]);
+    row.append(&label);
+    row.append(&switch);
+    card.append(&row);
+    card.append(&style::meta(flow.style_caption));
+    (card, switch)
+}
+
+/// The map's style a position of the switch stands for: on, the rocket.
+pub(crate) fn map_style_for(active: bool) -> crate::ui::monitor::map_scene::MapStyle {
+    use crate::ui::monitor::map_scene::MapStyle;
+    if active {
+        MapStyle::Launch
+    } else {
+        MapStyle::Standard
+    }
+}
+
 pub fn wire(app: &Rc<App>) {
+    // The Traces map's style: kept with the window's choices, applied to
+    // the map at once.
+    app.settings
+        .map_style_switch
+        .set_active(app.shell.map_style() == crate::ui::monitor::map_scene::MapStyle::Launch);
+    let a = Rc::clone(app);
+    app.settings
+        .map_style_switch
+        .connect_active_notify(move |switch| {
+            a.shell.set_map_style(map_style_for(switch.is_active()))
+        });
     super::consent_settings::wire(app);
     let a = Rc::clone(app);
     app.settings
@@ -876,6 +968,13 @@ pub fn wire(app: &Rc<App>) {
 
     render_autostart(app);
     render_public(app);
+    let home = Rc::clone(app);
+    app.settings
+        .promotions_switch
+        .connect_state_set(move |_, wanted| {
+            home.home.set_promotions(wanted);
+            gtk::glib::Propagation::Proceed
+        });
     let a = Rc::clone(app);
     app.settings
         .autostart_switch
@@ -4503,6 +4602,45 @@ mod consent_mounted_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's switch is `Toggle(styleToggle, isOn: $mapRocket)`: on is
+    /// the rocket and station, off the laptop and the orb.
+    #[test]
+    fn the_map_style_switch_on_is_the_rocket() {
+        use crate::ui::monitor::map_scene::MapStyle;
+        assert_eq!(map_style_for(true), MapStyle::Launch);
+        assert_eq!(map_style_for(false), MapStyle::Standard);
+    }
+
+    /// The map style card says the Mac's words from shared copy: its
+    /// title, the switch's name (its accessible name too) and the caption,
+    /// with the switch on, the rocket, before anything is read.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_map_style_card_has_the_shared_words() {
+        gtk::init().expect("GTK display");
+        let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
+        let (card, switch) = map_style_card();
+        assert!(switch.is_active());
+        let mut texts = Vec::new();
+        let mut stack = vec![card.upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                texts.push(label.label().to_string());
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                stack.push(c);
+            }
+        }
+        for words in [flow.style_title, flow.style_toggle, flow.style_caption] {
+            assert!(
+                texts.iter().any(|t| t.eq_ignore_ascii_case(words)),
+                "{words:?} not in {texts:?}"
+            );
+        }
+    }
 
     /// The Mac has no control over the approval hold, so this window has
     /// none either: nothing here writes it, and the daemon's default hold

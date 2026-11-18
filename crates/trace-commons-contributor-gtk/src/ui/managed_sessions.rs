@@ -95,10 +95,8 @@ fn install_button(tool: &Value) -> Option<gtk::Button> {
 }
 /// A bare refresh glyph, its tooltip and accessible name "Refresh".
 fn refresh_glyph(app: &Rc<App>) -> gtk::Button {
-    let glyph = gtk::Button::from_icon_name("view-refresh-symbolic");
-    glyph.add_css_class("flat");
-    glyph.set_tooltip_text(Some(&text("refresh")));
-    glyph.update_property(&[gtk::accessible::Property::Label(&text("refresh"))]);
+    // Its icon turns once when pressed (`GlassRefreshButton`).
+    let (glyph, _) = super::glass_feedback::refresh_button(&text("refresh"));
     let app = Rc::clone(app);
     glyph.connect_clicked(move |_| refresh(&app));
     glyph
@@ -111,6 +109,20 @@ fn launch_accounts(snapshot: &Value) -> Vec<Value> {
         .filter(|a| can_launch(snapshot, a["tool"].as_str().unwrap_or_default()))
         .cloned()
         .collect()
+}
+
+/// A line led by its tool's tile, as the Mac's saved-account and session
+/// rows are (`GlassToolTile(.tool(ManagedWords.glassTool(tool)))`).
+fn tiled(tool: &str, line: String) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, style::space::S);
+    row.append(&super::tool_tile::ToolTile::new(
+        super::tool_tile::Kind::managed(tool),
+        false,
+    ));
+    let label = style::body(line);
+    label.set_hexpand(true);
+    row.append(&label);
+    row
 }
 
 fn button(key: &str, f: impl Fn() + 'static) -> gtk::Button {
@@ -179,6 +191,65 @@ fn terminal_ask(snapshot: &Value) -> Option<(Vec<(String, String)>, u32)> {
 /// picked in a dialog that asked, else none.
 fn terminal_to_save(ask: Option<&[(String, String)]>, picked: u32) -> Option<String> {
     ask?.get(picked as usize).map(|(id, _)| id.clone())
+}
+
+/// Where the session opens while the dialog asks: the terminal picked in
+/// it, as the macOS sheet's `destination`; else the daemon's own line, which
+/// names herdr while sessions are grouped there.
+fn launch_destination<'a>(
+    snapshot: &'a Value,
+    ask: Option<&'a [(String, String)]>,
+    picked: u32,
+) -> Option<&'a str> {
+    // Grouped in herdr, the session opens there whatever is picked.
+    let grouped = snapshot["capabilities"]["herdr_grouping"] == true;
+    if grouped {
+        return session_destination(snapshot);
+    }
+    ask.and_then(|choices| choices.get(picked as usize))
+        .map(|(_, name)| name.as_str())
+        .or_else(|| session_destination(snapshot))
+}
+
+fn scope_text(snapshot: &Value, ask: Option<&[(String, String)]>, picked: u32) -> String {
+    text("launch_scope").replace(
+        "{destination}",
+        launch_destination(snapshot, ask, picked).unwrap_or_default(),
+    )
+}
+
+/// Keeps the launch line on the dropdown's pick.
+fn follow_pick(
+    dropdown: &gtk::DropDown,
+    line: &gtk::Label,
+    snapshot: &Value,
+    choices: Option<Vec<(String, String)>>,
+) {
+    let snapshot = snapshot.clone();
+    let line = line.clone();
+    dropdown.connect_selected_notify(move |d| {
+        line.set_label(&scope_text(&snapshot, choices.as_deref(), d.selected()));
+    });
+}
+
+/// The "Open sessions in" row: the core's label and a dropdown over the
+/// installed terminals, starting on `start`.
+fn terminal_row(choices: &[(String, String)], start: u32) -> (gtk::Box, gtk::DropDown) {
+    let label_text = text("terminal_choice");
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::builder()
+        .label(&label_text)
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    row.append(&label);
+    let names: Vec<&str> = choices.iter().map(|(_, name)| name.as_str()).collect();
+    let dropdown = gtk::DropDown::from_strings(&names);
+    dropdown.update_property(&[gtk::accessible::Property::Label(&label_text)]);
+    dropdown.set_selected(start);
+    row.append(&dropdown);
+    (row, dropdown)
 }
 
 fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
@@ -289,7 +360,7 @@ pub fn refresh(app: &Rc<App>) {
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-            style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
+            row.append(&tiled(account["tool"].as_str().unwrap_or_default(), format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default())));
             let tool = account["tool"].as_str().unwrap_or_default();
             if tool_missing(&snapshot, tool) {
                 style::append_meta(&row, tool_unavailable(tool));
@@ -322,7 +393,7 @@ pub fn refresh(app: &Rc<App>) {
             if sessions.is_empty() { style::append_body(root, text("empty")); }
             for session in sessions {
                 let project = if session["purpose"] == "login" { text("sign_in") } else { session["project_label"].as_str().unwrap_or_default().into() };
-                style::append_body(root, format!("{project} · {} · {} · {} · {}", text(session["tool"].as_str().unwrap_or_default()), session["account_label"].as_str().unwrap_or_default(), text(session["connection"].as_str().unwrap_or_default()), session["state"].as_str().unwrap_or_default()));
+                root.append(&tiled(session["tool"].as_str().unwrap_or_default(), format!("{project} · {} · {} · {} · {}", text(session["tool"].as_str().unwrap_or_default()), session["account_label"].as_str().unwrap_or_default(), text(session["connection"].as_str().unwrap_or_default()), session["state"].as_str().unwrap_or_default())));
                 if let Some(model) = session["model"].as_str() { style::append_meta(root, format!("{}: {model}", text("model"))); }
                 if session["tool"] == "opencode" { style::append_meta(root, text(&format!("collection_{}", session["collection"].as_str().unwrap_or("off")))); }
                 if session["state"] == "exited" || session["state"] == "failed" {
@@ -481,6 +552,30 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         .collect();
     let picker =
         gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+    // The folder sliding into the terminal, with the picked account's tool
+    // in it (`ManagedFolderHandoff`); it follows the picker.
+    let tool_of = |index: usize| {
+        super::tool_tile::Kind::managed(
+            accounts
+                .get(index)
+                .and_then(|a| a["tool"].as_str())
+                .unwrap_or_default(),
+        )
+    };
+    let handoff = Rc::new(super::folder_handoff::FolderHandoff::new(tool_of(0)));
+    content.append(&handoff.area);
+    {
+        let accounts = accounts.clone();
+        let handoff = Rc::clone(&handoff);
+        picker.connect_selected_notify(move |p| {
+            handoff.set_tool(super::tool_tile::Kind::managed(
+                accounts
+                    .get(p.selected() as usize)
+                    .and_then(|a| a["tool"].as_str())
+                    .unwrap_or_default(),
+            ));
+        });
+    }
     content.append(&picker);
     let folder = gtk::Entry::builder()
         .placeholder_text(text("project_placeholder"))
@@ -519,20 +614,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     // installed (#1891). The label is the core's.
     let terminals = terminal_ask(snapshot);
     let terminal_picker = terminals.as_ref().map(|(choices, start)| {
-        let label_text = text("terminal_choice");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let label = gtk::Label::builder()
-            .label(&label_text)
-            .xalign(0.0)
-            .hexpand(true)
-            .wrap(true)
-            .build();
-        row.append(&label);
-        let names: Vec<&str> = choices.iter().map(|(_, name)| name.as_str()).collect();
-        let dropdown = gtk::DropDown::from_strings(&names);
-        dropdown.update_property(&[gtk::accessible::Property::Label(&label_text)]);
-        dropdown.set_selected(*start);
-        row.append(&dropdown);
+        let (row, dropdown) = terminal_row(choices, *start);
         content.append(&row);
         dropdown
     });
@@ -558,13 +640,16 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         });
         chooser.show();
     }));
-    style::append_meta(
-        &content,
-        text("launch_scope").replace(
-            "{destination}",
-            session_destination(snapshot).unwrap_or_default(),
-        ),
-    );
+    // The line follows the pick, as on macOS.
+    let scope_line = style::meta(scope_text(
+        snapshot,
+        terminal_choices.as_deref(),
+        terminal_picker.as_ref().map_or(0, |d| d.selected()),
+    ));
+    content.append(&scope_line);
+    if let Some(dropdown) = &terminal_picker {
+        follow_pick(dropdown, &scope_line, snapshot, terminal_choices.clone());
+    }
     let a = Rc::clone(app);
     let generations = snapshot["generations"].clone();
     let w = window.clone();
@@ -667,6 +752,95 @@ mod tests {
             None
         );
         assert_eq!(terminal_ask(&json!({})), None);
+    }
+
+    /// The launch line names the terminal picked in the dialog (as the
+    /// macOS sheet's `destination`), else where the daemon says.
+    #[test]
+    fn the_launch_line_follows_the_picked_terminal() {
+        let snapshot = two_terminals(json!(true), json!("konsole"));
+        let (choices, _) = terminal_ask(&snapshot).unwrap();
+        assert_eq!(
+            launch_destination(&snapshot, Some(&choices), 0),
+            Some("GNOME Terminal")
+        );
+        assert_eq!(
+            launch_destination(&snapshot, Some(&choices), 1),
+            Some("Konsole")
+        );
+        let mut older = snapshot.clone();
+        older["capabilities"]["terminal_destination"] = json!("Konsole");
+        assert_eq!(launch_destination(&older, None, 0), Some("Konsole"));
+        assert_eq!(
+            launch_destination(&older, Some(&choices), 9),
+            Some("Konsole")
+        );
+        assert_eq!(launch_destination(&json!({}), None, 0), None);
+    }
+
+    /// Owner, 2026-11-03: while sessions are grouped in herdr the line names
+    /// herdr whatever terminal is picked, as the daemon's own line does.
+    #[test]
+    fn the_launch_line_names_herdr_while_grouped() {
+        let mut snapshot = two_terminals(json!(true), json!("konsole"));
+        snapshot["capabilities"]["launch_destination"] = json!("herdr");
+        snapshot["capabilities"]["herdr_grouping"] = json!(true);
+        let (choices, _) = terminal_ask(&snapshot).unwrap();
+        for picked in [0, 1] {
+            assert_eq!(
+                launch_destination(&snapshot, Some(&choices), picked),
+                Some("herdr")
+            );
+        }
+        snapshot["capabilities"]["herdr_grouping"] = json!(false);
+        snapshot["capabilities"]["launch_destination"] = json!("Konsole");
+        assert_eq!(
+            launch_destination(&snapshot, Some(&choices), 0),
+            Some("GNOME Terminal")
+        );
+    }
+
+    /// Needs a display: the row draws the core's label over the installed
+    /// apps and starts on the current one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_launch_dialog_row_starts_on_the_current_terminal() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let snapshot = two_terminals(json!(true), json!("konsole"));
+        let (choices, start) = terminal_ask(&snapshot).unwrap();
+        let (row, dropdown) = terminal_row(&choices, start);
+        assert_eq!(dropdown.selected(), 1);
+        let label = row.first_child().and_downcast::<gtk::Label>().unwrap();
+        assert_eq!(label.label(), text("terminal_choice"));
+        let model = dropdown.model().unwrap();
+        assert_eq!(model.n_items(), 2);
+        dropdown.set_selected(0);
+        assert_eq!(
+            terminal_to_save(Some(&choices), dropdown.selected()).as_deref(),
+            Some("gnome_terminal")
+        );
+        // The launch line follows the dropdown, and holds on herdr while
+        // sessions are grouped there.
+        let line = gtk::Label::new(None);
+        follow_pick(&dropdown, &line, &snapshot, Some(choices.clone()));
+        dropdown.set_selected(1);
+        assert_eq!(
+            line.label().as_str(),
+            scope_text(&snapshot, Some(&choices), 1).as_str()
+        );
+        assert!(line.label().contains("Konsole"));
+        dropdown.set_selected(0);
+        assert!(line.label().contains("GNOME Terminal"));
+        let mut grouped = snapshot.clone();
+        grouped["capabilities"]["launch_destination"] = json!("herdr");
+        grouped["capabilities"]["herdr_grouping"] = json!(true);
+        let line = gtk::Label::new(None);
+        follow_pick(&dropdown, &line, &grouped, Some(choices.clone()));
+        dropdown.set_selected(1);
+        assert!(line.label().contains("herdr"));
     }
 
     #[test]

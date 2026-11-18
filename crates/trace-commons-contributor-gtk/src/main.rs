@@ -74,6 +74,16 @@ fn main() -> anyhow::Result<()> {
             .map(Some)?,
         None => None,
     };
+    // On sample data (debug builds only) nothing reads the contributor's
+    // own state: the window's direct `ConfigStore` reads go to a throwaway
+    // directory unless one was named.
+    #[cfg(debug_assertions)]
+    let dir = match dir {
+        None if trace_commons_contributor_gtk::sample::requested() => {
+            Some(std::env::temp_dir().join(format!("trace-commons-sample-{}", std::process::id())))
+        }
+        dir => dir,
+    };
     // The daemon's `missions_enabled` switch, read once from its settings
     // file before any window, tray or accelerator exists: all of them list
     // screens from `ui::screens()`, and the default launch window has no
@@ -167,6 +177,13 @@ fn on_sigterm(quit: impl Fn() + 'static) -> gtk::glib::SourceId {
 }
 
 fn local_start(drivers: &Drivers) -> bool {
+    // A sample launch (debug builds only) opens the contribution window on
+    // the recorded set, never the local Insights window, which reads this
+    // machine's own sessions.
+    #[cfg(debug_assertions)]
+    if trace_commons_contributor_gtk::sample::requested() {
+        return false;
+    }
     // Realize smoke drivers exercise the connected shell (Worker and
     // desktop integration), including when its selected page is Insights.
     !drivers.exit_after_realize

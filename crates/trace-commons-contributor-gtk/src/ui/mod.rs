@@ -7,6 +7,7 @@
 
 pub(crate) mod account_change;
 pub mod appearance;
+pub mod armed_mark;
 pub mod balance;
 pub mod community_brand;
 pub(crate) mod consent_settings;
@@ -15,7 +16,12 @@ mod css_contract;
 pub mod edge_surfaces;
 mod first_run;
 mod first_run_terms;
+pub mod folder_handoff;
 pub mod funding;
+pub mod glass_feedback;
+pub mod glass_motion;
+pub mod hero_art;
+pub mod hero_card;
 pub mod history;
 pub(crate) mod history_detail;
 pub mod home;
@@ -29,6 +35,7 @@ pub mod omarchy;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
+pub mod popover_stack;
 pub mod preview;
 pub mod private_inference;
 pub(crate) mod projects_bulk;
@@ -40,6 +47,7 @@ pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
 pub(crate) mod terms_hold;
+pub mod tool_tile;
 pub mod update;
 pub mod wrap_row;
 
@@ -931,6 +939,7 @@ impl App {
             }
         });
         history::refresh(self);
+        home::refresh(self);
         private_inference::refresh(self);
         settings::refresh(self);
     }
