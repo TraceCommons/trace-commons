@@ -384,6 +384,9 @@ impl Shell {
             button.add_css_class("flat");
             // The chord and nothing else, in GTK's own words.
             button.set_tooltip_text(crate::ui::shortcuts::screen_accel_label(index).as_deref());
+            // Named by its title: the child is a box, so without a name of
+            // its own a screen reader reads the tooltip's chord instead.
+            button.update_property(&[gtk::accessible::Property::Label(tab.title())]);
             if let Some((_, first)) = tab_buttons.first() {
                 button.set_group(Some(first));
             }
@@ -1518,6 +1521,30 @@ mod tests {
         }
     }
 
+    /// Each tab button is named by its title. A tab's child is a box, not
+    /// a label, so without a name of its own a screen reader falls back to
+    /// the tooltip and reads the chord ("Ctrl+1").
+    #[test]
+    fn each_tab_is_named_by_its_title() {
+        let code = include_str!("shell.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("the module has a body before its tests");
+        let strip = code
+            .split("for (index, tab) in Tab::ALL")
+            .nth(1)
+            .expect("the strip builds one button per tab")
+            .split("tab_buttons.push")
+            .next()
+            .unwrap();
+        assert!(
+            strip.contains(
+                "button.update_property(&[gtk::accessible::Property::Label(tab.title())])"
+            ),
+            "a tab button has no accessible name of its own"
+        );
+    }
+
     // --- Mounted: the widgets, on a display ------------------------------
 
     use super::*;
@@ -1685,6 +1712,20 @@ mod tests {
             "the end controls are last"
         );
         assert!(at(shell.settings_button.upcast_ref()) < row.len() - 1);
+        mounted.window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_tabs_are_named_by_their_titles() {
+        let mounted = mounted(false);
+        for (tab, button) in &mounted.shell.tabs {
+            assert!(
+                gtk::test_accessible_has_property(button, gtk::AccessibleProperty::Label),
+                "the {} tab has no accessible name, so it is read as its chord",
+                tab.title()
+            );
+        }
         mounted.window.close();
     }
 
