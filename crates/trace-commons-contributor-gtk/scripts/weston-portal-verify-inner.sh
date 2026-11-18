@@ -173,7 +173,7 @@ else
     ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
     ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
     ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
-    ui::service_dialog::tests::mounted_a_narrow_command_wraps_only_between_tokens \
+    ui::service_dialog::tests::mounted_a_narrow_command_fits_and_wraps_only_between_runs \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \

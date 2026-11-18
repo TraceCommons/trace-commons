@@ -104,17 +104,49 @@ pub(super) fn set_command(label: &gtk::Label, command: &str) {
     label.set_attributes(Some(&command_attributes(command)));
 }
 
-/// No hyphen drawn at a break, and no break inside a shell token.
+/// No hyphen drawn at a break, and no break inside a shell token except
+/// after a `/` in an unquoted one ([`held_ranges`]).
 fn command_attributes(command: &str) -> gtk::pango::AttrList {
     let attributes = gtk::pango::AttrList::new();
     attributes.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
-    for range in shell_token_ranges(command) {
+    for range in held_ranges(command) {
         let mut held = gtk::pango::AttrInt::new_allow_breaks(false);
         held.set_start_index(range.start as u32);
         held.set_end_index(range.end as u32);
         attributes.insert(held);
     }
     attributes
+}
+
+/// The byte ranges of `command` a break is held back over. A quoted or
+/// escaped token is held whole: a break inside it reads as two arguments.
+/// An unquoted token is held between its slashes, so a long URL or path
+/// can wrap after a `/` and a narrow window still fits it, while a unit
+/// name such as `trace-commons-contributor.service` never breaks at its
+/// hyphens. Each held run ends before a run of slashes and the next starts
+/// after it, so the slashes themselves sit outside every range.
+fn held_ranges(command: &str) -> Vec<std::ops::Range<usize>> {
+    let mut held = Vec::new();
+    for token in shell_token_ranges(command) {
+        let text = &command[token.clone()];
+        if text.contains(['\'', '"', '\\']) {
+            held.push(token);
+            continue;
+        }
+        let mut start = token.start;
+        for (at, c) in text.char_indices() {
+            if c == '/' {
+                if start < token.start + at {
+                    held.push(start..token.start + at);
+                }
+                start = token.start + at + 1;
+            }
+        }
+        if start < token.end {
+            held.push(start..token.end);
+        }
+    }
+    held
 }
 
 /// The byte ranges of `command`'s shell tokens: runs outside whitespace,
@@ -676,11 +708,11 @@ mod tests {
                 })
                 .map(|a| (a.start_index(), a.end_index()))
                 .collect();
-            let tokens: Vec<(u32, u32)> = shell_token_ranges(command)
+            let ranges: Vec<(u32, u32)> = held_ranges(command)
                 .into_iter()
                 .map(|r| (r.start as u32, r.end as u32))
                 .collect();
-            assert_eq!(held, tokens, "{command}");
+            assert_eq!(held, ranges, "{command}");
             assert!(attributes.attributes().iter().any(|a| {
                 a.type_() == gtk::pango::AttrType::InsertHyphens
                     && a.downcast_ref::<gtk::pango::AttrInt>()
@@ -689,11 +721,71 @@ mod tests {
         }
     }
 
-    /// Laid out narrow, every line of a command starts at a token: Pango
-    /// breaks it at the spaces between tokens and nowhere else.
+    /// The install command's URL may wrap after each `/`, so dialog A can
+    /// be narrow; a quoted token and a unit name stay whole (#2171 review
+    /// 2, finding 2).
+    #[test]
+    fn a_long_unquoted_token_may_break_after_a_slash() {
+        use trace_commons_contributor::channel::HOST_CLI;
+        let held = |command: &str| -> Vec<String> {
+            held_ranges(command)
+                .into_iter()
+                .map(|range| command[range].to_owned())
+                .collect()
+        };
+        let install = held(SERVICE_INSTALL_COMMAND);
+        let url = SERVICE_INSTALL_COMMAND
+            .split_whitespace()
+            .find(|token| token.starts_with("https://"))
+            .expect("the installer URL");
+        let url_held: Vec<&str> = url.split('/').filter(|part| !part.is_empty()).collect();
+        assert_eq!(
+            url_held,
+            [
+                "https:",
+                "raw.githubusercontent.com",
+                "TraceCommons",
+                "trace-commons",
+                "main",
+                "scripts",
+                "install.sh"
+            ]
+        );
+        let at = install
+            .iter()
+            .position(|part| part == "https:")
+            .expect("the URL's first run");
+        assert_eq!(&install[at..at + url_held.len()], url_held.as_slice());
+        // Quoted: one run, slashes and all.
+        assert!(
+            install.iter().any(|part| part == HOST_CLI),
+            "{HOST_CLI} split: {install:?}"
+        );
+        // A unit name has no slash: one run, hyphens held.
+        let unit = SERVICE_STATUS_COMMAND
+            .split_whitespace()
+            .last()
+            .expect("the unit");
+        assert!(held(SERVICE_STATUS_COMMAND).iter().any(|part| part == unit));
+        let host = trace_commons_contributor::daemon::service::host_folder_command("claude_source")
+            .expect("approved");
+        let host_held = held(&host);
+        assert_eq!(host_held[0], HOST_CLI);
+        assert_eq!(host_held.last().unwrap(), "\"claude_root=$PWD\"");
+        // A path's leading and trailing slashes and a run of slashes sit
+        // outside every run.
+        assert_eq!(held("ls /usr//bin/ x"), ["ls", "usr", "bin", "x"]);
+        assert!(held("/").is_empty());
+    }
+
+    /// Laid out narrow, every line of a command starts at a token, or after
+    /// a `/` in an unquoted one (`held_ranges`): Pango breaks it nowhere
+    /// else. At 360px no line runs past the edge, and the label asks for
+    /// no more than that, so dialog A can be that narrow (#2171 review 2,
+    /// finding 2).
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
-    fn mounted_a_narrow_command_wraps_only_between_tokens() {
+    fn mounted_a_narrow_command_fits_and_wraps_only_between_runs() {
         adw::init().expect("GTK display unavailable");
         let host = trace_commons_contributor::daemon::service::host_folder_command("claude_source")
             .expect("approved");
@@ -708,13 +800,18 @@ mod tests {
             assert!(draws_no_hyphen(&label));
             let starts: Vec<i32> = shell_token_ranges(command)
                 .into_iter()
+                .chain(held_ranges(command))
                 .map(|r| r.start as i32)
                 .collect();
-            for width in [60, 120, 200, 320] {
+            let layout_at = |width: i32| {
                 let layout = label.create_pango_layout(Some(command));
                 layout.set_attributes(label.attributes().as_ref());
                 layout.set_wrap(label.wrap_mode());
                 layout.set_width(width * gtk::pango::SCALE);
+                layout
+            };
+            for width in [60, 120, 200, 320, 360] {
+                let layout = layout_at(width);
                 let lines: Vec<i32> = layout.lines().iter().map(|l| l.start_index()).collect();
                 assert!(
                     lines.len() > 1 || width >= 320,
@@ -723,10 +820,20 @@ mod tests {
                 for start in lines {
                     assert!(
                         starts.contains(&start),
-                        "{command} at {width}px breaks inside a token at byte {start}"
+                        "{command} at {width}px breaks inside a run at byte {start}"
                     );
                 }
             }
+            for line in layout_at(360).lines() {
+                let (_, logical) = line.extents();
+                assert!(
+                    logical.width() <= 360 * gtk::pango::SCALE,
+                    "{command}: a line is {}px wide at 360px",
+                    logical.width() / gtk::pango::SCALE
+                );
+            }
+            let (minimum, _, _, _) = label.measure(gtk::Orientation::Horizontal, -1);
+            assert!(minimum <= 360, "{command}: the label needs {minimum}px");
         }
     }
 
