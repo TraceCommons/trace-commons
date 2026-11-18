@@ -30,6 +30,7 @@ pub mod private_inference;
 pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
+pub(crate) mod sent_training;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;

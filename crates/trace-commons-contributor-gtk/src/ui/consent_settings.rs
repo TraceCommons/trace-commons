@@ -947,12 +947,19 @@ fn toggle_scope(app: &Rc<App>, scope: &ConsentScope, granted: bool) {
     app.call(
         "set_consent_scopes",
         set_scopes_params(&scopes),
-        |app, result| {
+        move |app, result| {
             let card = &app.settings.uses;
             match scopes_confirmed(&result) {
                 Some(confirmed) => {
+                    // Train coding models just turned on: offer it once on
+                    // the traces already sent without it, as the Mac's
+                    // `offerSentTracesTraining` does after a confirmed write.
+                    let offer = super::sent_training::turns_on(&reported, &confirmed);
                     if let Some((_, list)) = card.reported.borrow_mut().as_mut() {
                         *list = confirmed;
+                    }
+                    if offer {
+                        super::sent_training::offer_after_turn_on(app);
                     }
                 }
                 None => {
