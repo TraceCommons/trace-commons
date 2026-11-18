@@ -184,6 +184,9 @@ else
     ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
     ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
     ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
+    ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
+    ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
+    ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \

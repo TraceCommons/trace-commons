@@ -50,6 +50,19 @@ command: trace-commons-shell
 finish-args:
   # GTK 4 display access. Wayland first, X11 as the fallback the runtime
   # itself recommends; no direct device access is needed.
+  #
+  # These two also carry KWin's blur behind the glass panes
+  # (`ui::glass_backdrop`), which needs no grant of its own:
+  # - Wayland: org_kde_kwin_blur_manager is an ordinary global on the
+  #   compositor socket this grants, read through a second registry on
+  #   GTK's own connection. Not checked: whether KWin hides it from a
+  #   client Flatpak tags with wp_security_context_v1. If it does, the
+  #   global is absent and the window stays painted, the fail-safe.
+  # - X11 (only when there is no Wayland): a second, pure-Rust X connection
+  #   to the same DISPLAY, authorised by the XAUTHORITY Flatpak sets up for
+  #   GTK's own.
+  # No D-Bus name is needed: the grant is read from what the compositor
+  # offers, never from KWin's effects interface.
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc

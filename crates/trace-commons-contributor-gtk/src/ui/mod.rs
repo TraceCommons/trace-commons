@@ -13,6 +13,7 @@ mod css_contract;
 mod first_run;
 mod first_run_terms;
 pub mod funding;
+pub mod glass_backdrop;
 pub mod history;
 pub mod home;
 pub mod insights;

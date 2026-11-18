@@ -827,6 +827,16 @@ impl Shell {
         inspector_pane.append(&inspector_stack);
 
         let root = ThreePane::new(&main, &map_pane, &inspector_pane);
+        // KDE's blur behind the panes, where it is granted; painted
+        // everywhere else (`ui::glass_backdrop`).
+        crate::ui::glass_backdrop::follow(
+            window,
+            vec![
+                main.clone().upcast(),
+                map_pane.clone().upcast(),
+                inspector_pane.clone().upcast(),
+            ],
+        );
 
         // --- The person's kept choices ---------------------------------
         let mut prefs = PanePrefs::load();
@@ -2746,6 +2756,118 @@ mod tests {
         // A border would grow the pane by 2 each way on the next frame.
         pump_until(|| measure(&pane) != plain);
         assert_eq!(measure(&pane), plain);
+    }
+
+    /// The window's pixels at `points` (window coordinates), rendered from
+    /// its widget tree, as premultiplied B, G, R, A.
+    fn window_pixels(window: &adw::ApplicationWindow, points: &[(i32, i32)]) -> Vec<[u8; 4]> {
+        let (width, height) = (window.width(), window.height());
+        let paintable = gtk::WidgetPaintable::new(Some(window));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+        let node = snapshot.to_node().expect("a render node");
+        let renderer = gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface"))
+            .expect("a renderer");
+        // The window's own box: the shadow outside it is not the window.
+        let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+        let texture = renderer.render_texture(&node, Some(&viewport));
+        renderer.unrealize();
+        let stride = texture.width() as usize * 4;
+        let mut pixels = vec![0u8; stride * texture.height() as usize];
+        texture.download(&mut pixels, stride);
+        points
+            .iter()
+            .map(|&(x, y)| {
+                let at = y as usize * stride + x as usize * 4;
+                [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+            })
+            .collect()
+    }
+
+    /// A point in the gap between the main pane and the map pane, and one
+    /// inside the map pane clear of its rounded corners, in window
+    /// coordinates.
+    fn gap_and_pane(mounted: &Mounted) -> ((i32, i32), (i32, i32)) {
+        let mut all = Vec::new();
+        descendants(mounted.shell.root.upcast_ref(), &mut all);
+        let panes: Vec<gtk::graphene::Rect> = all
+            .iter()
+            .filter(|widget| widget.has_css_class("tc-glass-pane"))
+            .filter_map(|pane| pane.compute_bounds(&mounted.window))
+            .collect();
+        assert_eq!(panes.len(), 3, "the three panes are shown");
+        let (main, map) = (&panes[0], &panes[1]);
+        let gap_x = ((main.x() + main.width() + map.x()) / 2.0) as i32;
+        let middle = (main.y() + main.height() / 2.0) as i32;
+        assert!(
+            map.x() - (main.x() + main.width()) >= 4.0,
+            "a gap between the panes: {main:?} {map:?}"
+        );
+        let pane = (
+            (map.x() + 30.0) as i32,
+            (map.y() + map.height() - 30.0) as i32,
+        );
+        ((gap_x, middle), pane)
+    }
+
+    /// Weston offers no `org_kde_kwin_blur_manager`, so the probe finds no
+    /// grant and the window stays painted: its gaps are opaque.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_weston_offers_no_blur_so_the_window_stays_painted() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        let gear = mounted.shell.settings_button.clone();
+        pump_until(|| gear.width() == 28);
+        let display = gtk::prelude::WidgetExt::display(&mounted.window);
+        let capability = crate::ui::glass_backdrop::probe_capability(&display);
+        assert_eq!(
+            capability.backend,
+            crate::ui::glass_backdrop::Backend::Wayland
+        );
+        assert!(!capability.granted, "{capability:?}");
+        assert!(!crate::ui::style::is_translucent());
+        let (gap, pane) = gap_and_pane(&mounted);
+        let pixels = window_pixels(&mounted.window, &[gap, pane]);
+        assert_eq!(pixels[0][3], 255, "gap {pixels:?}");
+        assert_eq!(pixels[1][3], 255, "pane {pixels:?}");
+        mounted.window.close();
+    }
+
+    /// The translucent sheet, as GTK applies it: the gaps clear (the Mac's
+    /// window draws no background), the panes the material stack's alpha
+    /// (`tc_glass_pane`, 0.7491 light, 0.745 dark), and back to opaque when
+    /// it is taken off. Loaded by hand: weston grants no blur.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        let gear = mounted.shell.settings_button.clone();
+        pump_until(|| gear.width() == 28);
+        let (gap, pane) = gap_and_pane(&mounted);
+        let window = mounted.window.clone();
+        // The window's own follower may load the painted sheet on its first
+        // frame, so keep asking until the translucent one is what draws.
+        pump_until(|| {
+            crate::ui::style::set_translucent(true);
+            window_pixels(&window, &[gap])[0][3] == 0
+        });
+        let pixels = window_pixels(&mounted.window, &[gap, pane]);
+        assert_eq!(pixels[0][3], 0, "gap {pixels:?}");
+        let expected = if adw::StyleManager::default().is_dark() {
+            0.745
+        } else {
+            0.7491
+        };
+        let alpha = f64::from(pixels[1][3]) / 255.0;
+        assert!((alpha - expected).abs() < 0.02, "pane {pixels:?}");
+        crate::ui::style::set_translucent(false);
+        pump_until(|| window_pixels(&window, &[gap])[0][3] == 255);
+        let pixels = window_pixels(&mounted.window, &[gap, pane]);
+        assert_eq!(pixels[0][3], 255, "gap {pixels:?}");
+        assert_eq!(pixels[1][3], 255, "pane {pixels:?}");
+        mounted.window.close();
     }
 
     /// Out of focus every fill drawn from the pane's ground dims with it
