@@ -630,7 +630,7 @@ impl Coordinator {
     fn render_uses(self: &Rc<Self>) {
         let copy = first_run_copy();
         let modes = trace_commons_contributor::project_copy::contribution_mode_copy();
-        let grant = consent_copy::automatic_contribution_copy(None);
+        let grant = self.grant_copy();
         let options = self.options.borrow().clone();
         let state = self.state.borrow().clone();
         clear(&self.uses_flow);
@@ -685,14 +685,17 @@ impl Coordinator {
             .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         heading.append(&eyebrow(copy.uses.sharing));
-        let detail = if state.sharing == Sharing::Automatic {
-            grant
-                .patterns_only
-                .or(grant.model_scrubbed)
-                .map(|s| [copy.uses.automatic_scope, s.scope, s.limit].join(" "))
-        } else {
-            Some(grant.path_ask_first_detail.to_owned()).filter(|d| !d.is_empty())
-        };
+        let detail = grant.as_ref().and_then(|grant| {
+            if state.sharing == Sharing::Automatic {
+                grant
+                    .patterns_only
+                    .clone()
+                    .or(grant.model_scrubbed.clone())
+                    .map(|s| [copy.uses.automatic_scope, s.scope, s.limit].join(" "))
+            } else {
+                Some(grant.path_ask_first_detail.to_owned()).filter(|d| !d.is_empty())
+            }
+        });
         if let Some(detail) = detail {
             heading.append(&info(copy.uses.sharing, &detail));
         }
@@ -707,8 +710,12 @@ impl Coordinator {
             None => {}
         }
         self.uses_card.append(&ask);
-        if !grant.path_ask_first_title.is_empty() {
-            let line = body_label(grant.path_ask_first_title);
+        if let Some(title) = grant
+            .as_ref()
+            .map(|grant| grant.path_ask_first_title)
+            .filter(|title| !title.is_empty())
+        {
+            let line = body_label(title);
             line.add_css_class("tc-meta");
             self.uses_card.append(&line);
         }
@@ -1127,7 +1134,7 @@ impl Coordinator {
             &state,
             required_known,
             self.busy.get(),
-            sharing_available(&state),
+            sharing_available(&state, self.grant_copy().as_ref()),
         ));
     }
 
@@ -1338,7 +1345,7 @@ impl Coordinator {
                         &ready,
                         c.required().is_some(),
                         false,
-                        sharing_available(&ready),
+                        sharing_available(&ready, c.grant_copy().as_ref()),
                     )
                 {
                     c.start();
@@ -1543,6 +1550,15 @@ impl Coordinator {
             self.commit_start();
         }
     }
+    /// The core's words for this contributor's configuration, as the Mac
+    /// reads them (`consent_settings::automatic_copy_for`); `None` when it
+    /// cannot be read, and then nothing is disclosed on a guess.
+    fn grant_copy(&self) -> Option<consent_copy::AutomaticGrantCopy> {
+        self.app
+            .upgrade()
+            .and_then(|app| super::consent_settings::automatic_copy_for(&app.worker.dir))
+    }
+
     fn disclose_scrub(self: &Rc<Self>) {
         // The core's words for this contributor's configuration, as the
         // Mac reads them; an unreadable configuration discloses nothing.
@@ -1950,12 +1966,11 @@ impl Coordinator {
     }
 }
 
-/// The core's words for the sharing path chosen are all there.
-fn sharing_available(state: &State) -> bool {
-    uses::sharing_available(
-        state.sharing,
-        &consent_copy::automatic_contribution_copy(None),
-    )
+/// The core's words for the sharing path chosen are all there, from
+/// `grant`, this contributor's configuration's words; `None`, an unreadable
+/// configuration, offers neither path.
+fn sharing_available(state: &State, grant: Option<&consent_copy::AutomaticGrantCopy>) -> bool {
+    grant.is_some_and(|grant| uses::sharing_available(state.sharing, grant))
 }
 
 fn parse_options(result: Result<Value, String>) -> Option<Vec<ScopeOption>> {
