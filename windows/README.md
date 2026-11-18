@@ -47,6 +47,23 @@ dotnet build windows/src/TraceCommons.App/TraceCommons.App.csproj -p:Platform=x6
 `TC_FFI_LIB_DIR` overrides where the cdylib is looked for. It defaults to
 `target/debug` for the tests and `target/release` for the app.
 
+### Recorded samples and the parity gallery
+
+A Debug build reads the macOS app's recorded samples instead of a daemon when
+`TRACE_COMMONS_SAMPLE` is set (`src/TraceCommons.Interop/SampleDaemon.cs`), with
+the Mac's names and fallbacks: unset is the daemon, empty is `normalDay`, an
+unknown name is `normalDay` plus one log line, and `coreDown` fails every call.
+Every method without a recording is refused as `sample-unrecorded`. In sample
+mode the app never creates the state directory, starts or attaches a daemon or
+takes the lock, and opens the contribution queue rather than local Insights or
+first run. Release builds compile the client out.
+
+`scripts/win-capture-samples.ps1` runs on the Windows test box and captures each
+set in light and dark through `win-capture.ps1`, named
+`<set>-<tab>-<panes>-<appearance>.png` so `scripts/parity/gallery.sh` pairs them
+with the Mac's. Until the window has the Mac's tabs, each launch yields
+`<set>-traces-main-<appearance>.png`.
+
 ## Things the ABI requires that are easy to get wrong
 
 All four are enforced in `TcDaemon`; they are listed here because each one
