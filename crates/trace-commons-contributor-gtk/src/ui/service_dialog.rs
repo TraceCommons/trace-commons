@@ -78,23 +78,77 @@ pub struct Parts {
     pub failed: gtk::Box,
 }
 
-/// A command as a person reads and selects it: monospace, broken at any
-/// character when it must wrap, and never with a hyphen drawn at the break.
-/// Pango hyphenates a word it breaks unless told not to, and a command is
-/// not prose: `trace-commons-contribut-` / `or.service` names a unit that
-/// does not exist, and someone typing it from the screen types the hyphen.
+/// A command as a person reads and selects it: monospace, broken only
+/// between its shell tokens when it must wrap, and never with a hyphen
+/// drawn at the break. Pango hyphenates a word it breaks unless told not
+/// to, and a command is not prose: `trace-commons-contribut-` /
+/// `or.service` names a unit that does not exist, and someone typing it
+/// from the screen types the hyphen. A break inside a quoted token reads
+/// as two arguments. Set the text with [`set_command`].
 pub(super) fn command_label(command: &str) -> gtk::Label {
-    let attributes = gtk::pango::AttrList::new();
-    attributes.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
-    gtk::Label::builder()
-        .attributes(&attributes)
-        .label(command)
+    let label = gtk::Label::builder()
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::Char)
+        .wrap_mode(gtk::pango::WrapMode::Word)
         .selectable(true)
         .xalign(0.0)
         .css_classes(["monospace"])
-        .build()
+        .build();
+    set_command(&label, command);
+    label
+}
+
+/// Show `command` in a [`command_label`]: the text as it is, byte for
+/// byte (Copy reads it back), and its break points with it.
+pub(super) fn set_command(label: &gtk::Label, command: &str) {
+    label.set_label(command);
+    label.set_attributes(Some(&command_attributes(command)));
+}
+
+/// No hyphen drawn at a break, and no break inside a shell token.
+fn command_attributes(command: &str) -> gtk::pango::AttrList {
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
+    for range in shell_token_ranges(command) {
+        let mut held = gtk::pango::AttrInt::new_allow_breaks(false);
+        held.set_start_index(range.start as u32);
+        held.set_end_index(range.end as u32);
+        attributes.insert(held);
+    }
+    attributes
+}
+
+/// The byte ranges of `command`'s shell tokens: runs outside whitespace,
+/// where whitespace inside single or double quotes, or after a backslash,
+/// belongs to the token.
+fn shell_token_ranges(command: &str) -> Vec<std::ops::Range<usize>> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for (at, c) in command.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if start.is_none() {
+            if c.is_whitespace() {
+                continue;
+            }
+            start = Some(at);
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            c if c.is_whitespace() && !single && !double => {
+                tokens.push(start.take().unwrap_or(at)..at);
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = start {
+        tokens.push(start..command.len());
+    }
+    tokens
 }
 
 /// Whether `label` asks Pango to draw no hyphen where it breaks a word.
@@ -578,6 +632,100 @@ mod tests {
             );
             for label in &found {
                 assert!(draws_no_hyphen(label), "{dialog:?}: {}", label.label());
+            }
+        }
+    }
+
+    /// A command breaks only between its shell tokens: a quoted token is
+    /// one token, spaces inside it included (#2171 review, finding 8).
+    #[test]
+    fn a_command_breaks_only_between_shell_tokens() {
+        let command = "tc daemon settings --set \"claude_root=$PWD\"";
+        let tokens: Vec<&str> = shell_token_ranges(command)
+            .into_iter()
+            .map(|range| &command[range])
+            .collect();
+        assert_eq!(
+            tokens,
+            ["tc", "daemon", "settings", "--set", "\"claude_root=$PWD\""]
+        );
+        let quoted = "run  'a b'  \"c \\\" d\"e f";
+        let tokens: Vec<&str> = shell_token_ranges(quoted)
+            .into_iter()
+            .map(|range| &quoted[range])
+            .collect();
+        assert_eq!(tokens, ["run", "'a b'", "\"c \\\" d\"e", "f"]);
+        assert!(shell_token_ranges("").is_empty());
+        assert!(shell_token_ranges("   ").is_empty());
+
+        // The label holds a break back over each token, and never draws a
+        // hyphen; the text itself is the command, byte for byte.
+        for command in [
+            SERVICE_INSTALL_COMMAND,
+            SERVICE_STATUS_COMMAND,
+            "tc daemon settings --set \"claude_root=$PWD\"",
+        ] {
+            let attributes = command_attributes(command);
+            let held: Vec<(u32, u32)> = attributes
+                .attributes()
+                .iter()
+                .filter(|a| a.type_() == gtk::pango::AttrType::AllowBreaks)
+                .filter(|a| {
+                    a.downcast_ref::<gtk::pango::AttrInt>()
+                        .is_some_and(|v| v.value() == 0)
+                })
+                .map(|a| (a.start_index(), a.end_index()))
+                .collect();
+            let tokens: Vec<(u32, u32)> = shell_token_ranges(command)
+                .into_iter()
+                .map(|r| (r.start as u32, r.end as u32))
+                .collect();
+            assert_eq!(held, tokens, "{command}");
+            assert!(attributes.attributes().iter().any(|a| {
+                a.type_() == gtk::pango::AttrType::InsertHyphens
+                    && a.downcast_ref::<gtk::pango::AttrInt>()
+                        .is_some_and(|v| v.value() == 0)
+            }));
+        }
+    }
+
+    /// Laid out narrow, every line of a command starts at a token: Pango
+    /// breaks it at the spaces between tokens and nowhere else.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_a_narrow_command_wraps_only_between_tokens() {
+        adw::init().expect("GTK display unavailable");
+        let host = trace_commons_contributor::daemon::service::host_folder_command("claude_source")
+            .expect("approved");
+        for command in [
+            SERVICE_INSTALL_COMMAND,
+            SERVICE_STATUS_COMMAND,
+            host.as_str(),
+        ] {
+            let label = command_label("");
+            set_command(&label, command);
+            assert_eq!(label.label(), command);
+            assert!(draws_no_hyphen(&label));
+            let starts: Vec<i32> = shell_token_ranges(command)
+                .into_iter()
+                .map(|r| r.start as i32)
+                .collect();
+            for width in [60, 120, 200, 320] {
+                let layout = label.create_pango_layout(Some(command));
+                layout.set_attributes(label.attributes().as_ref());
+                layout.set_wrap(label.wrap_mode());
+                layout.set_width(width * gtk::pango::SCALE);
+                let lines: Vec<i32> = layout.lines().iter().map(|l| l.start_index()).collect();
+                assert!(
+                    lines.len() > 1 || width >= 320,
+                    "{command} at {width}: one line"
+                );
+                for start in lines {
+                    assert!(
+                        starts.contains(&start),
+                        "{command} at {width}px breaks inside a token at byte {start}"
+                    );
+                }
             }
         }
     }

@@ -236,7 +236,7 @@ impl ToolsScreen {
         match hint {
             Some(hint) => {
                 self.host_hint_line.set_label(hint.line);
-                self.host_hint_command.set_label(&hint.command);
+                super::service_dialog::set_command(&self.host_hint_command, &hint.command);
                 self.host_hint.set_visible(true);
             }
             None => self.host_hint.set_visible(false),

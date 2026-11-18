@@ -560,9 +560,6 @@ fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
     window.present();
 }
 
-/// The `cwd` a launch sends for a folder the portal mapped to its host
-/// path. `None` for a path that is not UTF-8: the wire carries a string, and
-/// a lossy one would name a different folder.
 /// Where Launch sends the folder it was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchRoute {
@@ -601,6 +598,9 @@ fn mapped_launch_proceeds(target: Option<bool>) -> bool {
     target == Some(true)
 }
 
+/// The `cwd` a launch sends for a folder the portal mapped to its host
+/// path. `None` for a path that is not UTF-8: the wire carries a string, and
+/// a lossy one would name a different folder.
 fn launch_cwd(host: &std::path::Path) -> Option<Value> {
     host.to_str().map(|cwd| json!(cwd))
 }
