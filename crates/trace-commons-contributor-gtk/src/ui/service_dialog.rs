@@ -496,7 +496,10 @@ mod tests {
         for dialog in [Dialog::Install, Dialog::Update] {
             let (parts, shown) = mounted(dialog);
             assert!(shown.iter().any(|s| s == words::START_FAILED), "{dialog:?}");
-            assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND), "{dialog:?}");
+            assert!(
+                shown.iter().any(|s| s == SERVICE_STATUS_COMMAND),
+                "{dialog:?}"
+            );
             parts.waiting.set_visible(true);
             show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
             assert!(!parts.failed.get_visible());

@@ -563,6 +563,44 @@ fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
 /// The `cwd` a launch sends for a folder the portal mapped to its host
 /// path. `None` for a path that is not UTF-8: the wire carries a string, and
 /// a lossy one would name a different folder.
+/// Where Launch sends the folder it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchRoute {
+    /// A switch-over is under way: where the launch would land is not
+    /// known, so nothing is sent.
+    Refuse,
+    /// Sent as it is.
+    AsIs,
+    /// A document-portal folder bound for the host daemon: sent as the
+    /// host folder it stands for, or not at all.
+    MapToHost,
+}
+
+/// [`LaunchRoute`] for `cwd`, from `target` (`Worker::declaration_target`:
+/// where a call made now would land), as `roots::declare_to_daemon`
+/// decides for a folder declaration. The snapshot the dialog opened with
+/// may predate a switch-over, so it is not asked.
+fn launch_route(
+    target: Option<bool>,
+    cwd: &std::path::Path,
+    doc_root: Option<&std::path::Path>,
+) -> LaunchRoute {
+    match target {
+        None => LaunchRoute::Refuse,
+        Some(on_host) if crate::document_portal::needs_mapping_in(cwd, on_host, doc_root) => {
+            LaunchRoute::MapToHost
+        }
+        Some(_) => LaunchRoute::AsIs,
+    }
+}
+
+/// Whether a folder mapped to its host path may still go: only while the
+/// window is on the host daemon once the portal has answered. A switch-over
+/// meanwhile would send a host path to the sandbox's daemon.
+fn mapped_launch_proceeds(target: Option<bool>) -> bool {
+    target == Some(true)
+}
+
 fn launch_cwd(host: &std::path::Path) -> Option<Value> {
     host.to_str().map(|cwd| json!(cwd))
 }
@@ -673,8 +711,8 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     let a = Rc::clone(app);
     let generations = snapshot["generations"].clone();
     // A folder from the sandboxed chooser is a document-portal path; a
-    // daemon on the host gets the folder it stands for, or no launch.
-    let daemon_on_host = snapshot["capabilities"]["daemon_on_host"] == true;
+    // daemon on the host gets the folder it stands for, or no launch
+    // (`launch_route`).
     let w = window.clone();
     content.append(&button("launch_short", move || {
         let Some(account) = accounts.get(picker.selected() as usize) else { return; };
@@ -700,7 +738,14 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
             ),
             None => action(a, "managed_launch_prepare", request, true),
         };
-        if crate::document_portal::needs_mapping(std::path::Path::new(&cwd), daemon_on_host) {
+        let route = launch_route(
+            a.worker.declaration_target(),
+            std::path::Path::new(&cwd),
+            crate::document_portal::doc_root().as_deref(),
+        );
+        if route == LaunchRoute::Refuse {
+            a.toast(&text("action_failed"));
+        } else if route == LaunchRoute::MapToHost {
             // One D-Bus round trip, off the GTK thread.
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
@@ -712,6 +757,9 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
             let a = Rc::clone(&a);
             gtk::glib::spawn_future_local(async move {
                 match rx.recv().await {
+                    Ok(Ok(_)) if !mapped_launch_proceeds(a.worker.declaration_target()) => {
+                        a.toast(&text("action_failed"))
+                    }
                     Ok(Ok(host)) => match launch_cwd(&host) {
                         Some(cwd) => {
                             request["cwd"] = cwd;
@@ -840,6 +888,35 @@ mod mounted_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Launch decides where a folder goes as a folder declaration does
+    /// (`roots::declare_to_daemon`): from where a call made now would land,
+    /// not from the snapshot the dialog opened with. Refused while a
+    /// switch-over is under way; a portal folder is mapped only for the
+    /// host daemon; and a mapped folder goes only if the window is still on
+    /// the host once the portal answers.
+    #[test]
+    fn launch_follows_the_switch_over_like_a_declaration() {
+        use super::LaunchRoute;
+        let root = std::path::Path::new("/run/user/1000/doc");
+        let portal = std::path::Path::new("/run/user/1000/doc/a1/project");
+        let host = std::path::Path::new("/home/u/project");
+        let route = |target, cwd| super::launch_route(target, cwd, Some(root));
+        assert_eq!(route(None, portal), LaunchRoute::Refuse);
+        assert_eq!(route(None, host), LaunchRoute::Refuse);
+        assert_eq!(route(Some(true), portal), LaunchRoute::MapToHost);
+        assert_eq!(route(Some(true), host), LaunchRoute::AsIs);
+        assert_eq!(route(Some(false), portal), LaunchRoute::AsIs);
+        assert_eq!(route(Some(false), host), LaunchRoute::AsIs);
+        assert_eq!(
+            super::launch_route(Some(true), portal, None),
+            LaunchRoute::AsIs
+        );
+        // After the portal answers.
+        assert!(super::mapped_launch_proceeds(Some(true)));
+        assert!(!super::mapped_launch_proceeds(Some(false)));
+        assert!(!super::mapped_launch_proceeds(None));
+    }
+
     /// A mapped host folder that is not UTF-8 is refused, never sent with
     /// U+FFFD in place of its bytes: the host daemon would open a session in
     /// a folder that does not exist, or in a different one.

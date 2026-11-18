@@ -455,10 +455,9 @@ mod mounted_tests {
             .filter_map(|w| w.downcast::<gtk::Label>().ok())
             .map(|l| l.text().to_string())
             .collect();
-        let command = trace_commons_contributor::daemon::service::host_folder_command(
-            "claude_source",
-        )
-        .unwrap();
+        let command =
+            trace_commons_contributor::daemon::service::host_folder_command("claude_source")
+                .unwrap();
         for text in [
             failed,
             "To add this folder anyway, open a terminal in it and run:",
@@ -472,7 +471,9 @@ mod mounted_tests {
             .filter_map(|w| w.downcast::<gtk::Button>().ok())
             .find(|b| {
                 b.label().as_deref()
-                    == Some(trace_commons_contributor::managed::copy::background_service::COPY_COMMAND)
+                    == Some(
+                        trace_commons_contributor::managed::copy::background_service::COPY_COMMAND,
+                    )
             })
             .expect("Copy command");
         copy.emit_clicked();

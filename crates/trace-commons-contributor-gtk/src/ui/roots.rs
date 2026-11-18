@@ -512,7 +512,10 @@ mod tests {
         // A folder outside the portal, or no portal mount.
         let host = serde_json::json!({"claude_source": {"mode": "watch", "path": "/home/u/x"}});
         assert_eq!(hint(&host, Some(4)), None);
-        assert_eq!(old_portal_hint(&one("claude_source"), None, || Some(4)), None);
+        assert_eq!(
+            old_portal_hint(&one("claude_source"), None, || Some(4)),
+            None
+        );
     }
 
     fn tools(watch_claude: bool) -> Tools {

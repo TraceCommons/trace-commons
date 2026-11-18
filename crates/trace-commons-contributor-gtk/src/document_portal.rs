@@ -80,10 +80,9 @@ pub fn host_path_with(
 }
 
 /// Whether [`host_path`] would ask the portal: only for a path inside its
-/// mount, sent to a daemon on the host.
-pub fn needs_mapping(path: &Path, daemon_on_host: bool) -> bool {
-    let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
-    daemon_on_host && root.is_some_and(|root| split_doc_path(path, &root).is_some())
+/// mount at `doc_root`, sent to a daemon on the host.
+pub fn needs_mapping_in(path: &Path, daemon_on_host: bool, doc_root: Option<&Path>) -> bool {
+    daemon_on_host && doc_root.is_some_and(|root| split_doc_path(path, root).is_some())
 }
 
 /// [`host_path_with`] against the real portal. Blocking: one D-Bus round

@@ -278,7 +278,11 @@ Nothing is declared while a switch-over is under way: a reopen queued ahead
 of a declaration replaces the backend first, so until the window has
 recorded the reopen's attachment (`Worker::declaration_target`), where a
 declaration would land is unknown and the screen shows the same "couldn't
-be saved" line.
+be saved" line. Launch decides the same way, from where a call made now
+would land rather than from the session snapshot its dialog opened with:
+during a switch-over it is refused with the existing "That didn't work." toast,
+and a folder mapped to its host path goes only if the window is still on
+the host daemon when the portal answers.
 
 A document portal below interface version 5 (GNOME 46's) has no
 `GetHostPaths`, so no chooser folder outside the grants can be mapped (owner,
