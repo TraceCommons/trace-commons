@@ -89,8 +89,12 @@ the main window never moved, kept above or stuck, from before the first
 the panel near a press; focus given back from the rail; disable undoing
 everything; re-enable and the client's replay; `Release`. Each step polls
 for what it expects up to a deadline instead of sleeping a fixed time.
-The marker version (interface version 3) has been run on GNOME Shell 51.1
-(Arch). The title-matching version before it also ran on GNOME Shell 46.0
-(Ubuntu 24.04), where it failed until the extension placed a window again
-once shown; this version has not been run on 46. Shell 47 to 50 are listed
+The title-matching version before this one (interface version 2) ran on
+GNOME Shell 51.1 (Arch) and on GNOME Shell 46.0 (Ubuntu 24.04), where it
+failed until the extension placed a window again once shown. The marker
+version (interface version 3) has not yet been run on a real shell; a
+probe on GNOME Shell 51.1 confirmed what it relies on: Mutter reports the
+window's object path and unique bus name for GTK application windows of an
+application registered with `NON_UNIQUE`, only after `window-created`, and
+the window's actions can be listed at that path. Shell 47 to 50 are listed
 in `metadata.json` on the strength of the APIs used, all present since 45.
