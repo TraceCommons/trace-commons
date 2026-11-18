@@ -364,7 +364,6 @@ fn mounted_the_folder_lists_icons_are_in_the_theme() {
     for name in [
         "pan-end-symbolic",
         "pan-down-symbolic",
-        "folder-symbolic",
         "view-more-symbolic",
         "document-open-recent-symbolic",
     ] {

@@ -98,6 +98,14 @@ impl Inspector {
         self.render(app);
     }
 
+    /// Redraw for a read only the summary draws from: only while the
+    /// summary is what shows ([`redraws_for_summary_read`]).
+    pub fn render_summary(&self, app: &Rc<App>) {
+        if redraws_for_summary_read(&self.selection()) {
+            self.render(app);
+        }
+    }
+
     pub fn render(&self, app: &Rc<App>) {
         let entries = app.entries.borrow();
         let projects = app.projects.borrow();
@@ -210,9 +218,17 @@ fn heading(text: impl AsRef<str>) -> gtk::Label {
     label
 }
 
+/// Whether a read only the summary draws from (`tool_destinations`,
+/// `history_rollup`, `commons_credit_summary`) redraws the inspector:
+/// only while nothing is selected, so a review card being read is not
+/// rebuilt under the reader on every daemon event.
+pub fn redraws_for_summary_read(selection: &Selection) -> bool {
+    *selection == Selection::None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Selection;
+    use super::{Selection, redraws_for_summary_read};
 
     use crate::model::QueueEntry;
 
@@ -285,5 +301,37 @@ mod tests {
             Selection::None
         );
         assert_eq!(selection.resolve(&[entry("a", "p1", "pending")]), selection);
+    }
+
+    /// The summary's reads redraw the inspector only while it shows the
+    /// summary; a selected folder or trace keeps its card.
+    #[test]
+    fn a_summary_read_redraws_only_the_summary() {
+        assert!(redraws_for_summary_read(&Selection::None));
+        assert!(!redraws_for_summary_read(&Selection::Folder("p".into())));
+        assert!(!redraws_for_summary_read(&Selection::Session("e".into())));
+        let refresh = include_str!("../mod.rs");
+        for read in [
+            "\"tool_destinations\"",
+            "\"history_rollup\"",
+            "\"commons_credit_summary\"",
+        ] {
+            let at = refresh.find(read).expect(read);
+            // The call's statement: up to the next one at its indent.
+            let rest = &refresh[at..];
+            let end = rest
+                .match_indices("\n        ")
+                .map(|(i, _)| i)
+                .find(|&i| {
+                    rest[i + 9..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !" })".contains(c))
+                })
+                .expect(read);
+            let call = &rest[..end];
+            assert!(call.contains("inspector.render_summary(app)"), "{read}");
+            assert!(!call.contains("inspector.render(app)"), "{read}");
+        }
     }
 }

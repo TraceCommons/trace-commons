@@ -228,6 +228,14 @@ pub fn withheld_note(withheld: &str, eligible: u64) -> String {
     )
 }
 
+/// How many traces a folder's Submit leaves behind, for its withheld line
+/// (`GroupSubmitOffer.withheldLine`).
+/// With no count from the daemon there is no eligibility question and no
+/// gap to explain, whatever Submit's own count (`sends`) says.
+pub fn withheld_count(waiting: u64, contributable: Option<u64>) -> u64 {
+    contributable.map_or(0, |eligible| waiting.saturating_sub(eligible))
+}
+
 /// The folder's Automatic switch (`automaticSwitch`): on for Automatic, off
 /// for Ask, none for a folder it cannot switch (Never, or a mode the core
 /// does not list). Traces with no project draw a switch that stays off.
@@ -732,8 +740,10 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
                         ProjectMode::Ask
                     },
                 );
-                // The switch shows the daemon's answer, drawn on the
-                // read that follows the write, never the press.
+                // The switch's state (its trough) stays the daemon's: it
+                // is set only by the read that follows the write and
+                // redraws the row. GTK moves the knob with the press, so
+                // while a confirmation is open the knob leads the trough.
                 glib::Propagation::Stop
             });
             frame.trailing.append(&switch);
@@ -802,7 +812,7 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
     // leaves behind, drawn once.
     let mut notes = folder_notes(folder);
     if !ignored {
-        let withheld = crate::copy::group_withheld_line(waiting.saturating_sub(sends));
+        let withheld = crate::copy::group_withheld_line(withheld_count(waiting, contributable));
         if !withheld.is_empty() {
             notes.push(withheld_note(&withheld, sends));
         }
@@ -991,8 +1001,13 @@ mod tests {
         );
         // The chevron's column, then the row menu's, each the first frame
         // after its control.
+        // The chevron's column is the frame on the `Group` that holds the
+        // chevron, or `Color.clear` on a row without one: read past
+        // `Color.clear` on purpose, never off the chevron's own wider tap
+        // target (`chevronTarget`), which comes first.
         let chevron = &LIST_ROW[LIST_ROW.find("chevron.right").unwrap()..];
-        assert_eq!(size::CHEVRON, mac_number(chevron, ".frame(width:"));
+        let column = &chevron[chevron.find("Color.clear").unwrap()..];
+        assert_eq!(size::CHEVRON, mac_number(column, ".frame(width:"));
         let kebab = &LIST_ROW[LIST_ROW.find("GlassKebab(menuLabel").unwrap()..];
         assert_eq!(size::KEBAB, mac_number(kebab, ".frame(width:"));
         assert_eq!(size::TRAILING, mac_number(LIST_ROW, ".padding(.trailing,"));
@@ -1320,6 +1335,18 @@ mod tests {
         assert!(row_offers_send(&e, false));
         assert!(!row_offers_send(&e, true), "never under an ignored folder");
         assert_eq!(ineligible_line(&entry("b", "p")), None);
+    }
+
+    /// The withheld line is the Mac's (`groupSubmit`): with no count from
+    /// the daemon there is no eligibility question and no gap to explain,
+    /// even where held traces keep Submit's own count below the waiting
+    /// one; with a count, the gap is the daemon's.
+    #[test]
+    fn the_withheld_line_needs_the_daemons_count() {
+        assert_eq!(withheld_count(3, None), 0);
+        assert_eq!(withheld_count(3, Some(1)), 2);
+        assert_eq!(withheld_count(3, Some(3)), 0);
+        assert_eq!(withheld_count(2, Some(5)), 0);
     }
 
     /// `test_sessionRowsShowTheirTool`: each trace's own tool's tile, the

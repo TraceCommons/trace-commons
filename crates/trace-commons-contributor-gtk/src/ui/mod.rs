@@ -904,7 +904,7 @@ impl App {
         self.call("tool_destinations", serde_json::json!({}), |app, result| {
             app.shell.map.set_destinations(result.as_ref().ok());
             app.shell.map.render(app);
-            app.shell.inspector.render(app);
+            app.shell.inspector.render_summary(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -935,7 +935,7 @@ impl App {
             });
             app.home.render_rollup(home_rollup.as_ref());
             *app.summary_rollup.borrow_mut() = home_rollup;
-            app.shell.inspector.render(app);
+            app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
             if let Ok(Ok(rollup)) = result {
                 *app.rollup.borrow_mut() = rollup;
@@ -953,7 +953,7 @@ impl App {
                 *app.credit_condition.borrow_mut() = result
                     .ok()
                     .and_then(|value| monitor::summary::pending_condition(&value));
-                app.shell.inspector.render(app);
+                app.shell.inspector.render_summary(app);
             },
         );
         history::refresh(self);
