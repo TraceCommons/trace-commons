@@ -19,6 +19,27 @@ pub use crate::channel::{
     SERVICE_INSTALL_COMMAND, SERVICE_INSTALL_GUIDE_URL, SERVICE_STATUS_COMMAND,
 };
 
+/// The command that declares a folder to the host daemon from a terminal
+/// opened in that folder, for a tool whose `set_settings` key is
+/// `settings_key`: the copy-only fallback when a sandboxed window cannot
+/// learn the host path of a folder the chooser handed it (a document portal
+/// without `GetHostPaths`). Fixed text: the folder is the terminal's `$PWD`,
+/// expanded by the person's shell, never a path from this process, which
+/// only holds the portal's. `None` for a tool `daemon settings --set` cannot
+/// declare: only Claude Code and Codex take a bare path
+/// (`claude_root`, `codex_root`); the others need a declaration object.
+pub fn host_folder_command(settings_key: &str) -> Option<String> {
+    let path_key = match settings_key {
+        "claude_source" => "claude_root",
+        "codex_source" => "codex_root",
+        _ => return None,
+    };
+    Some(format!(
+        "{} daemon settings --set \"{path_key}=$PWD\"",
+        crate::channel::HOST_CLI
+    ))
+}
+
 /// The `hello` key that carries [`SERVICE_LEVEL`].
 pub const HELLO_SERVICE_LEVEL_KEY: &str = "service_level";
 
@@ -374,6 +395,36 @@ mod tests {
             SERVICE_INSTALL_GUIDE_URL,
             "https://docs.tracecommons.ai/cli/quickstart/"
         );
+    }
+
+    /// The folder command: this channel's CLI, the tool's path key, the
+    /// terminal's own folder, and nothing for a tool that needs an object.
+    #[test]
+    fn the_host_folder_command_declares_the_terminals_folder() {
+        let cli = crate::channel::HOST_CLI;
+        assert_eq!(
+            host_folder_command("claude_source").as_deref(),
+            Some(format!("{cli} daemon settings --set \"claude_root=$PWD\"").as_str())
+        );
+        assert_eq!(
+            host_folder_command("codex_source").as_deref(),
+            Some(format!("{cli} daemon settings --set \"codex_root=$PWD\"").as_str())
+        );
+        for key in [
+            "gemini_source",
+            "cline_source",
+            "opencode_source",
+            "trajectory_source",
+            "claude_root",
+            "",
+        ] {
+            assert_eq!(host_folder_command(key), None, "{key}");
+        }
+        #[cfg(not(feature = "near-ai-staging"))]
+        assert_eq!(cli, "\"$HOME/.local/bin/near-ai\"");
+        #[cfg(feature = "near-ai-staging")]
+        assert_eq!(cli, "\"$HOME/.local/bin/near-ai-staging\"");
+        assert!(SERVICE_INSTALL_COMMAND.contains(&format!("&& {cli} daemon install &&")));
     }
 
     /// Whatever the channel: the commands name this build's unit, and the

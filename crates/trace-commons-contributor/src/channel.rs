@@ -131,6 +131,7 @@ mod values {
     pub const SERVICE_STATUS_COMMAND: &str =
         "systemctl --user status trace-commons-contributor.service";
     pub const SERVICE_INSTALL_GUIDE_URL: &str = "https://docs.tracecommons.ai/cli/quickstart/";
+    pub const HOST_CLI: &str = "\"$HOME/.local/bin/near-ai\"";
 }
 
 #[cfg(feature = "near-ai-staging")]
@@ -197,6 +198,7 @@ mod values {
         "systemctl --user status trace-commons-contributor-staging.service";
     /// Staging has no docs site; its installer points testers here.
     pub const SERVICE_INSTALL_GUIDE_URL: &str = "https://github.com/TraceCommons/trace-commons/blob/main/docs/operator/staging-tester-guide.md";
+    pub const HOST_CLI: &str = "\"$HOME/.local/bin/near-ai-staging\"";
 }
 
 /// `production` or `staging`.
@@ -344,6 +346,10 @@ pub const SERVICE_INSTALL_COMMAND: &str = values::SERVICE_INSTALL_COMMAND;
 pub const SERVICE_STATUS_COMMAND: &str = values::SERVICE_STATUS_COMMAND;
 /// "Open install guide".
 pub const SERVICE_INSTALL_GUIDE_URL: &str = values::SERVICE_INSTALL_GUIDE_URL;
+/// The CLI the installer puts on the host, as [`SERVICE_INSTALL_COMMAND`]
+/// runs it: by absolute path, double-quoted so `$HOME` expands. See
+/// `daemon::service::host_folder_command`.
+pub const HOST_CLI: &str = values::HOST_CLI;
 
 /// What `--version` adds after the build identity: the channel, so the
 /// macOS bundle scripts can check the bundled CLI against the bundle's

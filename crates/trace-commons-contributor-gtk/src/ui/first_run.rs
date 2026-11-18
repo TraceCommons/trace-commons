@@ -1852,10 +1852,13 @@ impl Coordinator {
             // its host folder, or not at all.
             let weak = Rc::downgrade(self);
             let generation = self.generation.get();
-            super::roots::declare_to_daemon(&app, params, move |_, declared| {
+            super::roots::declare_to_daemon(&app, params, move |_, declared, hint| {
                 let Some(c) = weak.upgrade().filter(|c| c.valid(generation)) else {
                     return;
                 };
+                if let Some(screen) = c.tools_screen.borrow().as_ref() {
+                    screen.show_host_hint(hint.as_ref());
+                }
                 let outcome = match declared {
                     Some((sent, Ok(value)))
                         if crate::first_run::acknowledged(

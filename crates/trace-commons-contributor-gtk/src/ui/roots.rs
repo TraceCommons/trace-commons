@@ -28,6 +28,8 @@ use adw::prelude::*;
 use trace_commons_contributor::daemon::settings::SourceDeclaration;
 use trace_commons_contributor::source::discovery::{self, SourceCandidate};
 
+use trace_commons_contributor::managed::copy::host_folder;
+
 use crate::copy;
 use crate::first_run::tools::{Found, ToolAnswer, Tools};
 
@@ -273,7 +275,7 @@ pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
             let pending = pending.clone();
             let screen = screen.clone();
             let weak_window = weak_window.clone();
-            declare_to_daemon(&app, serde_json::json!(roots), move |app, answer| {
+            declare_to_daemon(&app, serde_json::json!(roots), move |app, answer, hint| {
                 pending.set(false);
                 let confirmed = answer.is_some_and(|(sent, result)| {
                     result.is_ok_and(|settings| declarations_confirmed(&sent, &settings))
@@ -289,6 +291,7 @@ pub(super) fn present_connected(app: &Rc<super::App>) -> adw::Window {
                                 .settings_failed,
                         ),
                     );
+                    screen.show_host_hint(hint.as_ref());
                 }
                 if confirmed {
                     app.refresh();
@@ -344,32 +347,65 @@ pub(super) type Declared = Option<(serde_json::Value, Result<serde_json::Value, 
 pub(super) fn declare_to_daemon(
     app: &Rc<super::App>,
     params: serde_json::Value,
-    done: impl FnOnce(&Rc<super::App>, Declared) + 'static,
+    done: impl FnOnce(&Rc<super::App>, Declared, Option<HostFolderHint>) + 'static,
 ) {
     let Some(on_host) = app.worker.declaration_target() else {
-        done(app, None);
+        done(app, None, None);
         return;
     };
     if !crate::document_portal::declarations_need_mapping(&params, on_host) {
-        send_declaration(app, params, done);
+        send_declaration(app, params, move |app, declared| done(app, declared, None));
         return;
     }
-    // One bounded D-Bus round trip per folder, off the GTK thread.
+    // One bounded D-Bus round trip per folder, off the GTK thread. When
+    // the mapping fails, and only while the old-portal line is approved,
+    // one more: whether the portal is too old to map anything.
     let weak = Rc::downgrade(app);
     super::service_dialog::off_thread(
-        move || crate::document_portal::host_declarations(params),
+        move || {
+            let refused = params.clone();
+            crate::document_portal::host_declarations(params).ok_or_else(|| {
+                host_folder::add_on_host_line()
+                    .and_then(|_| crate::document_portal::old_portal_refusal(&refused))
+            })
+        },
         move |mapped| {
             let Some(app) = weak.upgrade() else {
                 return;
             };
             match mapped {
-                Some(params) if app.worker.declaration_target() == Some(true) => {
-                    send_declaration(&app, params, done)
+                Ok(params) if app.worker.declaration_target() == Some(true) => {
+                    send_declaration(&app, params, move |app, declared| done(app, declared, None))
                 }
-                _ => done(&app, None),
+                Ok(_) => done(&app, None, None),
+                Err(key) => done(&app, None, key.as_deref().and_then(host_folder_hint)),
             }
         },
     );
+}
+
+/// What the Tools screen adds under its failure line when the folder was
+/// refused because this system's document portal cannot say where it is on
+/// the host: a line, and the command that declares it from a terminal in
+/// that folder, which is only ever copied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HostFolderHint {
+    pub line: &'static str,
+    pub command: String,
+}
+
+/// [`HostFolderHint`] for the tool whose settings key is `settings_key`;
+/// `None` while its line is a draft (`host_folder::APPROVED`), and for a
+/// tool the command cannot declare. The failure line then shows alone.
+pub(super) fn host_folder_hint(settings_key: &str) -> Option<HostFolderHint> {
+    host_folder_hint_with(host_folder::add_on_host_line(), settings_key)
+}
+
+fn host_folder_hint_with(line: Option<&'static str>, settings_key: &str) -> Option<HostFolderHint> {
+    Some(HostFolderHint {
+        line: line?,
+        command: trace_commons_contributor::daemon::service::host_folder_command(settings_key)?,
+    })
 }
 
 fn send_declaration(
@@ -420,6 +456,27 @@ pub(super) fn source_title(source: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// While the old-portal line is a draft, a refused folder shows the
+    /// failure line alone; once approved, the line and the fixed command
+    /// for a tool the command can declare, and nothing for one it cannot.
+    #[test]
+    fn the_host_folder_hint_waits_for_its_approved_line() {
+        assert_eq!(host_folder_hint("claude_source"), None);
+        assert_eq!(host_folder_hint_with(None, "claude_source"), None);
+        let line = host_folder::ADD_ON_HOST;
+        assert_eq!(
+            host_folder_hint_with(Some(line), "codex_source"),
+            Some(HostFolderHint {
+                line,
+                command: trace_commons_contributor::daemon::service::host_folder_command(
+                    "codex_source"
+                )
+                .unwrap(),
+            })
+        );
+        assert_eq!(host_folder_hint_with(Some(line), "gemini_source"), None);
+    }
 
     fn tools(watch_claude: bool) -> Tools {
         let mut tools = Tools::default();

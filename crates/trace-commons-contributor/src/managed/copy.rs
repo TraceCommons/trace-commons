@@ -436,8 +436,57 @@ pub mod background_service {
     pub const SET_UP: &str = "Set up";
 }
 
+/// A folder a sandboxed window cannot hand to the background service: the
+/// chooser gave it a document-portal path, and this system's portal is too
+/// old to say which host folder that is (no `GetHostPaths`, interface
+/// version below 5; owner decision 2026-11-17, "Explain + CLI fallback").
+/// The folder is still refused, with the Tools screen's existing failure
+/// line (`first_run_copy().folders.settings_failed`). Below it, once
+/// approved, [`ADD_ON_HOST`] and `daemon::service::host_folder_command`
+/// with [`super::background_service::COPY_COMMAND`], which only ever copies
+/// the command.
+///
+/// [`ADD_ON_HOST`] is DRAFT, NEEDS APPROVAL. Nothing shows it while
+/// [`APPROVED`] is false: shells read it through [`add_on_host_line`].
+pub mod host_folder {
+    /// Whether the owner approved [`ADD_ON_HOST`]. Flip only with that
+    /// approval, and pin the approved words in the test below.
+    pub const APPROVED: bool = false;
+
+    /// Under the failure line, followed by the command. DRAFT, NEEDS
+    /// APPROVAL.
+    pub const ADD_ON_HOST: &str = "To add this folder anyway, open a terminal in it and run:";
+
+    /// [`ADD_ON_HOST`] once approved; `None` until then, so the failure
+    /// line shows alone.
+    pub fn add_on_host_line() -> Option<&'static str> {
+        line_when(APPROVED)
+    }
+
+    pub(crate) fn line_when(approved: bool) -> Option<&'static str> {
+        approved.then_some(ADD_ON_HOST)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The old-portal line is a draft: hidden until approved, and its draft
+    /// words exact, so a change to them is seen.
+    #[test]
+    fn the_host_folder_line_is_a_hidden_draft() {
+        use super::host_folder;
+        assert!(!host_folder::APPROVED);
+        assert_eq!(host_folder::add_on_host_line(), None);
+        assert_eq!(
+            host_folder::ADD_ON_HOST,
+            "To add this folder anyway, open a terminal in it and run:"
+        );
+        assert_eq!(
+            host_folder::line_when(true),
+            Some(host_folder::ADD_ON_HOST)
+        );
+    }
+
     /// The owner's approved words (2026-11-17), with the app's name where
     /// they say it. Exact, so a changed word fails here.
     #[test]

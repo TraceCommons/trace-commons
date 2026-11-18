@@ -178,6 +178,71 @@ pub fn host_declarations(params: serde_json::Value) -> Option<serde_json::Value>
     host_declarations_with(params, root.as_deref(), portal_lookup)
 }
 
+/// The first `org.freedesktop.portal.Documents` interface version with
+/// `GetHostPaths`.
+pub const HOST_PATHS_VERSION: u32 = 5;
+
+/// Whether a document portal reporting interface `version` has no
+/// `GetHostPaths`, so no folder it exports can be mapped to the host. An
+/// unknown version (no answer, or no portal) is not taken as old: the
+/// caller then says only that the folder was not saved.
+pub fn lacks_host_paths(version: Option<u32>) -> bool {
+    version.is_some_and(|version| version < HOST_PATHS_VERSION)
+}
+
+/// The settings key (`claude_source`, ...) of the one folder `params`
+/// watches inside the portal's mount at `doc_root`. `None` when there is
+/// none, or more than one: a terminal opened in one folder declares one.
+pub fn sole_portal_declaration_in(
+    params: &serde_json::Value,
+    doc_root: Option<&Path>,
+) -> Option<String> {
+    let root = doc_root?;
+    let mut inside = params
+        .as_object()?
+        .iter()
+        .filter(|(_, value)| value["mode"] == "watch")
+        .filter(|(_, value)| {
+            value["path"]
+                .as_str()
+                .is_some_and(|path| split_doc_path(Path::new(path), root).is_some())
+        })
+        .map(|(key, _)| key.clone());
+    let key = inside.next()?;
+    inside.next().is_none().then_some(key)
+}
+
+/// The settings key of the one portal folder in `params` that this
+/// system's portal cannot map because it predates `GetHostPaths`; `None`
+/// for any other refusal. Blocking: one bounded D-Bus property read, so
+/// callers run it off the GTK thread.
+pub fn old_portal_refusal(params: &serde_json::Value) -> Option<String> {
+    let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+    let key = sole_portal_declaration_in(params, root.as_deref())?;
+    lacks_host_paths(portal_version()).then_some(key)
+}
+
+/// The document portal's interface version, or `None` when it does not
+/// answer in [`PORTAL_TIMEOUT`].
+fn portal_version() -> Option<u32> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(get_portal_version().ok());
+    });
+    rx.recv_timeout(PORTAL_TIMEOUT).ok().flatten()
+}
+
+fn get_portal_version() -> anyhow::Result<u32> {
+    let connection = zbus::blocking::Connection::session()?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.portal.Documents",
+        "/org/freedesktop/portal/documents",
+        "org.freedesktop.portal.Documents",
+    )?;
+    Ok(proxy.get_property::<u32>("version")?)
+}
+
 /// How long a `GetHostPaths` answer may take.
 const PORTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -198,6 +263,46 @@ fn get_host_path(id: &str) -> anyhow::Result<Option<PathBuf>> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    /// Version 4 (GNOME 46's portal) has no `GetHostPaths`; 5 and later
+    /// do; an unknown version is not called old.
+    #[test]
+    fn only_a_portal_below_version_5_lacks_host_paths() {
+        assert!(lacks_host_paths(Some(4)));
+        assert!(lacks_host_paths(Some(1)));
+        assert!(!lacks_host_paths(Some(HOST_PATHS_VERSION)));
+        assert!(!lacks_host_paths(Some(6)));
+        assert!(!lacks_host_paths(None));
+    }
+
+    #[test]
+    fn the_sole_portal_folder_is_named_by_its_settings_key() {
+        use serde_json::json;
+        let root = Path::new("/run/user/1000/doc");
+        let portal = |id: &str| format!("/run/user/1000/doc/{id}/work");
+        let one = json!({
+            "claude_source": {"mode": "watch", "path": portal("a1")},
+            "codex_source": {"mode": "watch", "path": "/home/u/.codex/sessions"},
+            "gemini_source": {"mode": "off"},
+        });
+        assert_eq!(
+            sole_portal_declaration_in(&one, Some(root)).as_deref(),
+            Some("claude_source")
+        );
+        // Two portal folders: one terminal cannot declare both.
+        let two = json!({
+            "claude_source": {"mode": "watch", "path": portal("a1")},
+            "codex_source": {"mode": "watch", "path": portal("b2")},
+        });
+        assert_eq!(sole_portal_declaration_in(&two, Some(root)), None);
+        // None in the mount, or no mount at all.
+        let none = json!({"claude_source": {"mode": "watch", "path": "/home/u/x"}});
+        assert_eq!(sole_portal_declaration_in(&none, Some(root)), None);
+        assert_eq!(sole_portal_declaration_in(&one, None), None);
+        // Off is never a folder, whatever it carries.
+        let off = json!({"claude_source": {"mode": "off", "path": portal("a1")}});
+        assert_eq!(sole_portal_declaration_in(&off, Some(root)), None);
+    }
 
     #[test]
     fn the_portal_mount_is_doc_under_the_runtime_directory() {

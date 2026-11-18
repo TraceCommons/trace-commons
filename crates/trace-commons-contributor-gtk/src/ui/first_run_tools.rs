@@ -28,6 +28,10 @@ pub(super) struct ToolsScreen {
     parent: glib::WeakRef<gtk::Window>,
     busy: std::cell::Cell<bool>,
     refused: gtk::Label,
+    /// Under `failure`: [`super::roots::HostFolderHint`], when one is shown.
+    host_hint: gtk::Box,
+    host_hint_line: gtk::Label,
+    host_hint_command: gtk::Label,
 }
 
 /// The tool's name, as the Mac's `SourceKind.displayName` gives it.
@@ -85,6 +89,28 @@ pub(super) fn build(
     let failure = body_label("");
     failure.add_css_class("tc-refused");
     failure.set_visible(false);
+    let host_hint = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let host_hint_line = body_label("");
+    let host_hint_command = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::Char)
+        .selectable(true)
+        .xalign(0.0)
+        .css_classes(["monospace"])
+        .build();
+    // Copies the command; never runs it.
+    let copy_command = gtk::Button::with_label(
+        trace_commons_contributor::managed::copy::background_service::COPY_COMMAND,
+    );
+    copy_command.set_halign(gtk::Align::Start);
+    copy_command.connect_clicked({
+        let command = host_hint_command.clone();
+        move |button| button.clipboard().set_text(&command.label())
+    });
+    host_hint.append(&host_hint_line);
+    host_hint.append(&host_hint_command);
+    host_hint.append(&copy_command);
+    host_hint.set_visible(false);
     let continue_button = gtk::Button::with_label(copy.frame.continue_button);
     continue_button.add_css_class("suggested-action");
     continue_button.set_halign(gtk::Align::End);
@@ -99,6 +125,9 @@ pub(super) fn build(
         parent: parent.downgrade(),
         busy: std::cell::Cell::new(false),
         refused,
+        host_hint,
+        host_hint_line,
+        host_hint_command,
     });
     let add = gtk::Button::with_label(copy.tools.add_tool);
     add.add_css_class("flat");
@@ -134,6 +163,7 @@ pub(super) fn build(
     screen.root.add_controller(drop);
     screen.root.append(&screen.refused);
     screen.root.append(&screen.failure);
+    screen.root.append(&screen.host_hint);
     screen.root.append(&screen.continue_button);
     let on_continue = Rc::new(on_continue);
     screen.continue_button.connect_clicked({
@@ -147,6 +177,7 @@ pub(super) fn build(
             }
             screen.set_busy(true);
             screen.failure.set_visible(false);
+            screen.host_hint.set_visible(false);
             on_continue();
         }
     });
@@ -198,7 +229,23 @@ impl ToolsScreen {
                 self.failure.set_label(line);
                 self.failure.set_visible(true);
             }
-            None => self.failure.set_visible(false),
+            None => {
+                self.failure.set_visible(false);
+                self.host_hint.set_visible(false);
+            }
+        }
+    }
+
+    /// Under the failure line: how to add a refused folder on the host
+    /// ([`super::roots::HostFolderHint`]), or nothing.
+    pub fn show_host_hint(&self, hint: Option<&super::roots::HostFolderHint>) {
+        match hint {
+            Some(hint) => {
+                self.host_hint_line.set_label(hint.line);
+                self.host_hint_command.set_label(&hint.command);
+                self.host_hint.set_visible(true);
+            }
+            None => self.host_hint.set_visible(false),
         }
     }
 
