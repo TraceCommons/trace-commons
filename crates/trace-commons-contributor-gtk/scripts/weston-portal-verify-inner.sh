@@ -202,7 +202,8 @@ else
     ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
     ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
     ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
-    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold; do
+    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

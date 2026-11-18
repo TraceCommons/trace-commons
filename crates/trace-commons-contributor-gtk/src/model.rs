@@ -867,6 +867,10 @@ pub struct HistoryRecord {
     /// address".
     #[serde(default)]
     pub explanations: Vec<String>,
+    /// The row belongs to an account this device used before. The current
+    /// account cannot withdraw it, and the daemon refuses it.
+    #[serde(default)]
+    pub previous_account: bool,
 }
 
 /// `history_rollup`.
