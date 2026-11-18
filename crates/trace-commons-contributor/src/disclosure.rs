@@ -52,11 +52,9 @@ pub enum Route {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalFilter {
-    /// None: only the fixed patterns run.
+    /// None: only the fixed patterns run. Also what the retired client-side
+    /// NEAR AI scan reads as now: an old setting naming it is ignored.
     None,
-    /// NEAR AI's hosted privacy filter, from `pii_filter = "near-ai"` or the
-    /// environment. The text the patterns leave is sent to it.
-    NearAi,
     /// A privacy-filter endpoint named in the environment.
     SelfHosted,
     /// A local program named in the environment.
@@ -114,6 +112,12 @@ pub const ENV_FILTER_INVALID: &str = "invalid";
 /// Read the environment's privacy filter for [`route_disclosure`].
 #[must_use]
 pub fn env_filter() -> EnvFilter {
+    // The retired `near-ai` backend attaches nothing on this client (see
+    // `crate::retired_second_scan`), so it reads as no filter, the way the
+    // redactor builds it.
+    if crate::retired_second_scan::env_names_it() {
+        return "none";
+    }
     trace_commons_protocol::trace_contribution::privacy_filter_backend_from_env()
         .map_or(ENV_FILTER_INVALID, |tag| tag.label())
 }
@@ -172,7 +176,7 @@ pub fn route_disclosure(
         }),
         _ => None,
     };
-    let local_filter = (route == Route::Local).then(|| local_filter(cfg, env));
+    let local_filter = (route == Route::Local).then(|| local_filter(env));
     RouteDisclosure {
         route,
         witness,
@@ -185,22 +189,18 @@ pub fn route_disclosure(
     }
 }
 
-/// The filter `envelope::build_redactor` would attach: the config's
-/// `pii_filter` when set, and otherwise whatever the environment attaches.
-fn local_filter(cfg: &ContributorConfig, env: EnvFilter) -> LocalFilter {
-    match cfg.pii_filter.as_deref() {
-        Some("near-ai") => LocalFilter::NearAi,
-        // `build_redactor_with` refuses any other value.
-        Some(_) => LocalFilter::Invalid,
-        None => match env {
-            "none" => LocalFilter::None,
-            "near_ai" => LocalFilter::NearAi,
-            "self_hosted" => LocalFilter::SelfHosted,
-            "sidecar" => LocalFilter::Sidecar,
-            // `ENV_FILTER_INVALID`, or a backend label this build does not
-            // know: neither is "no filter".
-            _ => LocalFilter::Invalid,
-        },
+/// The filter `envelope::build_redactor` would attach: whatever the
+/// environment attaches. The config's retired `pii_filter` is not read.
+fn local_filter(env: EnvFilter) -> LocalFilter {
+    match env {
+        // `near_ai` is the retired client-side scan, which this client never
+        // attaches (`env_filter` already maps it to `none`).
+        "none" | "near_ai" => LocalFilter::None,
+        "self_hosted" => LocalFilter::SelfHosted,
+        "sidecar" => LocalFilter::Sidecar,
+        // `ENV_FILTER_INVALID`, or a backend label this build does not
+        // know: neither is "no filter".
+        _ => LocalFilter::Invalid,
     }
 }
 
@@ -220,7 +220,6 @@ mod tests {
             "user_subject": "alice",
             "device_key_id": "sha256:aa",
             "consent_scopes": ["debugging_evaluation"],
-            "pii_filter": null,
             "allowed_hosts": null,
         }))
         .expect("a contributor config")
@@ -286,13 +285,14 @@ mod tests {
 
     #[test]
     fn the_local_route_names_the_filter_this_machine_attaches() {
-        let mut c = cfg();
+        let c = cfg();
         assert_eq!(
             route_disclosure(Ok(Some(&c)), false, "none").local_filter,
             Some(LocalFilter::None)
         );
         for (env, expected) in [
-            ("near_ai", LocalFilter::NearAi),
+            // The retired client-side NEAR AI scan attaches nothing.
+            ("near_ai", LocalFilter::None),
             ("self_hosted", LocalFilter::SelfHosted),
             ("sidecar", LocalFilter::Sidecar),
             ("from_the_future", LocalFilter::Invalid),
@@ -303,17 +303,18 @@ mod tests {
             assert_eq!(facts.local_filter, Some(expected), "{env:?}");
             assert!(facts.witness.is_none());
         }
-        // The config's own selection is what the redactor builds from.
-        c.pii_filter = Some("near-ai".into());
-        assert_eq!(
-            route_disclosure(Ok(Some(&c)), false, "none").local_filter,
-            Some(LocalFilter::NearAi)
-        );
-        c.pii_filter = Some("something-else".into());
-        assert_eq!(
-            route_disclosure(Ok(Some(&c)), false, "none").local_filter,
-            Some(LocalFilter::Invalid)
-        );
+        // An old config naming the retired scan, with any value, is not a
+        // filter: the redactor never reads it.
+        for retired in ["near-ai", "something-else"] {
+            let mut raw = serde_json::to_value(cfg()).unwrap();
+            raw["pii_filter"] = serde_json::json!(retired);
+            let old: ContributorConfig = serde_json::from_value(raw).unwrap();
+            assert_eq!(
+                route_disclosure(Ok(Some(&old)), false, "none").local_filter,
+                Some(LocalFilter::None),
+                "{retired}"
+            );
+        }
     }
 
     #[test]

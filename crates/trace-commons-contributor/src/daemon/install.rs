@@ -14,7 +14,6 @@
 
 use anyhow::{Context, Result, bail};
 
-use super::settings::DaemonSettings;
 use crate::config::ConfigStore;
 
 const UNIT_FILE_NAME: &str = crate::channel::SYSTEMD_UNIT_NAME;
@@ -52,28 +51,9 @@ fn unit_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn install(store: &ConfigStore) -> Result<()> {
-    let cfg = store.load_config().context("loading contributor config")?;
-    let settings = DaemonSettings::load(store)?;
-
-    if let Some(cfg) = cfg.as_ref() {
-        if cfg.pii_filter.as_deref() == Some("near-ai") && settings.near_ai.is_none() {
-            bail!(
-                "refusing to install: pii_filter is near-ai but no near_ai \
-                 credentials are persisted in daemon settings. A service \
-                 manager passes no shell environment, so every upload would \
-                 refuse with pii-filter-unavailable. Set them with \
-                 `daemon settings` first."
-            );
-        }
-        if cfg.pii_filter.as_deref() == Some("near-ai") && !store.near_ai_notice_shown() {
-            bail!(
-                "refusing to install: the NEAR AI first-use notice has not \
-                 been shown yet. Run an interactive `submit` once so the \
-                 disclosure is actually delivered to you."
-            );
-        }
-    }
-
+    // An older config may still name the retired client-side NEAR AI second
+    // scan. It no longer refuses an install: the setting is ignored and
+    // uploads are scrubbed locally only.
     if !cfg!(target_os = "linux") {
         bail!(
             "autostart-not-supported-on-this-platform: on this platform the \
@@ -116,9 +96,8 @@ pub fn uninstall() -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
-    use crate::envelope::NearAiSettings;
 
-    fn cfg_with_filter(filter: Option<&str>) -> crate::config::ContributorConfig {
+    fn cfg() -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
@@ -134,7 +113,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: "key-1".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: filter.map(str::to_string),
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -173,45 +151,16 @@ mod tests {
     }
 
     #[test]
-    fn install_refuses_near_ai_without_persisted_credentials() {
-        // Otherwise every upload refuses under systemd and it reads as a bug.
+    fn install_ignores_a_retired_pii_filter() {
+        // An old config naming the retired NEAR AI scan, with no credential
+        // and no notice marker: both used to refuse the install.
         let (_d, store) = temp_store();
-        store
-            .save_config(&cfg_with_filter(Some("near-ai")))
-            .unwrap();
-        let err = install(&store).unwrap_err();
-        assert!(
-            err.to_string().contains("near_ai"),
-            "expected a credentials refusal, got: {err}"
-        );
-    }
-
-    #[test]
-    fn install_refuses_near_ai_until_the_notice_was_delivered() {
-        let (_d, store) = temp_store();
-        store
-            .save_config(&cfg_with_filter(Some("near-ai")))
-            .unwrap();
-        let settings = DaemonSettings {
-            near_ai: Some(NearAiSettings {
-                api_key: "k".into(),
-                base_url: None,
-                model: None,
-            }),
-            ..Default::default()
-        };
-        settings.save(&store).unwrap();
-        let err = install(&store).unwrap_err();
-        assert!(
-            err.to_string().contains("notice"),
-            "expected a notice refusal, got: {err}"
-        );
-    }
-
-    #[test]
-    fn install_without_a_privacy_filter_gets_past_the_credential_gates() {
-        let (_d, store) = temp_store();
-        store.save_config(&cfg_with_filter(None)).unwrap();
+        store.save_config(&cfg()).unwrap();
+        let path = store.dir().join("contributor.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["pii_filter"] = serde_json::json!("near-ai");
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
         let result = install(&store);
         if cfg!(target_os = "linux") {
             assert!(result.is_ok(), "{result:?}");

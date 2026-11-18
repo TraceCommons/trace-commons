@@ -766,7 +766,6 @@ struct DaemonSettingsView: Decodable, Equatable {
     let localNotifications: Bool
     let queueTtlDays: Int
     let maxQueueEntries: Int
-    let nearAIConfigured: Bool
     let claudeRootConfigured: Bool
     let codexRootConfigured: Bool
     /// What the contributor said about each agent's sessions: `watch`,
@@ -855,7 +854,6 @@ struct DaemonSettingsView: Decodable, Equatable {
         case localNotifications = "local_notifications"
         case queueTtlDays = "queue_ttl_days"
         case maxQueueEntries = "max_queue_entries"
-        case nearAIConfigured = "near_ai_configured"
         case claudeRootConfigured = "claude_root_configured"
         case codexRootConfigured = "codex_root_configured"
         case claudeSourceMode = "claude_source_mode"

@@ -70,22 +70,6 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
             </span>
           </div>
         ))}
-        <div className="flex items-start gap-2.5 border-b border-border py-3">
-          <span
-            className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full border border-input text-[10px] text-muted-foreground ${settings?.near_ai_configured === true ? "border-primary bg-primary text-primary-foreground" : ""}`}
-            aria-hidden="true"
-          >
-            {settings?.near_ai_configured === true ? "✓" : "–"}
-          </span>
-          <span>
-            <strong>Extra privacy scan</strong>
-            <small>
-              {settings?.near_ai_configured === true
-                ? "Configured"
-                : "Not configured"}
-            </small>
-          </span>
-        </div>
       </div>
     </section>
   );

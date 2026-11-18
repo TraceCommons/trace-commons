@@ -1,10 +1,13 @@
 //! The consent path must complete when the redaction step does not
 //! reproduce itself.
 //!
-//! This is the configuration the pilot actually runs: `pii_filter =
-//! "near-ai"`, an LLM-backed privacy filter. An LLM does not return
-//! identical spans for identical text, so redacting the same session twice
-//! yields two different envelopes.
+//! This was the configuration the pilot ran: an LLM-backed client-side
+//! privacy filter (the NEAR AI second scan, since retired). An LLM does not
+//! return identical spans for identical text, so redacting the same session
+//! twice yields two different envelopes. Any filter attached to the redactor
+//! can behave that way -- the environment can still attach a sidecar or
+//! self-hosted one -- so the invariant stays, driven here by a filter the
+//! test attaches directly.
 //!
 //! The design this replaced pinned a digest of the previewed envelope and
 //! re-derived it immediately before the upload. Against a deterministic
@@ -36,7 +39,6 @@ use trace_commons_contributor::config::{
 };
 use trace_commons_contributor::daemon::ipc::{self, DaemonShared};
 use trace_commons_contributor::daemon::queue::QueueState;
-use trace_commons_contributor::envelope::NearAiSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 
 async fn spawn(router: Router) -> String {
@@ -141,6 +143,9 @@ fn jittery_privacy_filter(generation: Arc<AtomicUsize>) -> Router {
 }
 
 struct Harness {
+    /// The project directory this harness's sessions live in. Its filter is
+    /// keyed to it, so no other test in the process is routed through it.
+    project: &'static str,
     _dir: tempfile::TempDir,
     shared: Arc<DaemonShared>,
     claude_root: std::path::PathBuf,
@@ -149,7 +154,7 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new() -> Self {
+    async fn new(project: &'static str) -> Self {
         let received = Arc::new(Mutex::new(Vec::new()));
         let generation = Arc::new(AtomicUsize::new(0));
         let issuer = spawn(stub_issuer()).await;
@@ -175,7 +180,6 @@ impl Harness {
                 user_subject: "alice".into(),
                 device_key_id: device.device_key_id,
                 consent_scopes: vec!["debugging_evaluation".into()],
-                pii_filter: Some("near-ai".into()),
                 allowed_hosts: Some("127.0.0.1".into()),
                 display_handle: None,
                 public_bio: None,
@@ -199,16 +203,16 @@ impl Harness {
                     path: dir.path().join("codex"),
                 },
             );
-            s.near_ai = Some(NearAiSettings {
-                api_key: "test-key".into(),
-                base_url: Some(filter),
-                model: None,
-            });
         }
-        // The first-use disclosure is a separate gate; acknowledge it so
-        // these tests are about the filter's behaviour, not the notice.
-        shared.store.ensure_near_ai_notice_shown().unwrap();
+        // The jittery filter, attached to this file's own project directory
+        // (no other test uses it), standing in for an environment-attached
+        // filter.
+        trace_commons_contributor::envelope::test_filter_hook::attach_http_classifier_for_cwd(
+            format!("/Users/testuser/code/{project}"),
+            filter,
+        );
         Self {
+            project,
             _dir: dir,
             shared,
             claude_root,
@@ -264,8 +268,8 @@ impl Harness {
 
 #[tokio::test]
 async fn a_previewed_entry_uploads_even_though_the_filter_never_repeats_itself() {
-    let h = Harness::new().await;
-    h.write_session("myproj", "7a7a7a7a-7a7a-7a7a-7a7a-7a7a7a7a7a7a");
+    let h = Harness::new("nondeterministic-filter-a").await;
+    h.write_session(h.project, "7a7a7a7a-7a7a-7a7a-7a7a-7a7a7a7a7a7a");
     h.discover().await;
     let entry_id = h.only_entry().entry_id;
 
@@ -320,8 +324,8 @@ async fn a_previewed_entry_uploads_even_though_the_filter_never_repeats_itself()
 async fn a_resolved_entry_leaves_no_redacted_content_on_disk() {
     // The stored envelope is redacted trace content at rest. It is bounded
     // to the approval it belongs to: once the entry is resolved, it goes.
-    let h = Harness::new().await;
-    h.write_session("myproj", "7b7b7b7b-7b7b-7b7b-7b7b-7b7b7b7b7b7b");
+    let h = Harness::new("nondeterministic-filter-b").await;
+    h.write_session(h.project, "7b7b7b7b-7b7b-7b7b-7b7b-7b7b7b7b7b7b");
     h.discover().await;
     let entry_id = h.only_entry().entry_id;
 

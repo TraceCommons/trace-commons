@@ -790,14 +790,6 @@ final class DaemonClient: Sendable {
         return try call("enroll", params: params, as: EnrollResult.self)
     }
 
-    /// Records that the NEAR AI first-use notice was actually shown to the
-    /// person in this UI. Callers must not call this without having shown
-    /// that notice text first -- see "### `acknowledge_near_ai_notice`" in
-    /// the contract: it is audited on the caller's unverified word.
-    func acknowledgeNearAINotice() throws {
-        _ = try rawResult("acknowledge_near_ai_notice")
-    }
-
     /// Records that the notice after a legacy invite identity moved to a
     /// NEAR AI account was shown. Callers call it only once that notice has
     /// been drawn and the person pressed its button.

@@ -210,18 +210,6 @@ final class CoreCopyExportTests: XCTestCase {
             "This trace could not be checked for leftover secrets, so treat it as holding one.")
     }
 
-    // MARK: - The extra privacy scan
-
-    /// Both halves of the disclosure, and no internal name as a headline.
-    func testThePrivacyScanCopyKeepsBothHalvesOfTheDisclosure() throws {
-        let copy = try XCTUnwrap(PrivacyScanCopy.decode(fromJSON: TCCoreCopy.privacyScanCopyJSON()))
-        XCTAssertTrue(copy.disclosure.contains("transmitted to NEAR AI"), copy.disclosure)
-        XCTAssertTrue(copy.disclosure.contains("nothing is sent at all"), copy.disclosure)
-        XCTAssertFalse(copy.title.contains("NEAR AI"), copy.title)
-        XCTAssertFalse(copy.title.contains("PII"), copy.title)
-        XCTAssertTrue(copy.localAlways.contains("It runs either way."), copy.localAlways)
-    }
-
     // MARK: - Quit
 
     /// Nothing live: the export has no prompt to give. A shell does not ask
