@@ -1214,10 +1214,6 @@ pub fn health_sentence(label: &str) -> &'static str {
         "not-logged-in" => "Not connected.",
         "pii-filter-unavailable" => "Waiting on the privacy scan.",
         "privacy-filter-canary-failed" => "Privacy scan failed its self-test.",
-        "near-ai-notice-not-acknowledged" => {
-            "One thing to confirm. You chose the extra privacy scan, which sends message text to \
-             NEAR AI. Confirm you're OK with that and contributions resume."
-        }
         "claim-mint-failed" | "ingest-unreachable" => "Can't reach the upload server.",
         "queue-full" => {
             concat!(
@@ -1310,7 +1306,6 @@ mod witness_busy_retry_tests {
 pub fn health_action(label: &str) -> Option<&'static str> {
     match label {
         "not-logged-in" => Some("Reconnect"),
-        "near-ai-notice-not-acknowledged" => Some("Review and confirm"),
         _ => None,
     }
 }
@@ -2223,7 +2218,6 @@ mod tests {
             "not-logged-in",
             "pii-filter-unavailable",
             "privacy-filter-canary-failed",
-            "near-ai-notice-not-acknowledged",
             "claim-mint-failed",
             "ingest-unreachable",
             "queue-full",

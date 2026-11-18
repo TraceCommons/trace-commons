@@ -132,7 +132,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     // Connect screens' own words left with them. Then to 177: the legacy
     // Welcome, Consent, Watch and Done pages' words, and the tools' names,
     // now `source_copy`'s.
-    ("copy.rs", 177),
+    ("copy.rs", 175),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
