@@ -481,10 +481,7 @@ mod tests {
             host_folder::ADD_ON_HOST,
             "To add this folder anyway, open a terminal in it and run:"
         );
-        assert_eq!(
-            host_folder::line_when(true),
-            Some(host_folder::ADD_ON_HOST)
-        );
+        assert_eq!(host_folder::line_when(true), Some(host_folder::ADD_ON_HOST));
     }
 
     /// The owner's approved words (2026-11-17), with the app's name where
