@@ -14,6 +14,7 @@
 //! the widgets and their drawing.
 
 pub mod demand;
+pub mod glyph;
 pub mod graph_footer;
 pub mod graph_model;
 pub mod inspector;

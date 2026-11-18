@@ -37,7 +37,6 @@ use adw::prelude::*;
 
 use super::App;
 use super::community_brand;
-use super::mark::{Scheme, current_scheme};
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{HistoryRecord, HistoryRollup, human_when};
@@ -784,7 +783,9 @@ const WITHDRAWABLE_STATUSES: [&str; 6] = [
 /// so the button would have nothing to send and would fail for a reason the
 /// contributor could do nothing about.
 fn offers_withdrawal(record: &HistoryRecord) -> bool {
-    WITHDRAWABLE_STATUSES.contains(&record.status.as_str()) && !record.submission_id.is_empty()
+    !record.previous_account
+        && WITHDRAWABLE_STATUSES.contains(&record.status.as_str())
+        && !record.submission_id.is_empty()
 }
 
 /// The withdraw button, or -- once an attempt has been made -- what that
@@ -1029,17 +1030,15 @@ impl Glyph {
     /// `tc_blue_icon`, `tc_muted`, `tc_coral_text`), which is what the
     /// mockup strokes an 11px glyph in. The accent and coral twins are the
     /// generated design tokens themselves, so they cannot drift.
-    fn ink(self, scheme: Scheme) -> &'static str {
-        use style::brand_tokens::{dark, light};
-        match (self, scheme) {
-            (Glyph::Accepted, Scheme::Light) => light::ACCENT_TEXT,
-            (Glyph::Accepted, Scheme::Dark) => dark::ACCENT_TEXT,
-            (Glyph::Held, Scheme::Light) => "#315FBA",
-            (Glyph::Held, Scheme::Dark) => "#9DB6F1",
-            (Glyph::Waiting, Scheme::Light) => "#5C635B",
-            (Glyph::Waiting, Scheme::Dark) => "#A6AC9F",
-            (Glyph::Withdrawn, Scheme::Light) => light::STATUS_OUTSIDE_TEXT,
-            (Glyph::Withdrawn, Scheme::Dark) => dark::STATUS_OUTSIDE_TEXT,
+    ///
+    /// The per-scheme literals now live in `style::Inks::standard`, beside
+    /// the Omarchy skin's, so the glyphs follow whichever is showing.
+    fn ink(self, inks: &style::Inks) -> &str {
+        match self {
+            Glyph::Accepted => &inks.accent_text,
+            Glyph::Held => &inks.held_icon,
+            Glyph::Waiting => &inks.muted,
+            Glyph::Withdrawn => &inks.outside_text,
         }
     }
 }
@@ -1057,7 +1056,7 @@ fn icon(glyph: Glyph, size: i32) -> gtk::DrawingArea {
     // announcing "circle" before each of them is noise.
     area.set_can_focus(false);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_glyph(cr, glyph, current_scheme(), width as f64, height as f64);
+        draw_glyph(cr, glyph, &style::inks(), width as f64, height as f64);
     });
     follow_scheme(&area);
     area
@@ -1089,14 +1088,14 @@ fn follow_scheme(area: &gtk::DrawingArea) {
 /// The mockup's 16-unit space, scaled to whatever the widget was given.
 const GLYPH_VIEW: f64 = 16.0;
 
-fn draw_glyph(cr: &gtk::cairo::Context, glyph: Glyph, scheme: Scheme, width: f64, height: f64) {
+fn draw_glyph(cr: &gtk::cairo::Context, glyph: Glyph, inks: &style::Inks, width: f64, height: f64) {
     let unit = width.min(height) / GLYPH_VIEW;
     if unit <= 0.0 {
         return;
     }
     let _ = cr.save();
     cr.scale(unit, unit);
-    set_source(cr, glyph.ink(scheme));
+    set_source(cr, glyph.ink(inks));
     cr.set_line_width(1.5);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
     cr.set_line_join(gtk::cairo::LineJoin::Round);
@@ -1355,8 +1354,39 @@ fn grouped(value: f64) -> String {
     if value < 0.0 { format!("-{out}") } else { out }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_history_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
+    /// History's status glyphs stroke in the inks they are given: the
+    /// standard text-safe twins, or the Omarchy palette's.
+    #[test]
+    fn status_glyphs_take_their_ink_from_the_inks() {
+        use super::Glyph;
+        use crate::ui::omarchy::{self, fixtures::LATTE};
+        use crate::ui::style::{Inks, brand_tokens};
+        let light = Inks::standard(false);
+        assert_eq!(
+            Glyph::Accepted.ink(&light),
+            brand_tokens::light::ACCENT_TEXT
+        );
+        assert_eq!(Glyph::Held.ink(&light), "#315FBA");
+        assert_eq!(Glyph::Waiting.ink(&light), "#5C635B");
+        let dark = Inks::standard(true);
+        assert_eq!(Glyph::Held.ink(&dark), "#9DB6F1");
+        assert_eq!(
+            Glyph::Withdrawn.ink(&dark),
+            brand_tokens::dark::STATUS_OUTSIDE_TEXT
+        );
+        let p = omarchy::parse(LATTE, false).unwrap();
+        let skin = Inks::omarchy(&p);
+        assert_eq!(Glyph::Accepted.ink(&skin), p.accent_text.hex());
+        assert_eq!(Glyph::Held.ink(&skin), p.held_text.hex());
+        assert_eq!(Glyph::Waiting.ink(&skin), p.muted.hex());
+        assert_eq!(Glyph::Withdrawn.ink(&skin), p.status_outside_text.hex());
+    }
 
     fn folder_record(id: &str, project: &str, label: &str) -> HistoryRecord {
         HistoryRecord {
@@ -1492,7 +1522,26 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         }
+    }
+
+    /// Never on a previous account's row (the Mac's `isWithdrawable`): the
+    /// current account cannot withdraw it, and the daemon refuses it.
+    #[test]
+    fn a_previous_accounts_record_is_not_offered_withdrawal() {
+        let wire: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted", "previous_account": true,
+        }))
+        .unwrap();
+        assert!(wire.previous_account);
+        assert!(!offers_withdrawal(&wire));
+        let current: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted",
+        }))
+        .unwrap();
+        assert!(!current.previous_account);
+        assert!(offers_withdrawal(&current));
     }
 
     #[test]
@@ -1610,6 +1659,7 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: Some(12.5),
             explanations: vec![],
+            previous_account: false,
         };
         let line = credit_line(&record).expect("a final figure is a figure");
         assert_eq!(line, "credit 12.5");
@@ -1630,6 +1680,7 @@ mod tests {
             credit_points_pending: 3.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         };
         assert_eq!(
             credit_line(&record).as_deref(),

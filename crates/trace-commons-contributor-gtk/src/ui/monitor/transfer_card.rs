@@ -35,6 +35,7 @@ pub fn card(
 
     let card = gtk::Box::new(gtk::Orientation::Vertical, 6);
     card.add_css_class("tc-map-transfer-card");
+    card.add_css_class("tc-glass-popover");
     card.set_accessible_role(gtk::AccessibleRole::Group);
     card.update_property(&[gtk::accessible::Property::Label(&title)]);
 
@@ -54,6 +55,7 @@ pub fn card(
     head.append(&name);
     let badge = gtk::Label::new(Some(tag));
     badge.add_css_class("tc-map-transfer-tag");
+    badge.add_css_class("tc-type-label");
     if tone == Tone::On {
         badge.add_css_class("tc-map-transfer-tag-on");
     }

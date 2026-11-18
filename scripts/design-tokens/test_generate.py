@@ -96,5 +96,58 @@ class InsightsTokensTests(unittest.TestCase):
             self.assertIn('button:checked', css)
 
 
+class GlassTokensTests(unittest.TestCase):
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_every_tier_has_an_opaque_fill_and_a_class(self):
+        for scheme in generate.SCHEMES:
+            palette = generate.glass_palette(self.tokens, scheme)
+            css = generate.render_glass_css(self.tokens, scheme)
+            for tier, name, _, _, _ in generate.GLASS_TIERS:
+                with self.subTest(scheme=scheme, tier=tier):
+                    self.assertRegex(palette[tier], r"^#[0-9a-f]{6}$")
+                    self.assertIn(f".tc-glass-{name} {{ background-color: @tc_glass_{generate.snake(tier)};", css)
+
+    def test_tiers_are_the_nine_the_mac_names(self):
+        self.assertEqual([t[0] for t in generate.GLASS_TIERS],
+                         ["pane", "card", "cardQuiet", "well", "control", "controlSelected",
+                          "popover", "menu", "nodeCard"])
+
+    def test_radii_follow_the_flat_theme(self):
+        css = generate.render_glass_css(self.tokens, "light")
+        self.assertIn(".tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px;", css)
+        self.assertIn(".tc-glass-card { background-color: @tc_glass_card; border-radius: 16px;", css)
+
+    def test_every_type_role_has_a_class_relative_to_the_body(self):
+        css = generate.render_glass_css(self.tokens, "dark")
+        for role in self.tokens["type"]:
+            self.assertIn(".tc-type-" + generate.snake(role).replace("_", "-") + " {", css)
+        self.assertNotRegex(css, r"font-size: [\d.]+px")
+
+    def test_unreadable_future_ink_is_rejected(self):
+        self.tokens["themes"]["flatDark"]["color"]["textSecondary"] = {"hex": "#0d1124"}
+        with self.assertRaisesRegex(generate.TokenError, "inkSecondary"):
+            generate.glass_palette(self.tokens, "dark")
+
+    def test_glyphs_come_from_the_swift_path_data(self):
+        glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
+        self.assertEqual([g["name"] for g in glyphs],
+                         ["viewMenu", "graph", "map", "inspector", "gear", "chevronDown", "folder", "kebab"])
+        by_name = {g["name"]: g for g in glyphs}
+        self.assertEqual(by_name["viewMenu"]["data"], "M1,2h12M1,6h12M1,10h12")
+        # The shared frame is prepended, as Swift does with Self.frame.
+        self.assertTrue(by_name["graph"]["data"].startswith("M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5"))
+        self.assertTrue(by_name["graph"]["data"].endswith("M0.5,7.5h13M4,7.5v4M8,7.5v4"))
+        self.assertIsNone(by_name["kebab"]["stroke"])
+        self.assertEqual(by_name["gear"]["size"], (15, 15))
+        self.assertIn('fill="currentColor"', generate.glyph_svg(by_name["kebab"]))
+        self.assertIn('stroke="currentColor"', generate.glyph_svg(by_name["map"]))
+
+    def test_generated_output_is_deterministic(self):
+        first = generate.render_gtk(self.tokens)
+        self.assertEqual(first, generate.render_gtk(self.tokens))
+
+
 if __name__ == '__main__':
     unittest.main()

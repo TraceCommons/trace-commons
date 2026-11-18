@@ -137,6 +137,8 @@ mod tests {
             BRAND_CSS,
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
+            super::super::style::brand_tokens::GLASS_LIGHT_CSS,
+            super::super::style::brand_tokens::GLASS_DARK_CSS,
         ] {
             for line in sheet.lines() {
                 let line = line.trim();

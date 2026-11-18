@@ -182,7 +182,7 @@
   color: @tc_muted;
 }
 
-/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "held 41s". */
+/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "Approved 41s ago". */
 .tc-ledger {
   font-family: monospace;
   font-size: 12px;
@@ -450,32 +450,27 @@ row:selected {
   padding: 0;
 }
 
-/* The "+N" pill under the folder column: a small control in the names'
-   own size. */
+/* The "+N" pill under the folder column: a glass control (the tier and
+   the type come from the generated sheet; this sets only its fit). */
 .tc-map-pill {
   min-height: 0;
   padding: 2px 8px;
-  font-size: 11px;
   font-weight: 600;
-  border-radius: 999px;
+  border: none;
+  box-shadow: none;
+  color: @tc_glass_ink;
 }
 
-/* A node's card, on hover or keyboard focus. */
+/* A node's card, on hover or keyboard focus: the node-card tier. */
 .tc-map-card {
-  background-color: @tc_surface;
-  color: @tc_ink;
-  border: 1px solid @tc_line_divider;
-  border-radius: 10px;
+  color: @tc_glass_ink;
   padding: 10px 12px;
 }
 
 /* A trace being contributed, kept or dismissed: a card at the map's foot
-   while another tab than Traces is shown. Opaque, as a popover notice. */
+   while another tab than Traces is shown. The popover tier, opaque. */
 .tc-map-transfer-card {
-  background-color: @tc_surface;
-  color: @tc_ink;
-  border: 1px solid @tc_line_divider;
-  border-radius: 12px;
+  color: @tc_glass_ink;
   padding: 10px 12px;
 }
 
@@ -501,14 +496,111 @@ row:selected {
 .tc-map-transfer-tag {
   padding: 1px 8px;
   border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
   border: 1px solid @tc_line_divider;
 }
 
 .tc-map-transfer-tag-on {
   color: @tc_green_text;
   border-color: @tc_green;
+}
+
+/* --- The painted glass window ----------------------------------------
+   The Monitor window as the Mac draws it under Reduce Transparency: opaque
+   tiers on an opaque ground. Every colour, radius, edge and type step is
+   generated (`brand_tokens::GLASS_*_CSS`, from design-tokens/glass.tokens.json
+   through the flat theme); what is here is fit, state and the rules the
+   generator cannot know. The window follows the system's light or dark, or
+   TRACE_COMMONS_APPEARANCE, because the sheet is chosen when it is loaded. */
+window.tc-glass-window {
+  background-color: @tc_glass_scene;
+  color: @tc_glass_ink;
+}
+
+.tc-glass-pane {
+  color: @tc_glass_ink;
+}
+
+/* The screens the panes host were laid out on the shell's own ground.
+   Inside a pane they take the pane's, and their cards take the card tier's
+   fill, so the screens read as part of the glass. */
+.tc-glass-pane .tc-root {
+  background-color: transparent;
+  border-radius: 0;
+}
+
+.tc-glass-pane .tc-card {
+  background-color: @tc_glass_card;
+  color: @tc_glass_ink;
+}
+
+/* The tab strip: plain tabs on the pane, the selected one under the
+   tabEmber rule (a 2px line fading to nothing at either end). */
+.tc-glass-tabs {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.tc-glass-tabs .tc-tab {
+  font-size: 1em;
+  padding: 6px 12px 8px 12px;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-glass-tabs .tc-tab:hover {
+  background-color: @tc_glass_row_hover;
+}
+
+.tc-glass-tabs .tc-tab:checked {
+  background-color: transparent;
+  background-image: linear-gradient(to right, transparent, @tc_glass_tab_ember 30%, @tc_glass_tab_ember 70%, transparent);
+  background-size: 100% 2px;
+  background-position: left bottom;
+  background-repeat: no-repeat;
+  box-shadow: none;
+  color: @tc_glass_ink;
+}
+
+/* The toolbar's capsule holds the Graph, Map and Inspector toggles: a glass
+   control, its glyphs in the toolbar ink while the pane is shown and in the
+   hidden ink while it is not. */
+.tc-toolbar-capsule {
+  padding: 2px;
+}
+
+.tc-toolbar-toggle {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  min-height: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: @tc_glass_toolbar_glyph_hidden;
+}
+
+.tc-toolbar-toggle:checked {
+  background-color: transparent;
+  box-shadow: none;
+  border-radius: 999px;
+  color: @tc_glass_toolbar_glyph;
+  font-weight: 400;
+}
+
+.tc-toolbar-toggle:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-toolbar-toggle:disabled {
+  opacity: 0.45;
+}
+
+.tc-toolbar-gear {
+  color: @tc_glass_toolbar_glyph;
 }
 
 /* --- The health banner ---------------------------------------------
@@ -540,6 +632,14 @@ row:selected {
    the pane's width, so nothing of the tab shows beside a card. */
 .tc-notice-backdrop {
   background-color: @tc_bg;
+}
+
+/* In a glass pane the screens' ground is the pane's fill
+   (`.tc-glass-pane .tc-root` is transparent), and the stack takes it too:
+   the shell's ground drew a warm band in light and an olive one in dark
+   across the cool pane. */
+.tc-glass-pane .tc-notice-backdrop {
+  background-color: @tc_glass_pane;
 }
 
 /* A card behind the front one, peeking out under it

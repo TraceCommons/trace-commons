@@ -183,6 +183,7 @@ mod imp {
 
             let pill = gtk::Button::new();
             pill.add_css_class("tc-map-pill");
+            pill.add_css_class("tc-glass-control");
             pill.set_visible(false);
             pill.set_parent(&*obj);
             let weak = obj.downgrade();
@@ -201,6 +202,7 @@ mod imp {
                 .visible(false)
                 .build();
             card.add_css_class("tc-map-card");
+            card.add_css_class("tc-glass-node-card");
             let title = gtk::Label::new(None);
             title.add_css_class("heading");
             title.set_xalign(0.0);
@@ -717,7 +719,7 @@ mod imp {
                     sublabel_size,
                     false,
                     Anchor::Middle,
-                    &palette.ink(0.6),
+                    &palette.secondary(1.0),
                 );
             }
             if let Some(dock) = dock {
@@ -776,7 +778,7 @@ mod imp {
                 }
                 if let Some(sublabel) = node.sublabel.as_deref() {
                     let at = Point::new(centre.x, centre.y + radius + sublabel_offset);
-                    let colour = palette.ink(0.6 * node.dim);
+                    let colour = palette.secondary(node.dim);
                     self.text(
                         snapshot,
                         sublabel,
@@ -790,7 +792,7 @@ mod imp {
             }
             for overflow in &scene.overflows {
                 let text = format!("+{}", overflow.count);
-                let colour = palette.ink(0.6);
+                let colour = palette.secondary(1.0);
                 self.text(
                     snapshot,
                     &text,
@@ -828,7 +830,7 @@ mod imp {
                 (10.0 * s).max(9.0),
                 true,
                 Anchor::Start,
-                &palette.ink(0.6),
+                &palette.secondary(1.0),
             );
             for (index, id) in order.iter().enumerate() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
@@ -877,7 +879,7 @@ mod imp {
                     &colour,
                 );
                 if let Some(line) = line {
-                    let colour = palette.ink(0.6 * shown);
+                    let colour = palette.secondary(shown);
                     let at = Point::new(x, centre.y + 7.0 * s);
                     self.text(
                         snapshot,
@@ -1225,6 +1227,8 @@ impl MapCanvas {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Palette {
     pub ink: gtk::gdk::RGBA,
+    /// Secondary labels: opaque, and clear of 4.5:1 on the map's ground.
+    pub secondary: gtk::gdk::RGBA,
     pub background: gtk::gdk::RGBA,
     pub accent: gtk::gdk::RGBA,
     pub on: gtk::gdk::RGBA,
@@ -1241,6 +1245,7 @@ impl Palette {
         let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         Self {
             ink: gtk::gdk::RGBA::BLACK,
+            secondary: parse(&crate::ui::style::Inks::standard(false).muted),
             background: gtk::gdk::RGBA::WHITE,
             accent: parse(light::ACCENT),
             on: parse(light::STATUS_ON),
@@ -1251,42 +1256,48 @@ impl Palette {
 
     #[allow(deprecated)]
     pub fn current(widget: &impl IsA<gtk::Widget>) -> Self {
-        use crate::ui::style::brand_tokens::{dark, light};
-        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         let dark_scheme = adw::StyleManager::default().is_dark();
-        let (accent, on, ask, outside) = if dark_scheme {
-            (
-                dark::ACCENT,
-                dark::STATUS_ON,
-                dark::STATUS_ASK,
-                dark::STATUS_OUTSIDE,
-            )
-        } else {
-            (
-                light::ACCENT,
-                light::STATUS_ON,
-                light::STATUS_ASK,
-                light::STATUS_OUTSIDE,
-            )
-        };
         let context = widget.as_ref().style_context();
         let fallback = if dark_scheme {
             gtk::gdk::RGBA::BLACK
         } else {
             gtk::gdk::RGBA::WHITE
         };
+        Self::with_inks(
+            context.color(),
+            context.lookup_color("window_bg_color").unwrap_or(fallback),
+            &crate::ui::style::inks(),
+        )
+    }
+
+    /// The theme's ink and ground, with the accent and status fills from
+    /// `inks`: the generated tokens in the standard look, the Omarchy
+    /// palette's in the skin.
+    pub fn with_inks(
+        ink: gtk::gdk::RGBA,
+        background: gtk::gdk::RGBA,
+        inks: &crate::ui::style::Inks,
+    ) -> Self {
+        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         Self {
-            ink: context.color(),
-            background: context.lookup_color("window_bg_color").unwrap_or(fallback),
-            accent: parse(accent),
-            on: parse(on),
-            ask: parse(ask),
-            outside: parse(outside),
+            ink,
+            secondary: parse(&inks.muted),
+            background,
+            accent: parse(&inks.accent),
+            on: parse(&inks.status_on),
+            ask: parse(&inks.status_ask),
+            outside: parse(&inks.status_outside),
         }
     }
 
     pub fn ink(&self, alpha: f64) -> gtk::gdk::RGBA {
         self.ink.with_alpha(self.ink.alpha() * alpha as f32)
+    }
+
+    /// The secondary ink, faded by `alpha` only where a node is dimmed.
+    pub fn secondary(&self, alpha: f64) -> gtk::gdk::RGBA {
+        self.secondary
+            .with_alpha(self.secondary.alpha() * alpha as f32)
     }
 
     /// A folder's dot by rule: its fill and its ring.
@@ -2261,6 +2272,80 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
+    /// The map's dots take their fills from the inks: the standard tokens,
+    /// exactly as `Palette::fixed` pins them, or the Omarchy palette's.
+    #[test]
+    fn the_map_palette_takes_its_fills_from_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::GRUVBOX};
+        use crate::ui::style::Inks;
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        assert_eq!(
+            super::Palette::with_inks(ink, ground, &Inks::standard(false)),
+            super::Palette::fixed()
+        );
+        let p = omarchy::parse(GRUVBOX, false).unwrap();
+        let skin = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p));
+        let rgba = |c: omarchy::Rgb| gtk::gdk::RGBA::parse(c.hex()).unwrap();
+        assert_eq!(skin.accent, rgba(p.accent));
+        assert_eq!(skin.on, rgba(p.status_on));
+        assert_eq!(skin.ask, rgba(p.status_ask));
+        assert_eq!(skin.outside, rgba(p.status_outside));
+    }
+
+    /// The map's secondary labels (the line under the pad, the overflow
+    /// count, the pile's heading, sublabels) are an opaque ink that clears
+    /// 4.5:1 on the grounds the map is drawn on: the glass scene and pane in
+    /// the standard look, and every ground of every vendored Omarchy
+    /// palette. The theme ink at 60% fell to about 2.5:1 on light skins and
+    /// 4.3:1 in Standard light.
+    #[test]
+    fn the_map_secondary_labels_clear_the_text_floor() {
+        use crate::ui::omarchy::{self, Rgb, TEXT, contrast, fixtures::FIXTURES};
+        use crate::ui::style::{Inks, brand_tokens};
+        let rgb = |c: &gtk::gdk::RGBA| {
+            let ch = |v: f32| (f64::from(v) * 255.0).round() as u8;
+            Rgb(ch(c.red()), ch(c.green()), ch(c.blue()))
+        };
+        let define = |css: &str, name: &str| {
+            let prefix = format!("@define-color {name} ");
+            css.lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .and_then(|rest| Rgb::parse(rest.trim_end_matches(';')))
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        let mut failures = Vec::new();
+        for (dark, css) in [
+            (false, brand_tokens::GLASS_LIGHT_CSS),
+            (true, brand_tokens::GLASS_DARK_CSS),
+        ] {
+            let palette = super::Palette::with_inks(ink, ground, &Inks::standard(dark));
+            if palette.secondary.alpha() < 1.0 {
+                failures.push(format!("standard dark={dark}: translucent"));
+            }
+            for name in ["tc_glass_scene", "tc_glass_pane"] {
+                let ratio = contrast(rgb(&palette.secondary), define(css, name));
+                if ratio < TEXT {
+                    failures.push(format!("standard dark={dark} on {name}: {ratio:.2}:1"));
+                }
+            }
+        }
+        for (name, text) in FIXTURES {
+            let p = omarchy::parse(text, false).unwrap();
+            let palette = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p));
+            if palette.secondary.alpha() < 1.0 {
+                failures.push(format!("{name}: translucent"));
+            }
+            for (i, g) in p.grounds().into_iter().enumerate() {
+                let ratio = contrast(rgb(&palette.secondary), g);
+                if ratio < TEXT {
+                    failures.push(format!("{name} on ground {i}: {ratio:.2}:1"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     use super::*;
 
     /// The legend's memory item is the shared copy's word for this
