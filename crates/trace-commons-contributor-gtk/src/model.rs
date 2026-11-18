@@ -28,6 +28,9 @@ pub struct Status {
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,
+    /// New terms are owed: uploads wait until they are accepted again.
+    #[serde(default)]
+    pub terms_hold: bool,
     #[serde(default)]
     pub queue_depth: u64,
     /// The daemon's unresolved decision count. Missing on older daemons;

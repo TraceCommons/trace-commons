@@ -33,6 +33,7 @@ pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
+pub(crate) mod terms_hold;
 pub mod update;
 pub mod wrap_row;
 
@@ -1142,16 +1143,23 @@ impl App {
         // reworded (K5), and armed folders the gate is holding.
         let rewordings = status.arming_rewording_notices();
         let held = status.gate_held_notice();
+        let terms = terms_hold::notice_words(status.terms_hold);
         // The legacy invite migration notice is the account's: it changes
         // what the contributor's sessions go under, and they are told on
         // whichever screen they are reading (the consent spec requires it in
         // every shell).
         let migration = status.legacy_migration_notice();
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(!notices.is_empty() || !rewordings.is_empty() || held.is_some());
+            column.set_visible(
+                terms.is_some() || !notices.is_empty() || !rewordings.is_empty() || held.is_some(),
+            );
         }
         if let Some(column) = self.account_notices.parent() {
             column.set_visible(migration.is_some() || offer_shown);
+        }
+        // First: until the terms are accepted again, nothing uploads.
+        if let Some(words) = &terms {
+            self.void_notices.append(&terms_hold::card(self, words));
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
