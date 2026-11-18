@@ -604,15 +604,10 @@ struct ManagedLaunchSheet: View {
     @State private var project: URL?
     /// The terminal picked here while the sheet asks for one.
     @State private var launchTerminal: String?
-    /// Where the session opens: the terminal picked here while the sheet
-    /// asks for one, else the daemon's.
+    /// Where the session opens: herdr while grouped there, else the terminal
+    /// picked here while the sheet asks for one, else the daemon's.
     private var destination: String {
-        let snapshot = model.managedSnapshot
-        if snapshot?.asksForTerminal == true,
-           let picked = snapshot?.terminalChoices.first(where: { $0.id == launchTerminal }) {
-            return picked.name
-        }
-        return snapshot.flatMap { ManagedSurface.sessionDestination($0.capabilities) } ?? model.managedText("terminal")
+        model.managedSnapshot?.launchDestination(picked: launchTerminal) ?? model.managedText("terminal")
     }
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }

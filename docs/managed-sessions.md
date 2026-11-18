@@ -249,8 +249,10 @@ Settings, over the installed apps, starting on the current choice
 `capabilities.terminal_chosen` (true or false; an older daemon that omits it
 never asks). Open saves the pick as the default (`set_managed_terminal`),
 then launches, so the session opens there and the next dialog starts on it.
-With one terminal installed nothing is asked. Windows, Linux and Tauri pick
-only in Settings today.
+With one terminal installed nothing is asked. The GTK shell and the Windows
+app draw the same row in their Launch dialog (#1891). In GTK the launch-scope
+line beneath it names the terminal picked in the dialog, as on macOS. Tauri
+picks only in Settings today.
 
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented

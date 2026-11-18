@@ -951,6 +951,18 @@ public extension ManagedSnapshot {
         asksForTerminal ? picked : nil
     }
 
+    /// Where a launch dialog says the session opens: herdr while sessions
+    /// are grouped there (owner, 2026-11-03), whatever terminal is picked;
+    /// else the terminal picked in a dialog that asks; else the daemon's own
+    /// line.
+    func launchDestination(picked: String?) -> String? {
+        if capabilities.herdrGrouping != true, asksForTerminal,
+           let name = terminalChoices.first(where: { $0.id == picked })?.name {
+            return name
+        }
+        return ManagedSurface.sessionDestination(capabilities)
+    }
+
     /// The terminal a launch dialog that asks starts on: the current one
     /// when it is installed, else the first installed.
     var proposedTerminal: String? {
