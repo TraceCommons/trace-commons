@@ -182,7 +182,7 @@
   color: @tc_muted;
 }
 
-/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "held 41s". */
+/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "Approved 41s ago". */
 .tc-ledger {
   font-family: monospace;
   font-size: 12px;

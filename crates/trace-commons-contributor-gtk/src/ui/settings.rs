@@ -95,19 +95,26 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
-    /// The three `set_settings` knobs, built once and only ever refilled.
+    /// The sharing choice at the top of Projects, as on the Mac.
+    pub(crate) sharing: super::consent_settings::SharingCard,
+    /// The Uses section, as on the Mac.
+    pub(crate) uses: super::consent_settings::UsesCard,
+    /// The bulk change over the project list, as the Mac's Projects
+    /// manager offers it.
+    pub(crate) bulk: super::projects_bulk::BulkState,
+    /// The projects the list last drew, so a selection change can redraw
+    /// it without a daemon read.
+    last_projects: std::cell::RefCell<Vec<Project>>,
+    /// The two `set_settings` knobs, built once and only ever refilled.
     ///
     /// Everything else on this screen is torn down and rebuilt on each
     /// render, which is fine for labels and fatal for a control: a refresh
     /// runs on every daemon event, and rebuilding a spin button would
     /// destroy the one the contributor is in the middle of typing into.
     quiescence_minutes: gtk::SpinButton,
-    approval_hold_seconds: gtk::SpinButton,
-    /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
-    approval_hold_note: gtk::Label,
     digest_hours: gtk::SpinButton,
     /// Set while `render_knobs` is writing the daemon's own values into
-    /// those three, so the `value-changed` they emit is not mistaken for a
+    /// those two, so the `value-changed` they emit is not mistaken for a
     /// contributor turning a dial and echoed straight back as a write.
     filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
@@ -590,8 +597,12 @@ impl SettingsView {
 
         sections.body(Section::Witness).append(&witness_card);
 
+        let sharing = super::consent_settings::SharingCard::new();
+        sections.body(Section::Projects).append(&sharing.root);
         let projects = style::card(gtk::Orientation::Vertical, space::M);
         sections.body(Section::Projects).append(&projects);
+        let uses = super::consent_settings::UsesCard::new();
+        sections.body(Section::Uses).append(&uses.root);
 
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
         // Ranges, not free numbers. The daemon accepts any `u64` for all
@@ -608,24 +619,6 @@ impl SettingsView {
             1.0,
             240.0,
         );
-        let approval_hold_seconds = knob_row(
-            &knobs,
-            copy::KNOB_HOLD_TITLE,
-            copy::KNOB_HOLD_UNIT,
-            0.0,
-            300.0,
-        );
-        // A hold of zero is not a small undo window, it is none, and that
-        // is a different statement from the number beside it. It gets its
-        // own line, shown only when it is true.
-        let approval_hold_note = gtk::Label::builder()
-            .label(copy::KNOB_HOLD_ZERO)
-            .xalign(0.0)
-            .wrap(true)
-            .visible(false)
-            .build();
-        approval_hold_note.add_css_class("tc-caveat");
-        knobs.append(&approval_hold_note);
         let digest_hours = knob_row(
             &knobs,
             copy::KNOB_DIGEST_TITLE,
@@ -665,6 +658,12 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The Linux app's Appearance choice (Omarchy skin spec, D2): a card
+        // of its own under Startup, since the sections are pinned to the
+        // macOS groups. It writes only the shell's own preference file.
+        sections
+            .body(Section::Startup)
+            .append(&super::appearance::settings_card());
 
         // Home's promotion switch, as the Mac's General section has it: the
         // core's card heading, the switch and the line under it.
@@ -722,9 +721,11 @@ impl SettingsView {
             connection_checks,
             pause_button,
             projects,
+            sharing,
+            uses,
+            bulk: Default::default(),
+            last_projects: Default::default(),
             quiescence_minutes,
-            approval_hold_seconds,
-            approval_hold_note,
             digest_hours,
             filling_knobs: std::cell::Cell::new(false),
             autostart_body,
@@ -792,6 +793,7 @@ impl SettingsView {
 }
 
 pub fn wire(app: &Rc<App>) {
+    super::consent_settings::wire(app);
     let a = Rc::clone(app);
     app.settings
         .contribution_refresh
@@ -815,22 +817,16 @@ pub fn wire(app: &Rc<App>) {
         }
     });
 
-    // The three knobs, each writing exactly the one key it owns.
+    // The two knobs, each writing exactly the one key it owns.
     //
     // `set_settings` rejects an object holding a key it does not recognise
     // rather than ignoring it, and it applies every key present -- so
-    // sending all three on every turn of one dial would make this window
-    // re-assert two values it was not asked to change, over whatever a
+    // sending both on every turn of one dial would make this window
+    // re-assert a value it was not asked to change, over whatever a
     // concurrent `trace-commons-contributor settings --set` had just
     // written. One key per write keeps this window's edits to what the
     // contributor actually edited.
     wire_knob(app, &app.settings.quiescence_minutes, "quiescence_secs", 60);
-    wire_knob(
-        app,
-        &app.settings.approval_hold_seconds,
-        "approval_hold_secs",
-        1,
-    );
     wire_knob(
         app,
         &app.settings.digest_hours,
@@ -1033,6 +1029,7 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
+    super::consent_settings::note_status(app, status);
     let scope = status.account_scope.clone();
     if *app.settings.contribution_scope.borrow() != scope {
         *app.settings.contribution_scope.borrow_mut() = scope;
@@ -1234,10 +1231,15 @@ fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
     }
     app.settings.set_up_again.set(state);
     button.set_sensitive(false);
+    // Sharing writes pressed before the unenroll are not applied after it,
+    // nor while it runs, whatever it answers (the Mac's `unenroll`:
+    // `invalidateAccountScopedReads`, then `finishAccountReadBoundary`).
+    app.settings.sharing.owner.borrow_mut().boundary();
     app.call("unenroll", serde_json::json!({}), move |app, result| {
         let mut state = app.settings.set_up_again.get();
         state.finish(result.is_ok());
         app.settings.set_up_again.set(state);
+        app.settings.sharing.owner.borrow_mut().boundary();
         if let Ok(answer) = &result {
             // The NEAR AI sign-in goes with the enrollment (#1843): say so
             // only when it did not, as macOS does.
@@ -2018,11 +2020,14 @@ pub fn refresh(app: &Rc<App>) {
         discover_routing(app);
     }
     super::terminal_choice::refresh(app);
+    super::consent_settings::refresh(app);
+    super::projects_bulk::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
-        let projects: Vec<Project> = result
+        let read: Option<Vec<Project>> = result
             .ok()
-            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok())
-            .unwrap_or_default();
+            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok());
+        super::consent_settings::note_projects(app, read.as_deref());
+        let projects = read.unwrap_or_default();
         render_projects(app, &projects);
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {
@@ -2134,7 +2139,14 @@ fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)>
         .collect()
 }
 
+/// Redraw the project list from what it last drew (a selection change).
+pub(crate) fn rerender_projects(app: &Rc<App>) {
+    let projects = app.settings.last_projects.borrow().clone();
+    render_projects(app, &projects);
+}
+
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
+    *app.settings.last_projects.borrow_mut() = projects.to_vec();
     let view = &app.settings.projects;
     while let Some(child) = view.first_child() {
         view.remove(&child);
@@ -2174,6 +2186,10 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     armed_summary.append(&armed_line);
     view.append(&armed_summary);
 
+    // The Mac's bulk bar: Select all, how many, and Set to.
+    let shown: Vec<String> = projects.iter().map(|p| p.project_id.clone()).collect();
+    view.append(&super::projects_bulk::bar(app, &shown));
+
     for project in projects {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         // Name over note, so the row reads as one thing with a property.
@@ -2181,6 +2197,16 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         // single label it was.
         let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
         column.set_hexpand(true);
+        let title_for_check = if project.is_unresolved_bucket {
+            copy::ONBOARD_WATCH_UNKNOWN_LABEL
+        } else {
+            project.project_label.as_str()
+        };
+        row.append(&super::projects_bulk::row_check(
+            app,
+            &project.project_id,
+            title_for_check,
+        ));
         // The wire label for the unresolvable bucket is the slug
         // `unknown-project`, which is an identifier and not a name. Screen 5
         // says the same thing about the same bucket, so it says it in the
@@ -2291,7 +2317,7 @@ fn set_mode(app: &Rc<App>, project_id: &str, mode: &str) {
         serde_json::json!({ "project_id": project_id, "mode": mode }),
         |app, result| {
             if result.is_err() {
-                app.toast("That couldn't be changed just now. Nothing else changed either.");
+                app.toast(copy::project_mode_failed());
             }
             app.refresh();
         },
@@ -2388,7 +2414,7 @@ fn knob_row(card: &gtk::Box, title: &str, unit: &str, lower: f64, upper: f64) ->
     spin
 }
 
-/// Fill the three knobs from the daemon's own answer.
+/// Fill the two knobs from the daemon's own answer.
 ///
 /// Never from this shell's idea of what it just wrote: `set_settings`
 /// returns the settings as they now stand, and both that and `get_settings`
@@ -2407,14 +2433,9 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
     view.filling_knobs.set(true);
     view.quiescence_minutes
         .set_value(knob_shown(settings.quiescence_secs, 60));
-    view.approval_hold_seconds
-        .set_value(knob_shown(settings.approval_hold_secs, 1));
     view.digest_hours
         .set_value(knob_shown(settings.digest_interval_secs, 3600));
     view.filling_knobs.set(false);
-
-    view.approval_hold_note
-        .set_visible(settings.approval_hold_secs == 0);
 
     // The extra privacy scan and the two session folders used to be
     // restated here as well. §5.4 puts all three in the Connection section
@@ -4500,9 +4521,23 @@ mod witness_tests {
         }
     }
 }
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_settings_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac has no control over the approval hold, so this window has
+    /// none either: nothing here writes it, and the daemon's default hold
+    /// is the only one. A hold of zero would be no Undo at all.
+    #[test]
+    fn settings_offer_no_control_over_the_approval_hold() {
+        let key = concat!("\"approval_hold", "_secs\"");
+        assert!(!include_str!("settings.rs").contains(key));
+        assert!(!include_str!("../copy.rs").contains(concat!("KNOB_", "HOLD_")));
+    }
 
     fn settings_with_modes(claude: &str, codex: &str) -> Settings {
         serde_json::from_value(serde_json::json!({
