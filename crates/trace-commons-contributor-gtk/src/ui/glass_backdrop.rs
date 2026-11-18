@@ -142,9 +142,10 @@ pub struct Frost {
 }
 
 /// The frost asked for in a scheme. Only `contrast` changes the desktop:
-/// KWin 6.5 and 6.6 apply `contrast` and `saturation` and ignore
+/// KWin 6.5.2 to 6.6 apply `contrast` and `saturation` and ignore
 /// `intensity` (`BlurEffect::updateBlurRegion`), so `intensity` stays at
-/// 1 and every release KWin has shipped the protocol in draws the same.
+/// 1 and every KWin that advertises the global draws the same. (6.5.0
+/// and 6.5.1 advertise none; they draw a fixed contrast of their own.)
 /// `saturation` stays at 1: it does not move a grey desktop, the worst
 /// case measured.
 pub fn frost(dark: bool) -> Frost {
@@ -162,8 +163,9 @@ pub fn frost(dark: bool) -> Frost {
 
 /// The largest `contrast`, in steps of 0.05, at which every text colour
 /// reads on the frosted dark panes: the most desktop that can show through
-/// (`style.rs`, `the_frost_shows_as_much_desktop_as_the_text_allows`). At
-/// 0.40 `tc_muted` falls to 4.49:1 over a white desktop.
+/// (`style.rs`, `the_frost_shows_as_much_desktop_as_the_text_allows`). The
+/// worst text there is 4.63:1; at 0.40 `tc_muted` falls to 4.49:1 over a
+/// white desktop.
 pub const FROST_CONTRAST_DARK: f64 = 0.35;
 /// None in light: no contrast makes its text read (at 0, a mid-grey
 /// desktop, `tc_muted` is 3.93:1), and the intensity that would lift it is
@@ -200,6 +202,12 @@ pub fn pane_colour(dark: bool) -> [u8; 4] {
 /// `c * x + (1 - c) / 2` per channel; then saturation, mixing toward the
 /// Rec. 709 luma (0.2126, 0.7152, 0.0722); then intensity scales. The
 /// framebuffer clamps the result to 0..1.
+///
+/// The channels are encoded values, not linear light: KWin blends in gamma
+/// 2.2 (`DrmOutput`, `blendingSpace`, 6.6), and the blur samples what was
+/// blended. Were the matrix applied in linear light, no contrast would make
+/// the dark scheme read (4.36:1 at best). An HDR output raises white past
+/// the SDR reference, which this does not model.
 pub fn frosted(desktop: [f64; 3], frost: Frost) -> [f64; 3] {
     let c = frost.contrast;
     let shift = (1.0 - c) / 2.0;
@@ -692,6 +700,10 @@ pub fn follow(window: &adw::ApplicationWindow, panes: Vec<gtk::Widget>) {
             follower.probe();
         }
     });
+    // A window already on screen has had its map: decide now.
+    if window.is_mapped() {
+        follower.refresh();
+    }
     // Leaving the window, leave the display painted for any other, and
     // let the follower go with it.
     let held = std::cell::RefCell::new(Some(follower));
