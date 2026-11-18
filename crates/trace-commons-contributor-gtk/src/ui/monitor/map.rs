@@ -218,8 +218,10 @@ mod imp {
         /// whether the pointer is over its card.
         pub pile_stage: Cell<PileStage>,
         pub pile_inside: Cell<bool>,
-        /// The stages still to come, cancelled by a change of mind.
-        pub pile_staging: RefCell<Vec<glib::SourceId>>,
+        /// Counts the pointer's comings and goings over the pile: a stage
+        /// still to come from an earlier one is dropped (a fired timeout
+        /// cannot be removed again, so stale ones are ignored instead).
+        pub pile_turn: Cell<u64>,
         /// Each node's button, by node id, in keyboard order.
         pub nodes: RefCell<Vec<(String, gtk::Button)>>,
         pub pill: RefCell<Option<gtk::Button>>,
@@ -347,9 +349,6 @@ mod imp {
         fn dispose(&self) {
             if let Some(tick) = self.tick.take() {
                 tick.remove();
-            }
-            for source in self.pile_staging.take() {
-                source.remove();
             }
             for (_, button) in self.nodes.take() {
                 button.unparent();
@@ -614,29 +613,29 @@ mod imp {
             }
             // A change of mind cancels the stages still to come
             // (`MapToolPile.hover`).
-            for source in self.pile_staging.take() {
-                source.remove();
-            }
-            let mut pending = Vec::new();
+            let turn = self.pile_turn.get() + 1;
+            self.pile_turn.set(turn);
             for (delay, step) in map_scene::pile_steps(inside, reduce_motion()) {
                 if delay == 0 {
                     self.pile_stage.set(self.pile_stage.get().with(step));
                     continue;
                 }
                 let weak = self.obj().downgrade();
-                pending.push(glib::timeout_add_local_once(
+                glib::timeout_add_local_once(
                     std::time::Duration::from_millis(u64::from(delay)),
                     move || {
                         if let Some(obj) = weak.upgrade() {
                             let imp = obj.imp();
+                            if imp.pile_turn.get() != turn {
+                                return;
+                            }
                             imp.pile_stage.set(imp.pile_stage.get().with(step));
                             obj.queue_allocate();
                             obj.queue_draw();
                         }
                     },
-                ));
+                );
             }
-            self.pile_staging.replace(pending);
             let obj = self.obj();
             obj.queue_allocate();
             obj.queue_draw();
