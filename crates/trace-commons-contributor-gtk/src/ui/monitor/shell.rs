@@ -87,6 +87,10 @@ struct State {
     last_demand: RefCell<BTreeSet<String>>,
     /// The opened History row's submission id; empty for none.
     opened_history: RefCell<String>,
+    /// The opened record's contribution details, read once per opening
+    /// and kept across redraws, so a queue or History refresh does not
+    /// read the server again or flash its reading line.
+    history_detail_slot: RefCell<Option<(String, gtk::Box)>>,
     /// The notices closed with their X until the window is opened again.
     closed: Rc<RefCell<notices::Closed>>,
     missions: bool,
@@ -398,6 +402,9 @@ impl Shell {
             button.add_css_class("flat");
             // The chord and nothing else, in GTK's own words.
             button.set_tooltip_text(crate::ui::shortcuts::screen_accel_label(index).as_deref());
+            // Named by its title: the child is a box, so without a name of
+            // its own a screen reader reads the tooltip's chord instead.
+            button.update_property(&[gtk::accessible::Property::Label(tab.title())]);
             if let Some((_, first)) = tab_buttons.first() {
                 button.set_group(Some(first));
             }
@@ -730,6 +737,7 @@ impl Shell {
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
                 opened_history: RefCell::new(String::new()),
+                history_detail_slot: RefCell::new(None),
                 closed,
                 missions,
             },
@@ -1015,6 +1023,8 @@ impl Shell {
     /// inspector opens. Clearing it closes nothing.
     pub fn open_history_row(&self, app: &Rc<App>, submission_id: &str) {
         self.state.opened_history.replace(submission_id.to_string());
+        // Opening a row reads its details afresh.
+        self.state.history_detail_slot.replace(None);
         if !submission_id.is_empty() {
             self.update_prefs(|prefs| prefs.shows_inspector = true);
         }
@@ -1035,9 +1045,39 @@ impl Shell {
             .as_ref()
             .and_then(|records| records.iter().find(|r| r.submission_id == opened))
         {
-            Some(record) => self
-                .history_detail
-                .append(&crate::ui::history::record_detail(record)),
+            Some(record) => {
+                self.history_detail
+                    .append(&crate::ui::history::record_detail(record));
+                // The contribution's details, read from the daemon, as the
+                // Mac's `SessionDetailView` shows them beside the record.
+                if !record.submission_id.is_empty() {
+                    let kept = self
+                        .state
+                        .history_detail_slot
+                        .borrow()
+                        .clone()
+                        .filter(|(id, _)| *id == record.submission_id);
+                    let slot = match kept {
+                        Some((_, slot)) => slot,
+                        None => {
+                            let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                            let id = record.submission_id.clone();
+                            crate::ui::history_detail::load(
+                                app,
+                                &slot,
+                                &record.submission_id,
+                                &record.status,
+                                move |app| *app.shell.state.opened_history.borrow() == id,
+                            );
+                            self.state
+                                .history_detail_slot
+                                .replace(Some((record.submission_id.clone(), slot.clone())));
+                            slot
+                        }
+                    };
+                    self.history_detail.append(&slot);
+                }
+            }
             // A row that has gone is the Traces selection again, never a
             // stale card.
             None if records.is_some() => self.state.opened_history.borrow_mut().clear(),
@@ -1551,6 +1591,30 @@ mod tests {
         }
     }
 
+    /// Each tab button is named by its title. A tab's child is a box, not
+    /// a label, so without a name of its own a screen reader falls back to
+    /// the tooltip and reads the chord ("Ctrl+1").
+    #[test]
+    fn each_tab_is_named_by_its_title() {
+        let code = include_str!("shell.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("the module has a body before its tests");
+        let strip = code
+            .split("for (index, tab) in Tab::ALL")
+            .nth(1)
+            .expect("the strip builds one button per tab")
+            .split("tab_buttons.push")
+            .next()
+            .unwrap();
+        assert!(
+            strip.contains(
+                "button.update_property(&[gtk::accessible::Property::Label(tab.title())])"
+            ),
+            "a tab button has no accessible name of its own"
+        );
+    }
+
     // --- Mounted: the widgets, on a display ------------------------------
 
     use super::*;
@@ -1718,6 +1782,20 @@ mod tests {
             "the end controls are last"
         );
         assert!(at(shell.settings_button.upcast_ref()) < row.len() - 1);
+        mounted.window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_tabs_are_named_by_their_titles() {
+        let mounted = mounted(false);
+        for (tab, button) in &mounted.shell.tabs {
+            assert!(
+                gtk::test_accessible_has_property(button, gtk::AccessibleProperty::Label),
+                "the {} tab has no accessible name, so it is read as its chord",
+                tab.title()
+            );
+        }
         mounted.window.close();
     }
 

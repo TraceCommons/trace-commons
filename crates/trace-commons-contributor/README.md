@@ -381,28 +381,18 @@ for the native API and remaining work.
   reports surviving bearer values as advisories so the residual stays
   visible. If a session pasted a bearer token of a surviving shape, assume
   it is still present and do not submit that session until reviewed.
-- An optional second pass, `--pii-filter near-ai`, sends the
-  already-locally-redacted **message text only** (`content`/
-  `human_correction` fields — not structured tool payloads) through a NEAR AI
-  Cloud (TEE-hosted) PII filter for a second opinion. Structured tool
-  payloads are covered solely by the deterministic pass above, never by the
-  NEAR AI pass. This path requires `TRACE_NEAR_AI_PRIVACY_API_KEY` to be
-  set; `TRACE_NEAR_AI_PRIVACY_BASE_URL` and `TRACE_NEAR_AI_PRIVACY_MODEL`
-  are optional overrides. It is fail-closed: if the filter is requested but
-  unreachable or misconfigured, or if an unknown `--pii-filter` value is
-  given, the batch is refused rather than silently uploaded unfiltered. The
-  API key is read from the environment only; it is never written to
-  `contributor.json` or any other local state file (no key at rest).
-- The first time a batch runs with `--pii-filter near-ai` (or a saved config
-  with that filter selected), the CLI prints a one-time notice that
-  redacted-but-unscrubbed message text will be sent to NEAR AI under your
-  API key, then records that the notice has been shown (a marker file in
-  the local state directory) so later runs stay quiet.
+- The optional client-side second pass that sent message text to a NEAR AI
+  privacy classifier (`--pii-filter near-ai`, `pii_filter = "near-ai"` in
+  `contributor.json`, a `near_ai` credential in daemon settings, or
+  `TRACE_PRIVACY_FILTER_BACKEND=near-ai` on the client) is retired. An old
+  setting is ignored: uploads are scrubbed locally only, the daemon and
+  `submit` log once that the setting was ignored, and the next save drops it
+  from disk. `--pii-filter` is still accepted, so older scripts keep working,
+  and changes nothing. No message text is sent to a NEAR AI classifier from
+  this client. The server-side privacy filter is separate and unaffected.
 - Once per batch, a synthetic privacy-filter canary is run through the
-  active redactor before any real session is uploaded — including, when one
-  is attached, the NEAR AI (or other) privacy-filter backend itself, not
-  just the deterministic pass. If the canary values survive redaction
-  through either stage, the whole batch aborts — this catches a broken,
+  active redactor before any real session is uploaded. If the canary
+  values survive redaction, the whole batch aborts — this catches a broken,
   disabled, or no-op filter before it can leak anything.
 - The server applies its own rescrub pass on top of whatever the client
   sends; that rescrub is deterministic (the same class of secret/path
@@ -508,7 +498,7 @@ the redactor and mapper produce from message content.
 |---|---|
 | `login [--invite <link> \| --grant <b64> \| --key-id] [--allowed-hosts <csv>] [--scopes <csv> \| --default] [--no-browser]` | With no `--invite` or `--grant`, signs in with NEAR AI in the browser and enrolls this device (no invite needed; skips the browser when a NEAR AI sign-in is already kept). With `--invite` (or `TRACE_COMMONS_INVITE`), redeems an invite link. With `--grant`, redeems an enrollment grant. `--key-id` prints this device's key id to hand to an instance operator and enrolls nothing. `--allowed-hosts` applies to `--invite` and `--grant` only. `--no-browser` prints the sign-in address instead of opening a browser; over SSH, or on Linux with no display, that is automatic and `login` also prints the `ssh` command that forwards the sign-in to your own computer. Refuses on a device that is already enrolled. |
 | `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear when `--trajectory` names a file or directory, and — without it — from the working directory's `*.trajectory.json(l)` files and the trajectory staging folder that `import-antigravity` writes to. |
-| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--all` widens selection to every session but still asks for confirmation. `--yes` skips confirmation; the existing `--json --all` mode remains non-interactive. |
+| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--all` widens selection to every session but still asks for confirmation. `--yes` skips confirmation; the existing `--json --all` mode remains non-interactive. |
 | `import-antigravity [--project <path>\|--all]` | Imports conversations from a running Antigravity IDE instance and stages them for `submit`. Requires Antigravity to be running, since its conversations are only readable through the local API it serves. `--project` scopes to one workspace (default: the current directory); `--all` takes every conversation the running instance exposes. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |

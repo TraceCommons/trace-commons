@@ -4,9 +4,9 @@
 //! An earlier design pinned a *digest* of the previewed envelope on the
 //! queue entry and re-derived it immediately before the upload, refusing if
 //! the two disagreed. That guard was correct and it broke the feature under
-//! the configuration the pilot actually runs. With `pii_filter =
-//! "near-ai"` the redaction step is an LLM-backed service, and an LLM does
-//! not return identical spans for identical text: preview pins D1, the
+//! the configuration the pilot then ran: an LLM-backed client-side
+//! privacy filter (since retired), and an LLM does not return identical
+//! spans for identical text: preview pins D1, the
 //! upload rebuilds and gets D2, the entry is refused and re-offered with
 //! the pin cleared, the next preview pins D3 which will not reproduce
 //! either. Nothing unsafe ships -- it fails closed -- but the primary
@@ -715,14 +715,13 @@ mod tests {
         assert_eq!(loaded.response.envelope_bytes, bytes);
         let opts = crate::submit::SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut context = crate::submit::SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = crate::submit::SubmitContext::new(&store, &cfg, &opts).unwrap();
         context.use_approved_witness(loaded.response).unwrap();
         // Server authority is separately exercised by the real-PG
         // actual_postgres_challenge_witness_ingest_and_terminal_retry test:
@@ -824,7 +823,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id,
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -849,8 +847,7 @@ mod tests {
             .remove(0);
         let transcript = crate::source::TraceSource::load(&src, &session_ref).unwrap();
         let raw = crate::envelope::build_raw_contribution(&transcript, &cfg, chrono::Utc::now());
-        let redactor =
-            crate::envelope::build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let redactor = crate::envelope::build_redactor(transcript.cwd.as_deref()).unwrap();
         crate::envelope::redact_to_envelope(&redactor, raw)
             .await
             .unwrap()

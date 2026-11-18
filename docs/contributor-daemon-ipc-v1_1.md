@@ -380,8 +380,8 @@ What replaces the restriction is **visibility, not gatekeeping**:
   approval -- `approve: {"all": true}` and `approve: {"project_id": ...}`
   alike -- appends a local, hash-only audit entry, readable via
   `list_audit`. A project-wide approval that matched nothing appends no
-  entry, because nothing was approved. So do `set_consent_scopes` and
-  `acknowledge_near_ai_notice`, and so does `cancel: {"project_id": ...}`
+  entry, because nothing was approved. So does `set_consent_scopes`,
+  and so does `cancel: {"project_id": ...}`
   -- undoing a batch approval is the same class of act as making one.
 - The action and its audit entry are **one fail-closed unit**. If the entry
   cannot be persisted -- disk full, permissions, a corrupt log -- the action
@@ -488,9 +488,13 @@ something it can corroborate, rather than to a string a client invented.
 - `get_settings` reports five booleans -- `near_ai_configured`,
   `near_ai_inference_configured`, `near_ai_session_retained`,
   `claude_root_configured`, `codex_root_configured` -- and never the
-  underlying values. The first three are credentials and are **different
-  credentials for different services**, which their near-identical names do
-  not convey: `near_ai_configured` is the privacy-filter API key,
+  underlying values. `near_ai_configured` is **always `false`**: it reported
+  the credential of the client-side NEAR AI second scan, which is retired
+  (an older settings file's `near_ai` credential is never read, never crosses
+  the socket, and is dropped on the next save). It stays on the wire because
+  older shells decode it and gate their scan step on it. The next two are
+  credentials and are **different credentials for different services**,
+  which their near-identical names do not convey:
   `near_ai_inference_configured` is the NEAR AI inference key this daemon
   mints for a contributor, and `near_ai_session_retained` is the NEAR AI
   session kept alongside that key so the account balance can be read. The
@@ -575,9 +579,9 @@ The exemption also covers **the previewed envelope at rest**. A successful
 0700 state directory (`daemon-approved-envelope-{entry_id}.json`, 0600,
 atomic), and the upload sends exactly those bytes rather than building a
 second envelope. That is what makes preview and upload agree under a
-privacy filter that does not reproduce its own output: with
-`pii_filter = "near-ai"` an LLM-backed filter returns different spans for
-identical text, and any design that rebuilt-and-compared refused every
+privacy filter that does not reproduce its own output: an LLM-backed
+filter (the pilot once ran one on the client; any attached filter can
+behave this way) returns different spans for identical text, and any design that rebuilt-and-compared refused every
 previewed entry forever. The stored bytes are held to the same bounds as
 the rest of the exemption, plus three of their own:
 
@@ -733,7 +737,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
-| `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at`, `change_24h_nanos`, `change_24h_text`, `received_total_nanos` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
 | `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
@@ -744,7 +747,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
-| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `ptyxis`, `konsole`, `xfce4_terminal`, `ghostty`, `kitty`, `wezterm`, `alacritty`, `foot`, `terminator`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
@@ -834,7 +837,7 @@ number. The JSON is `{title, detail, action, action_kind, severity}`:
   It cannot be derived from `action`: an unsupported OpenCode export is
   actionable with no button.
 - `action_kind` is a stable kind for the button, present exactly when
-  `action` is: `reconnect`, `privacy_scan_notice` or `review_queue` (Swift's
+  `action` is: `reconnect` or `review_queue` (Swift's
   `reviewsQueue`). Switch on it, never on the button's words.
 - `opencode-export-version-unsupported` is answered with the source settings'
   own version sentence (`source_copy`), not the generic banner.
@@ -6253,15 +6256,20 @@ defaults and refusals.
 in, one of this platform's ids and nothing else: on macOS `terminal`
 (the default), `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`
 or `rex`; on Windows `windows_terminal` (the default); on Linux
-`gnome_terminal` (the default), `konsole`, `ghostty`, `kitty`, `wezterm` or
-`alacritty`. Another platform's id is refused like any other. Any other
+`gnome_terminal` (the default), `ptyxis`, `konsole`, `xfce4_terminal`,
+`ghostty`, `kitty`, `wezterm`, `alacritty`, `foot` or `terminator`. Another
+platform's id is refused like any other. Any other
 value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
 settings file holding a value this build does not know loads it as
 unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 `terminal_destination`, a launch is refused, and nothing falls back to
-the default. `set_managed_terminal` writes the same setting. The managed
-snapshot's `capabilities` carries `terminal_current` (the chosen id, or
-`null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
+the default. While `managed_terminal_chosen` is false and the default is
+not installed, the first installed app in picker order stands in for it,
+in the snapshot, a launch and tool setup alike; nothing is saved, and a
+terminal the person chose is never replaced. `set_managed_terminal` writes
+the same setting. The managed snapshot's `capabilities` carries
+`terminal_current` (the id a launch opens: the chosen one, the stand-in
+above, or `null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
 this computer; empty under Flatpak), `terminal_destination` (the
 chosen app's name: where tool setup opens, and what the install and update
 hints and the picker name) and `launch_destination` (where a session opens:
@@ -7062,10 +7070,12 @@ as `not_recorded` rather than inheriting a stale answer. Configs written before
 the record existed read the same way. The record is not an input to
 `input_fingerprint`.
 
-`local_filter` is present only when `route` is `local`: `none`, `near_ai`,
+`local_filter` is present only when `route` is `local`: `none`,
 `self_hosted`, `sidecar`, or `invalid` (a setting the redactor refuses to
-build, so nothing is sent). It is the config's `pii_filter` when set, and
-otherwise the environment's backend.
+build, so nothing is sent). It is the environment's backend. The retired
+client-side NEAR AI scan reads as `none` whatever an old config or the
+environment says, because the redactor never attaches it; `near_ai` is no
+longer sent.
 
 **What this does not report, because this client does not know it:** which
 privacy filter the witness itself calls (it is set in the configuration the
@@ -7940,36 +7950,21 @@ The CLI's `unenroll` (with `--yes` to skip its confirmation) calls this;
 `consent scopes` calls `set_consent_scopes` with the floor scope named, so an
 enrollment made with `login --default` leaves the consent hold.
 
-### `acknowledge_near_ai_notice`
+### `acknowledge_near_ai_notice` (retired)
 
-Records that the NEAR AI first-use privacy disclosure was shown to the
-contributor in a UI, and clears the `near-ai-notice-not-acknowledged` health
-label so the daemon will start using that filter. This is the only way an
-app-only contributor (one who never touches the CLI, which shows the same
-notice on stdout) can get past that gate. Because this asserts, on the
-caller's unverified word, that a disclosure was actually shown to someone,
-it is audited (`near-ai-notice-acknowledged`) -- an application must not
-call it without actually having shown the notice text first.
+Removed with the client-side NEAR AI second scan. A call gets the ordinary
+`unknown_method` / `unknown-method` answer, changes nothing and writes no
+audit row; no shipped shell calls it, because each gated the call on
+`near_ai_configured` (now always `false`) or on the
+`near-ai-notice-not-acknowledged` health label, which is never raised again.
+Older audit rows with the action `near-ai-notice-acknowledged` still render.
 
-Acknowledging also re-offers every session the gate had refused, and
-`reoffered` is how many. A session sent while the notice was outstanding is
-refused with `near-ai-notice-not-acknowledged`, which is a refusal about
-timing rather than about the session -- but a refused entry is never moved
-again, and the watcher does not re-offer a session whose file is unchanged,
-so without this those sessions were lost for good. They return as `Pending`
-with their old approval cleared, because that approval was given before the
-disclosure it depended on: an `auto_upload` folder re-approves them on the
-next poll, and any other folder asks again. A `queue_changed` event is
-published when any move.
-
-A refused entry whose file already has a live entry (the session grew while
-it sat refused, and the watcher offered the new content) is not revived: it
-is marked `superseded` with `session-changed-after-offer`, and is not counted
-in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
-runs on every daemon tick once the notice marker exists, so a notice
-acknowledged through the CLI, which writes the marker without calling this
-method, gets the same result. It runs whether or not the daemon is paused,
-quiesced for an update, or in dry-run, since it sends nothing.
+A queue an older build wrote may still hold entries refused with
+`near-ai-notice-not-acknowledged`. The daemon re-offers them on every tick:
+they return to `Pending`, not approved, so whether they are sent is decided
+afresh by the contributor or by a standing grant. It runs whether or not the
+daemon is paused, quiesced for an update, or in dry-run, since it sends
+nothing.
 
 ### `near_ai_balance`
 
@@ -9403,7 +9398,6 @@ nothing for an interval that is not whole hours.
 | `pii-filter-unavailable` | filter configured but unreachable | yes |
 | `claim-mint-failed` | issuer refused or failed | yes |
 | `ingest-unreachable` | upload failed after retries | yes |
-| `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
 | `witness-saturated` | approved sessions held because the privacy witness is at capacity; also the `reason_label` on each held entry | yes |
@@ -9423,16 +9417,15 @@ applies, the daemon shows the one with the **highest precedence** below,
 listed highest first:
 
 1. `not-logged-in`
-2. `near-ai-notice-not-acknowledged`
-3. `privacy-filter-canary-failed`
-4. `pii-filter-unavailable`
-5. `claim-mint-failed`
-6. `ingest-unreachable`
-7. `queue-full`
-8. `witness-saturated`
-9. `automatic-contribution-held`
-10. `admission-limit-reached`
-11. `session-too-large`
+2. `privacy-filter-canary-failed`
+3. `pii-filter-unavailable`
+4. `claim-mint-failed`
+5. `ingest-unreachable`
+6. `queue-full`
+7. `witness-saturated`
+8. `automatic-contribution-held`
+9. `admission-limit-reached`
+10. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
@@ -10002,8 +9995,10 @@ launcher on a saved key.
 
 ### `managed_tool_setup` — coding-tool installation and updates
 
-A local, explicit Terminal action, currently offered by native macOS when
-`managed_snapshot.capabilities.tool_setup` is true. Older daemons omit the
+A local, explicit Terminal action, offered when
+`managed_snapshot.capabilities.tool_setup` is true: on macOS, and on Linux
+outside a Flatpak sandbox (native macOS is the only shell that draws it
+today). Older daemons omit the
 optional capability and clients retain their official setup-guide links.
 
 Request parameters are exactly `tool: "claude" | "codex" | "opencode"` and
@@ -10022,9 +10017,13 @@ Fresh installs use the official standalone installers for Claude Code, Codex,
 and OpenCode's current V2 installer. Existing OpenCode installations use their
 own updater rather than being replaced by the fresh-install command. Updates preserve recognized
 Homebrew casks/npm prefixes; native Claude uses `update`, Codex uses its official
-installer, and OpenCode uses its own `upgrade`. The handoff uses the same bounded
+installer, and OpenCode uses its own `upgrade`. On macOS the handoff uses the same bounded
 AppleScript runner and selected Terminal/Ghostty/iTerm2 templates as managed
-sessions. The terminal stays open after the vendor command finishes. This does
+sessions. On Linux the chosen terminal is started with an argv vector, its own
+flags without a folder, then `/bin/bash`, `-lc` and the script as one element,
+as a session launch is. The script ends in a login shell (`$SHELL`, else
+`/bin/zsh` on macOS and `/bin/bash` on Linux), so the terminal stays open after
+the vendor command finishes. This does
 not change supported-version policy or auto-upgrade any tool on launch.
 
 Vendor references:

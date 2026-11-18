@@ -14,7 +14,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigStore, DAEMON_SETTINGS_FILE};
-use crate::envelope::NearAiSettings;
 
 pub const DAEMON_SETTINGS_SCHEMA: &str = "trace_commons.daemon_settings.v1";
 
@@ -458,15 +457,14 @@ pub struct DaemonSettings {
     /// the native applications render their own, and the daemon's shell-out
     /// path needs a desktop session it may not have.
     pub local_notifications: bool,
-    /// Privacy-filter credentials, persisted so a service-managed daemon can
-    /// reach the filter without a shell environment.
-    pub near_ai: Option<NearAiSettings>,
+    // `near_ai`, the credential of the retired client-side NEAR AI second
+    // scan, is gone. An older file that still holds it loads (unknown keys
+    // are ignored), the credential is never read, and the next save drops it
+    // from disk. See `crate::retired_second_scan`.
     /// The NEAR AI **inference** credential this daemon obtained for the
-    /// contributor, distinct from `near_ai` above, which is the
-    /// **privacy-filter** credential and answers a different service. Two
-    /// near-homonyms in one file invite "I set my NEAR AI key, why do calls
-    /// still fail", so the distinction is stated here, on the IPC boolean, and
-    /// in the doc inventory rather than left to be inferred from the name.
+    /// contributor. Older files may also carry `near_ai`, the credential of
+    /// the retired privacy scan, which answered a different service and is
+    /// ignored.
     ///
     /// This slot is the daemon's, and that is the point. The rule this module
     /// keeps elsewhere -- never act on a slot the contributor owns -- is about
@@ -485,10 +483,9 @@ pub struct DaemonSettings {
     /// balance can be read. See [`NearAiSession`] for what this is authority
     /// over, which is considerably more than the key beside it.
     ///
-    /// A third NEAR-AI-shaped key in one document, and the three answer three
-    /// different questions: `near_ai` is the privacy-filter credential,
-    /// `near_ai_inference` is the key inference calls carry, and this is the
-    /// session that management reads need. Forgetting the credential clears
+    /// Two NEAR-AI-shaped keys in one document, answering two different
+    /// questions: `near_ai_inference` is the key inference calls carry, and
+    /// this is the session that management reads need. Forgetting the credential clears
     /// this too -- see `nearai_credential::disconnect` -- because a
     /// contributor who believes they revoked the daemon's access and left a
     /// session behind has been told something false.
@@ -1408,7 +1405,6 @@ impl Default for DaemonSettings {
             canary_interval_secs: DEFAULT_CANARY_INTERVAL_SECS,
             approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,
-            near_ai: None,
             near_ai_inference: None,
             near_ai_session: None,
             cloud_credentials: None,
@@ -2527,6 +2523,32 @@ mod tests {
         ] {
             assert!(stored.get(key).is_none(), "{key}: {stored}");
         }
+    }
+
+    /// A file an older build wrote may hold `near_ai`, the plaintext
+    /// credential of the retired client-side NEAR AI second scan. It loads,
+    /// and the next save takes the credential off disk.
+    #[test]
+    fn a_settings_file_with_the_retired_scan_credential_loads_and_drops_it() {
+        let (_dir, store) = temp_store();
+        let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+        legacy["near_ai"] = serde_json::json!({
+            "api_key": "legacy-secret-key",
+            "base_url": "https://classifier.example",
+            "model": null,
+        });
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let settings = DaemonSettings::load(&store).expect("a legacy settings file loads");
+        settings.save(&store).unwrap();
+        let stored = std::fs::read(store.daemon_path(DAEMON_SETTINGS_FILE)).unwrap();
+        let stored_json: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+        assert!(stored_json.get("near_ai").is_none(), "{stored_json}");
+        assert!(
+            !String::from_utf8_lossy(&stored).contains("legacy-secret-key"),
+            "the retired credential must leave the disk on save"
+        );
     }
 
     /// A shell built while the daily limit existed may still send its two
@@ -5197,7 +5219,6 @@ mod tests {
         assert_eq!(s.quiescence_secs, DEFAULT_QUIESCENCE_SECS);
         assert_eq!(s.max_reuploads, DEFAULT_MAX_REUPLOADS);
         assert!(!s.local_notifications, "notifications must be opt-in");
-        assert!(s.near_ai.is_none());
     }
 
     #[test]
@@ -5536,7 +5557,7 @@ mod tests {
 
     #[test]
     fn settings_are_written_readable_only_by_the_owner() {
-        // near_ai carries an API key.
+        // The file can carry NEAR AI credential metadata.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

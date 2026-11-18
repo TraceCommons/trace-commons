@@ -2597,11 +2597,6 @@ final class AppModel: ObservableObject {
         return outcome
     }
 
-    /// Records that the NEAR AI first-use notice was shown, and clears the
-    /// health label that otherwise keeps the daemon refusing that filter.
-    /// Refreshes settings and status afterward so `nearAIConfigured` /
-    /// `health` reflect the daemon's own post-acknowledgment state rather
-    /// than an assumption made here.
     /// Records that one void notice was shown, then re-reads status so the
     /// daemon's own list, not an assumption made here, decides what stays.
     func acknowledgeGrantVoid(id: UInt64) {
@@ -2899,17 +2894,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func acknowledgeNearAINotice() {
-        perform(
-            "acknowledge_near_ai_notice",
-            work: { try $0.acknowledgeNearAINotice() }
-        ) { _ in
-            self.refreshSettings()
-            self.refreshStatus()
-            self.refreshAudit()
-        }
-    }
-
     func refreshConsentOptions() {
         perform("consent_options", work: { try $0.consentOptions() }) {
             self.publishIfChanged(\.consentScopes, $0)
@@ -3202,7 +3186,8 @@ final class AppModel: ObservableObject {
     /// (`LaunchRouting.onboardingKnown`), in one spelling for the launch,
     /// the Monitor's gates and every request's routing.
     var onboardingKnown: Bool {
-        LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
+        if DebugScreenshot.capturesSampleWindows { return true }
+        return LaunchRouting.onboardingKnown(startup: startup, statusAnswered: status.answered, statusFailed: statusReadFailed)
     }
 
     /// What the launch's own request opens (`LaunchRouting.launchOpening`).
@@ -3236,6 +3221,7 @@ final class AppModel: ObservableObject {
     /// `loggedIn` reads false, so onboarding reads required until then;
     /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
+        if DebugScreenshot.capturesSampleWindows { return false }
         if startup == .needsRoots { return true }
         if Self.reviewSkipsSignIn { return false }
         return !status.loggedIn || !isOnboardingComplete
