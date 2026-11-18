@@ -51,6 +51,9 @@ pub mod card {
     pub const MIN_HEIGHT: f64 = 156.0;
     pub const GRAPHIC_RESERVE: i32 = 90;
     pub const GRAPHIC_WIDTH: f64 = 210.0;
+    /// The words' inset on every side (`cardPaddingHorizontal`).
+    pub const PADDING: i32 =
+        super::super::style::brand_tokens::glass::space::CARD_PADDING_HORIZONTAL;
     /// The ground's corner: the flat theme's card radius.
     pub const RADIUS: f64 = super::super::style::brand_tokens::glass::radius::CARD as f64;
     /// The hover: heroInk at this opacity over the ground, under the graphic.
@@ -173,8 +176,7 @@ pub fn paint_ground(cr: &cairo::Context, width: f64, height: f64, ground: Ground
 /// not the pixel glyph (the Insights hero's bars, which are widgets).
 pub fn paint_card(
     cr: &cairo::Context,
-    width: f64,
-    height: f64,
+    (width, height): (f64, f64),
     ground: Ground,
     hover: bool,
     mask: Option<&glyph::Mask>,
@@ -189,6 +191,73 @@ pub fn paint_card(
         glyph::paint_symbol(cr, width, height, mask, dark, time);
     }
     let _ = cr.restore();
+}
+
+/// The hero cards' stylesheet, from the tokens: heroInk words, the white
+/// pill, the X, and the bars' names, the same in both appearances.
+pub fn css() -> String {
+    let ink = Rgb::hex(tokens::HERO_INK);
+    let rgba = |alpha: f64| {
+        format!(
+            "rgba({}, {}, {}, {alpha})",
+            (ink.0 * 255.0).round(),
+            (ink.1 * 255.0).round(),
+            (ink.2 * 255.0).round()
+        )
+    };
+    let (pad_x, pad_y) = card::PILL_PADDING;
+    let radius = card::RADIUS;
+    [
+        format!(
+            "button.tc-hero, button.tc-hero:hover, button.tc-hero:active, button.tc-hero:checked \
+             {{ padding: 0; margin: 0; background: none; border: none; box-shadow: none; \
+             border-radius: {radius}px; min-height: 0; min-width: 0; }}"
+        ),
+        format!(".tc-hero-layers {{ border-radius: {radius}px; }}"),
+        format!(
+            "button.tc-hero label.tc-hero-title {{ color: {}; font-weight: 800; }}",
+            tokens::HERO_INK
+        ),
+        format!(
+            "button.tc-hero label.tc-hero-subtitle {{ color: {}; font-weight: 400; }}",
+            rgba(card::SUBTITLE_INK)
+        ),
+        format!(
+            "button.tc-hero label.tc-hero-line {{ color: {}; font-weight: 600; }}",
+            rgba(card::CONTENT_INK)
+        ),
+        format!(
+            "button.tc-hero label.tc-hero-figure {{ color: {}; font-weight: 700; \
+             font-feature-settings: \"tnum\"; }}",
+            tokens::HERO_INK
+        ),
+        format!(
+            "button.tc-hero label.tc-hero-pill {{ background: {}; color: {}; \
+             border-radius: 999px; padding: {pad_y}px {pad_x}px; font-weight: 600; }}",
+            tokens::HERO_BUTTON_FILL,
+            tokens::HERO_BUTTON_INK
+        ),
+        format!(
+            "button.tc-hero-close, button.tc-hero-close:active {{ padding: {}px; margin: 0; \
+             background: none; border: none; box-shadow: none; min-width: 0; min-height: 0; \
+             color: {}; }}",
+            card::CLOSE_INSET,
+            rgba(card::CLOSE_INK)
+        ),
+        format!(
+            "button.tc-hero-close:hover {{ background: none; color: {}; }}",
+            rgba(card::CLOSE_INK_HOVER)
+        ),
+        format!(
+            "label.tc-hero-bar-name {{ color: {}; text-shadow: 0 8px 12px rgba(0, 0, 0, 0.2); }}",
+            rgba(bars::NAME_INK)
+        ),
+        format!(
+            ".tc-hero-bar {{ border-radius: {}px; box-shadow: 0 8px 12px rgba(0, 0, 0, 0.2); }}",
+            bars::RADIUS
+        ),
+    ]
+    .join("\n")
 }
 
 /// The rules the pixel graphics move by (`GlassPixelField`).
@@ -509,7 +578,7 @@ pub mod glyph {
         // A one-point gap, as the pixel field's.
         let side = (card::CELL - 1.0).max(1.0);
         let cells = lit(mask, time, palette.len());
-        for shade in 0..palette.len() {
+        for (shade, colour) in palette.iter().enumerate() {
             for bright in [false, true] {
                 let mut any = false;
                 for cell in cells
@@ -530,7 +599,7 @@ pub mod glyph {
                     } else {
                         card::DIM_CELLS
                     };
-                    palette[shade].source(cr, alpha);
+                    colour.source(cr, alpha);
                     let _ = cr.fill();
                 }
             }
@@ -614,7 +683,7 @@ pub mod bars {
             .filter_map(|tool| Some((tool.tool.clone(), tool.tokens?)))
             .filter(|(_, tokens)| *tokens > 0)
             .collect();
-        bars.sort_by(|a, b| b.1.cmp(&a.1));
+        bars.sort_by_key(|bar| std::cmp::Reverse(bar.1));
         bars.truncate(TOOL_LIMIT);
         bars
     }
@@ -673,7 +742,7 @@ pub fn compact(value: u64) -> String {
                 index += 1;
                 continue;
             }
-            return if tenths % 10 == 0 {
+            return if tenths.is_multiple_of(10) {
                 format!("{}{suffix}", tenths / 10)
             } else {
                 format!("{}.{}{suffix}", tenths / 10, tenths % 10)
@@ -693,7 +762,7 @@ fn grouped(value: u128) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -887,7 +956,7 @@ pub mod coins {
             let _ = cr.fill();
         }
         let alpha = opacity(t);
-        let _ = cr.push_group();
+        cr.push_group();
         let spark = Rgb::hex(SPARK);
         for coin in coins() {
             let flown = t - coin.delay;

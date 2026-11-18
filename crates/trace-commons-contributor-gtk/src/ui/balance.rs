@@ -57,7 +57,10 @@ pub struct BalanceSection {
     /// read. Emptied first, so a state that offers nothing leaves nothing
     /// behind.
     action: gtk::Box,
-    card: gtk::Box,
+    pub(super) card: gtk::Box,
+    /// The toned row's words, rebuilt on every read: Home counts the
+    /// figure up in it when NEAR AI credit arrives.
+    head: Rc<std::cell::RefCell<Option<gtk::Label>>>,
 }
 
 impl Default for BalanceSection {
@@ -71,6 +74,17 @@ impl BalanceSection {
     pub fn use_flat_style(&self) {
         self.card.remove_css_class("tc-card");
         self.card.add_css_class("tc-insights-card");
+    }
+
+    /// Writes over the figure the row shows, until the next read draws the
+    /// row again; a read mid-count is written over by the next step.
+    pub fn head_writer(&self) -> impl Fn(&str) + 'static {
+        let head = Rc::clone(&self.head);
+        move |text| {
+            if let Some(head) = head.borrow().as_ref() {
+                head.set_text(text);
+            }
+        }
     }
 
     /// A balance sign-in cannot replace an in-progress browser ceremony.
@@ -101,6 +115,7 @@ impl BalanceSection {
             status,
             action,
             card,
+            head: Rc::new(std::cell::RefCell::new(None)),
         }
     }
 }
@@ -175,6 +190,9 @@ fn details(row: &crate::balance::BalanceView) -> Vec<&str> {
 pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
     render_section(app, &app.private_inference.balance, balance);
     render_section(app, &app.home.balance, balance);
+    // A read that answered: Home marks credit that arrived since the
+    // figure it last showed.
+    app.home.balance_read(balance);
 }
 
 fn render_section(app: &Rc<App>, view: &BalanceSection, balance: &crate::model::NearAiBalance) {
@@ -184,11 +202,12 @@ fn render_section(app: &Rc<App>, view: &BalanceSection, balance: &crate::model::
     }
 
     let head = head(&row);
+    *view.head.borrow_mut() = None;
     if !head.is_empty() {
-        view.status.append(&private_inference::tone_row(
-            head,
-            private_inference::indicator_tone(row.tone),
-        ));
+        let tone_row =
+            private_inference::tone_row(head, private_inference::indicator_tone(row.tone));
+        *view.head.borrow_mut() = tone_row.last_child().and_downcast::<gtk::Label>();
+        view.status.append(&tone_row);
     }
     for line in details(&row) {
         style::append_meta(&view.status, line);

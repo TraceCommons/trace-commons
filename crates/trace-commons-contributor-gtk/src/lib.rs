@@ -28,6 +28,7 @@ pub mod disclosure;
 pub mod eligibility;
 pub mod first_run;
 pub mod home;
+pub mod home_cards;
 pub mod model;
 pub mod notify;
 pub mod original_search;

@@ -125,7 +125,9 @@ fn the_hero_card_takes_the_macs_measures() {
     assert_eq!(card::MIN_HEIGHT, 156.0);
     assert_eq!(card::GRAPHIC_RESERVE, 90);
     assert_eq!(card::GRAPHIC_WIDTH, 210.0);
-    assert_eq!(card::RADIUS, 16.0, "the flat theme's card radius");
+    assert_eq!(card::PADDING, 14);
+    // The flat theme's card radius.
+    assert_eq!(card::RADIUS, 16.0);
     assert_eq!(card::HOVER, 0.06);
     assert_eq!((card::CLOSE_GLYPH, card::CLOSE_INSET), (12, 8));
     assert_eq!((card::CLOSE_INK, card::CLOSE_INK_HOVER), (0.75, 1.0));
@@ -461,8 +463,7 @@ fn renders_for_comparison() {
                 let mask = symbol.and_then(glyph::hero_mask);
                 paint_card(
                     &cr,
-                    w as f64,
-                    h as f64,
+                    (w as f64, h as f64),
                     ground,
                     hover,
                     mask.as_ref(),
@@ -477,6 +478,51 @@ fn renders_for_comparison() {
                     &dir.join(format!("{name}{suffix}-{scheme}.png")),
                 );
             }
+        }
+        // The Insights hero's bars (their names are labels, not drawn
+        // here), placed as `hero_card::place_bars` places them.
+        {
+            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            paint_card(
+                &cr,
+                (w as f64, h as f64),
+                Ground::Insights,
+                false,
+                None,
+                dark,
+                0.0,
+            );
+            let tokens = [900u64, 400, 120, 40];
+            let names = 13.0 + bars::NAME_GAP as f64;
+            let tall = bars::height(tokens[0], tokens[0]) + names;
+            let (x0, y0) = super::super::hero_card::place_bars(
+                w,
+                h,
+                bars::width(tokens.len()),
+                tall.round() as i32,
+            );
+            let _ = cr.save();
+            super::rounded(&cr, 0.0, 0.0, w as f64, h as f64, card::RADIUS);
+            cr.clip();
+            for (index, value) in tokens.iter().enumerate() {
+                let height = bars::height(*value, tokens[0]);
+                let x = x0 as f64
+                    + index as f64 * (bars::NAME_WIDTH + bars::SPACING) as f64
+                    + (bars::NAME_WIDTH as f64 - bars::BAR_WIDTH) / 2.0;
+                let y = y0 as f64 + tall - height;
+                let _ = cr.save();
+                cr.translate(x, y);
+                bars::paint_bar(&cr, bars::BAR_WIDTH, height);
+                let _ = cr.restore();
+            }
+            let _ = cr.restore();
+            drop(cr);
+            let mut surface = surface;
+            save_png(
+                &mut surface,
+                &dir.join(format!("insights-bars-{scheme}.png")),
+            );
         }
         // The coin burst at four moments over a 200 by 90 card.
         for t in [0.1, 0.45, 0.9, 1.4] {

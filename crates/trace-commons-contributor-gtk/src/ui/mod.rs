@@ -14,6 +14,7 @@ mod first_run;
 mod first_run_terms;
 pub mod funding;
 pub mod hero_art;
+pub mod hero_card;
 pub mod history;
 pub mod home;
 pub mod insights;
@@ -907,6 +908,7 @@ impl App {
             }
         });
         history::refresh(self);
+        home::refresh(self);
         private_inference::refresh(self);
         settings::refresh(self);
     }

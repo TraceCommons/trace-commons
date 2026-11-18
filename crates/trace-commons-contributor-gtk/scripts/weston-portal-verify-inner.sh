@@ -168,6 +168,9 @@ else
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   for test_name in \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
+    ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
+    ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
+    ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
