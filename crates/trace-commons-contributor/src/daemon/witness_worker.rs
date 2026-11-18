@@ -585,15 +585,8 @@ async fn job(shared: &Arc<DaemonShared>, snapshot: &QueueEntry, clock: Clock) ->
         return JobEnd::Done;
     };
 
-    let near_ai = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .near_ai
-        .clone();
     let opts = crate::submit::SubmitOptions {
         dry_run: false,
-        pii_filter: cfg.pii_filter.clone(),
         no_reasoning: false,
         machine_readable: true,
         unenrolled_preview: false,
@@ -606,7 +599,7 @@ async fn job(shared: &Arc<DaemonShared>, snapshot: &QueueEntry, clock: Clock) ->
         return JobEnd::Dropped;
     };
     let Ok(mut ctx) =
-        super::run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))
+        super::run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts))
     else {
         return JobEnd::Dropped;
     };

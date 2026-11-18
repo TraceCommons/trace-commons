@@ -139,7 +139,6 @@ async fn daemon_with_one_message(
         user_subject: "alice".into(),
         device_key_id: device.device_key_id.clone(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,

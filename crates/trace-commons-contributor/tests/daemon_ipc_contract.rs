@@ -181,7 +181,6 @@ fn fixture_config(device_key_id: &str) -> trace_commons_contributor::config::Con
         user_subject: "alice".into(),
         device_key_id: device_key_id.to_string(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -366,7 +365,6 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
             user_subject: "alice".into(),
             device_key_id: "sha256:aa".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -695,12 +693,8 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
     // `submit_one` and `build_preview` use, and check the daemon reported
     // exactly that -- not merely *some* different number.
     let transcript = TraceSource::load(&src, &session_ref).unwrap();
-    let redactor = trace_commons_contributor::envelope::build_redactor_with(
-        &cfg,
-        transcript.cwd.as_deref(),
-        None,
-    )
-    .unwrap();
+    let redactor =
+        trace_commons_contributor::envelope::build_redactor(transcript.cwd.as_deref()).unwrap();
     // Pinned, not `Utc::now()`. See the comment below the rebuild for why the
     // instant has to be one this test can name again afterwards.
     let rebuild_now = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")

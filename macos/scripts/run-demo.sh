@@ -86,7 +86,6 @@ cat > "$STATE_DIR/contributor.json" <<'JSON'
   "user_subject": "demo-user",
   "device_key_id": "demo-device",
   "consent_scopes": ["debugging_evaluation"],
-  "pii_filter": null,
   "allowed_hosts": null
 }
 JSON

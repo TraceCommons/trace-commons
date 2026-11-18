@@ -17,7 +17,6 @@ public sealed class SettingsProtocolTests
         Assert.NotNull(settings);
         Assert.True(settings!.ClaudeRootConfigured);
         Assert.False(settings.CodexRootConfigured);
-        Assert.True(settings.NearAiConfigured);
         Assert.Equal(1800UL, settings.QuiescenceSeconds);
         Assert.Equal(14400UL, settings.DigestIntervalSeconds);
         Assert.Equal(10UL, settings.ApprovalHoldSeconds);

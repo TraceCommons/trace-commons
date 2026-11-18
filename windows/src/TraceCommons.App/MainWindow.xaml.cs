@@ -789,13 +789,7 @@ public sealed partial class MainWindow : Window
     /// The health banner's action, for the two conditions that have one.
     /// </summary>
     /// <remarks>
-    /// Both resolve on the same screen, which is why one handler serves both.
-    /// <c>not-logged-in</c> is answered by the Connect step, and
-    /// <c>near-ai-notice-not-acknowledged</c> by the privacy step, whose
-    /// choice is the only thing in this app that calls
-    /// <c>acknowledge_near_ai_notice</c> -- without that call the daemon
-    /// refuses the filter forever and the contributor experiences unexplained
-    /// paralysis, which is precisely the state this banner is reporting.
+    /// <c>not-logged-in</c> is answered by the Connect step.
     ///
     /// Onboarding is opened directly rather than through
     /// <see cref="ShowOnboardingIfNeededAsync"/>: that method's job is to

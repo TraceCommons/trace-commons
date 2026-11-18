@@ -34,9 +34,6 @@ use trace_commons_protocol::trace_contribution::ConsentScope;
 const UNENROLLED_PREVIEW_NOTICE: &str = "unenrolled preview: deterministic-only redaction; identity \
     fields are placeholders, external privacy filters are ignored to keep pre-enrollment data \
     offline, and nothing was submitted";
-const NEAR_AI_FIRST_USE_NOTICE: &str = "notice: this will send redacted-but-unscrubbed message text \
-    to NEAR AI under your API key (one-time notice; see `--pii-filter near-ai` in the README for \
-    scope).";
 
 // These explicit placeholders exist only so an unenrolled preview can build
 // the same local envelope shape without claiming a real contributor identity.
@@ -63,7 +60,6 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         user_subject: PREVIEW_USER_SUBJECT.to_string(),
         device_key_id: PREVIEW_DEVICE_KEY_ID.to_string(),
         consent_scopes: vec!["debugging_evaluation".to_string()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -192,7 +188,6 @@ pub(crate) async fn enroll_core(
         user_subject: grant.attestation.user_subject.clone(),
         device_key_id: response.device_key_id,
         consent_scopes,
-        pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
         display_handle: None,
         public_bio: None,
@@ -1624,7 +1619,6 @@ pub struct SubmitSelection<'a> {
     /// these", which is still worth having when the batch is not.
     pub pick: bool,
     pub dry_run: bool,
-    pub pii_filter: Option<&'a str>,
     pub manifest: Option<&'a Path>,
     /// Where to write the signed score attestation for this run's
     /// submissions. Absent leaves the standalone `attest` command as the only
@@ -1764,15 +1758,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         None => anyhow::bail!(crate::near_ai_login::UNENROLLED_HINT),
     };
 
-    let selected_filter = sel.pii_filter.or(cfg.pii_filter.as_deref());
-    let near_ai_notice =
-        !unenrolled_preview && selected_filter == Some("near-ai") && !store.near_ai_notice_shown();
+    // The retired client-side NEAR AI second scan: an old `pii_filter` in
+    // the config, its credential in the daemon settings, or the environment
+    // switch is ignored and logged once. Uploads are scrubbed locally only.
+    crate::retired_second_scan::log_if_configured(store);
     let mut notices = Vec::new();
     if unenrolled_preview {
         notices.push(UNENROLLED_PREVIEW_NOTICE);
-    }
-    if near_ai_notice {
-        notices.push(NEAR_AI_FIRST_USE_NOTICE);
     }
     if !sel.json {
         for notice in &notices {
@@ -1873,7 +1865,6 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         };
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
-        pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
         machine_readable: sel.json,
         unenrolled_preview,
@@ -2728,7 +2719,6 @@ mod tests {
             user_subject: "alice".to_string(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".to_string()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2884,7 +2874,6 @@ mod tests {
             user_subject: "alice".to_string(),
             device_key_id: device_key_id.to_string(),
             consent_scopes: vec!["debugging_evaluation".to_string()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: Some("quiet-otter".to_string()),
             public_bio: Some("Ships billing systems by day.".to_string()),
@@ -3183,7 +3172,6 @@ mod login_route_tests {
                 user_subject: "alice".into(),
                 device_key_id: device.device_key_id,
                 consent_scopes: vec!["debugging_evaluation".into()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -3243,7 +3231,6 @@ mod login_route_tests {
             yes: false,
             pick: false,
             dry_run: false,
-            pii_filter: None,
             manifest: None,
             attest_out: None,
             attest_post: None,
@@ -3332,7 +3319,6 @@ mod project_filter_tests {
             yes: true,
             pick: false,
             dry_run: true,
-            pii_filter: None,
             manifest: Some(&manifest),
             attest_out: None,
             attest_post: None,
@@ -3373,7 +3359,6 @@ mod project_filter_tests {
             yes: true,
             pick: false,
             dry_run: true,
-            pii_filter: None,
             manifest: None,
             attest_out: Some(&attestation),
             attest_post: None,
@@ -3749,7 +3734,6 @@ async fn enroll_with_invite_core(
             .unwrap_or_else(|| device.device_key_id.clone()),
         device_key_id: response.device_key_id,
         consent_scopes,
-        pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
         display_handle: None,
         public_bio: None,

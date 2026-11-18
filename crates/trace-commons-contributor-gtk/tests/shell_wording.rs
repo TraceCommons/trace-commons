@@ -128,7 +128,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 206),
+    ("copy.rs", 203),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
@@ -140,7 +140,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became
     // "1 hour", which is a length, not a sentence.
     // Settings navigation removes the local "How it behaves" heading.
-    ("ui/settings.rs", 19),
+    ("ui/settings.rs", 17),
     ("update.rs", 2),
     ("worker.rs", 1),
 ];

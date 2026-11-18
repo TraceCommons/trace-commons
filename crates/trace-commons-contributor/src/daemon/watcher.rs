@@ -1472,21 +1472,19 @@ impl PassContext {
             .as_ref()
             .map(|c| c.consent_scopes.clone())
             .unwrap_or_default();
-        let (near_ai, attested_bodies, scrub_check_manual) = {
+        let (attested_bodies, scrub_check_manual) = {
             let s = shared.settings.lock().expect("settings lock");
             (
-                s.near_ai.clone(),
                 s.ironwire_attested_bodies,
                 s.scrub_check == super::settings::ScrubCheck::Manual,
             )
         };
-        let approval_inputs = cfg.as_ref().map(|c| {
-            crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
-        });
+        let approval_inputs = cfg
+            .as_ref()
+            .map(|c| crate::daemon::preview::input_fingerprint(c, attested_bodies));
         let grant_terms = cfg.as_ref().map(|c| {
             super::grant_terms::GrantTerms::current(
                 c,
-                near_ai.as_ref(),
                 attested_bodies,
                 &super::grant_terms::env_filter_backend(),
             )
@@ -4626,7 +4624,6 @@ mod tests {
             user_subject: "alice".to_string(),
             device_key_id: "sha256:aa".to_string(),
             consent_scopes: scopes.iter().map(|s| s.to_string()).collect(),
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -6483,7 +6480,7 @@ mod tests {
         let src = crate::source::claude_code::ClaudeCodeSource::new(f.claude_root.clone());
         let session_ref = src.discover().unwrap().remove(0);
         let (summary, _body, envelope) =
-            crate::daemon::preview::build_preview(&f.shared.store, None, None, &src, &session_ref)
+            crate::daemon::preview::build_preview(&f.shared.store, None, &src, &session_ref)
                 .await
                 .unwrap();
         crate::daemon::approved_envelope::save(&f.shared.store, entry_id, &envelope).unwrap();
@@ -8713,7 +8710,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,

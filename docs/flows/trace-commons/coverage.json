@@ -3725,29 +3725,6 @@
       ]
     },
     {
-      "id": "ipc:acknowledge_near_ai_notice:crates/trace-commons-contributor/src/daemon/ipc.rs:4365",
-      "kind": "ipc",
-      "identifier": "acknowledge_near_ai_notice",
-      "source": {
-        "path": "crates/trace-commons-contributor/src/daemon/ipc.rs",
-        "line": 4365
-      },
-      "inventory_role": "dispatched IPC method",
-      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
-      "owner_model": "client_shell",
-      "classification": "gap",
-      "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
-      "observable_state": "Handler result or visible destination; full implementation state is not inferred by this scanner.",
-      "model_actions": [],
-      "modeled_observables": [],
-      "dispatchers": [
-        {
-          "name": "handle_request",
-          "line": 4365
-        }
-      ]
-    },
-    {
       "id": "ipc:list_history:crates/trace-commons-contributor/src/daemon/ipc.rs:4366",
       "kind": "ipc",
       "identifier": "list_history",

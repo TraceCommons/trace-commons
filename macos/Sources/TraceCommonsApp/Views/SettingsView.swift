@@ -41,7 +41,6 @@ enum SettingsLegacyWords {
     static var connected: String { words?.connected ?? "" }
     static var notConnected: String { words?.notConnected ?? "" }
     static var queuedNothingSent: String { words?.queuedNothingSent ?? "" }
-    static var extraScanConfigured: String { words?.extraScanConfigured ?? "" }
     static func sessionFinishedAfter(_ secs: Int) -> String {
         fill(words?.sessionFinishedAfter, ["seconds": String(secs)])
     }
