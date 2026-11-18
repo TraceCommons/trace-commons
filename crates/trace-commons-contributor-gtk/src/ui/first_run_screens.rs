@@ -416,6 +416,88 @@ mod mounted_tests {
         assert!(tools.borrow().watches_anything());
     }
 
+    /// A folder the old Documents portal (v4) cannot map: the failure line,
+    /// then the owner's approved line, the fixed command, and "Copy
+    /// command", which puts exactly that command on the clipboard. A later
+    /// commit that succeeds hides them again.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let window = gtk::Window::new();
+        let screen = super::super::first_run_tools::build(
+            Rc::new(RefCell::new(Tools::default())),
+            &window,
+            || {},
+        );
+        let failed = first_run_copy().folders.settings_failed;
+        let hint = super::super::roots::host_folder_hint("claude_source").expect("approved");
+        screen.finish(Some(failed));
+        screen.show_host_hint(Some(&hint));
+        let root: gtk::Widget = screen.root.clone().upcast();
+        let shown = |widget: &gtk::Widget| {
+            let mut current = Some(widget.clone());
+            while let Some(w) = current {
+                if !w.is_visible() {
+                    return false;
+                }
+                if w == root {
+                    return true;
+                }
+                current = w.parent();
+            }
+            false
+        };
+        let labels: Vec<String> = descendants(&root)
+            .into_iter()
+            .filter(|w| shown(w))
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .map(|l| l.text().to_string())
+            .collect();
+        let command = trace_commons_contributor::daemon::service::host_folder_command(
+            "claude_source",
+        )
+        .unwrap();
+        for text in [
+            failed,
+            "To add this folder anyway, open a terminal in it and run:",
+            command.as_str(),
+        ] {
+            assert!(labels.iter().any(|l| l == text), "{text} not shown");
+        }
+        let copy = descendants(&root)
+            .into_iter()
+            .filter(|w| shown(w))
+            .filter_map(|w| w.downcast::<gtk::Button>().ok())
+            .find(|b| {
+                b.label().as_deref()
+                    == Some(trace_commons_contributor::managed::copy::background_service::COPY_COMMAND)
+            })
+            .expect("Copy command");
+        copy.emit_clicked();
+        let text = Rc::new(RefCell::new(None));
+        let read = Rc::clone(&text);
+        copy.clipboard()
+            .read_text_async(None::<&gtk::gio::Cancellable>, move |r| {
+                *read.borrow_mut() = Some(r.ok().flatten().map(|s| s.to_string()));
+            });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while text.borrow().is_none() && std::time::Instant::now() < deadline {
+            context.iteration(true);
+        }
+        assert_eq!(text.borrow().clone().flatten(), Some(command.clone()));
+        screen.finish(None);
+        assert!(
+            !descendants(&root)
+                .into_iter()
+                .filter(|w| shown(w))
+                .filter_map(|w| w.downcast::<gtk::Label>().ok())
+                .any(|l| l.text() == command),
+            "a commit that succeeded still shows the command"
+        );
+    }
+
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn private_ai_counts_the_tools_that_can_connect() {

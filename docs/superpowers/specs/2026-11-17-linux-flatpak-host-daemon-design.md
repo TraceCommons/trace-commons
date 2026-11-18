@@ -235,7 +235,8 @@ button that reopens the dialog. A headless driver run (`--exit-after-realize`,
   not-running dialog's "It didn't start. To see why, run this in a
   terminal:" and the status command -- no other words, no new notice --
   and keeps watching, so a service that comes up later still closes it.
-  The too-old dialog keeps waiting; the line was approved for this one.
+  The too-old dialog does the same once its own tries run out (owner,
+  2026-11-17).
 - Installed but not running: "Start it" does the same switch-over (the same
   `RestartUnit`; the button still says "Start it"). If the service still does
   not answer, the dialog shows "It didn't start. To see why, run this in a

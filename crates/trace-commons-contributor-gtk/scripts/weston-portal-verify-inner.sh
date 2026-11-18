@@ -169,7 +169,7 @@ else
   for test_name in \
     ui::service_dialog::tests::mounted_not_installed_dialog_has_the_approved_words_and_buttons \
     ui::service_dialog::tests::mounted_not_running_dialog_has_start_it_and_the_status_command_on_failure \
-    ui::service_dialog::tests::mounted_not_installed_dialog_shows_the_status_command_after_its_last_try \
+    ui::service_dialog::tests::mounted_install_and_update_dialogs_show_the_status_command_after_their_last_try \
     ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
     ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
@@ -183,6 +183,7 @@ else
     ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
     ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
+    ui::first_run_screens::mounted_tests::a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command \
     ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
     ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
     ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps; do

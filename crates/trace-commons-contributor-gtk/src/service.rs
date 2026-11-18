@@ -147,7 +147,7 @@ pub enum WatchStep {
     /// daemon holds it off, or it is still starting: stop that daemon, ask
     /// systemd to restart the unit, attach.
     SwitchOver,
-    /// The not-installed dialog's last switch-over did not bring the
+    /// The not-installed or too-old dialog's last switch-over did not bring the
     /// service up: show the not-running dialog's failure line and status
     /// command, and keep watching.
     Failed,
@@ -181,9 +181,11 @@ pub fn watch_step(open: Dialog, state: ServiceState, tries: Tries) -> WatchStep 
         {
             WatchStep::SwitchOver
         }
-        // Only the not-installed dialog: the owner approved the line there
-        // (2026-11-17), not in the too-old one.
-        (Dialog::Install, ServiceState::InstalledNotRunning) if tries.made >= SWITCH_TRIES => {
+        // Dialog B's failure line and status command once the tries run out
+        // (owner, 2026-11-17), in the not-installed and too-old dialogs.
+        (Dialog::Install | Dialog::Update, ServiceState::InstalledNotRunning)
+            if tries.made >= SWITCH_TRIES =>
+        {
             WatchStep::Failed
         }
         _ => WatchStep::Keep,
@@ -621,34 +623,37 @@ mod tests {
         }
     }
 
-    /// After the last automatic switch-over fails, the not-installed dialog
-    /// shows the not-running dialog's failure line and status command
-    /// (owner, 2026-11-17), and keeps watching: a service that comes up
-    /// later still closes it. The too-old dialog was not part of that
-    /// approval and keeps waiting.
+    /// After the last automatic switch-over fails, the not-installed and
+    /// too-old dialogs show the not-running dialog's failure line and
+    /// status command (owner, 2026-11-17), and keep watching: a service
+    /// that comes up later still closes them.
     #[test]
-    fn the_not_installed_dialog_shows_the_failure_once_its_tries_run_out() {
+    fn the_install_and_update_dialogs_show_the_failure_once_their_tries_run_out() {
         let failed = tried(SWITCH_TRIES, Some(0));
+        for dialog in [Dialog::Install, Dialog::Update] {
+            assert_eq!(
+                watch_step(dialog, ServiceState::InstalledNotRunning, failed),
+                WatchStep::Failed,
+                "{dialog:?}"
+            );
+            assert_eq!(
+                watch_step(dialog, ServiceState::Running, failed),
+                WatchStep::Close
+            );
+            // Not before the last try.
+            assert_ne!(
+                watch_step(
+                    dialog,
+                    ServiceState::InstalledNotRunning,
+                    tried(SWITCH_TRIES - 1, Some(0))
+                ),
+                WatchStep::Failed
+            );
+        }
+        // The too-old dialog before its command ran: still waiting.
         assert_eq!(
-            watch_step(Dialog::Install, ServiceState::InstalledNotRunning, failed),
-            WatchStep::Failed
-        );
-        assert_eq!(
-            watch_step(Dialog::Install, ServiceState::Running, failed),
-            WatchStep::Close
-        );
-        assert_eq!(
-            watch_step(Dialog::Update, ServiceState::InstalledNotRunning, failed),
+            watch_step(Dialog::Update, ServiceState::TooOld, failed),
             WatchStep::Keep
-        );
-        // Not before the last try.
-        assert_ne!(
-            watch_step(
-                Dialog::Install,
-                ServiceState::InstalledNotRunning,
-                tried(SWITCH_TRIES - 1, Some(0))
-            ),
-            WatchStep::Failed
         );
         // Dialog B shows it only after "Start it".
         assert_eq!(

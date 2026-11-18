@@ -487,34 +487,36 @@ mod tests {
         assert!(!shown.iter().any(|s| s == SERVICE_INSTALL_COMMAND));
     }
 
-    /// Once its automatic switch-overs are spent, the not-installed dialog
-    /// shows dialog B's failure line and status command in place of its
-    /// waiting line, with no other words.
+    /// Once their automatic switch-overs are spent, the not-installed and
+    /// too-old dialogs show dialog B's failure line and status command in
+    /// place of the waiting line, with no other words.
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
-    fn mounted_not_installed_dialog_shows_the_status_command_after_its_last_try() {
-        let (parts, shown) = mounted(Dialog::Install);
-        assert!(shown.iter().any(|s| s == words::START_FAILED));
-        assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND));
-        parts.waiting.set_visible(true);
-        show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
-        assert!(!parts.failed.get_visible());
-        assert!(parts.waiting.get_visible());
-        show_step(&parts.failed, &parts.waiting, WatchStep::Failed);
-        assert!(parts.failed.get_visible());
-        assert!(!parts.waiting.get_visible());
-        let mut failed = Vec::new();
-        labels(parts.failed.upcast_ref(), &mut failed);
-        assert_eq!(
-            failed,
-            vec![
-                words::START_FAILED.to_string(),
-                SERVICE_STATUS_COMMAND.to_string()
-            ]
-        );
-        // The service gone again: the line goes with it.
-        show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
-        assert!(!parts.failed.get_visible());
+    fn mounted_install_and_update_dialogs_show_the_status_command_after_their_last_try() {
+        for dialog in [Dialog::Install, Dialog::Update] {
+            let (parts, shown) = mounted(dialog);
+            assert!(shown.iter().any(|s| s == words::START_FAILED), "{dialog:?}");
+            assert!(shown.iter().any(|s| s == SERVICE_STATUS_COMMAND), "{dialog:?}");
+            parts.waiting.set_visible(true);
+            show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
+            assert!(!parts.failed.get_visible());
+            assert!(parts.waiting.get_visible());
+            show_step(&parts.failed, &parts.waiting, WatchStep::Failed);
+            assert!(parts.failed.get_visible(), "{dialog:?}");
+            assert!(!parts.waiting.get_visible());
+            let mut failed = Vec::new();
+            labels(parts.failed.upcast_ref(), &mut failed);
+            assert_eq!(
+                failed,
+                vec![
+                    words::START_FAILED.to_string(),
+                    SERVICE_STATUS_COMMAND.to_string()
+                ]
+            );
+            // The service gone again: the line goes with it.
+            show_step(&parts.failed, &parts.waiting, WatchStep::Keep);
+            assert!(!parts.failed.get_visible());
+        }
     }
 
     #[test]
