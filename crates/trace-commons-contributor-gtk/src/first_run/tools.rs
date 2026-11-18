@@ -47,6 +47,23 @@ pub fn held_watches(settings: &Value) -> BTreeSet<String> {
         .collect()
 }
 
+/// The tool whose declaration `settings_key` is (`claude_source` is
+/// Claude Code); `None` for a key no tool row declares.
+pub fn tool_for_settings_key(settings_key: &str) -> Option<&'static str> {
+    TOOL_ORDER.iter().copied().find(|source| {
+        trace_commons_contributor::daemon::settings::source_settings_key(source)
+            == Some(settings_key)
+    })
+}
+
+/// Whether a refusal on Tools no longer holds: its old-portal line named
+/// `refused`, and the daemon now newly holds that tool, so the command was
+/// run and the folder is watched. A refusal that named no tool, or a
+/// different tool newly held, leaves the refusal shown.
+pub fn refusal_ended(refused: Option<&str>, newly_held: &BTreeSet<String>) -> bool {
+    refused.is_some_and(|tool| newly_held.contains(tool))
+}
+
 /// What a folder picked with "add your tool" is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FolderKind {
@@ -218,8 +235,10 @@ impl Tools {
     /// turned it off here; a folder added here for that tool stops being
     /// watched, since the daemon reads one folder per tool and holds one.
     /// A tool it no longer holds reads off.
-    pub fn record_held(&mut self, held: BTreeSet<String>) {
-        for source in held.difference(&self.held) {
+    /// Returns the tools it newly holds.
+    pub fn record_held(&mut self, held: BTreeSet<String>) -> BTreeSet<String> {
+        let newly: BTreeSet<String> = held.difference(&self.held).cloned().collect();
+        for source in &newly {
             let turned_off =
                 self.touched.contains(source) && self.row_answer(source) == ToolAnswer::Off;
             if !turned_off {
@@ -237,6 +256,7 @@ impl Tools {
             }
         }
         self.held = held;
+        newly
     }
     /// Whether the declaration for `settings_key` is the daemon's own,
     /// which no commit sends.
@@ -625,6 +645,37 @@ mod tests {
         assert_eq!(tools.row_answer(SOURCE_CLAUDE_CODE), ToolAnswer::Off);
         assert!(tools.is_watched(SOURCE_CODEX));
         assert!(tools.can_continue());
+    }
+
+    /// A refusal whose old-portal line names a tool ends when the daemon
+    /// newly holds that tool (the command was run): Tools hides the failure
+    /// line and the command. Another tool newly held, a read that holds
+    /// nothing new, or a refusal that named no tool leaves it shown
+    /// (#2171 review 2, finding 1).
+    #[test]
+    fn a_refusal_ends_when_the_daemon_newly_holds_its_tool() {
+        assert_eq!(
+            tool_for_settings_key("claude_source"),
+            Some(SOURCE_CLAUDE_CODE)
+        );
+        assert_eq!(tool_for_settings_key("codex_source"), Some(SOURCE_CODEX));
+        assert_eq!(tool_for_settings_key("trajectory_source"), None);
+        assert_eq!(tool_for_settings_key("claude_root"), None);
+        let refused = tool_for_settings_key("claude_source");
+        let mut tools = discovered();
+        let newly = tools.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!(newly, held(&[SOURCE_CODEX]));
+        assert!(!refusal_ended(refused, &newly));
+        let newly = tools.record_held(held(&[SOURCE_CODEX]));
+        assert!(newly.is_empty());
+        assert!(!refusal_ended(refused, &newly));
+        let newly = tools.record_held(held(&[SOURCE_CODEX, SOURCE_CLAUDE_CODE]));
+        assert_eq!(newly, held(&[SOURCE_CLAUDE_CODE]));
+        assert!(refusal_ended(refused, &newly));
+        assert!(!refusal_ended(None, &newly));
+        // Read again: Claude Code is no longer new.
+        let newly = tools.record_held(held(&[SOURCE_CODEX, SOURCE_CLAUDE_CODE]));
+        assert!(!refusal_ended(refused, &newly));
     }
 
     /// A held tool this window's discovery cannot see still has its row.

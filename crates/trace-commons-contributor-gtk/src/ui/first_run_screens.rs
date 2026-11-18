@@ -555,6 +555,81 @@ mod mounted_tests {
         );
     }
 
+    /// The old-portal command run, the daemon newly holds the refused tool:
+    /// Tools stops saying the change couldn't be saved and stops showing
+    /// the command. Another tool newly held leaves both shown (#2171
+    /// review 2, finding 1).
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn a_refusal_hides_once_the_daemon_holds_the_refused_tool() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let mut tools = Tools::default();
+        tools.record_discovery(vec![
+            Found {
+                source: "claude-code".into(),
+                path: "/home/x/.claude/projects".into(),
+                exists: true,
+                session_count: 1,
+                total_bytes: None,
+            },
+            Found {
+                source: "codex".into(),
+                path: "/home/x/.codex/sessions".into(),
+                exists: true,
+                session_count: 1,
+                total_bytes: None,
+            },
+        ]);
+        let window = gtk::Window::new();
+        let screen =
+            super::super::first_run_tools::build(Rc::new(RefCell::new(tools)), &window, || {});
+        let failed = first_run_copy().folders.settings_failed;
+        let hint = super::super::roots::host_folder_hint("claude_source").expect("approved");
+        // The coordinator's order: the hint, then the failure line.
+        screen.show_host_hint(Some(&hint));
+        screen.finish(Some(failed));
+        let root: gtk::Widget = screen.root.clone().upcast();
+        let shown = |text: &str| {
+            descendants(&root)
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::Label>().ok())
+                .filter(|l| l.text() == text)
+                .any(|l| {
+                    let mut current: Option<gtk::Widget> = Some(l.upcast());
+                    while let Some(w) = current {
+                        if !w.is_visible() {
+                            return false;
+                        }
+                        if w == root {
+                            return true;
+                        }
+                        current = w.parent();
+                    }
+                    false
+                })
+        };
+        assert!(shown(failed));
+        assert!(shown(&hint.command));
+        screen.record_held(["codex".to_owned()].into_iter().collect());
+        assert!(shown(failed), "another tool held hid the failure line");
+        assert!(shown(&hint.command), "another tool held hid the command");
+        screen.record_held(
+            ["codex".to_owned(), "claude-code".to_owned()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            !shown(failed),
+            "the refused tool is held: failure line still shown"
+        );
+        assert!(
+            !shown(&hint.command),
+            "the refused tool is held: command still shown"
+        );
+        assert!(screen.continue_button.is_sensitive());
+    }
+
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn private_ai_counts_the_tools_that_can_connect() {

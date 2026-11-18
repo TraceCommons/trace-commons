@@ -439,6 +439,9 @@ pub(super) fn declare_to_daemon(
 pub(super) struct HostFolderHint {
     pub line: &'static str,
     pub command: String,
+    /// The tool whose folder was refused: once the daemon newly holds it,
+    /// the command was run and Tools hides the hint.
+    pub tool: &'static str,
 }
 
 /// [`HostFolderHint`] for the tool whose settings key is `settings_key`:
@@ -449,6 +452,7 @@ pub(super) fn host_folder_hint(settings_key: &str) -> Option<HostFolderHint> {
     Some(HostFolderHint {
         line: host_folder::add_on_host_line()?,
         command: trace_commons_contributor::daemon::service::host_folder_command(settings_key)?,
+        tool: crate::first_run::tools::tool_for_settings_key(settings_key)?,
     })
 }
 
@@ -534,6 +538,7 @@ mod tests {
                     "{} daemon settings --set \"claude_root=$PWD\"",
                     trace_commons_contributor::channel::HOST_CLI
                 ),
+                tool: "claude-code",
             })
         );
         assert_eq!(

@@ -34,6 +34,8 @@ pub(super) struct ToolsScreen {
     host_hint: gtk::Box,
     host_hint_line: gtk::Label,
     host_hint_command: gtk::Label,
+    /// The tool the shown hint names ([`super::roots::HostFolderHint::tool`]).
+    hint_tool: std::cell::Cell<Option<&'static str>>,
 }
 
 /// The tool's name, as the Mac's `SourceKind.displayName` gives it.
@@ -124,6 +126,7 @@ pub(super) fn build(
         host_hint,
         host_hint_line,
         host_hint_command,
+        hint_tool: std::cell::Cell::new(None),
     });
     let add = gtk::Button::with_label(copy.tools.add_tool);
     add.add_css_class("flat");
@@ -172,8 +175,7 @@ pub(super) fn build(
                 return;
             }
             screen.set_busy(true);
-            screen.failure.set_visible(false);
-            screen.host_hint.set_visible(false);
+            screen.hide_refusal();
             on_continue();
         }
     });
@@ -218,13 +220,26 @@ impl ToolsScreen {
 
     /// Show the tools the attached daemon already watches
     /// (`Tools::record_held`). Not while a commit holds the answers it
-    /// started from.
+    /// started from. When the daemon newly holds the tool a refusal's
+    /// old-portal line named, the command was run: the failure line and
+    /// the command no longer apply and are hidden
+    /// (`first_run::tools::refusal_ended`).
     pub fn record_held(self: &Rc<Self>, held: std::collections::BTreeSet<String>) {
         if self.busy.get() || self.tools.borrow().held == held {
             return;
         }
-        self.tools.borrow_mut().record_held(held);
+        let newly = self.tools.borrow_mut().record_held(held);
+        if crate::first_run::tools::refusal_ended(self.hint_tool.get(), &newly) {
+            self.hide_refusal();
+        }
         self.render();
+    }
+
+    /// Hide the failure line and the hint under it.
+    fn hide_refusal(&self) {
+        self.failure.set_visible(false);
+        self.host_hint.set_visible(false);
+        self.hint_tool.set(None);
     }
 
     /// The commit ended: on failure say so with `failure`, and let Continue
@@ -236,10 +251,7 @@ impl ToolsScreen {
                 self.failure.set_label(line);
                 self.failure.set_visible(true);
             }
-            None => {
-                self.failure.set_visible(false);
-                self.host_hint.set_visible(false);
-            }
+            None => self.hide_refusal(),
         }
     }
 
@@ -251,8 +263,12 @@ impl ToolsScreen {
                 self.host_hint_line.set_label(hint.line);
                 super::service_dialog::set_command(&self.host_hint_command, &hint.command);
                 self.host_hint.set_visible(true);
+                self.hint_tool.set(Some(hint.tool));
             }
-            None => self.host_hint.set_visible(false),
+            None => {
+                self.host_hint.set_visible(false);
+                self.hint_tool.set(None);
+            }
         }
     }
 

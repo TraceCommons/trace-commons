@@ -187,6 +187,7 @@ else
     ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
     ui::first_run_screens::mounted_tests::tools_tick_a_tool_the_daemon_already_watches \
     ui::first_run_screens::mounted_tests::a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command \
+    ui::first_run_screens::mounted_tests::a_refusal_hides_once_the_daemon_holds_the_refused_tool \
     ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
     ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
     ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps; do
