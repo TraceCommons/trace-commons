@@ -1332,7 +1332,12 @@ fn manifest_block(
     let app_for_skip = Rc::clone(app);
     let entry_for_skip = entry.clone();
     skip.connect_clicked(move |_| {
-        confirm_dismiss(&app_for_skip, &entry_for_skip, |app, _| app.refresh());
+        confirm_dismiss(
+            &app_for_skip,
+            &app_for_skip.window,
+            &entry_for_skip,
+            |app, _| app.refresh(),
+        );
     });
 
     let app_for_submit = Rc::clone(app);
@@ -1580,9 +1585,13 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // same thing. Under drill-in that row is a level down, so hiding this
         // would mean opening a folder to do the thing the folder is offering.
         // The rule expired with the layout it was written for.
-        let submit_all = gtk::Button::with_label(&copy::folder_submit(
-            contributable.unwrap_or(waiting as u64),
-        ));
+        // The count it sends: the daemon's, else the rows here that Submit
+        // all would send (`group_candidates`), never the held ones.
+        let sends = contributable.unwrap_or_else(|| {
+            crate::eligibility::sendable_ids(folder.members.iter().map(|(_, entry)| entry)).len()
+                as u64
+        });
+        let submit_all = gtk::Button::with_label(&copy::folder_submit(sends));
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
         submit_all.set_tooltip_text(Some(copy::submit_all_tooltip()));
@@ -1980,12 +1989,13 @@ pub(crate) fn dismiss_body(entry: &QueueEntry) -> String {
 /// the daemon took it.
 pub(crate) fn confirm_dismiss(
     app: &Rc<App>,
+    parent: &impl IsA<gtk::Window>,
     entry: &QueueEntry,
     done: impl Fn(&Rc<App>, bool) + 'static,
 ) {
     let words = copy::traces();
     let dialog = adw::MessageDialog::new(
-        Some(&app.window),
+        Some(parent),
         Some(words.tree.dismiss_session_title),
         Some(&dismiss_body(entry)),
     );

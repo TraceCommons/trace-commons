@@ -86,6 +86,10 @@ struct State {
     last_demand: RefCell<BTreeSet<String>>,
     /// The opened History row's submission id; empty for none.
     opened_history: RefCell<String>,
+    /// The opened record's contribution details, read once per opening
+    /// and kept across redraws, so a queue or History refresh does not
+    /// read the server again or flash its reading line.
+    history_detail_slot: RefCell<Option<(String, gtk::Box)>>,
     /// The notices closed with their X until the window is opened again.
     closed: Rc<RefCell<notices::Closed>>,
     missions: bool,
@@ -727,6 +731,7 @@ impl Shell {
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
                 opened_history: RefCell::new(String::new()),
+                history_detail_slot: RefCell::new(None),
                 closed,
                 missions,
             },
@@ -1001,6 +1006,8 @@ impl Shell {
     /// inspector opens. Clearing it closes nothing.
     pub fn open_history_row(&self, app: &Rc<App>, submission_id: &str) {
         self.state.opened_history.replace(submission_id.to_string());
+        // Opening a row reads its details afresh.
+        self.state.history_detail_slot.replace(None);
         if !submission_id.is_empty() {
             self.update_prefs(|prefs| prefs.shows_inspector = true);
         }
@@ -1027,16 +1034,31 @@ impl Shell {
                 // The contribution's details, read from the daemon, as the
                 // Mac's `SessionDetailView` shows them beside the record.
                 if !record.submission_id.is_empty() {
-                    let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                    let kept = self
+                        .state
+                        .history_detail_slot
+                        .borrow()
+                        .clone()
+                        .filter(|(id, _)| *id == record.submission_id);
+                    let slot = match kept {
+                        Some((_, slot)) => slot,
+                        None => {
+                            let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                            let id = record.submission_id.clone();
+                            crate::ui::history_detail::load(
+                                app,
+                                &slot,
+                                &record.submission_id,
+                                &record.status,
+                                move |app| *app.shell.state.opened_history.borrow() == id,
+                            );
+                            self.state
+                                .history_detail_slot
+                                .replace(Some((record.submission_id.clone(), slot.clone())));
+                            slot
+                        }
+                    };
                     self.history_detail.append(&slot);
-                    let id = record.submission_id.clone();
-                    crate::ui::history_detail::load(
-                        app,
-                        &slot,
-                        &record.submission_id,
-                        &record.status,
-                        move |app| *app.shell.state.opened_history.borrow() == id,
-                    );
                 }
             }
             // A row that has gone is the Traces selection again, never a
