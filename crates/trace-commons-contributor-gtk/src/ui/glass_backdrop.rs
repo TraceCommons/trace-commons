@@ -12,9 +12,21 @@
 //! look stays, because translucency without blur fails the contrast floors
 //! over an arbitrary desktop.
 //!
+//! Blur alone does not make the shell's text read over every desktop, so
+//! on Wayland KWin's background contrast (`org_kde_kwin_contrast`) is asked
+//! for behind the same region, with a [`Frost`] per scheme, and the window
+//! goes translucent on its own only where [`readable`] says the text then
+//! reads: today the dark scheme with the contrast granted. KWin 6.4 to 6.6
+//! advertise the contrast global; KWin's development branch has removed
+//! it, and there, and on X11, the window stays painted.
+//!
+//! Not verified on a running KWin: the GCP KDE box has no DRM device to
+//! run one on. What is verified is KWin's own source for the matrix
+//! ([`frosted`]) and the contrast measurement in `style.rs`.
+//!
 //! Every decision is pure and tested here ([`decide`], [`Requests`],
-//! [`blur_region`]); the protocol plumbing sits behind [`BlurBackend`], in
-//! the Linux-only `kde` module.
+//! [`blur_region`], [`watch`], [`frosted`]); the protocol plumbing sits
+//! behind [`BlurBackend`], in the Linux-only `kde` module.
 
 use gtk::prelude::*;
 
@@ -50,6 +62,10 @@ pub struct Capability {
     /// `gdk::Display::is_composited() && is_rgba()`: a translucent window
     /// shows what is behind it.
     pub composited: bool,
+    /// KWin's background contrast is reachable too: the Wayland
+    /// `org_kde_kwin_contrast_manager` global is bound. Only then is the
+    /// [`Frost`] behind the panes, and only then can [`readable`] hold.
+    pub contrast: bool,
 }
 
 impl Capability {
@@ -58,6 +74,7 @@ impl Capability {
         backend: Backend::Other,
         granted: false,
         composited: false,
+        contrast: false,
     };
 }
 
@@ -103,23 +120,111 @@ impl Glass {
     }
 }
 
+/// KWin's background contrast, asked for behind the same pane region as
+/// the blur (`org_kde_kwin_contrast`, plasma-wayland-protocols
+/// `contrast.xml`, v2 in `wayland-protocols-plasma` 0.3.12). KWin draws the
+/// blurred desktop through a colour matrix built from `contrast`,
+/// `intensity` and `saturation` ([`frosted`]) before the translucent pane
+/// is laid over it.
+///
+/// `colour` goes out with `set_frost` (v2), the pane's own fill as the
+/// protocol asks. No KWin release draws it: KWin 6.4's contrast effect and
+/// 6.5's and 6.6's blur effect store it (`src/wayland/contrast.cpp`,
+/// `ContrastInterface::frost`) and never read it, so [`readable`] does
+/// not count on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frost {
+    pub contrast: f64,
+    pub intensity: f64,
+    pub saturation: f64,
+    /// `set_frost`'s red, green, blue and alpha, 0 to 255.
+    pub colour: [u8; 4],
+}
+
+/// The frost asked for in a scheme. Only `contrast` changes the desktop:
+/// KWin 6.5 and 6.6 apply `contrast` and `saturation` and ignore
+/// `intensity` (`BlurEffect::updateBlurRegion`), so `intensity` stays at
+/// 1 and every release KWin has shipped the protocol in draws the same.
+/// `saturation` stays at 1: it does not move a grey desktop, the worst
+/// case measured.
+pub fn frost(dark: bool) -> Frost {
+    Frost {
+        contrast: if dark {
+            FROST_CONTRAST_DARK
+        } else {
+            FROST_CONTRAST_LIGHT
+        },
+        intensity: 1.0,
+        saturation: 1.0,
+        colour: pane_colour(dark),
+    }
+}
+
+/// The largest `contrast`, in steps of 0.05, at which every text colour
+/// reads on the frosted dark panes: the most desktop that can show through
+/// (`style.rs`, `the_frost_shows_as_much_desktop_as_the_text_allows`). At
+/// 0.40 `tc_muted` falls to 4.49:1 over a white desktop.
+pub const FROST_CONTRAST_DARK: f64 = 0.35;
+/// None in light: no contrast makes its text read (at 0, a mid-grey
+/// desktop, `tc_muted` is 3.93:1), and the intensity that would lift it is
+/// ignored by KWin 6.5 and 6.6. Light asks for no change and stays painted.
+pub const FROST_CONTRAST_LIGHT: f64 = 1.0;
+
+/// The translucent pane's fill (`tc_glass_pane` in the blur sheet), as
+/// `set_frost` takes it.
+pub fn pane_colour(dark: bool) -> [u8; 4] {
+    let sheet = if dark {
+        super::style::brand_tokens::GLASS_DARK_BLUR_CSS
+    } else {
+        super::style::brand_tokens::GLASS_LIGHT_BLUR_CSS
+    };
+    let parsed = sheet.lines().find_map(|line| {
+        let inner = line
+            .strip_prefix("@define-color tc_glass_pane rgba(")?
+            .strip_suffix(");")?;
+        let parts: Vec<f64> = inner
+            .split(',')
+            .map(|part| part.trim().parse().ok())
+            .collect::<Option<_>>()?;
+        let [r, g, b, a] = parts[..] else { return None };
+        Some([r, g, b, a * 255.0].map(|v| v.round().clamp(0.0, 255.0) as u8))
+    });
+    parsed.unwrap_or([0, 0, 0, 255])
+}
+
+/// What KWin draws for one blurred desktop colour (channels 0 to 1) under
+/// `frost`: `tex * colorMatrix` with `colorMatrix = contrast * saturation
+/// * intensity` (KWin 6.4 `ContrastEffect::colorMatrix` and its shader;
+/// 6.5/6.6 `colorTransformMatrix` and `onscreen.frag`, intensity left out
+/// there). Read as a row vector, the contrast matrix applies first:
+/// `c * x + (1 - c) / 2` per channel; then saturation, mixing toward the
+/// Rec. 709 luma (0.2126, 0.7152, 0.0722); then intensity scales. The
+/// framebuffer clamps the result to 0..1.
+pub fn frosted(desktop: [f64; 3], frost: Frost) -> [f64; 3] {
+    let c = frost.contrast;
+    let shift = (1.0 - c) / 2.0;
+    let contrasted = desktop.map(|x| c * x + shift);
+    let s = frost.saturation;
+    let luma = [0.2126, 0.7152, 0.0722];
+    let weighted: f64 = (0..3).map(|i| contrasted[i] * (1.0 - s) * luma[i]).sum();
+    let saturated = contrasted.map(|x| x * s + weighted);
+    saturated.map(|x| (x * frost.intensity).clamp(0.0, 1.0))
+}
+
 /// Whether every text colour the panes' screens use reads at 4.5:1 on the
 /// translucent panes over a black and a white desktop, in and out of focus,
-/// in this scheme. Measured, not chosen: `style.rs`'s
-/// `every_text_colour_reads_on_the_translucent_panes` fails if this
-/// disagrees with the measurement either way.
+/// in this scheme, with what KWin granted behind them. Measured, not
+/// chosen: `style.rs`'s `every_text_colour_reads_on_the_translucent_panes`
+/// fails if this disagrees with the measurement either way.
 ///
-/// False in both schemes today. KWin's blur averages the desktop and adds
-/// no frost of its own, as the Mac's material does, so over a dark desktop a
-/// light pane is mid-grey (worst 2.51:1, `tc_blue_text` out of focus;
-/// `tc_muted` 2.57:1) and over a white one a dark pane is too light (worst
-/// 3.33:1, `tc_muted`). No tint share reaches 4.5 in light
-/// (3.54:1 at the full veil); dark would need 0.65 against the Mac's 0.25.
-/// Until that is settled the window stays painted under [`Override::Auto`],
-/// on KDE too.
-pub fn readable(dark: bool) -> bool {
-    let _ = dark;
-    false
+/// Blur alone never reads: KWin's blur averages the desktop and adds no
+/// frost of its own, so over a dark desktop a light pane is mid-grey (worst
+/// 2.51:1) and over a white one a dark pane is too light (worst 3.33:1).
+/// With KWin's background contrast granted, the [`frost`] behind the panes
+/// is measured too: dark then reads everywhere, light still does not.
+pub fn readable(dark: bool, contrast: bool) -> bool {
+    // Dark reads at FROST_CONTRAST_DARK; light reads at no contrast.
+    contrast && dark
 }
 
 /// The one decision. High contrast always paints: the Mac's flat theme
@@ -140,6 +245,39 @@ pub fn decide(
         Override::Painted => Glass::Painted,
         Override::Auto if !readable => Glass::Painted,
         Override::Auto | Override::Blur => Glass::Blurred,
+    }
+}
+
+/// What the follower keeps running between events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watch {
+    /// Re-decide after every painted frame: the panes move with resizes,
+    /// maximizing, tiling and pane widths without the surface resizing.
+    pub frames: bool,
+    /// Re-probe the grant once a second: KWin drops it when its blur effect
+    /// unloads.
+    pub poll: bool,
+}
+
+/// What to keep running: nothing while the window is unmapped, and
+/// otherwise no per-frame or timed work unless the grant is held or blur
+/// is forced. Frames only while blurred, since only a sent region follows
+/// the panes. Without the grant, a focus change, a map, a compositing or a
+/// high-contrast change probes again instead.
+pub fn watch(choice: Override, granted: bool, glass: Glass, mapped: bool) -> Watch {
+    if !mapped {
+        return Watch {
+            frames: false,
+            poll: false,
+        };
+    }
+    Watch {
+        frames: glass == Glass::Blurred,
+        poll: match choice {
+            Override::Painted => false,
+            Override::Auto => granted,
+            Override::Blur => true,
+        },
     }
 }
 
@@ -262,14 +400,29 @@ pub enum Effect {
 pub struct Requests {
     glass: Option<Glass>,
     sent: Option<Vec<Rect>>,
+    /// The frost that went with the last request.
+    frost: Option<Frost>,
     /// A request did not go out. Translucency without blur is never shown,
     /// so the window paints until the grant is lost and given again.
     refused: bool,
 }
 
 impl Requests {
-    /// `glass` as [`decide`] chose it, with `granted` the backend's grant.
-    pub fn update(&mut self, glass: Glass, granted: bool, region: Vec<Rect>) -> Vec<Effect> {
+    /// How the window draws now, a refused request included.
+    pub fn glass(&self) -> Glass {
+        self.glass.unwrap_or(Glass::Painted)
+    }
+
+    /// `glass` as [`decide`] chose it, with `granted` the backend's grant
+    /// and `frost` what goes behind the panes with the blur (`None` where
+    /// KWin's contrast is not granted). A changed frost asks again.
+    pub fn update(
+        &mut self,
+        glass: Glass,
+        granted: bool,
+        region: Vec<Rect>,
+        frost: Option<Frost>,
+    ) -> Vec<Effect> {
         if !granted {
             self.refused = false;
         }
@@ -285,9 +438,10 @@ impl Requests {
             }
             return effects;
         }
-        if self.sent.as_ref() == Some(&region) {
+        if self.sent.as_ref() == Some(&region) && self.frost == frost {
             return effects;
         }
+        self.frost = frost;
         if region.is_empty() {
             if self.sent.as_ref().is_some_and(|sent| !sent.is_empty()) {
                 effects.push(Effect::Unset);
@@ -311,6 +465,7 @@ impl Requests {
             effects.push(Effect::Sheet(false));
         }
         self.sent = None;
+        self.frost = None;
         effects.push(Effect::Unset);
         effects
     }
@@ -324,7 +479,15 @@ pub trait BlurBackend {
     /// the X server again. Called on a timer and when compositing changes.
     fn poll(&mut self);
     /// Ask for blur over `region` behind `surface`. False if not sent.
-    fn request(&mut self, surface: &gtk::gdk::Surface, region: &[Rect], scale: f64) -> bool;
+    /// With `frost`, KWin's background contrast goes behind the same
+    /// region; without it, any contrast asked for before is withdrawn.
+    fn request(
+        &mut self,
+        surface: &gtk::gdk::Surface,
+        region: &[Rect],
+        scale: f64,
+        frost: Option<Frost>,
+    ) -> bool;
     /// Withdraw the request on `surface`.
     fn unset(&mut self, surface: &gtk::gdk::Surface);
 }
@@ -337,7 +500,7 @@ impl BlurBackend for NoBlur {
         Capability::NONE
     }
     fn poll(&mut self) {}
-    fn request(&mut self, _: &gtk::gdk::Surface, _: &[Rect], _: f64) -> bool {
+    fn request(&mut self, _: &gtk::gdk::Surface, _: &[Rect], _: f64, _: Option<Frost>) -> bool {
         false
     }
     fn unset(&mut self, _: &gtk::gdk::Surface) {}
@@ -370,61 +533,174 @@ struct State {
     logged: Option<(Capability, Glass)>,
 }
 
+/// One window's follower: what it decided, and the frame and timer
+/// watches it keeps only while [`watch`] asks for them.
+struct Follower {
+    window: glib::WeakRef<adw::ApplicationWindow>,
+    panes: Vec<gtk::Widget>,
+    state: std::cell::RefCell<State>,
+    /// The `after-paint` handler, with the clock it is on: at most one.
+    paint: std::cell::RefCell<Option<(gtk::gdk::FrameClock, glib::SignalHandlerId)>>,
+    timer: std::cell::RefCell<Option<glib::SourceId>>,
+    /// Inside the timer's own tick, which ends itself by returning
+    /// `Break` rather than removing its source.
+    ticking: std::cell::Cell<bool>,
+}
+
+impl Follower {
+    /// Re-decide, then keep exactly the watches [`watch`] asks for.
+    fn refresh(self: &std::rc::Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            self.stop();
+            return;
+        };
+        let wanted = {
+            let mut state = self.state.borrow_mut();
+            apply(&window, &self.panes, &mut state);
+            watch(
+                state.choice,
+                state.backend.capability().granted,
+                state.requests.glass(),
+                window.is_mapped(),
+            )
+        };
+        self.keep(&window, wanted);
+    }
+
+    /// Ask the desktop again, then re-decide.
+    fn probe(self: &std::rc::Rc<Self>) {
+        self.state.borrow_mut().backend.poll();
+        self.refresh();
+    }
+
+    fn keep(self: &std::rc::Rc<Self>, window: &adw::ApplicationWindow, wanted: Watch) {
+        if !wanted.frames {
+            if let Some((clock, handler)) = self.paint.borrow_mut().take() {
+                clock.disconnect(handler);
+            }
+        } else if self.paint.borrow().is_none()
+            && let Some(clock) = window.surface().map(|surface| surface.frame_clock())
+        {
+            let weak = std::rc::Rc::downgrade(self);
+            let handler = clock.connect_after_paint(move |_| {
+                if let Some(follower) = weak.upgrade() {
+                    follower.refresh();
+                }
+            });
+            *self.paint.borrow_mut() = Some((clock, handler));
+        }
+        if !wanted.poll {
+            if let Some(timer) = self.timer.borrow_mut().take()
+                && !self.ticking.get()
+            {
+                timer.remove();
+            }
+        } else if self.timer.borrow().is_none() {
+            let weak = std::rc::Rc::downgrade(self);
+            let timer = glib::timeout_add_seconds_local(1, move || {
+                let Some(follower) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                follower.ticking.set(true);
+                follower.probe();
+                follower.ticking.set(false);
+                if follower.timer.borrow().is_some() {
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                }
+            });
+            *self.timer.borrow_mut() = Some(timer);
+        }
+    }
+
+    /// Unmapped or gone: nothing runs until the next map.
+    fn stop(self: &std::rc::Rc<Self>) {
+        if let Some((clock, handler)) = self.paint.borrow_mut().take() {
+            clock.disconnect(handler);
+        }
+        if let Some(timer) = self.timer.borrow_mut().take()
+            && !self.ticking.get()
+        {
+            timer.remove();
+        }
+    }
+}
+
 /// Follow the desktop's blur for `window`, whose glass panes are `panes`.
-/// Probes once, then re-decides on every painted frame (the panes move with
-/// resizes, maximizing, tiling and pane widths without the surface
-/// resizing), on a one-second poll (a grant can be revoked: KWin drops the
-/// global when its blur effect unloads), on a compositing change and on a
-/// high-contrast change.
+/// Probes once, then re-decides on a map, a focus change, a compositing
+/// change, a high-contrast or scheme change, and, only while [`watch`]
+/// asks for them, after every painted frame (the panes move with resizes,
+/// maximizing, tiling and pane widths without the surface resizing) and on
+/// a one-second poll (a grant can be revoked: KWin drops the global when
+/// its blur effect unloads). Unmapped, nothing runs.
 pub fn follow(window: &adw::ApplicationWindow, panes: Vec<gtk::Widget>) {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
     };
-    let state = std::rc::Rc::new(std::cell::RefCell::new(State {
-        backend: probe(&display),
-        requests: Requests::default(),
-        choice: parse_override(std::env::var(OVERRIDE_ENV).ok().as_deref()),
-        logged: None,
-    }));
-    let panes = std::rc::Rc::new(panes);
-
-    let refresh = {
-        let state = state.clone();
-        let panes = panes.clone();
-        let window = window.downgrade();
-        std::rc::Rc::new(move || {
-            if let Some(window) = window.upgrade() {
-                apply(&window, &panes, &mut state.borrow_mut());
-            }
-        })
-    };
-
-    let r = refresh.clone();
-    window.connect_map(move |window| {
-        if let Some(clock) = window.surface().map(|surface| surface.frame_clock()) {
-            let r = r.clone();
-            clock.connect_after_paint(move |_| r());
-        }
-        r();
+    let follower = std::rc::Rc::new(Follower {
+        window: window.downgrade(),
+        panes,
+        state: std::cell::RefCell::new(State {
+            backend: probe(&display),
+            requests: Requests::default(),
+            choice: parse_override(std::env::var(OVERRIDE_ENV).ok().as_deref()),
+            logged: None,
+        }),
+        paint: Default::default(),
+        timer: Default::default(),
+        ticking: Default::default(),
     });
-    let r = refresh.clone();
-    adw::StyleManager::default().connect_high_contrast_notify(move |_| r());
-    let (s, r) = (state.clone(), refresh.clone());
+
+    let weak = std::rc::Rc::downgrade(&follower);
+    window.connect_map(move |_| {
+        if let Some(follower) = weak.upgrade() {
+            follower.refresh();
+        }
+    });
+    let weak = std::rc::Rc::downgrade(&follower);
+    window.connect_unmap(move |_| {
+        if let Some(follower) = weak.upgrade() {
+            follower.stop();
+        }
+    });
+    // Without the grant nothing polls: a focus change asks again, so a
+    // blur effect loaded later is found the next time the window is used.
+    let weak = std::rc::Rc::downgrade(&follower);
+    window.connect_is_active_notify(move |_| {
+        if let Some(follower) = weak.upgrade() {
+            follower.probe();
+        }
+    });
+    let manager = adw::StyleManager::default();
+    let weak = std::rc::Rc::downgrade(&follower);
+    manager.connect_high_contrast_notify(move |_| {
+        if let Some(follower) = weak.upgrade() {
+            follower.refresh();
+        }
+    });
+    // The scheme picks the frost and whether its text reads.
+    let weak = std::rc::Rc::downgrade(&follower);
+    manager.connect_dark_notify(move |_| {
+        if let Some(follower) = weak.upgrade() {
+            follower.refresh();
+        }
+    });
+    let weak = std::rc::Rc::downgrade(&follower);
     display.connect_composited_notify(move |_| {
-        s.borrow_mut().backend.poll();
-        r();
-    });
-    let weak = window.downgrade();
-    glib::timeout_add_seconds_local(1, move || {
-        if weak.upgrade().is_none() {
-            return glib::ControlFlow::Break;
+        if let Some(follower) = weak.upgrade() {
+            follower.probe();
         }
-        state.borrow_mut().backend.poll();
-        refresh();
-        glib::ControlFlow::Continue
     });
-    // Leaving the window, leave the display painted for any other.
-    window.connect_destroy(|_| super::style::set_translucent(false));
+    // Leaving the window, leave the display painted for any other, and
+    // let the follower go with it.
+    let held = std::cell::RefCell::new(Some(follower));
+    window.connect_destroy(move |_| {
+        if let Some(follower) = held.borrow_mut().take() {
+            follower.stop();
+        }
+        super::style::set_translucent(false);
+    });
 }
 
 fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut State) {
@@ -433,18 +709,24 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
     capability.composited = display.is_composited() && display.is_rgba();
     let manager = adw::StyleManager::default();
     let high_contrast = manager.is_high_contrast();
+    let dark = manager.is_dark();
+    // The Omarchy skin paints its own palette (`style::sheet_for_window`),
+    // which the readability measurement does not cover: painted, as under
+    // high contrast.
+    let skinned = super::appearance::active_palette().is_some();
     let glass = decide(
         state.choice,
         capability,
-        high_contrast,
-        readable(manager.is_dark()),
+        high_contrast || skinned,
+        readable(dark, capability.contrast),
     );
     if state.logged != Some((capability, glass)) {
         state.logged = Some((capability, glass));
         eprintln!(
-            "trace-commons-shell: glass backend={} blur_granted={} composited={} high_contrast={high_contrast} glass={glass:?}",
+            "trace-commons-shell: glass backend={} blur_granted={} contrast_granted={} composited={} high_contrast={high_contrast} glass={glass:?}",
             capability.backend.name(),
             capability.granted,
+            capability.contrast,
             capability.composited,
         );
     }
@@ -465,9 +747,10 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
     let Some(surface) = window.surface() else {
         return;
     };
+    let frost = capability.contrast.then(|| frost(dark));
     let mut effects = state
         .requests
-        .update(glass, capability.granted, region)
+        .update(glass, capability.granted, region, frost)
         .into_iter()
         .collect::<std::collections::VecDeque<_>>();
     while let Some(effect) = effects.pop_front() {
@@ -475,7 +758,7 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
             Effect::Sheet(translucent) => super::style::set_translucent(translucent),
             Effect::Request(region) => {
                 let scale = f64::from(surface.scale_factor());
-                if !state.backend.request(&surface, &region, scale) {
+                if !state.backend.request(&surface, &region, scale, frost) {
                     eprintln!(
                         "trace-commons-shell: glass request=unsent bands={}",
                         region.len()
@@ -504,7 +787,85 @@ mod tests {
         backend: Backend::Wayland,
         granted: true,
         composited: true,
+        contrast: false,
     };
+
+    /// A changed frost (the scheme flipped, or KWin's contrast came or
+    /// went) asks again over the same region; an unchanged one does not.
+    #[test]
+    fn a_changed_frost_asks_again() {
+        let region = vec![Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        }];
+        let mut requests = Requests::default();
+        assert_eq!(
+            requests.update(Glass::Blurred, true, region.clone(), None),
+            vec![Effect::Sheet(true), Effect::Request(region.clone())]
+        );
+        assert_eq!(
+            requests.update(Glass::Blurred, true, region.clone(), Some(frost(true))),
+            vec![Effect::Request(region.clone())]
+        );
+        assert_eq!(
+            requests.update(Glass::Blurred, true, region.clone(), Some(frost(true))),
+            vec![]
+        );
+        assert_eq!(
+            requests.update(Glass::Blurred, true, region.clone(), Some(frost(false))),
+            vec![Effect::Request(region.clone())]
+        );
+        assert_eq!(
+            requests.update(Glass::Blurred, true, region.clone(), None),
+            vec![Effect::Request(region)]
+        );
+    }
+
+    /// No frame or timer work without the grant (or forced blur), none
+    /// while unmapped, and frames only while a region is being followed.
+    #[test]
+    fn the_follower_idles_unless_blur_is_in_play() {
+        let idle = Watch {
+            frames: false,
+            poll: false,
+        };
+        for choice in [Override::Auto, Override::Painted, Override::Blur] {
+            for granted in [false, true] {
+                for glass in [Glass::Painted, Glass::Blurred] {
+                    assert_eq!(watch(choice, granted, glass, false), idle);
+                }
+            }
+        }
+        // GNOME, weston, any desktop without the grant: nothing runs.
+        assert_eq!(watch(Override::Auto, false, Glass::Painted, true), idle);
+        assert_eq!(watch(Override::Painted, false, Glass::Painted, true), idle);
+        // Granted but painted (Auto, unreadable): poll for revocation only.
+        assert_eq!(
+            watch(Override::Auto, true, Glass::Painted, true),
+            Watch {
+                frames: false,
+                poll: true
+            }
+        );
+        // Blurred: follow the panes and the grant.
+        assert_eq!(
+            watch(Override::Auto, true, Glass::Blurred, true),
+            Watch {
+                frames: true,
+                poll: true
+            }
+        );
+        // Forced blur waits for a grant on the timer.
+        assert_eq!(
+            watch(Override::Blur, false, Glass::Painted, true),
+            Watch {
+                frames: false,
+                poll: true
+            }
+        );
+    }
 
     #[test]
     fn the_override_defaults_to_following_the_desktop() {
@@ -532,6 +893,7 @@ mod tests {
                                     backend,
                                     granted,
                                     composited,
+                                    contrast: false,
                                 };
                                 if decide(choice, capability, high_contrast, readable)
                                     == Glass::Blurred
@@ -578,21 +940,77 @@ mod tests {
         }
     }
 
-    /// Today neither scheme's text reads over every desktop, so a KDE box
-    /// with blur granted stays painted unless the override asks for blur.
+    /// Blur without KWin's contrast never reads over every desktop, so a
+    /// KDE box with blur alone granted stays painted unless the override
+    /// asks for blur.
     #[test]
-    fn a_granted_kde_box_is_painted_until_its_text_reads() {
+    fn a_granted_kde_box_without_contrast_is_painted() {
         for dark in [false, true] {
-            assert!(!readable(dark));
+            assert!(!readable(dark, false));
             assert_eq!(
-                decide(Override::Auto, WAYLAND, false, readable(dark)),
+                decide(Override::Auto, WAYLAND, false, readable(dark, false)),
                 Glass::Painted
             );
             assert_eq!(
-                decide(Override::Blur, WAYLAND, false, readable(dark)),
+                decide(Override::Blur, WAYLAND, false, readable(dark, false)),
                 Glass::Blurred
             );
         }
+    }
+
+    /// The frost is KWin's colour matrix, read off its source: contrast
+    /// first (`c * x + (1 - c) / 2`), then saturation toward the Rec. 709
+    /// luma, then intensity, clamped to 0..1.
+    #[test]
+    fn the_frost_is_kwins_colour_matrix() {
+        let plain = Frost {
+            contrast: 1.0,
+            intensity: 1.0,
+            saturation: 1.0,
+            colour: [0, 0, 0, 255],
+        };
+        let close = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9);
+        assert!(close(frosted([0.2, 0.5, 0.9], plain), [0.2, 0.5, 0.9]));
+        let half = Frost {
+            contrast: 0.5,
+            ..plain
+        };
+        assert!(close(frosted([0.0; 3], half), [0.25; 3]));
+        assert!(close(frosted([1.0; 3], half), [0.75; 3]));
+        let grey = Frost {
+            saturation: 0.0,
+            ..plain
+        };
+        assert!(close(frosted([1.0, 0.0, 0.0], grey), [0.2126; 3]));
+        let dim = Frost {
+            intensity: 0.5,
+            ..plain
+        };
+        assert!(close(frosted([1.0, 0.4, 0.0], dim), [0.5, 0.2, 0.0]));
+        // Contrast before saturation: a saturated colour pushed past 1 by
+        // contrast is clamped only at the end.
+        let both = Frost {
+            contrast: 2.0,
+            saturation: 0.0,
+            ..plain
+        };
+        let luma: f64 = 0.2126 * 1.5 + 0.7152 * -0.5 + 0.0722 * -0.5;
+        assert!(close(
+            frosted([1.0, 0.0, 0.0], both),
+            [luma.clamp(0.0, 1.0); 3]
+        ));
+    }
+
+    /// The frost colour is the translucent pane's own fill.
+    #[test]
+    fn the_frost_colour_is_the_panes_fill() {
+        for dark in [false, true] {
+            let [_, _, _, alpha] = frost(dark).colour;
+            assert!(alpha > 0, "dark={dark}");
+            assert_ne!(frost(dark).colour, [0, 0, 0, 255], "dark={dark}");
+        }
+        assert_eq!(frost(true).colour, [20, 23, 38, 190]);
+        assert_eq!(frost(false).colour, [229, 232, 237, 191]);
     }
 
     fn area(region: &[Rect]) -> i64 {
@@ -745,18 +1163,18 @@ mod tests {
     fn a_grant_loads_the_translucent_sheet_and_asks_for_the_panes() {
         let mut requests = Requests::default();
         assert_eq!(
-            requests.update(Glass::Painted, false, band(0)),
+            requests.update(Glass::Painted, false, band(0), None),
             vec![Effect::Sheet(false)]
         );
         assert_eq!(
-            requests.update(Glass::Blurred, true, band(0)),
+            requests.update(Glass::Blurred, true, band(0), None),
             vec![Effect::Sheet(true), Effect::Request(band(0))]
         );
         // A frame that moves nothing sends nothing.
-        assert_eq!(requests.update(Glass::Blurred, true, band(0)), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(0), None), vec![]);
         // A pane that moves is asked for again.
         assert_eq!(
-            requests.update(Glass::Blurred, true, band(5)),
+            requests.update(Glass::Blurred, true, band(5), None),
             vec![Effect::Request(band(5))]
         );
     }
@@ -764,14 +1182,14 @@ mod tests {
     #[test]
     fn a_revoked_grant_withdraws_the_request_and_paints() {
         let mut requests = Requests::default();
-        requests.update(Glass::Blurred, true, band(0));
+        requests.update(Glass::Blurred, true, band(0), None);
         assert_eq!(
-            requests.update(Glass::Painted, false, band(0)),
+            requests.update(Glass::Painted, false, band(0), None),
             vec![Effect::Sheet(false), Effect::Unset]
         );
         // Granted again: asked again, though the region is the same.
         assert_eq!(
-            requests.update(Glass::Blurred, true, band(0)),
+            requests.update(Glass::Blurred, true, band(0), None),
             vec![Effect::Sheet(true), Effect::Request(band(0))]
         );
     }
@@ -781,17 +1199,17 @@ mod tests {
         // To both protocols an empty region means the whole surface.
         let mut requests = Requests::default();
         assert_eq!(
-            requests.update(Glass::Blurred, true, vec![]),
+            requests.update(Glass::Blurred, true, vec![], None),
             vec![Effect::Sheet(true)]
         );
-        requests.update(Glass::Blurred, true, band(0));
+        requests.update(Glass::Blurred, true, band(0), None);
         assert_eq!(
-            requests.update(Glass::Blurred, true, vec![]),
+            requests.update(Glass::Blurred, true, vec![], None),
             vec![Effect::Unset]
         );
-        assert_eq!(requests.update(Glass::Blurred, true, vec![]), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, vec![], None), vec![]);
         assert_eq!(
-            requests.update(Glass::Blurred, true, band(0)),
+            requests.update(Glass::Blurred, true, band(0), None),
             vec![Effect::Request(band(0))]
         );
     }
@@ -801,17 +1219,20 @@ mod tests {
     #[test]
     fn an_unsent_request_paints_and_withdraws_until_the_grant_returns() {
         let mut requests = Requests::default();
-        requests.update(Glass::Blurred, true, band(0));
+        requests.update(Glass::Blurred, true, band(0), None);
         assert_eq!(
             requests.refused(),
             vec![Effect::Sheet(false), Effect::Unset]
         );
-        assert_eq!(requests.update(Glass::Blurred, true, band(0)), vec![]);
-        assert_eq!(requests.update(Glass::Blurred, true, band(5)), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(0), None), vec![]);
+        assert_eq!(requests.update(Glass::Blurred, true, band(5), None), vec![]);
         // The grant goes and comes back: asked again.
-        assert_eq!(requests.update(Glass::Painted, false, band(5)), vec![]);
         assert_eq!(
-            requests.update(Glass::Blurred, true, band(5)),
+            requests.update(Glass::Painted, false, band(5), None),
+            vec![]
+        );
+        assert_eq!(
+            requests.update(Glass::Blurred, true, band(5), None),
             vec![Effect::Sheet(true), Effect::Request(band(5))]
         );
     }

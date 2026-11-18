@@ -1,5 +1,8 @@
 //! KWin's blur, behind [`BlurBackend`]: the protocol plumbing and nothing
-//! else. Every decision is in the parent module, tested on any host.
+//! else. Every decision is in the parent module, tested on any host. On
+//! Wayland, KWin's background contrast (`org_kde_kwin_contrast_manager`
+//! v2, plasma-wayland-protocols `contrast.xml`) goes behind the same region
+//! with the frost the parent chose, and is withdrawn wherever the blur is.
 //!
 //! Lifted from the blur spike (#2162, `examples/blur_spike.rs`). Names are
 //! from source: `org_kde_kwin_blur_manager` v1 and `org_kde_kwin_blur` v1
@@ -27,15 +30,19 @@ pub(super) fn probe(display: &gdk::Display) -> Option<Box<dyn BlurBackend>> {
 }
 
 mod wayland {
-    use crate::ui::glass_backdrop::{Backend, BlurBackend, Capability, Rect};
+    use crate::ui::glass_backdrop::{Backend, BlurBackend, Capability, Frost, Rect};
     use gdk4_wayland::prelude::*;
     use gtk::gdk;
     use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
     use wayland_client::protocol::{wl_compositor, wl_region, wl_registry, wl_surface};
     use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
     use wayland_protocols_plasma::blur::client::{org_kde_kwin_blur, org_kde_kwin_blur_manager};
+    use wayland_protocols_plasma::contrast::client::{
+        org_kde_kwin_contrast, org_kde_kwin_contrast_manager,
+    };
 
-    const MANAGER: &str = "org_kde_kwin_blur_manager";
+    const BLUR_MANAGER: &str = "org_kde_kwin_blur_manager";
+    const CONTRAST_MANAGER: &str = "org_kde_kwin_contrast_manager";
 
     pub(crate) struct State;
 
@@ -54,19 +61,43 @@ mod wayland {
     delegate_noop!(State: ignore wl_region::WlRegion);
     delegate_noop!(State: ignore org_kde_kwin_blur_manager::OrgKdeKwinBlurManager);
     delegate_noop!(State: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
+    delegate_noop!(State: ignore org_kde_kwin_contrast_manager::OrgKdeKwinContrastManager);
+    delegate_noop!(State: ignore org_kde_kwin_contrast::OrgKdeKwinContrast);
 
-    struct Bound {
+    struct BoundBlur {
         name: u32,
         manager: org_kde_kwin_blur_manager::OrgKdeKwinBlurManager,
-        compositor: wl_compositor::WlCompositor,
         current: Option<(wl_surface::WlSurface, org_kde_kwin_blur::OrgKdeKwinBlur)>,
+    }
+
+    /// KWin's background contrast: its own global, advertised while the
+    /// effect that draws it is loaded (KWin 6.4's contrast effect, 6.5's
+    /// and 6.6's blur effect), and gone from KWin's development branch.
+    struct BoundContrast {
+        name: u32,
+        manager: org_kde_kwin_contrast_manager::OrgKdeKwinContrastManager,
+        current: Option<(
+            wl_surface::WlSurface,
+            org_kde_kwin_contrast::OrgKdeKwinContrast,
+        )>,
+    }
+
+    impl BoundContrast {
+        fn withdraw(&mut self, surface: &wl_surface::WlSurface) {
+            if let Some((_, contrast)) = self.current.take() {
+                contrast.release();
+            }
+            self.manager.unset(surface);
+        }
     }
 
     struct Session {
         conn: Connection,
         queue: EventQueue<State>,
         globals: GlobalList,
-        bound: Option<Bound>,
+        compositor: Option<wl_compositor::WlCompositor>,
+        blur: Option<BoundBlur>,
+        contrast: Option<BoundContrast>,
     }
 
     pub(crate) struct Blur {
@@ -87,7 +118,9 @@ mod wayland {
                         conn,
                         queue,
                         globals,
-                        bound: None,
+                        compositor: None,
+                        blur: None,
+                        contrast: None,
                     }),
                     Err(err) => {
                         eprintln!("trace-commons-shell: glass wayland_registry_error={err}");
@@ -100,62 +133,87 @@ mod wayland {
             blur
         }
 
-        /// The manager's current name in the registry, if advertised.
-        fn advertised(session: &Session) -> Option<u32> {
+        /// A global's current name in the registry, if advertised.
+        fn advertised(session: &Session, interface: &str) -> Option<u32> {
             session.globals.contents().with_list(|list| {
                 list.iter()
-                    .find(|global| global.interface == MANAGER)
+                    .find(|global| global.interface == interface)
                     .map(|global| global.name)
             })
         }
 
-        /// Bind the manager when it appears, and forget it when KWin removes
-        /// it (the blur effect unloaded).
+        /// Bind each manager when it appears, and forget it when KWin
+        /// removes it (its effect unloaded). The two come and go apart.
         fn rebind(&mut self) {
             let Some(session) = self.session.as_mut() else {
                 return;
             };
-            let advertised = Self::advertised(session);
-            if session.bound.as_ref().map(|bound| bound.name) == advertised {
-                return;
-            }
-            if let Some(bound) = session.bound.take()
-                && let Some((_, blur)) = bound.current
-            {
-                blur.release();
-            }
-            let Some(name) = advertised else {
-                return;
-            };
             let qh = session.queue.handle();
-            let manager = session
-                .globals
-                .bind::<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager, _, _>(&qh, 1..=1, ());
-            let compositor =
-                session
+            let blur = Self::advertised(session, BLUR_MANAGER);
+            if session.blur.as_ref().map(|bound| bound.name) != blur {
+                if let Some(bound) = session.blur.take()
+                    && let Some((_, old)) = bound.current
+                {
+                    old.release();
+                }
+                if let Some(name) = blur
+                    && let Ok(manager) = session
+                        .globals
+                        .bind::<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager, _, _>(
+                        &qh,
+                        1..=1,
+                        (),
+                    )
+                {
+                    session.blur = Some(BoundBlur {
+                        name,
+                        manager,
+                        current: None,
+                    });
+                }
+            }
+            let contrast = Self::advertised(session, CONTRAST_MANAGER);
+            if session.contrast.as_ref().map(|bound| bound.name) != contrast {
+                if let Some(bound) = session.contrast.take()
+                    && let Some((_, old)) = bound.current
+                {
+                    old.release();
+                }
+                if let Some(name) = contrast
+                    && let Ok(manager) = session
+                        .globals
+                        .bind::<org_kde_kwin_contrast_manager::OrgKdeKwinContrastManager, _, _>(
+                        &qh,
+                        1..=2,
+                        (),
+                    )
+                {
+                    session.contrast = Some(BoundContrast {
+                        name,
+                        manager,
+                        current: None,
+                    });
+                }
+            }
+            if session.compositor.is_none() && session.blur.is_some() {
+                session.compositor = session
                     .globals
-                    .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=4, ());
-            if let (Ok(manager), Ok(compositor)) = (manager, compositor) {
-                session.bound = Some(Bound {
-                    name,
-                    manager,
-                    compositor,
-                    current: None,
-                });
+                    .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=4, ())
+                    .ok();
             }
         }
     }
 
     impl BlurBackend for Blur {
         fn capability(&self) -> Capability {
+            let session = self.session.as_ref();
             Capability {
                 backend: Backend::Wayland,
-                granted: self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.bound.is_some()),
+                granted: session
+                    .is_some_and(|session| session.blur.is_some() && session.compositor.is_some()),
                 // Filled in by the caller from the display.
                 composited: false,
+                contrast: session.is_some_and(|session| session.contrast.is_some()),
             }
         }
 
@@ -168,12 +226,20 @@ mod wayland {
             self.rebind();
         }
 
-        fn request(&mut self, surface: &gdk::Surface, region: &[Rect], _scale: f64) -> bool {
+        fn request(
+            &mut self,
+            surface: &gdk::Surface,
+            region: &[Rect],
+            _scale: f64,
+            frost: Option<Frost>,
+        ) -> bool {
             let Some(session) = self.session.as_mut() else {
                 return false;
             };
             let qh = session.queue.handle();
-            let Some(bound) = session.bound.as_mut() else {
+            let (Some(bound), Some(compositor)) =
+                (session.blur.as_mut(), session.compositor.as_ref())
+            else {
                 return false;
             };
             let Some(wl_surface) = surface
@@ -187,18 +253,46 @@ mod wayland {
                     old.release();
                 }
                 let blur = bound.manager.create(&wl_surface, &qh, ());
-                bound.current = Some((wl_surface, blur));
+                bound.current = Some((wl_surface.clone(), blur));
             }
             let Some((_, blur)) = bound.current.as_ref() else {
                 return false;
             };
             // Surface-local, in logical pixels: the compositor scales it.
-            let wl_region = bound.compositor.create_region(&qh, ());
+            let wl_region = compositor.create_region(&qh, ());
             for rect in region {
                 wl_region.add(rect.x, rect.y, rect.width, rect.height);
             }
             blur.set_region(Some(&wl_region));
             blur.commit();
+            // The frost behind exactly the same region, or none.
+            if let Some(contrast) = session.contrast.as_mut() {
+                match frost {
+                    Some(frost) => {
+                        if contrast.current.as_ref().map(|(s, _)| s.id()) != Some(wl_surface.id()) {
+                            if let Some((_, old)) = contrast.current.take() {
+                                old.release();
+                            }
+                            let object = contrast.manager.create(&wl_surface, &qh, ());
+                            contrast.current = Some((wl_surface.clone(), object));
+                        }
+                        if let Some((_, object)) = contrast.current.as_ref() {
+                            object.set_region(Some(&wl_region));
+                            object.set_contrast(frost.contrast);
+                            object.set_intensity(frost.intensity);
+                            object.set_saturation(frost.saturation);
+                            // `set_frost` is v2; a v1 object would be a
+                            // protocol error.
+                            if object.version() >= 2 {
+                                let [red, green, blue, alpha] = frost.colour.map(i32::from);
+                                object.set_frost(red, green, blue, alpha);
+                            }
+                            object.commit();
+                        }
+                    }
+                    None => contrast.withdraw(&wl_surface),
+                }
+            }
             wl_region.destroy();
             session.conn.flush().is_ok()
         }
@@ -207,17 +301,27 @@ mod wayland {
             let Some(session) = self.session.as_mut() else {
                 return;
             };
-            let Some(bound) = session.bound.as_mut() else {
-                return;
-            };
-            if let Some((_, blur)) = bound.current.take() {
-                blur.release();
-            }
-            if let Some(wl_surface) = surface
+            let wl_surface = surface
                 .downcast_ref::<gdk4_wayland::WaylandSurface>()
-                .and_then(|surface| surface.wl_surface())
-            {
-                bound.manager.unset(&wl_surface);
+                .and_then(|surface| surface.wl_surface());
+            if let Some(bound) = session.blur.as_mut() {
+                if let Some((_, blur)) = bound.current.take() {
+                    blur.release();
+                }
+                if let Some(wl_surface) = wl_surface.as_ref() {
+                    bound.manager.unset(wl_surface);
+                }
+            }
+            // The frost goes wherever the blur does.
+            if let Some(contrast) = session.contrast.as_mut() {
+                match wl_surface.as_ref() {
+                    Some(wl_surface) => contrast.withdraw(wl_surface),
+                    None => {
+                        if let Some((_, object)) = contrast.current.take() {
+                            object.release();
+                        }
+                    }
+                }
             }
             let _ = session.conn.flush();
         }
@@ -225,7 +329,7 @@ mod wayland {
 }
 
 mod x11 {
-    use crate::ui::glass_backdrop::{Backend, BlurBackend, Capability, Rect, x11_cardinals};
+    use crate::ui::glass_backdrop::{Backend, BlurBackend, Capability, Frost, Rect, x11_cardinals};
     use gtk::gdk;
     use gtk::prelude::*;
     use x11rb::connection::Connection;
@@ -280,6 +384,9 @@ mod x11 {
                 backend: Backend::X11,
                 granted: self.announced,
                 composited: false,
+                // KWin reads background contrast from Wayland surfaces
+                // only (`BlurEffect::updateBlurRegion`).
+                contrast: false,
             }
         }
 
@@ -297,7 +404,13 @@ mod x11 {
             });
         }
 
-        fn request(&mut self, surface: &gdk::Surface, region: &[Rect], scale: f64) -> bool {
+        fn request(
+            &mut self,
+            surface: &gdk::Surface,
+            region: &[Rect],
+            scale: f64,
+            _frost: Option<Frost>,
+        ) -> bool {
             let (Some(session), Some(xid)) = (self.session.as_ref(), Self::xid(surface)) else {
                 return false;
             };

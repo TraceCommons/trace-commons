@@ -1099,6 +1099,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{brand_tokens, stylesheet, stylesheet_for};
+    use crate::ui::glass_backdrop;
 
     /// A grid of figures is no stop on the Tab chain, and Tab goes on
     /// past it; a grid of buttons still takes focus on its tiles.
@@ -1340,61 +1341,118 @@ mod tests {
         format!("#{:02x}{:02x}{:02x}", mix(r, 0), mix(g, 1), mix(b, 2))
     }
 
-    /// Text in a translucent pane sits on whatever KWin's blur averages the
-    /// desktop to. A scheme may go translucent on its own
-    /// (`glass_backdrop::readable`) only if every text colour the panes'
-    /// screens use reads at 4.5:1 there too, over a black and a white
-    /// desktop, in and out of focus, on the pane and on the tiers that hold
-    /// text. Two-sided: `readable` must agree with the measurement, so the
-    /// gate can neither open on a failure nor stay shut after a fix.
-    #[test]
-    fn every_text_colour_reads_on_the_translucent_panes() {
-        let inks = [
-            "tc_glass_ink",
-            "tc_glass_ink_secondary",
-            "tc_glass_status_on_text",
-            "tc_glass_status_ask_text",
-            "tc_ink",
-            "tc_muted",
-            "accent_color",
-            "tc_green_text",
-            "tc_gold_text",
-            "tc_coral_text",
-            "tc_blue_text",
-            "success_color",
-            "warning_color",
-            "error_color",
-        ];
-        for dark in [false, true] {
-            let mut failures = Vec::new();
-            let colours = palette(dark);
-            for desktop in ["#000000", "#ffffff"] {
-                for pane in ["tc_glass_pane", "tc_glass_pane_inactive"] {
-                    let ground = flatten(blur_colour(dark, pane), desktop);
-                    let mut grounds = vec![(pane.to_string(), ground.clone())];
-                    for tier in ["tc_glass_card", "tc_glass_card_quiet", "tc_glass_control"] {
-                        grounds.push((
-                            format!("{tier} on {pane}"),
-                            flatten(blur_colour(dark, tier), &ground),
-                        ));
-                    }
-                    for (where_, under) in &grounds {
-                        for ink in inks {
-                            let ratio = contrast(&colours[ink], under);
-                            if ratio < 4.5 {
-                                failures.push(format!(
-                                    "dark={dark}: {ink} on {where_} over {desktop} is {ratio:.2}:1"
-                                ));
-                            }
+    /// Every text colour the panes' screens use, for the translucent check:
+    /// the glass inks, tertiary included (column titles and sub-lines), the
+    /// shell's own and every status and accent text. `tc_glass_status_off`
+    /// is left out: it colours the chevron glyph and a turned-off Submit,
+    /// which carry no text a person must read. The selected row's ink sits
+    /// on the selection's opaque fill, not on the pane.
+    const PANE_INKS: [&str; 15] = [
+        "tc_glass_ink",
+        "tc_glass_ink_secondary",
+        "tc_glass_ink_tertiary",
+        "tc_glass_status_on_text",
+        "tc_glass_status_ask_text",
+        "tc_ink",
+        "tc_muted",
+        "accent_color",
+        "tc_green_text",
+        "tc_gold_text",
+        "tc_coral_text",
+        "tc_blue_text",
+        "success_color",
+        "warning_color",
+        "error_color",
+    ];
+
+    /// The desktop as KWin hands it to the pane: `desktop` itself, or
+    /// through the frost when the contrast is granted.
+    fn behind_pane(desktop: [f64; 3], frost: Option<glass_backdrop::Frost>) -> String {
+        let shown = frost.map_or(desktop, |frost| glass_backdrop::frosted(desktop, frost));
+        let byte = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            byte(shown[0]),
+            byte(shown[1]),
+            byte(shown[2])
+        )
+    }
+
+    /// Every failure of [`PANE_INKS`] on the translucent panes over a black
+    /// and a white desktop, in and out of focus, on the pane and on the
+    /// tiers that hold text.
+    fn translucent_failures(dark: bool, frost: Option<glass_backdrop::Frost>) -> Vec<String> {
+        let mut failures = Vec::new();
+        let colours = palette(dark);
+        for desktop in [[0.0; 3], [1.0; 3]] {
+            let desktop = behind_pane(desktop, frost);
+            for pane in ["tc_glass_pane", "tc_glass_pane_inactive"] {
+                let ground = flatten(blur_colour(dark, pane), &desktop);
+                let mut grounds = vec![(pane.to_string(), ground.clone())];
+                for tier in ["tc_glass_card", "tc_glass_card_quiet", "tc_glass_control"] {
+                    grounds.push((
+                        format!("{tier} on {pane}"),
+                        flatten(blur_colour(dark, tier), &ground),
+                    ));
+                }
+                for (where_, under) in &grounds {
+                    for ink in PANE_INKS {
+                        let ratio = contrast(&colours[ink], under);
+                        if ratio < 4.5 {
+                            failures.push(format!(
+                                "dark={dark}: {ink} on {where_} over {desktop} is {ratio:.2}:1"
+                            ));
                         }
                     }
                 }
             }
-            assert_eq!(
-                failures.is_empty(),
-                crate::ui::glass_backdrop::readable(dark),
-                "dark={dark}: {failures:#?}"
-            );
+        }
+        failures
+    }
+
+    /// Text in a translucent pane sits on whatever KWin's blur averages the
+    /// desktop to, through the frost where KWin's contrast is granted. A
+    /// scheme may go translucent on its own (`glass_backdrop::readable`)
+    /// only if every text colour the panes' screens use reads at 4.5:1
+    /// there too, over a black and a white desktop, in and out of focus,
+    /// on the pane and on the tiers that hold text. Two-sided: `readable`
+    /// must agree with the measurement, so the gate can neither open on a
+    /// failure nor stay shut after a fix.
+    #[test]
+    fn every_text_colour_reads_on_the_translucent_panes() {
+        for dark in [false, true] {
+            for granted in [false, true] {
+                let frost = granted.then(|| glass_backdrop::frost(dark));
+                let failures = translucent_failures(dark, frost);
+                assert_eq!(
+                    failures.is_empty(),
+                    glass_backdrop::readable(dark, granted),
+                    "dark={dark} contrast={granted}: {failures:#?}"
+                );
+            }
+        }
+    }
+
+    /// The frost's contrast is the largest, in steps of 0.05, at which the
+    /// text reads: the most desktop that can show through. In light no step
+    /// reads (a mid-grey desktop at contrast 0 still leaves `tc_muted`
+    /// under 4.5:1), so light asks for none and stays painted.
+    #[test]
+    fn the_frost_shows_as_much_desktop_as_the_text_allows() {
+        for dark in [false, true] {
+            let chosen = glass_backdrop::frost(dark);
+            let best = (0..=20)
+                .rev()
+                .map(|step| f64::from(step) * 0.05)
+                .find(|&contrast| {
+                    translucent_failures(dark, Some(glass_backdrop::Frost { contrast, ..chosen }))
+                        .is_empty()
+                });
+            match best {
+                Some(best) => assert!((chosen.contrast - best).abs() < 1e-9, "dark={dark}: {best}"),
+                None => assert_eq!(chosen.contrast, 1.0, "dark={dark}"),
+            }
+            assert_eq!(best.is_some(), dark, "dark={dark}: {best:?}");
         }
     }
 
@@ -1560,6 +1618,30 @@ mod tests {
         for dark in [false, true] {
             assert_eq!(super::sheet_for(Some(&palette), dark), css);
         }
+    }
+
+    /// The skin's sheet loads whether or not the translucent one is asked
+    /// for: the blur sheets would redefine the glass colours the palette
+    /// set. Without a palette, the translucent sheet loads as asked.
+    #[test]
+    fn a_skin_stays_painted_and_the_standard_sheet_follows_the_blur() {
+        let (_, palette, css) = omarchy_sheets().remove(0);
+        for dark in [false, true] {
+            for translucent in [false, true] {
+                assert_eq!(
+                    super::sheet_for_window(Some(&palette), dark, translucent),
+                    css
+                );
+                assert_eq!(
+                    super::sheet_for_window(None, dark, translucent),
+                    super::stylesheet_for(dark, translucent)
+                );
+            }
+        }
+        assert_ne!(
+            super::sheet_for_window(None, true, true),
+            super::sheet_for_window(None, true, false)
+        );
     }
 
     /// `@define-color` cannot be scoped, so the skin replaces values and
