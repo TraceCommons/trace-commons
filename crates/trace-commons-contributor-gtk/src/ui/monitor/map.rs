@@ -606,7 +606,7 @@ mod imp {
             }
         }
 
-        fn point_at(&self, pointer: Option<(f64, f64)>) {
+        pub(super) fn point_at(&self, pointer: Option<(f64, f64)>) {
             let inside = {
                 let scene = self.scene.borrow();
                 let Some(stack) = scene.stack.as_ref() else {
@@ -4246,6 +4246,70 @@ mod tests {
         assert!(!map.canvas.is_ticking(), "the clock stops");
         assert!(map.canvas.imp().motion().is_none(), "no run is drawn");
         assert_eq!(map.card_ids(), ["s2"], "the card still shows");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// Iterates the main loop until `done` holds or `millis` pass.
+    fn settle_within(millis: u64, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+        let context = glib::MainContext::default();
+        while !done() && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Over its card the pile opens in the Mac's stages (taller at once,
+    /// then wider, then the names) and closes the other way, names first;
+    /// the Settings switch's style reaches the map and the runs to come.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_pile_opens_in_stages_and_the_style_switches_at_once() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "claude-code")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        let imp = map.canvas.imp();
+        let scene = map.canvas.scene();
+        let stack = scene.stack.as_ref().expect("the pile");
+        let (x, y, w, h) = stack.card(&imp.geometry(), false, false);
+        imp.point_at(Some((x + w / 2.0, y + h / 2.0)));
+        let tall = PileStage {
+            tall: true,
+            ..PileStage::default()
+        };
+        assert_eq!(imp.pile_stage.get(), tall, "taller at once, no wider");
+        settle_within(2000, || imp.pile_stage.get().names);
+        assert_eq!(imp.pile_stage.get(), OPEN_PILE);
+        imp.point_at(None);
+        assert!(!imp.pile_stage.get().names, "the names go at once");
+        assert!(imp.pile_stage.get().wide, "the width waits");
+        settle_within(2000, || imp.pile_stage.get() == PileStage::default());
+        assert_eq!(imp.pile_stage.get(), PileStage::default());
+
+        assert_eq!(
+            map.canvas.style(),
+            MapStyle::Launch,
+            "the rocket by default"
+        );
+        map.set_style(MapStyle::Standard);
+        assert_eq!(map.canvas.style(), MapStyle::Standard);
+        assert_eq!(map.transfers.player.borrow().style, MapStyle::Standard);
         settings.set_gtk_enable_animations(previous);
         window.close();
     }

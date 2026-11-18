@@ -266,6 +266,29 @@ mod tests {
         assert!((first[1] - first[0] - pitch * 2.0).abs() < 0.001);
     }
 
+    /// The light field over the light pane is the Mac's own near-white:
+    /// (247, 248, 249) at the map's edge in the Mac's
+    /// `heldSessions-traces-main+map-light` render, whose pane is opaque
+    /// in the same flat theme.
+    #[test]
+    fn the_light_field_is_the_macs_near_white() {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 400, 400).unwrap();
+        let colours = MapColours::scheme(false);
+        {
+            let cr = gtk::cairo::Context::new(&surface).unwrap();
+            crate::ui::monitor::map::source(&cr, &colours.pane_opaque, 1.0);
+            let _ = cr.paint();
+            draw(&cr, 400.0, 400.0, &colours, false);
+        }
+        surface.flush();
+        let data = surface.data().unwrap();
+        let corner = [data[2], data[1], data[0]];
+        for (k, mac) in [247, 248, 249].into_iter().enumerate() {
+            assert!((i32::from(corner[k]) - mac).abs() <= 2, "corner {corner:?}");
+        }
+    }
+
     /// The field over the dark pane is navy and its marks are seen: the
     /// centre lighter than the corner by the veil's gradient, and a mark
     /// near the centre lighter than the ground beside it. The corner is

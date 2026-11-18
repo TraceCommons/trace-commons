@@ -9,9 +9,10 @@
 //! Deliberate platform differences:
 //! - The memory line in Details says "Memory files stay on this computer."
 //!   (`memory_stays_computer`) where the Mac's says "this Mac".
-//! - A batch from several tools shows the stock stacked-pages icon where
-//!   the Mac draws its `square.stack` symbol (owner, 2026-11-18: stock
-//!   symbolic icons for the Mac's SF Symbols).
+//! - A batch from several tools shows the stock `edit-copy-symbolic` icon
+//!   where the Mac draws its `square.stack` symbol: an extension of the
+//!   owner's 2026-11-18 ruling (stock symbolic icons for the Mac's SF
+//!   Symbols in the graph range and the inspector) to this card.
 //! - The cards are a short column, newest nearest the legend, not the
 //!   Mac's peeking stack; at most `Player::VISIBLE` are drawn.
 
