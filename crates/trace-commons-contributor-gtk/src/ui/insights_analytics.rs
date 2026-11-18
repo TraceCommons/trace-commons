@@ -162,6 +162,20 @@ pub(super) fn harness(source: Option<AnalyticsSource>) -> String {
     source.map_or_else(dash, |source| text(&wire(source)))
 }
 
+/// A harness's line led by its tile (`InsightsHarnessTile`); the line
+/// alone for a harness this build has no tile for.
+fn tiled(source: AnalyticsSource, line: &str) -> gtk::Widget {
+    let Some(kind) = crate::ui::tool_tile::Kind::harness(&wire(source)) else {
+        return small(line).upcast();
+    };
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.append(&crate::ui::tool_tile::ToolTile::new(kind, false));
+    let words = small(line);
+    words.set_hexpand(true);
+    row.append(&words);
+    row.upcast()
+}
+
 pub(super) fn source_line(source: AnalyticsSource) -> String {
     text(&format!("analytics_source_{}", wire(source)))
 }
@@ -786,7 +800,7 @@ impl AnalyticsTabs {
                             "title-3",
                         ));
                         for source in &overview.sources {
-                            totals.append(&small(&source_line(source.source)));
+                            totals.append(&tiled(source.source, &source_line(source.source)));
                             totals.append(&styled(&figure(source.tokens), "title-3"));
                         }
                         tabs.overview_body.append(&totals);
@@ -1034,7 +1048,7 @@ impl AnalyticsTabs {
         }
         for source in &overview.sources {
             tokens.append(&styled(&figure(source.tokens), "title-3"));
-            tokens.append(&small(&source_line(source.source)));
+            tokens.append(&tiled(source.source, &source_line(source.source)));
             tokens.append(&small(&change(source)));
         }
         cards.insert(
@@ -1214,7 +1228,8 @@ impl AnalyticsTabs {
         }
         body.append(&cards);
         if let Some(line) = claude_only_line(patterns) {
-            body.append(&small(&line));
+            // `InsightsScopeLine`: Claude Code's tile beside the line.
+            body.append(&tiled(AnalyticsSource::ClaudeCode, &line));
         }
         let listed = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.append(&listed);

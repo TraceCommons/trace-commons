@@ -1015,6 +1015,13 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
         ran_in.add_css_class("tc-meta");
         naming.append(&ran_in);
     }
+    // The tool's tile, as the Mac's tree row leads with it
+    // (`TracesWords.sessionTile`): its logo, its initials, or the plain
+    // session mark for a source this build does not know.
+    head.append(&super::tool_tile::ToolTile::new(
+        super::tool_tile::Kind::session(entry.declared_source.as_deref(), &entry.source),
+        false,
+    ));
     head.append(&naming);
     let agent = gtk::Label::new(Some(entry.agent_label()));
     agent.add_css_class("tc-meta");
@@ -1567,6 +1574,11 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         line.add_css_class("tc-attention");
         naming.append(&line);
     }
+    // The folder's tile, as the Mac's tree draws a folder row.
+    opener.append(&super::tool_tile::ToolTile::new(
+        super::tool_tile::Kind::Folder,
+        false,
+    ));
     opener.append(&naming);
 
     let summary = gtk::Label::new(Some(&copy::folder_summary(waiting, folder.bytes)));

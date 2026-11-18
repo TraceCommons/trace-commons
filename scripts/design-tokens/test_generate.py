@@ -144,6 +144,48 @@ class GlassTokensTests(unittest.TestCase):
         self.assertIn('fill="currentColor"', generate.glyph_svg(by_name["kebab"]))
         self.assertIn('stroke="currentColor"', generate.glyph_svg(by_name["map"]))
 
+    def test_logos_come_from_the_swift_path_data(self):
+        logos = generate.parse_logos(generate.LOGOS.read_text())
+        self.assertEqual([l["name"] for l in logos], ["claude", "codex", "antigravity", "openCode", "theia"])
+        by_name = {l["name"]: l for l in logos}
+        self.assertEqual(by_name["openCode"]["view_box"], (0, 0, 24, 24))
+        self.assertEqual(by_name["openCode"]["paths"], ["M16,6H8v12h8V6zm4,16H4V2h16v20z"])
+        self.assertEqual(by_name["theia"]["view_box"], (0, 0, 64, 64))
+        self.assertEqual(len(by_name["theia"]["paths"]), 3)
+        self.assertTrue(by_name["claude"]["paths"][0].startswith("M4.709,15.955l4.72-2.647"))
+
+    def test_brand_mark_comes_from_the_swift_path_data(self):
+        mark = generate.parse_brand_mark(generate.BRAND_MARK.read_text())
+        self.assertEqual(mark["view_box"], (82.96, 82.13, 234.08, 231.72))
+        self.assertTrue(mark["data"].startswith("M292.106,82.1357C283.445,82.1357"))
+        self.assertTrue(mark["data"].endswith("Z"))
+
+    def test_map_colours_follow_the_flat_theme(self):
+        rendered = "\n".join(generate.render_map_rust(self.tokens))
+        # Flat light overrides the shared orb and purpleSoft with its blue.
+        self.assertIn('pub const MAP_ORB_SHARED: Rgba = ("#056bdc", 1.0);', rendered)
+        self.assertIn('pub const PURPLE_SOFT: Rgba = ("#0091fd", 1.0);', rendered)
+        self.assertIn('pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);', rendered)
+        self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);', rendered)
+        self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);', rendered)
+        self.assertIn('pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);', rendered)
+        self.assertIn('pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);', rendered)
+
+    def test_tile_values_are_the_macs(self):
+        rendered = "\n".join(generate.render_tile_rust(self.tokens))
+        # GlassTokens.Size.toolTile / toolTileLarge / toolLogo / toolLogoLarge.
+        for line in ("TOOL_TILE: f64 = 22.0", "TOOL_TILE_LARGE: f64 = 30.0",
+                     "TOOL_LOGO: f64 = 15.0", "TOOL_LOGO_LARGE: f64 = 20.0",
+                     "SPINNER: f64 = 12.0", "SPINNER_STROKE: f64 = 1.5", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6", "SKELETON_DIM: f64 = 0.5"):
+            self.assertIn(f"pub const {line};", rendered)
+        # The flat theme rounds a control at 11, the classic at 8.
+        self.assertIn("pub const RADIUS_CONTROL: f64 = 11.0;", rendered)
+        self.assertIn("pub const RADIUS_TILE: f64 = 6.0;", rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
+
     def test_generated_output_is_deterministic(self):
         first = generate.render_gtk(self.tokens)
         self.assertEqual(first, generate.render_gtk(self.tokens))

@@ -12,7 +12,9 @@ pub mod credential;
 mod css_contract;
 mod first_run;
 mod first_run_terms;
+pub mod folder_handoff;
 pub mod funding;
+pub mod glass_motion;
 pub mod hero_art;
 pub mod hero_card;
 pub mod history;
@@ -34,6 +36,7 @@ pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
+pub mod tool_tile;
 pub mod update;
 pub mod wrap_row;
 

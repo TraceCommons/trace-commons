@@ -113,6 +113,20 @@ fn launch_accounts(snapshot: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// A line led by its tool's tile, as the Mac's saved-account and session
+/// rows are (`GlassToolTile(.tool(ManagedWords.glassTool(tool)))`).
+fn tiled(tool: &str, line: String) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, style::space::S);
+    row.append(&super::tool_tile::ToolTile::new(
+        super::tool_tile::Kind::managed(tool),
+        false,
+    ));
+    let label = style::body(line);
+    label.set_hexpand(true);
+    row.append(&label);
+    row
+}
+
 fn button(key: &str, f: impl Fn() + 'static) -> gtk::Button {
     let b = gtk::Button::with_label(&text(key));
     b.connect_clicked(move |_| f());
@@ -285,7 +299,7 @@ pub fn refresh(app: &Rc<App>) {
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
-            style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
+            row.append(&tiled(account["tool"].as_str().unwrap_or_default(), format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default())));
             let tool = account["tool"].as_str().unwrap_or_default();
             if tool_missing(&snapshot, tool) {
                 style::append_meta(&row, tool_unavailable(tool));
@@ -318,7 +332,7 @@ pub fn refresh(app: &Rc<App>) {
             if sessions.is_empty() { style::append_body(root, text("empty")); }
             for session in sessions {
                 let project = if session["purpose"] == "login" { text("sign_in") } else { session["project_label"].as_str().unwrap_or_default().into() };
-                style::append_body(root, format!("{project} · {} · {} · {} · {}", text(session["tool"].as_str().unwrap_or_default()), session["account_label"].as_str().unwrap_or_default(), text(session["connection"].as_str().unwrap_or_default()), session["state"].as_str().unwrap_or_default()));
+                root.append(&tiled(session["tool"].as_str().unwrap_or_default(), format!("{project} · {} · {} · {} · {}", text(session["tool"].as_str().unwrap_or_default()), session["account_label"].as_str().unwrap_or_default(), text(session["connection"].as_str().unwrap_or_default()), session["state"].as_str().unwrap_or_default())));
                 if let Some(model) = session["model"].as_str() { style::append_meta(root, format!("{}: {model}", text("model"))); }
                 if session["tool"] == "opencode" { style::append_meta(root, text(&format!("collection_{}", session["collection"].as_str().unwrap_or("off")))); }
                 if session["state"] == "exited" || session["state"] == "failed" {
@@ -477,6 +491,30 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         .collect();
     let picker =
         gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+    // The folder sliding into the terminal, with the picked account's tool
+    // in it (`ManagedFolderHandoff`); it follows the picker.
+    let tool_of = |index: usize| {
+        super::tool_tile::Kind::managed(
+            accounts
+                .get(index)
+                .and_then(|a| a["tool"].as_str())
+                .unwrap_or_default(),
+        )
+    };
+    let handoff = Rc::new(super::folder_handoff::FolderHandoff::new(tool_of(0)));
+    content.append(&handoff.area);
+    {
+        let accounts = accounts.clone();
+        let handoff = Rc::clone(&handoff);
+        picker.connect_selected_notify(move |p| {
+            handoff.set_tool(super::tool_tile::Kind::managed(
+                accounts
+                    .get(p.selected() as usize)
+                    .and_then(|a| a["tool"].as_str())
+                    .unwrap_or_default(),
+            ));
+        });
+    }
     content.append(&picker);
     let folder = gtk::Entry::builder()
         .placeholder_text(text("project_placeholder"))
