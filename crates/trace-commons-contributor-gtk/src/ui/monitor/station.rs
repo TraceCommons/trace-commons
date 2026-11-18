@@ -466,6 +466,42 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64) {
     let _ = cr.restore();
 }
 
+/// The station at `angle` with its glow, as a render node over the frame
+/// `width` by `height` whose top-left is `origin`.
+pub fn node(
+    origin: (f64, f64),
+    width: f64,
+    height: f64,
+    angle: f64,
+    lit: bool,
+) -> gtk::gsk::RenderNode {
+    use gtk::gsk::prelude::IsRenderNode;
+    use gtk::{graphene, gsk};
+    let bounds = graphene::Rect::new(
+        origin.0 as f32,
+        origin.1 as f32,
+        width as f32,
+        height as f32,
+    );
+    let mesh = gsk::CairoNode::new(&bounds);
+    {
+        let cr = mesh.draw_context();
+        cr.translate(origin.0, origin.1);
+        draw(&cr, width, height, angle);
+    }
+    let blue = gtk::gdk::RGBA::new(
+        BRAND_BLUE[0] as f32,
+        BRAND_BLUE[1] as f32,
+        BRAND_BLUE[2] as f32,
+        glow(lit) as f32,
+    );
+    let glowing = gsk::ShadowNode::new(
+        &mesh,
+        &[gsk::Shadow::new(blue, 0.0, 0.0, GSK_GLOW_RADIUS as f32)],
+    );
+    glowing.upcast()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,40 +809,4 @@ mod tests {
             }
         }
     }
-}
-
-/// The station at `angle` with its glow, as a render node over the frame
-/// `width` by `height` whose top-left is `origin`.
-pub fn node(
-    origin: (f64, f64),
-    width: f64,
-    height: f64,
-    angle: f64,
-    lit: bool,
-) -> gtk::gsk::RenderNode {
-    use gtk::gsk::prelude::IsRenderNode;
-    use gtk::{graphene, gsk};
-    let bounds = graphene::Rect::new(
-        origin.0 as f32,
-        origin.1 as f32,
-        width as f32,
-        height as f32,
-    );
-    let mesh = gsk::CairoNode::new(&bounds);
-    {
-        let cr = mesh.draw_context();
-        cr.translate(origin.0, origin.1);
-        draw(&cr, width, height, angle);
-    }
-    let blue = gtk::gdk::RGBA::new(
-        BRAND_BLUE[0] as f32,
-        BRAND_BLUE[1] as f32,
-        BRAND_BLUE[2] as f32,
-        glow(lit) as f32,
-    );
-    let glowing = gsk::ShadowNode::new(
-        &mesh,
-        &[gsk::Shadow::new(blue, 0.0, 0.0, GSK_GLOW_RADIUS as f32)],
-    );
-    glowing.upcast()
 }

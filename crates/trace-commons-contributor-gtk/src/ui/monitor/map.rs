@@ -423,7 +423,7 @@ mod imp {
             // nodes and under the rocket and the pile, as the Mac draws it.
             if let Some((origin, width, height, lit)) = station_frame(&scene, &fit) {
                 let angle = station::angle(self.now(), reduce);
-                snapshot.append_node(&station::node(origin, width, height, angle, lit));
+                snapshot.append_node(station::node(origin, width, height, angle, lit));
             }
             if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
                 snapshot.append_node(over);
