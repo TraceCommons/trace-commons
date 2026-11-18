@@ -123,7 +123,8 @@ impl QueueView {
         let undo_undo = gtk::Button::with_label(copy::UNDO);
         undo_undo.add_css_class("suggested-action");
         undo_undo.add_css_class("tc-primary");
-        let undo_let_it_send = gtk::Button::with_label(copy::LET_IT_SEND);
+        let undo_let_it_send = gtk::Button::with_label(copy::undo_dismiss());
+        undo_let_it_send.set_tooltip_text(Some(copy::undo_dismiss_tooltip()));
         undo_let_it_send.add_css_class("tc-quiet");
         let undo_bar = build_undo_bar(&undo_headline, &undo_held, &undo_undo, &undo_let_it_send);
 
@@ -342,9 +343,10 @@ fn build_undo_bar(
     headline.set_hexpand(true);
     top.append(headline);
     top.append(held);
+    bar.prepend(&style::eyebrow(copy::undo_eyebrow()));
     bar.append(&top);
 
-    style::append_caveat(&bar, copy::UNDO_BODY);
+    style::append_caveat(&bar, copy::undo_body());
 
     let actions = style::wrap_row(space::S);
     style::wrap_append(&actions, undo);
@@ -904,7 +906,7 @@ pub fn render_undo(app: &Rc<App>) {
     // this window cannot see it, so a countdown would be a promise about
     // somebody else's clock.
     let seconds = (chrono::Utc::now() - undo.approved_at).num_seconds().max(0);
-    view.undo_held.set_text(&format!("held {seconds}s"));
+    view.undo_held.set_text(&copy::approved_ago(seconds));
     view.undo_bar.set_visible(true);
 }
 
@@ -1300,7 +1302,6 @@ fn manifest_block(
     let actions = style::wrap_row(space::S);
     let skip = gtk::Button::with_label(copy::not_this_one());
     skip.add_css_class("tc-quiet");
-    skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
     let look = gtk::Button::with_label(copy::look_inside());
     look.add_css_class("suggested-action");
     look.add_css_class("tc-primary");
@@ -1344,21 +1345,9 @@ fn manifest_block(
     look.connect_clicked(move |_| super::preview::open(&app_for_look, index));
 
     let app_for_skip = Rc::clone(app);
-    let entry_id = entry.entry_id.clone();
+    let entry_for_skip = entry.clone();
     skip.connect_clicked(move |_| {
-        let entry_id = entry_id.clone();
-        app_for_skip.call(
-            "dismiss",
-            serde_json::json!({ "entry_id": entry_id }),
-            move |app, result| {
-                if result.is_ok() {
-                    // Its card on the Traces map, found among the traces
-                    // the map listed before this reload drops it.
-                    app.note_dismissed(&entry_id);
-                    app.refresh();
-                }
-            },
-        );
+        confirm_dismiss(&app_for_skip, &entry_for_skip, |app, _| app.refresh());
     });
 
     let app_for_submit = Rc::clone(app);
@@ -1606,7 +1595,9 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         // same thing. Under drill-in that row is a level down, so hiding this
         // would mean opening a folder to do the thing the folder is offering.
         // The rule expired with the layout it was written for.
-        let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
+        let submit_all = gtk::Button::with_label(&copy::folder_submit(
+            contributable.unwrap_or(waiting as u64),
+        ));
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
         submit_all.set_tooltip_text(Some(copy::submit_all_tooltip()));
@@ -1941,6 +1932,86 @@ pub(crate) fn arming_refusal_line(method: &str) -> &'static str {
     } else {
         trace_commons_contributor::preview_copy::MONITOR_REQUEST_FAILED
     }
+}
+
+/// The Mac's dismiss confirmation (`dismissBody`): when the trace was
+/// found, and its size.
+pub(crate) fn dismiss_body(entry: &QueueEntry) -> String {
+    let when = entry
+        .discovered_at
+        .or(entry.started_at)
+        .map(|at| {
+            // The Mac's "Mon 3:04 PM" (`when`).
+            let local = at.with_timezone(&chrono::Local);
+            format!(
+                "{} {} {}",
+                local.format("%a"),
+                local.format("%-I:%M"),
+                local.format("%p")
+            )
+        })
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    copy::traces()
+        .tree
+        .dismiss_session_body
+        .replace("{when}", &when)
+        .replace("{size}", &human_bytes(entry.size_bytes))
+}
+
+/// A trace's dismiss asks first, as the Mac's `dismissModal`: Keep it is
+/// the default and the close, and only the destructive Dismiss sends
+/// `dismiss`. A refusal says the core's failure line; `done` hears whether
+/// the daemon took it.
+pub(crate) fn confirm_dismiss(
+    app: &Rc<App>,
+    entry: &QueueEntry,
+    done: impl Fn(&Rc<App>, bool) + 'static,
+) {
+    let words = copy::traces();
+    let dialog = adw::MessageDialog::new(
+        Some(&app.window),
+        Some(words.tree.dismiss_session_title),
+        Some(&dismiss_body(entry)),
+    );
+    dialog.add_responses(&[
+        ("keep", words.tree.dismiss_session_keep),
+        ("dismiss", words.dismiss_action),
+    ]);
+    dialog.set_response_appearance("dismiss", adw::ResponseAppearance::Destructive);
+    dialog.set_close_response("keep");
+    dialog.set_default_response(Some("keep"));
+    let app = Rc::clone(app);
+    let entry_id = entry.entry_id.clone();
+    let done = Rc::new(done);
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        if response != "dismiss" {
+            return;
+        }
+        let entry_id = entry_id.clone();
+        let done = Rc::clone(&done);
+        app.call(
+            "dismiss",
+            serde_json::json!({ "entry_id": entry_id.clone() }),
+            move |app, result| match result {
+                Ok(_) => {
+                    // Its card on the Traces map, found among the traces
+                    // the map listed before this reload drops it.
+                    app.note_dismissed(&entry_id);
+                    done(app, true);
+                }
+                Err(label) => {
+                    app.toast(&format!(
+                        "{} {}",
+                        copy::traces().tree.dismiss_session_failed,
+                        undo_refusal_line(&label)
+                    ));
+                    done(app, false);
+                }
+            },
+        );
+    });
+    dialog.present();
 }
 
 /// The one `cancel` an Undo sends, as the Mac's `cancelFolder(projectId:)`
@@ -2371,11 +2442,48 @@ mod tests {
     #[test]
     fn the_queue_actions_say_the_shared_words() {
         let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
-        assert_eq!(copy::submit(), traces.contribute);
-        assert_eq!(copy::not_this_one(), traces.dismiss);
+        let queue = trace_commons_contributor::shell_words_copy::queue_words();
+        assert_eq!(copy::submit(), traces.tree.submit);
+        assert_eq!(copy::not_this_one(), traces.tree.dismiss_session);
+        assert_eq!(copy::folder_submit(3), "Submit \u{00b7} 3");
+        assert_eq!(copy::undo_eyebrow(), traces.undo.approval_saved);
+        assert_eq!(copy::undo_headline("proj"), "proj approved");
+        assert_eq!(copy::undo_body(), queue.undo_will_send);
+        assert_eq!(copy::approved_ago(41), "Approved 41s ago");
+        assert_eq!(copy::approved_ago(500), "Approved 120s+ ago");
+        assert_eq!(copy::undo_dismiss(), traces.dismiss_action);
+        assert_eq!(copy::undo_dismiss_tooltip(), queue.close_notice_still_sends);
+        // The GTK sentences they replace are gone.
+        let source = include_str!("../copy.rs");
+        for gone in [
+            "pub const SUBMIT_ALL:",
+            "pub const UNDO_BODY:",
+            "pub const NOT_THIS_ONE_TOOLTIP:",
+            "pub const LET_IT_SEND:",
+            "Still on this machine.",
+        ] {
+            assert!(!source.contains(gone), "{gone}");
+        }
+        assert!(!include_str!("queue.rs").contains(concat!("\"held ", "{seconds}s\"")));
         assert_eq!(copy::look_inside(), traces.session_review.look_inside);
         assert_eq!(copy::submit_tooltip(), traces.tree.submit_trace_tip);
         assert_eq!(copy::submit_all_tooltip(), traces.tree.submit_tip);
+    }
+
+    /// The dismiss confirmation's body is the core's, filled as the Mac's
+    /// `dismissBody`: when, then the size.
+    #[test]
+    fn the_dismiss_confirmation_says_the_cores_body() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e", "project_id": "p", "project_label": "proj",
+            "state": "pending", "size_bytes": 2048,
+        }))
+        .unwrap();
+        let body = dismiss_body(&entry);
+        let template = copy::traces().tree.dismiss_session_body;
+        assert!(body.starts_with("\u{2014} \u{00b7} 2 KB."), "{body}");
+        assert!(template.contains("{when}") && template.contains("{size}"));
+        assert!(!body.contains('{'));
     }
 
     /// A refused Undo says the shared Traces line, never a GTK sentence.

@@ -601,7 +601,6 @@ impl Sheet {
 
         let skip = gtk::Button::with_label(copy::not_this_one());
         skip.add_css_class("tc-quiet");
-        skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
         let close = gtk::Button::with_label(copy::CLOSE);
         close.add_css_class("tc-quiet");
         let contribute = gtk::Button::with_label(copy::CONTRIBUTE);
@@ -1657,19 +1656,15 @@ impl Sheet {
 
     fn dismiss_current(self: &Rc<Self>) {
         let Some(entry) = self.current() else { return };
-        let entry_id = entry.entry_id.clone();
         let sheet = Rc::clone(self);
-        self.app.call(
-            "dismiss",
-            serde_json::json!({ "entry_id": entry_id.clone() }),
-            move |app, result| {
-                if result.is_ok() {
-                    app.note_dismissed(&entry_id);
-                }
-                app.refresh();
+        // Asks first, as the Mac's `dismissModal`; the sheet moves on only
+        // once the daemon has taken it.
+        super::queue::confirm_dismiss(&self.app, &entry, move |app, dismissed| {
+            app.refresh();
+            if dismissed {
                 sheet.advance();
-            },
-        );
+            }
+        });
     }
 
     /// Approve exactly the bytes this sheet described, render the toast

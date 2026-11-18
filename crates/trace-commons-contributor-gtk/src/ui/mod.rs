@@ -142,7 +142,7 @@ pub struct PendingUndo {
     /// The folder whose Submit all this is; `None` for one trace's Submit.
     /// The inspector's demand tells the two apart (`monitor::demand`).
     pub folder: Option<String>,
-    /// When this window offered the undo, which is what the bar's "held 41s"
+    /// When this window offered the undo, which is what the bar's "Approved 41s ago"
     /// counts up from. It counts *up* on purpose: the app cannot see the
     /// watcher's sweep, so a countdown would be a promise it cannot keep.
     pub approved_at: chrono::DateTime<chrono::Utc>,

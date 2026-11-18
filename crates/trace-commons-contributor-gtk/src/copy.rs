@@ -122,7 +122,7 @@ fn transcripts(n: u32) -> &'static str {
 
 /// The row's and folder's action words: the core's Traces table, the words
 /// the Mac draws, so the shells cannot drift.
-fn traces() -> trace_commons_contributor::preview_copy::MonitorTracesCopy {
+pub(crate) fn traces() -> trace_commons_contributor::preview_copy::MonitorTracesCopy {
     trace_commons_contributor::preview_copy::monitor_traces_copy()
 }
 
@@ -130,20 +130,16 @@ pub fn look_inside() -> &'static str {
     traces().session_review.look_inside
 }
 
+/// A trace's dismiss, the Mac's row menu item (`tree.dismiss_session`).
+/// It asks first, in the core's words, as the Mac's `dismissModal` does.
 pub fn not_this_one() -> &'static str {
-    traces().dismiss
+    traces().tree.dismiss_session
 }
 
-/// Says "for good" because it is. A dismissal is a decision about the
-/// conversation, and there is no un-dismiss -- so the tooltip says so
-/// before the click. GTK's own words: the Mac asks a confirmation here
-/// instead (`dismiss_session_body`), which this shell does not port yet.
-pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this trace for good, even if you keep working in \
-     it. This project will keep being offered.";
-
-/// The one-click send on a queue row, and its tooltip, in the core's words.
+/// The one-click send on a queue row (`tree.submit`), and its tooltip, in
+/// the core's words.
 pub fn submit() -> &'static str {
-    traces().contribute
+    traces().tree.submit
 }
 
 pub fn submit_tooltip() -> &'static str {
@@ -154,14 +150,21 @@ pub fn submit_tooltip() -> &'static str {
 /// on a row. Calls `approve` with a `project_id` rather than an `entry_id`
 /// -- the daemon selects that project's pending entries, this shell never
 /// enumerates them itself.
-pub const SUBMIT_ALL: &str = "Submit all";
+/// The folder's Submit pill with the count it sends (`tree.submit_count`,
+/// the Mac's `submitTitle`).
+pub fn folder_submit(count: u64) -> String {
+    traces()
+        .tree
+        .submit_count
+        .replace("{count}", &count.to_string())
+}
 
 pub fn submit_all_tooltip() -> &'static str {
     traces().tree.submit_tip
 }
 
 /// Stops a project being offered again and clears whatever it has waiting.
-/// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry
+/// Sits beside [`folder_submit`] on the same group header but must never carry
 /// its primary-action styling -- the two buttons take a contributor's queue
 /// in opposite directions.
 pub use trace_commons_contributor::project_copy::IGNORE_PROJECT;
@@ -536,16 +539,47 @@ pub const CLOSE: &str = "Close";
 pub const SENDING: &str = "Sending…";
 pub const UNDO: &str = "Undo";
 
-pub fn undo_headline(project_label: &str) -> String {
-    format!("Approved {project_label}. Still on this machine.")
+/// The undo bar's eyebrow, "APPROVAL SAVED" (`undo.approval_saved`).
+pub fn undo_eyebrow() -> &'static str {
+    traces().undo.approval_saved
 }
 
-/// Explains automatic sending and when approval can still be undone.
-pub const UNDO_BODY: &str =
-    "Approved traces will send automatically. You can undo until uploading starts.";
+/// The undo bar's title, the Mac's `InspectorPrompts.title`:
+/// "{label} approved".
+pub fn undo_headline(project_label: &str) -> String {
+    traces().undo.approved.replace("{label}", project_label)
+}
 
-/// Closes the notice without changing the approval.
-pub const LET_IT_SEND: &str = "Dismiss";
+/// Under the title, as the Mac's approval undo says it
+/// (`QueueLegacyWords.undoWillSend`).
+pub fn undo_body() -> &'static str {
+    trace_commons_contributor::shell_words_copy::queue_words().undo_will_send
+}
+
+/// The Mac's count-up ceiling (`AppModel.Undo.tickCeiling`).
+pub const UNDO_TICK_CEILING: i64 = 120;
+
+/// How long ago the approval was made, counting up and stopping at the
+/// ceiling (`QueueLegacyWords.approvedAgo`).
+pub fn approved_ago(seconds: i64) -> String {
+    let words = trace_commons_contributor::shell_words_copy::queue_words();
+    let (template, shown) = if seconds >= UNDO_TICK_CEILING {
+        (words.approved_ago_ceiling, UNDO_TICK_CEILING)
+    } else {
+        (words.approved_ago, seconds.max(0))
+    };
+    template.replace("{seconds}", &shown.to_string())
+}
+
+/// Closes the notice without changing the approval: the core's Dismiss,
+/// with the Mac's close label as its tooltip.
+pub fn undo_dismiss() -> &'static str {
+    traces().dismiss_action
+}
+
+pub fn undo_dismiss_tooltip() -> &'static str {
+    trace_commons_contributor::shell_words_copy::queue_words().close_notice_still_sends
+}
 
 // --- Credit ------------------------------------------------------------
 
