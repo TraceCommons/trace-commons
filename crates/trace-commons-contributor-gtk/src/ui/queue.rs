@@ -1296,20 +1296,20 @@ fn manifest_block(
     block.append(&facts);
 
     let actions = style::wrap_row(space::S);
-    let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
+    let skip = gtk::Button::with_label(copy::not_this_one());
     skip.add_css_class("tc-quiet");
     skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
-    let look = gtk::Button::with_label(copy::LOOK_INSIDE);
+    let look = gtk::Button::with_label(copy::look_inside());
     look.add_css_class("suggested-action");
     look.add_css_class("tc-primary");
     // `Submit` is the one-click path this row gained alongside `Look
     // inside`: it never shows a redacted transcript, so it earns its
     // prominence from the toast and the hold window that follow it, not
     // from crowding `Look inside` out of the accent colour.
-    let submit = gtk::Button::with_label(copy::SUBMIT);
+    let submit = gtk::Button::with_label(copy::submit());
     submit.add_css_class("suggested-action");
     submit.add_css_class("tc-primary");
-    submit.set_tooltip_text(Some(copy::SUBMIT_TOOLTIP));
+    submit.set_tooltip_text(Some(copy::submit_tooltip()));
     let review_words = trace_commons_contributor::preview_copy::monitor_traces_copy();
     let review = gtk::Button::with_label(review_words.review);
     review.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -1607,7 +1607,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
         let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
-        submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
+        submit_all.set_tooltip_text(Some(copy::submit_all_tooltip()));
 
         // Both group controls take the gate, or neither should.
         //
@@ -2237,6 +2237,17 @@ mod tests {
         )));
         // Settings' folder rules (`set_mode`) say the same line.
         assert!(include_str!("settings.rs").contains("app.toast(copy::project_mode_failed());"));
+    }
+
+    /// The row's and folder's action words are the core's, as the Mac's.
+    #[test]
+    fn the_queue_actions_say_the_shared_words() {
+        let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
+        assert_eq!(copy::submit(), traces.contribute);
+        assert_eq!(copy::not_this_one(), traces.dismiss);
+        assert_eq!(copy::look_inside(), traces.session_review.look_inside);
+        assert_eq!(copy::submit_tooltip(), traces.tree.submit_trace_tip);
+        assert_eq!(copy::submit_all_tooltip(), traces.tree.submit_tip);
     }
 
     /// A refused Undo says the shared Traces line, never a GTK sentence.

@@ -120,38 +120,45 @@ fn transcripts(n: u32) -> &'static str {
     }
 }
 
-pub const LOOK_INSIDE: &str = "Look inside";
-pub const NOT_THIS_ONE: &str = "Not this one";
+/// The row's and folder's action words: the core's Traces table, the words
+/// the Mac draws, so the shells cannot drift.
+fn traces() -> trace_commons_contributor::preview_copy::MonitorTracesCopy {
+    trace_commons_contributor::preview_copy::monitor_traces_copy()
+}
+
+pub fn look_inside() -> &'static str {
+    traces().session_review.look_inside
+}
+
+pub fn not_this_one() -> &'static str {
+    traces().dismiss
+}
+
 /// Says "for good" because it is. A dismissal is a decision about the
-/// conversation, not about the size it happened to be when the card was
-/// drawn, and there is no un-dismiss -- so the tooltip has to say so before
-/// the click, not leave the contributor to infer it from a card that never
-/// comes back. The second sentence is the reassurance that keeps the first
-/// from reading like an opt-out of the whole project.
+/// conversation, and there is no un-dismiss -- so the tooltip says so
+/// before the click. GTK's own words: the Mac asks a confirmation here
+/// instead (`dismiss_session_body`), which this shell does not port yet.
 pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this trace for good, even if you keep working in \
      it. This project will keep being offered.";
 
-/// The one-click send on a queue row. See
-/// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click
-/// builds, pins, and approves, then raises the toast that says what
-/// happened -- see [`crate::toast`].
-///
-/// The tooltip says "approves", never "sends": nothing leaves the machine
-/// at click time, only at the watcher's next sweep -- [`UNDO_BODY`] states
-/// that for the undo bar, and a toast that once said "Sent." while still
-/// offering Undo was the same contradiction this tooltip must not repeat.
-pub const SUBMIT: &str = "Submit";
-pub const SUBMIT_TOOLTIP: &str = "Approves this trace now. Scrubbing runs first; the watcher \
-     sends it on its next sweep, and you can undo before then.";
+/// The one-click send on a queue row, and its tooltip, in the core's words.
+pub fn submit() -> &'static str {
+    traces().contribute
+}
+
+pub fn submit_tooltip() -> &'static str {
+    traces().tree.submit_trace_tip
+}
 
 /// The same gesture at the project level, on the group's header rather than
 /// on a row. Calls `approve` with a `project_id` rather than an `entry_id`
 /// -- the daemon selects that project's pending entries, this shell never
 /// enumerates them itself.
 pub const SUBMIT_ALL: &str = "Submit all";
-pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting trace from this project now. \
-     Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
-     then.";
+
+pub fn submit_all_tooltip() -> &'static str {
+    traces().tree.submit_tip
+}
 
 /// Stops a project being offered again and clears whatever it has waiting.
 /// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry

@@ -113,6 +113,6 @@ fn mounted_held_trace_shows_its_reasons_and_no_row_submit() {
             .any(|t| t == "The scrubber was unsure about some of it.")
     );
     assert!(shown.iter().any(|t| t == &format!("{}: 2", traces.unsure)));
-    assert!(!shown.contains(&format!("button:{}", crate::copy::SUBMIT)));
-    assert!(shown.contains(&format!("button:{}", crate::copy::LOOK_INSIDE)));
+    assert!(!shown.contains(&format!("button:{}", crate::copy::submit())));
+    assert!(shown.contains(&format!("button:{}", crate::copy::look_inside())));
 }

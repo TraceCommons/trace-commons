@@ -599,7 +599,7 @@ impl Sheet {
         correction_group.append(&correction_caption);
         correction_group.set_visible(false);
 
-        let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
+        let skip = gtk::Button::with_label(copy::not_this_one());
         skip.add_css_class("tc-quiet");
         skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
         let close = gtk::Button::with_label(copy::CLOSE);
