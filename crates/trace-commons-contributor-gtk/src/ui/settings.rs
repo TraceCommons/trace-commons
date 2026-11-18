@@ -1182,12 +1182,14 @@ fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
     }
     app.settings.set_up_again.set(state);
     button.set_sensitive(false);
+    // Sharing writes pressed before the unenroll are not applied after it,
+    // nor while it runs, whatever it answers (the Mac's `unenroll`:
+    // `invalidateAccountScopedReads`, then `finishAccountReadBoundary`).
+    app.settings.sharing.owner.borrow_mut().boundary();
     app.call("unenroll", serde_json::json!({}), move |app, result| {
         let mut state = app.settings.set_up_again.get();
         state.finish(result.is_ok());
         app.settings.set_up_again.set(state);
-        // A sharing write pressed before the unenroll is not applied after
-        // it (the Mac's `finishAccountReadBoundary`).
         app.settings.sharing.owner.borrow_mut().boundary();
         if let Ok(answer) = &result {
             // The NEAR AI sign-in goes with the enrollment (#1843): say so

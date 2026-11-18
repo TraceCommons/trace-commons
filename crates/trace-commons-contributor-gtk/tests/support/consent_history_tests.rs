@@ -163,13 +163,27 @@ fn describe(widget: &gtk::Widget) -> String {
     format!("{}({name})", widget.type_().name())
 }
 
-/// Run the loop for `span`, as the frames between two key presses do: Tab
-/// orders a container's children by where they were laid out.
-fn frames(fixture: &Fixture, span: std::time::Duration) {
-    let until = std::time::Instant::now() + span;
-    while std::time::Instant::now() < until {
+/// Run the loop until every control the window shows has been laid out,
+/// as it has been by the time a person presses a key: Tab orders a
+/// container's children by where they were laid out, and before then it
+/// skipped the main pane below the toolbar.
+fn laid_out(fixture: &Fixture) {
+    let window: gtk::Widget = fixture.app.window.clone().upcast();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        while fixture.context.pending() {
+            fixture.context.iteration(false);
+        }
+        let all = descendants_of(&window)
+            .into_iter()
+            .filter(|w| w.is_drawable() && w.is_focusable())
+            .all(|w| w.width() > 0 && w.height() > 0);
+        if all {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "the window laid out");
         fixture.context.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
 
@@ -180,7 +194,7 @@ fn tab_walk(fixture: &Fixture, presses: usize) -> Vec<gtk::Widget> {
     let mut landed = Vec::new();
     for _ in 0..presses {
         window.child_focus(gtk::DirectionType::TabForward);
-        frames(fixture, std::time::Duration::from_millis(15));
+        laid_out(fixture);
         if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
             landed.push(focus);
         }
@@ -240,7 +254,7 @@ fn mounted_tab_reaches_a_history_folders_records() {
         assert!(std::time::Instant::now() < deadline, "the records drew");
         fixture.context.iteration(false);
     }
-    frames(&fixture, std::time::Duration::from_millis(300));
+    laid_out(&fixture);
     let check = |when: &str| {
         let landed = tab_walk(&fixture, 80);
         let trail: Vec<String> = landed.iter().map(describe).collect();
@@ -253,6 +267,7 @@ fn mounted_tab_reaches_a_history_folders_records() {
     };
     check("with the notices as they open");
     // Close every notice the window shows, then walk again.
+    let mut closed = 0;
     for button in descendants_of(app.window.upcast_ref())
         .into_iter()
         .filter_map(|w| w.downcast::<gtk::Button>().ok())
@@ -264,8 +279,10 @@ fn mounted_tab_reaches_a_history_folders_records() {
     {
         button.emit_clicked();
         fixture.settle();
+        closed += 1;
     }
-    frames(&fixture, std::time::Duration::from_millis(300));
+    assert!(closed > 0, "a notice was open to close");
+    laid_out(&fixture);
     check("with the notices closed");
 }
 
