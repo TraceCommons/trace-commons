@@ -1107,3 +1107,7 @@ switch.tc-tree-switch > slider {
   background-color: @tc_glass_popover;
   border-radius: 16px 16px 0 0;
 }
+
+window.tc-glass-window:backdrop .tc-map-transfer-plate {
+  background-color: @tc_glass_popover_inactive;
+}

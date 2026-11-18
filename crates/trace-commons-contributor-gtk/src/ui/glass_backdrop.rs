@@ -193,10 +193,10 @@ pub fn pane_colour(dark: bool) -> [u8; 4] {
 }
 
 /// What KWin draws for one blurred desktop colour (channels 0 to 1) under
-/// `frost`: `tex * colorMatrix` with `colorMatrix = contrast * saturation
-/// * intensity` (KWin 6.4 `ContrastEffect::colorMatrix` and its shader;
-/// 6.5/6.6 `colorTransformMatrix` and `onscreen.frag`, intensity left out
-/// there). Read as a row vector, the contrast matrix applies first:
+/// `frost`: `tex * colorMatrix`, the matrix being the product
+/// `contrast * saturation * intensity` (KWin 6.4
+/// `ContrastEffect::colorMatrix` and its shader; 6.5/6.6
+/// `colorTransformMatrix` and `onscreen.frag`, intensity left out there). Read as a row vector, the contrast matrix applies first:
 /// `c * x + (1 - c) / 2` per channel; then saturation, mixing toward the
 /// Rec. 709 luma (0.2126, 0.7152, 0.0722); then intensity scales. The
 /// framebuffer clamps the result to 0..1.

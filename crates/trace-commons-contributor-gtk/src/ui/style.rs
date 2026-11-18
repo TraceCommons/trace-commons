@@ -622,6 +622,13 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
 /// rule.
 fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
     let hex = |c: omarchy::Rgb| Some(c.hex());
+    let dark = p.mode == omarchy::Mode::Dark;
+    // A wash of a palette colour at the standard sheet's own alpha.
+    let wash = |c: omarchy::Rgb, dark_alpha: f64, light_alpha: f64| {
+        let omarchy::Rgb(r, g, b) = c;
+        let alpha = if dark { dark_alpha } else { light_alpha };
+        Some(format!("rgba({r}, {g}, {b}, {alpha})"))
+    };
     match name {
         // The generated brand roles.
         "tc_accent" => hex(p.accent),
@@ -654,6 +661,30 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_control_hover" => hex(p.control_hover),
         "tc_glass_row_hover" => hex(p.row_hover),
         "tc_glass_tab_ember" => hex(p.accent_line),
+        // The glass tiers out of focus: the skin does not dim, so each is
+        // its focused role.
+        "tc_glass_pane_inactive" => hex(p.bg),
+        "tc_glass_card_inactive"
+        | "tc_glass_card_quiet_inactive"
+        | "tc_glass_control_inactive"
+        | "tc_glass_popover_inactive"
+        | "tc_glass_menu_inactive"
+        | "tc_glass_node_card_inactive" => hex(p.surface),
+        "tc_glass_well_inactive" | "tc_glass_tile_folder" => hex(p.inset),
+        "tc_glass_control_selected_inactive" => hex(p.accent),
+        "tc_glass_rule" | "tc_glass_rule_inactive" => hex(p.line),
+        "tc_glass_ink_tertiary" | "tc_glass_status_off" | "tc_glass_graph_focus_off" => {
+            hex(p.tertiary)
+        }
+        "tc_glass_graph_focus_on" => hex(p.accent_text),
+        "tc_glass_graph_focus_idle" => hex(p.muted),
+        "tc_glass_status_on" => hex(p.status_on),
+        "tc_glass_status_on_text" => hex(p.status_on_text),
+        "tc_glass_status_ask" => hex(p.status_ask),
+        "tc_glass_status_ask_text" => hex(p.status_ask_text),
+        "tc_glass_tab_ember_halo" => wash(p.accent_line, 0.31, 0.28),
+        "tc_glass_edge_high_contrast" => wash(p.ink, 0.4, 0.55),
+        "tc_glass_range_fill" => wash(p.ink, 0.07, 0.07),
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),
@@ -714,6 +745,10 @@ fn recolour_insights(css: &str, p: &omarchy::Palette, dark: bool) -> String {
             ("#3b3d47", p.control_hover),
             ("#071a2e", p.on_accent),
             ("#d8d9e0", p.muted),
+            // The unfocused twins: the skin does not dim.
+            ("#15192a", p.bg),
+            ("#121628", p.surface),
+            ("#0f121d", p.surface),
         ]
     } else {
         &[
@@ -726,6 +761,10 @@ fn recolour_insights(css: &str, p: &omarchy::Palette, dark: bool) -> String {
             ("#dbdee4", p.control_hover),
             ("#ffffff", p.on_accent),
             ("#3c3c43", p.muted),
+            // The unfocused twins: the skin does not dim.
+            ("#e8e9ec", p.bg),
+            ("#f6f6f7", p.surface),
+            ("#f8f8f9", p.surface),
         ]
     };
     let mut out = String::with_capacity(css.len());
@@ -1659,7 +1698,7 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            assert_eq!(glass, 19, "{name}");
+            assert_eq!(glass, 43, "{name}");
         }
     }
 
