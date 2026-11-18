@@ -715,10 +715,18 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
     let declined_app = Rc::clone(app);
     decline.connect_clicked(move |_| {
         let app = Rc::clone(&declined_app);
+        // As the Mac: the offer goes only once the daemon has the answer;
+        // a refusal keeps it and says so.
         app.call(
             "decline_arming",
             serde_json::json!({ "project_id": declined_id }),
-            |app, _| render_arming_offer(app, None),
+            |app, result| {
+                if arming_answer_landed(&result) {
+                    render_arming_offer(app, None);
+                } else {
+                    app.toast(arming_refusal_line("decline_arming"));
+                }
+            },
         );
     });
 
@@ -729,8 +737,12 @@ pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffe
         app.call(
             "set_project_mode",
             serde_json::json!({ "project_id": armed_id, "mode": "auto_upload" }),
-            |app, _| {
-                render_arming_offer(app, None);
+            |app, result| {
+                if arming_answer_landed(&result) {
+                    render_arming_offer(app, None);
+                } else {
+                    app.toast(arming_refusal_line("set_project_mode"));
+                }
                 app.refresh();
             },
         );
@@ -1730,9 +1742,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
                 serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
                 move |app, result| {
                     match result {
-                        Err(_) => app.toast(
-                            "That couldn't be changed just now. Nothing else changed either.",
-                        ),
+                        Err(_) => app.toast(copy::project_mode_failed()),
                         Ok(value) => {
                             let purged = value.get("purged").and_then(|v| v.as_u64());
                             // An older daemon does not send the field at all.
@@ -1891,6 +1901,23 @@ fn first_line(prompt: &str) -> String {
 fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
+    }
+}
+
+/// Whether an arming offer's answer reached the daemon. The Mac reads any
+/// result as landed (`rawResult`) and any failure as not.
+pub(crate) fn arming_answer_landed(reply: &Result<serde_json::Value, String>) -> bool {
+    reply.is_ok()
+}
+
+/// What a refused arming answer says: Enable's in the Settings table's
+/// words for a folder setting that did not change, Not now's in the Traces
+/// tab's.
+pub(crate) fn arming_refusal_line(method: &str) -> &'static str {
+    if method == "set_project_mode" {
+        copy::project_mode_failed()
+    } else {
+        trace_commons_contributor::preview_copy::MONITOR_REQUEST_FAILED
     }
 }
 
@@ -2156,6 +2183,40 @@ mod tests {
         assert!(!undo_reply_confirmed(&trace, &Ok(json!(null))));
         assert!(!undo_reply_confirmed(&trace, &Ok(json!({"ok": "yes"}))));
         assert!(!undo_reply_confirmed(&trace, &Err("not-cancelable".into())));
+    }
+
+    /// The arming offer stays up until the daemon answers, and a refusal
+    /// keeps it, as the Mac's `perform` keeps its card: Enable's refusal in
+    /// the Settings table's words, Not now's in the Traces tab's.
+    #[test]
+    fn an_arming_answer_closes_the_offer_only_once_it_lands() {
+        use serde_json::json;
+        assert!(arming_answer_landed(&Ok(json!({"ok": true}))));
+        assert!(!arming_answer_landed(&Err("unavailable".into())));
+        assert_eq!(
+            arming_refusal_line("set_project_mode"),
+            trace_commons_contributor::shell_words_copy::settings_words().project_mode_failed
+        );
+        assert_eq!(
+            arming_refusal_line("decline_arming"),
+            trace_commons_contributor::preview_copy::MONITOR_REQUEST_FAILED
+        );
+    }
+
+    /// A folder whose setting did not change is told so in the core's
+    /// words, wherever the change was asked for.
+    #[test]
+    fn a_refused_folder_setting_says_the_shared_line() {
+        assert_eq!(
+            crate::copy::project_mode_failed(),
+            trace_commons_contributor::shell_words_copy::settings_words().project_mode_failed
+        );
+        assert!(!include_str!("queue.rs").contains(concat!(
+            "That couldn't be changed just now. Nothing else",
+            " changed either."
+        )));
+        // Settings' folder rules (`set_mode`) say the same line.
+        assert!(include_str!("settings.rs").contains("app.toast(copy::project_mode_failed());"));
     }
 
     /// A refused Undo says the shared Traces line, never a GTK sentence.

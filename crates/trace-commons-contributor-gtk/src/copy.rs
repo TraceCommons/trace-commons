@@ -1556,11 +1556,11 @@ pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
 pub const ONBOARD_IGNORE: &str =
     trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
 
-/// Shown when `set_project_mode` refuses. The same sentence the settings
-/// screen uses for the same refusal, so the two places that change a
-/// project's mode cannot describe the same failure differently.
-pub const PROJECT_MODE_FAILED: &str =
-    "That couldn't be changed just now. Nothing else changed either.";
+/// Shown when `set_project_mode` refuses, wherever a folder's setting is
+/// changed: the core's sentence, the one the Mac says.
+pub fn project_mode_failed() -> &'static str {
+    trace_commons_contributor::shell_words_copy::settings_words().project_mode_failed
+}
 pub const ONBOARD_CONTINUE: &str = "Continue";
 
 pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";

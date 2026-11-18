@@ -1432,7 +1432,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         } else {
                                             copy::ONBOARD_WATCH_ASK_FIRST
                                         });
-                                        app.toast(copy::PROJECT_MODE_FAILED);
+                                        app.toast(copy::project_mode_failed());
                                     }
                                 }
                             },

@@ -2250,7 +2250,7 @@ fn set_mode(app: &Rc<App>, project_id: &str, mode: &str) {
         serde_json::json!({ "project_id": project_id, "mode": mode }),
         |app, result| {
             if result.is_err() {
-                app.toast("That couldn't be changed just now. Nothing else changed either.");
+                app.toast(copy::project_mode_failed());
             }
             app.refresh();
         },
