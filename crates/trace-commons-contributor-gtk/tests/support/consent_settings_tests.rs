@@ -42,7 +42,15 @@ fn mounted_settings_have_no_undo_window_control() {
     }
 }
 
+/// The cards wait for first run (R-43); these tests are about the state
+/// after it, which a status read would show.
+fn after_first_run(fixture: &Fixture) {
+    fixture.app.settings.sharing.root.set_visible(true);
+    fixture.app.settings.uses.root.set_visible(true);
+}
+
 fn grant_answered(fixture: &Fixture, grant: serde_json::Value) {
+    after_first_run(fixture);
     crate::ui::consent_settings::refresh(&fixture.app);
     fixture.drive_until(|| !fixture.calls_to("automatic_grant").is_empty());
     fixture.answer("automatic_grant", Ok(grant));
@@ -152,6 +160,7 @@ fn mounted_sharing_automatic_refuses_on_an_unreadable_configuration() {
 #[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
 fn mounted_uses_sends_the_daemons_list_with_one_scope_changed() {
     let fixture = Fixture::new("UsesToggle", &["consent_options", "set_consent_scopes"]);
+    after_first_run(&fixture);
     *fixture.app.settings.uses.reported.borrow_mut() = Some((true, vec!["eval".into()]));
     crate::ui::consent_settings::refresh(&fixture.app);
     fixture.drive_until(|| !fixture.calls_to("consent_options").is_empty());

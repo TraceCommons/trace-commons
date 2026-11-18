@@ -94,7 +94,12 @@ fn mounted_an_opened_record_shows_its_contribution_details() {
         })),
     );
     let shown = texts(slot.upcast_ref());
-    assert!(shown.iter().any(|t| t == copy.contribution_details));
+    // Eyebrows are uppercased by `style::eyebrow`.
+    assert!(
+        shown
+            .iter()
+            .any(|t| *t == copy.contribution_details.to_uppercase())
+    );
     assert!(shown.iter().any(|t| t == copy.no_permitted_uses));
     assert!(shown.iter().any(|t| t == "fix-build"));
 
