@@ -25,11 +25,14 @@ What the extension does to a window it places:
 - for the rail, puts it against the primary monitor's right work-area
   edge, centred (the Mac's `EdgeRailGeometry.frame`); for the panel, puts
   it near the press, inside an 8-pixel margin;
-- places it again when it changes size, or the monitors or work areas
-  change;
-- never lets the rail keep keyboard focus, as the Mac's non-activating
-  panel never does: a click that focuses it gives focus back to the window
-  that had it;
+- places it again when Mutter first shows it (whose own first placement
+  would otherwise move it), when it changes size, and when the monitors or
+  work areas change;
+- lets the open rail keep keyboard focus once it is given, so Escape and
+  Tab work, and never lets a closed rail keep it, as the Mac's
+  non-activating panel never takes it (owner, 2026-11-18, "Keyboard only
+  while open"): focus goes back only to a window on the active workspace
+  and not minimised, or else to nothing;
 - undoes all of this on `Release`, when the caller leaves the bus, and on
   `disable()`. GNOME Shell disables every extension on the lock screen and
   enables it again on unlock; the app's client (`src/edge/gnome.rs`)

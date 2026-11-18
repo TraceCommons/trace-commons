@@ -30,8 +30,8 @@
 // extension API that 45 introduced, which 47-51 keep. Every Meta call here
 // (get_pid, get_title, get_gtk_window_object_path, get_frame_rect,
 // move_frame, make_above, stick, get_work_area_for_monitor,
-// located_on_workspace, focus, the minimized property, the unmanaging
-// signal, and the display's unset_input_focus,
+// located_on_workspace, focus, the minimized property, the unmanaging,
+// size-changed and shown signals, and the display's unset_input_focus,
 // get_current_time_roundtrip and window-created) is in mutter's public
 // API in each of those versions.
 
@@ -239,6 +239,11 @@ export default class EdgeSurfacesExtension extends Extension {
         placement.place = place;
         placement.signals = [
             window.connect('size-changed', place),
+            // A window asked for as soon as it maps is often not shown yet,
+            // and Mutter's own first placement then moves it again (Shell
+            // 46: the rail stayed where Mutter cascaded it until it was
+            // first opened). Placed again once shown, it stays put.
+            window.connect('shown', place),
             window.connect('unmanaging', () => {
                 placement.signals = [];
                 placement.window = null;
