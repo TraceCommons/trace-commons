@@ -83,6 +83,14 @@ impl OnceLog {
             label = LABEL_SETTING_IGNORED,
             "retired second-scan setting ignored; local scrubbing only"
         );
+        // The daemon's installed subscriber keeps a warning's callsite and
+        // drops its fields, so the label is also written as a label line,
+        // where one is installed. Nothing else: no value, path or key.
+        crate::daemon::diagnostics_log::record_labels(
+            tracing::Level::WARN,
+            LABEL_SETTING_IGNORED,
+            &[],
+        );
         true
     }
 }

@@ -10024,9 +10024,8 @@ fn envelope_is_for_enrollment(
 ///
 /// `near_ai_configured` reported whether the retired client-side NEAR AI
 /// second scan had a credential. It stays on the wire as a constant `false`:
-/// the macOS and GTK shells decode it as a required field, and every older
-/// shell gates its scan step on it, so `false` turns that step off
-/// everywhere. A credential an older build left in the settings file is
+/// the macOS shell decodes it as a required field, and every older shell
+/// gates its scan step on it, so `false` turns that step off everywhere. A credential an older build left in the settings file is
 /// never read and never crosses the socket.
 pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
