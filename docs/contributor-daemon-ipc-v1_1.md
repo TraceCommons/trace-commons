@@ -6496,11 +6496,23 @@ refused these two shapes -- a raw `set_settings` caller (another shell, or a
 future one) had no such floor and could persist a declaration nothing would
 ever actually route through.
 
-`claude_root` and `codex_root` each take a JSON string (a filesystem path)
-or `null` (clear the override, falling back to the conventional per-user
-location); setting either here only takes effect from the daemon's *next*
-supervisor tick onward -- the tick already scheduled or in flight when this
-call returns has already read the old value.
+`claude_root` and `codex_root` each take a JSON string (a filesystem path
+from the root) or `null` (clear the override, falling back to the
+conventional per-user location); setting either here only takes effect from
+the daemon's *next* supervisor tick onward -- the tick already scheduled or
+in flight when this call returns has already read the old value. A relative
+or empty path is `bad_params` / `settings-invalid-value` and changes
+nothing, as is a relative or empty `path` in a `watch` declaration for any
+`*_source` key: it would be read against whatever directory the daemon was
+started in. From the CLI, `daemon settings --set claude_root=` (an empty
+value) sends `null` and clears the folder; the same holds for `codex_root`.
+
+A folder declared for Claude Code or Codex (by `*_root` or `*_source`) that
+is the tool's home -- it holds a real `projects` (Claude Code) or `sessions`
+(Codex) folder, not a symlink -- is read at that store folder, even while
+the store is empty. The mapping is applied when the declaration is set,
+when the settings load, and on every pass, so a home declared before its
+store existed is read at the store once the store is made.
 
 A caller that needs the
 watcher to scan a non-default location from the very first tick -- most

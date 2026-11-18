@@ -2391,17 +2391,33 @@ fn read_at_store(
 }
 
 /// `null` clears the override (falls back to the conventional per-user
-/// location); a string sets it; anything else is a type error. Never
-/// formats `value` into the error -- see `apply_settings_object`'s doc.
+/// location); an absolute path sets it; anything else, a relative or empty
+/// path included, is refused ([`watches_an_absolute_path`]). Never formats
+/// `value` into the error -- see `apply_settings_object`'s doc.
 fn parse_optional_root(
     value: &serde_json::Value,
 ) -> std::result::Result<Option<SourceDeclaration>, &'static str> {
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(s) => Ok(Some(SourceDeclaration::Watch {
+    let declaration = match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(SourceDeclaration::Watch {
             path: PathBuf::from(s),
-        })),
-        _ => Err(ERR_SETTINGS_INVALID_VALUE),
+        }),
+        _ => return Err(ERR_SETTINGS_INVALID_VALUE),
+    };
+    watches_an_absolute_path(declaration)
+}
+
+/// A watch declaration names a folder from the root: a relative path would
+/// be read against whatever directory a service manager started the daemon
+/// in, and an empty one is not a folder. Off and no declaration pass.
+/// `has_root`, which is `is_absolute` on Unix; on Windows it also takes a
+/// path from the root of the current drive (`\x`, `/x`).
+fn watches_an_absolute_path(
+    declaration: Option<SourceDeclaration>,
+) -> std::result::Result<Option<SourceDeclaration>, &'static str> {
+    match declaration.as_ref().and_then(SourceDeclaration::path) {
+        Some(path) if !path.has_root() => Err(ERR_SETTINGS_INVALID_VALUE),
+        _ => Ok(declaration),
     }
 }
 
@@ -2490,7 +2506,7 @@ fn parse_ironwire_declaration(
     }
 }
 
-/// `{"mode":"watch","path":"..."}`, `{"mode":"off"}`, or null to clear the
+/// `{"mode":"watch","path":"<absolute>"}`, `{"mode":"off"}`, or null to clear the
 /// declaration back to never-asked. Never formats `value` into the error --
 /// see `apply_settings_object`'s doc; a declaration carries a path.
 fn parse_source_declaration(
@@ -2499,8 +2515,8 @@ fn parse_source_declaration(
     match value {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Object(_) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
+            .map_err(|_| ERR_SETTINGS_INVALID_VALUE)
+            .and_then(|declaration| watches_an_absolute_path(Some(declaration))),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
 }
@@ -5738,6 +5754,73 @@ mod tests {
             claude_sessions(&settings),
             (home.join("projects").display().to_string(), 1)
         );
+    }
+
+    /// A watched folder is an absolute path: a relative or empty
+    /// `*_root` or `*_source` path would be read against the daemon's
+    /// working directory, so it is refused and nothing is stored. `null`
+    /// still clears a root (#2171 review 2, finding 4).
+    #[test]
+    fn a_relative_or_empty_watch_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("traces");
+        std::fs::create_dir_all(&folder).unwrap();
+        let declared = |settings: &DaemonSettings| {
+            [
+                settings.claude_source.clone(),
+                settings.codex_source.clone(),
+                settings.gemini_source.clone(),
+                settings.cline_source.clone(),
+                settings.opencode_source.clone(),
+                settings.trajectory_source.clone(),
+            ]
+        };
+        let nothing: [Option<SourceDeclaration>; 6] = Default::default();
+        for key in ["claude_root", "codex_root"] {
+            for bad in ["", "relative", "./x", "null"] {
+                let mut settings = DaemonSettings::default();
+                assert_eq!(
+                    apply_settings_object(&mut settings, &json!({ key: bad })),
+                    Err(ERR_SETTINGS_INVALID_VALUE),
+                    "{key}={bad:?}"
+                );
+                assert_eq!(declared(&settings), nothing, "{key}={bad:?}");
+            }
+            let mut settings = DaemonSettings::default();
+            apply_settings_object(&mut settings, &json!({ key: folder })).unwrap();
+            assert_ne!(declared(&settings), nothing);
+            apply_settings_object(&mut settings, &json!({ key: null })).unwrap();
+            assert_eq!(declared(&settings), nothing);
+        }
+        for key in [
+            "claude_source",
+            "codex_source",
+            "gemini_source",
+            "cline_source",
+            "opencode_source",
+            "trajectory_source",
+        ] {
+            for bad in ["", "relative"] {
+                let mut settings = DaemonSettings::default();
+                assert_eq!(
+                    apply_settings_object(
+                        &mut settings,
+                        &json!({ key: {"mode":"watch","path":bad} })
+                    ),
+                    Err(ERR_SETTINGS_INVALID_VALUE),
+                    "{key}={bad:?}"
+                );
+                assert_eq!(declared(&settings), nothing, "{key}={bad:?}");
+            }
+            let mut settings = DaemonSettings::default();
+            apply_settings_object(
+                &mut settings,
+                &json!({ key: {"mode":"watch","path":folder} }),
+            )
+            .unwrap();
+            assert_ne!(declared(&settings), nothing, "{key}");
+            apply_settings_object(&mut settings, &json!({ key: {"mode":"off"} })).unwrap();
+        }
     }
 
     #[test]

@@ -336,7 +336,7 @@ fn home_store(source: &str, path: &Path) -> Option<PathBuf> {
         SOURCE_CODEX => "sessions",
         _ => return None,
     };
-    if !path.is_absolute() {
+    if !path.has_root() {
         return None;
     }
     let at = path.join(store);
