@@ -167,14 +167,31 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, colours: &MapColo
 }
 
 /// The field's drawing, kept until its size or scheme changes.
+/// What the field was last drawn for: its size, scheme and veil.
+type FieldKey = (i32, i32, bool, gtk::gdk::RGBA, gtk::gdk::RGBA);
+
 #[derive(Default)]
 pub struct Field {
-    kept: RefCell<Option<((i32, i32, bool), gtk::gsk::RenderNode)>>,
+    kept: RefCell<Option<(FieldKey, gtk::gsk::RenderNode)>>,
 }
 
 impl Field {
-    pub fn node(&self, width: i32, height: i32, dark: bool) -> gtk::gsk::RenderNode {
-        let key = (width, height, dark);
+    /// The field for `colours`, the map's resolved colours (the skin's in
+    /// Omarchy), kept until its size, scheme or veil changes.
+    pub fn node(
+        &self,
+        width: i32,
+        height: i32,
+        dark: bool,
+        colours: &MapColours,
+    ) -> gtk::gsk::RenderNode {
+        let key = (
+            width,
+            height,
+            dark,
+            colours.field_inner,
+            colours.field_outer,
+        );
         if let Some((kept, node)) = self.kept.borrow().as_ref()
             && *kept == key
         {
@@ -184,13 +201,7 @@ impl Field {
         let node = gtk::gsk::CairoNode::new(&bounds);
         {
             let cr = node.draw_context();
-            draw(
-                &cr,
-                f64::from(width),
-                f64::from(height),
-                &MapColours::scheme(dark),
-                dark,
-            );
+            draw(&cr, f64::from(width), f64::from(height), colours, dark);
         }
         let node: gtk::gsk::RenderNode = gtk::gsk::prelude::IsRenderNode::upcast(node);
         self.kept.replace(Some((key, node.clone())));

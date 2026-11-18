@@ -36,9 +36,12 @@
 //! run's 60), kept between frames (`LibraryArt`), and drawn once at rest
 //! with animations off. Under everything is the Mac's field (`field`).
 //! The coins carry each tool's logo, or its initials, in its tint
-//! (`tool_art`). Colours are the Mac's own map tokens in the flat theme
-//! (`MapColours`), the words in its text colours, with the theme's ink
-//! where the Mac uses its ink.
+//! (`tool_art`). Colours are resolved from the inks (`MapColours::resolve`):
+//! in the standard look the Mac's own map tokens in the flat theme, the
+//! words in its text colours, with the theme's ink where the Mac uses its
+//! ink; in the Omarchy skin its palette's roles. Every word colour
+//! (`word_colour`) is opaque and raised, where it falls short, to 4.5:1 on
+//! the map's grounds.
 //!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
@@ -81,6 +84,7 @@ use crate::model::{
     GateStatus, HarnessList, HistoryRecord, Project, QueueEntry, Settings, ToolDestinations,
 };
 use crate::ui::App;
+use crate::ui::omarchy;
 
 /// What the scene is built from, apart from the pane's size.
 #[derive(Clone, Debug, PartialEq)]
@@ -492,7 +496,7 @@ mod imp {
             let reduce = reduce_motion();
             // The field under both maps (`GlassMapField`).
             let dark = adw::StyleManager::default().is_dark();
-            snapshot.append_node(self.field.node(width, height, dark));
+            snapshot.append_node(self.field.node(width, height, dark, &palette.map));
             // The arcs, redrawn on every tick: their dashes move.
             let cr = snapshot.append_cairo(&bounds);
             let healthy = self.inputs.borrow().gate.state.is_healthy();
@@ -878,7 +882,7 @@ mod imp {
                     sublabel_size,
                     false,
                     Anchor::Middle,
-                    &palette.map.text_tertiary,
+                    &word_colour(palette, Word::PadLine),
                 );
             }
             if let Some(dock) = dock {
@@ -889,7 +893,7 @@ mod imp {
                     (10.0 * s).max(9.0),
                     true,
                     Anchor::Middle,
-                    &palette.map.status_on_text,
+                    &word_colour(palette, Word::Dock),
                 );
             }
         }
@@ -990,7 +994,7 @@ mod imp {
                 (10.0 * s).max(9.0),
                 true,
                 Anchor::Middle,
-                &palette.map.text_tertiary,
+                &word_colour(palette, Word::PileHeading),
             );
             for (index, id) in order.iter().enumerate() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
@@ -1016,8 +1020,7 @@ mod imp {
                 } else {
                     centre.y
                 };
-                let primary = palette.map.text_primary;
-                let colour = primary.with_alpha(primary.alpha() * shown as f32);
+                let colour = faded_word(palette, Word::CoinName, shown);
                 let size = (11.0 * s).max(9.5);
                 self.text(
                     snapshot,
@@ -1029,8 +1032,7 @@ mod imp {
                     &colour,
                 );
                 if let Some(line) = line {
-                    let tertiary = palette.map.text_tertiary;
-                    let colour = tertiary.with_alpha(tertiary.alpha() * shown as f32);
+                    let colour = faded_word(palette, Word::CoinLine, shown);
                     let at = Point::new(x, centre.y + 7.0 * s);
                     self.text(
                         snapshot,
@@ -1392,19 +1394,15 @@ impl MapCanvas {
 
 // --- Drawing -----------------------------------------------------------------
 
-/// The colours the map draws with: the theme's ink and background, and the
-/// shell's accent and status tokens for the current scheme.
+/// The colours the map draws with: the theme's ink and background, and
+/// every map colour resolved from the inks (`MapColours::resolve`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Palette {
     pub ink: gtk::gdk::RGBA,
-    /// Secondary labels: opaque, and clear of 4.5:1 on the map's ground.
-    pub secondary: gtk::gdk::RGBA,
     pub background: gtk::gdk::RGBA,
-    pub accent: gtk::gdk::RGBA,
-    pub on: gtk::gdk::RGBA,
-    pub ask: gtk::gdk::RGBA,
-    pub outside: gtk::gdk::RGBA,
-    /// The Mac's own map colours for the scheme.
+    /// What the map draws in: the Mac's map colours in the standard look,
+    /// the Omarchy palette's roles in the skin, each word colour opaque and
+    /// clear of 4.5:1 on the map's grounds.
     pub map: MapColours,
 }
 
@@ -1433,6 +1431,10 @@ pub struct MapColours {
     pub text_primary: gtk::gdk::RGBA,
     pub text_secondary: gtk::gdk::RGBA,
     pub text_tertiary: gtk::gdk::RGBA,
+    /// A node's sublabel (`FlowMapView.drawNode`'s statusOff), kept apart
+    /// from `status_off` so the rings keep the Mac's grey while the words
+    /// are raised to the text floor.
+    pub sublabel: gtk::gdk::RGBA,
     /// `GlassColor.accentText`: the purpleText token.
     pub accent_text: gtk::gdk::RGBA,
     /// Claude, Codex, Antigravity, OpenCode, Theia.
@@ -1487,6 +1489,7 @@ impl MapColours {
             text_primary: pick(l::TEXT_PRIMARY, d::TEXT_PRIMARY),
             text_secondary: pick(l::TEXT_SECONDARY, d::TEXT_SECONDARY),
             text_tertiary: pick(l::TEXT_TERTIARY, d::TEXT_TERTIARY),
+            sublabel: pick(l::STATUS_OFF, d::STATUS_OFF),
             accent_text: pick(l::PURPLE_TEXT, d::PURPLE_TEXT),
             tools: [
                 pick(l::TOOL_CLAUDE, d::TOOL_CLAUDE),
@@ -1511,6 +1514,218 @@ impl MapColours {
             Tint::Primary => self.text_primary,
         }
     }
+
+    /// The colours the map draws in for `inks`: the Mac's for the scheme
+    /// in the standard look; in the Omarchy skin, its palette's roles. In
+    /// both, every word colour is then made opaque and raised to the 4.5:1
+    /// text floor on the map's grounds (`raise_words`), the rule the rest of
+    /// the GTK palette follows (`style::LIGHT_TOKENS`' tertiary twin): a
+    /// colour that already clears is kept exactly.
+    ///
+    /// Kept for the last look asked for: the map asks on every frame.
+    pub fn resolve(dark: bool, inks: &crate::ui::style::Inks) -> Self {
+        type Kept = Option<((bool, Option<omarchy::Palette>), MapColours)>;
+        thread_local! {
+            static KEPT: RefCell<Kept> = const { RefCell::new(None) };
+        }
+        let key = (dark, inks.skin.clone());
+        KEPT.with(|kept| {
+            if let Some((k, colours)) = kept.borrow().as_ref()
+                && *k == key
+            {
+                return colours.clone();
+            }
+            let colours = match &inks.skin {
+                Some(p) => Self::skinned(p),
+                None => Self::standard(dark),
+            };
+            kept.replace(Some((key, colours.clone())));
+            colours
+        })
+    }
+
+    /// The Mac's colours, words raised to the floor on the map pane and
+    /// the window's scene, bare and under the field's veil.
+    fn standard(dark: bool) -> Self {
+        use crate::ui::style::brand_tokens::{GLASS_DARK_CSS, GLASS_LIGHT_CSS};
+        let mut colours = Self::scheme(dark);
+        let css = if dark {
+            GLASS_DARK_CSS
+        } else {
+            GLASS_LIGHT_CSS
+        };
+        let pane = rgb(&colours.pane_opaque);
+        let scene = css_colour(css, "tc_glass_scene").unwrap_or(pane);
+        let toward = if dark {
+            omarchy::Rgb::WHITE
+        } else {
+            omarchy::Rgb::BLACK
+        };
+        colours.raise_words(&[pane, scene], toward);
+        colours
+    }
+
+    /// The Omarchy palette's roles in the Mac's places. The tools keep
+    /// their own tints (they are the tools' marks, not the theme's), in
+    /// the skin's scheme.
+    fn skinned(p: &omarchy::Palette) -> Self {
+        let dark = p.mode == omarchy::Mode::Dark;
+        let mac = Self::scheme(dark);
+        let c = |rgb: omarchy::Rgb| {
+            let (r, g, b) = rgb.unit();
+            gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0)
+        };
+        let veil = |alpha: f32| c(p.scene).with_alpha(alpha);
+        let mut colours = Self {
+            orb_shared: c(p.accent),
+            orb_kept: c(p.status_ask),
+            purple_soft: c(p.accent),
+            blue: c(p.held),
+            status_off: c(p.tertiary),
+            status_on: c(p.status_on),
+            status_on_text: c(p.status_on_text),
+            status_ask: c(p.status_ask),
+            status_outside: c(p.status_outside),
+            node_off: c(p.line),
+            rule_fills: [
+                c(p.bg.mix(p.status_on, 0.2)),
+                c(p.bg.mix(p.status_ask, 0.2)),
+                c(p.bg.mix(p.tertiary, 0.15)),
+                c(p.inset),
+            ],
+            credential_on: c(p.status_on),
+            pane_opaque: c(p.bg),
+            well_fill: c(p.inset),
+            field_inner: veil(mac.field_inner.alpha()),
+            field_outer: veil(mac.field_outer.alpha()),
+            text_primary: c(p.ink),
+            text_secondary: c(p.muted),
+            text_tertiary: c(p.tertiary),
+            sublabel: c(p.tertiary),
+            accent_text: c(p.accent_text),
+            tools: mac.tools,
+            hero_deep: c(p.accent),
+            hero_bright: c(p.accent_line),
+        };
+        let toward = if dark {
+            omarchy::Rgb::WHITE
+        } else {
+            omarchy::Rgb::BLACK
+        };
+        colours.raise_words(&p.grounds(), toward);
+        colours
+    }
+
+    /// Every colour a word is drawn in (`word_colour`) made opaque over
+    /// the first ground and moved toward `toward`, a step at a time, until
+    /// it clears 4.5:1 on each of `grounds`, bare and under the field's
+    /// veil at its edge and its centre. One that already clears is kept.
+    fn raise_words(&mut self, grounds: &[omarchy::Rgb], toward: omarchy::Rgb) {
+        let mut all = grounds.to_vec();
+        for &g in grounds {
+            let edge = over(&self.field_outer, g);
+            all.push(edge);
+            all.push(over(&self.field_inner, edge));
+        }
+        let first = grounds.first().copied().unwrap_or(toward);
+        let raise = |colour: &mut gtk::gdk::RGBA| {
+            let clears = |c: omarchy::Rgb| {
+                all.iter()
+                    .all(|g| omarchy::contrast(c, *g) >= omarchy::TEXT)
+            };
+            let opaque = over(colour, first);
+            if colour.alpha() >= 1.0 && clears(opaque) {
+                return;
+            }
+            let raised = (0..=255)
+                .map(|step| opaque.mix(toward, f64::from(step) / 255.0))
+                .find(|c| clears(*c))
+                .unwrap_or(toward);
+            let (r, g, b) = raised.unit();
+            *colour = gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0);
+        };
+        raise(&mut self.text_primary);
+        raise(&mut self.text_tertiary);
+        raise(&mut self.sublabel);
+        raise(&mut self.status_on_text);
+    }
+}
+
+/// `colour` composited onto the opaque `ground`.
+fn over(colour: &gtk::gdk::RGBA, ground: omarchy::Rgb) -> omarchy::Rgb {
+    ground.mix(rgb(colour), f64::from(colour.alpha()))
+}
+
+/// An RGBA's channels, its alpha dropped.
+fn rgb(colour: &gtk::gdk::RGBA) -> omarchy::Rgb {
+    let ch = |v: f32| (f64::from(v) * 255.0).round().clamp(0.0, 255.0) as u8;
+    omarchy::Rgb(ch(colour.red()), ch(colour.green()), ch(colour.blue()))
+}
+
+/// A literal `@define-color` in a generated sheet.
+fn css_colour(css: &str, name: &str) -> Option<omarchy::Rgb> {
+    let prefix = format!("@define-color {name} ");
+    css.lines()
+        .find_map(|line| line.trim_start().strip_prefix(&prefix))
+        .and_then(|rest| omarchy::Rgb::parse(rest.trim().trim_end_matches(';')))
+}
+
+/// Every kind of word the map draws. Each is set in one colour,
+/// `word_colour`, and the map's text calls take a `Word`, never a colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Word {
+    /// A node's name.
+    Name,
+    /// A node's sublabel.
+    Sublabel,
+    /// The line under the pad while a contribution's traces gather.
+    PadLine,
+    /// The library's "+N" as the rocket docks.
+    Dock,
+    /// A "+N" for the nodes that did not fit.
+    Overflow,
+    /// The pile's heading.
+    PileHeading,
+    /// A coin's name in the open pile.
+    CoinName,
+    /// What waits from a coin, under its name.
+    CoinLine,
+    /// The two letters of a tool with no artwork.
+    Initials,
+}
+
+impl Word {
+    pub const ALL: [Word; 9] = [
+        Word::Name,
+        Word::Sublabel,
+        Word::PadLine,
+        Word::Dock,
+        Word::Overflow,
+        Word::PileHeading,
+        Word::CoinName,
+        Word::CoinLine,
+        Word::Initials,
+    ];
+}
+
+/// The colour `word` is drawn in, before any fade (`FlowMapView.drawNode`,
+/// `drawStill`, `MapToolPile`): names in the primary text colour,
+/// sublabels in statusOff's text twin, the quiet lines in the tertiary
+/// text colour, the dock's "+N" in statusOnText.
+pub fn word_colour(palette: &Palette, word: Word) -> gtk::gdk::RGBA {
+    let m = &palette.map;
+    match word {
+        Word::Name | Word::CoinName | Word::Initials => m.text_primary,
+        Word::Sublabel => m.sublabel,
+        Word::PadLine | Word::Overflow | Word::PileHeading | Word::CoinLine => m.text_tertiary,
+        Word::Dock => m.status_on_text,
+    }
+}
+
+/// `word`'s colour faded by `alpha`.
+pub fn faded_word(palette: &Palette, word: Word, alpha: f64) -> gtk::gdk::RGBA {
+    let c = word_colour(palette, word);
+    c.with_alpha(c.alpha() * alpha as f32)
 }
 
 /// Whether the library turns on this map: only the Traces map's station
@@ -1632,18 +1847,12 @@ impl Palette {
     /// which colour.
     #[cfg(test)]
     pub fn fixed() -> Self {
-        use crate::ui::style::brand_tokens::light;
-        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
-        Self {
-            ink: gtk::gdk::RGBA::BLACK,
-            secondary: parse(&crate::ui::style::Inks::standard(false).muted),
-            background: gtk::gdk::RGBA::WHITE,
-            accent: parse(light::ACCENT),
-            on: parse(light::STATUS_ON),
-            ask: parse(light::STATUS_ASK),
-            outside: parse(light::STATUS_OUTSIDE),
-            map: MapColours::scheme(false),
-        }
+        Self::with_inks(
+            gtk::gdk::RGBA::BLACK,
+            gtk::gdk::RGBA::WHITE,
+            &crate::ui::style::Inks::standard(false),
+            false,
+        )
     }
 
     #[allow(deprecated)]
@@ -1663,37 +1872,24 @@ impl Palette {
         )
     }
 
-    /// The theme's ink and ground, with the accent and status fills from
-    /// `inks`: the generated tokens in the standard look, the Omarchy
-    /// palette's in the skin. `dark` picks the scheme of the Mac's map
-    /// colours (`MapColours`).
+    /// The theme's ink and ground, and the map's colours resolved from
+    /// `inks` (`MapColours::resolve`): the Mac's in the standard look, the
+    /// Omarchy palette's in the skin. `dark` is the scheme.
     pub fn with_inks(
         ink: gtk::gdk::RGBA,
         background: gtk::gdk::RGBA,
         inks: &crate::ui::style::Inks,
         dark: bool,
     ) -> Self {
-        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         Self {
             ink,
-            secondary: parse(&inks.muted),
             background,
-            accent: parse(&inks.accent),
-            on: parse(&inks.status_on),
-            ask: parse(&inks.status_ask),
-            outside: parse(&inks.status_outside),
-            map: MapColours::scheme(dark),
+            map: MapColours::resolve(dark, inks),
         }
     }
 
     pub fn ink(&self, alpha: f64) -> gtk::gdk::RGBA {
         self.ink.with_alpha(self.ink.alpha() * alpha as f32)
-    }
-
-    /// The secondary ink, faded by `alpha` only where a node is dimmed.
-    pub fn secondary(&self, alpha: f64) -> gtk::gdk::RGBA {
-        self.secondary
-            .with_alpha(self.secondary.alpha() * alpha as f32)
     }
 
     /// A folder's dot by rule: its fill and its ring (`FlowMapView.rule`).
@@ -1715,13 +1911,15 @@ pub fn node_word_colours(
     node: &map_scene::Node,
     palette: &Palette,
 ) -> (gtk::gdk::RGBA, gtk::gdk::RGBA) {
-    let fade = |c: gtk::gdk::RGBA| c.with_alpha(c.alpha() * node.dim as f32);
-    (fade(palette.map.text_primary), fade(palette.map.status_off))
+    (
+        faded_word(palette, Word::Name, node.dim),
+        faded_word(palette, Word::Sublabel, node.dim),
+    )
 }
 
 /// A "+N"'s colour: the tertiary text colour (`drawStill`).
 pub fn overflow_colour(palette: &Palette) -> gtk::gdk::RGBA {
-    palette.map.text_tertiary
+    word_colour(palette, Word::Overflow)
 }
 
 pub fn source(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
@@ -2001,7 +2199,7 @@ fn draw_node(
                 // the primary ink (`GlassTool.other`), at the map's micro
                 // type.
                 (None, Some(letters)) => {
-                    source(cr, &palette.map.text_primary, dim);
+                    source(cr, &word_colour(palette, Word::Initials), dim);
                     let font = MarkFont::MICRO;
                     centred_text(cr, &letters, centre, font.size, font.family);
                 }
@@ -2907,79 +3105,6 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
-    /// The map's dots take their fills from the inks: the standard tokens,
-    /// exactly as `Palette::fixed` pins them, or the Omarchy palette's.
-    #[test]
-    fn the_map_palette_takes_its_fills_from_the_inks() {
-        use crate::ui::omarchy::{self, fixtures::GRUVBOX};
-        use crate::ui::style::Inks;
-        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
-        assert_eq!(
-            super::Palette::with_inks(ink, ground, &Inks::standard(false), false),
-            super::Palette::fixed()
-        );
-        let p = omarchy::parse(GRUVBOX, false).unwrap();
-        let skin = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p), false);
-        let rgba = |c: omarchy::Rgb| gtk::gdk::RGBA::parse(c.hex()).unwrap();
-        assert_eq!(skin.accent, rgba(p.accent));
-        assert_eq!(skin.on, rgba(p.status_on));
-        assert_eq!(skin.ask, rgba(p.status_ask));
-        assert_eq!(skin.outside, rgba(p.status_outside));
-    }
-
-    /// The map's secondary labels (the line under the pad, the overflow
-    /// count, the pile's heading, sublabels) are an opaque ink that clears
-    /// 4.5:1 on the grounds the map is drawn on: the glass scene and pane in
-    /// the standard look, and every ground of every vendored Omarchy
-    /// palette. The theme ink at 60% fell to about 2.5:1 on light skins and
-    /// 4.3:1 in Standard light.
-    #[test]
-    fn the_map_secondary_labels_clear_the_text_floor() {
-        use crate::ui::omarchy::{self, Rgb, TEXT, contrast, fixtures::FIXTURES};
-        use crate::ui::style::{Inks, brand_tokens};
-        let rgb = |c: &gtk::gdk::RGBA| {
-            let ch = |v: f32| (f64::from(v) * 255.0).round() as u8;
-            Rgb(ch(c.red()), ch(c.green()), ch(c.blue()))
-        };
-        let define = |css: &str, name: &str| {
-            let prefix = format!("@define-color {name} ");
-            css.lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .and_then(|rest| Rgb::parse(rest.trim_end_matches(';')))
-                .unwrap_or_else(|| panic!("{name}"))
-        };
-        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
-        let mut failures = Vec::new();
-        for (dark, css) in [
-            (false, brand_tokens::GLASS_LIGHT_CSS),
-            (true, brand_tokens::GLASS_DARK_CSS),
-        ] {
-            let palette = super::Palette::with_inks(ink, ground, &Inks::standard(dark), dark);
-            if palette.secondary.alpha() < 1.0 {
-                failures.push(format!("standard dark={dark}: translucent"));
-            }
-            for name in ["tc_glass_scene", "tc_glass_pane"] {
-                let ratio = contrast(rgb(&palette.secondary), define(css, name));
-                if ratio < TEXT {
-                    failures.push(format!("standard dark={dark} on {name}: {ratio:.2}:1"));
-                }
-            }
-        }
-        for (name, text) in FIXTURES {
-            let p = omarchy::parse(text, false).unwrap();
-            let palette = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p), false);
-            if palette.secondary.alpha() < 1.0 {
-                failures.push(format!("{name}: translucent"));
-            }
-            for (i, g) in p.grounds().into_iter().enumerate() {
-                let ratio = contrast(rgb(&palette.secondary), g);
-                if ratio < TEXT {
-                    failures.push(format!("{name} on ground {i}: {ratio:.2}:1"));
-                }
-            }
-        }
-        assert!(failures.is_empty(), "{failures:#?}");
-    }
 
     use super::*;
 
@@ -3043,6 +3168,214 @@ mod tests {
         gtk::gdk::RGBA::parse(hex).unwrap()
     }
 
+    use crate::ui::omarchy::{self, Rgb};
+
+    /// An opaque colour's channels as `omarchy::Rgb`, for the WCAG maths.
+    fn rgb_of(c: &gtk::gdk::RGBA) -> Rgb {
+        let ch = |v: f32| (f64::from(v) * 255.0).round() as u8;
+        Rgb(ch(c.red()), ch(c.green()), ch(c.blue()))
+    }
+
+    /// `over` composited onto the opaque `ground`.
+    fn over_ground(over: &gtk::gdk::RGBA, ground: Rgb) -> Rgb {
+        ground.mix(rgb_of(over), f64::from(over.alpha()))
+    }
+
+    /// A `@define-color` literal from a generated sheet.
+    fn css_define(css: &str, name: &str) -> Rgb {
+        let prefix = format!("@define-color {name} ");
+        css.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|rest| Rgb::parse(rest.trim_end_matches(';')))
+            .unwrap_or_else(|| panic!("{name}"))
+    }
+
+    /// Every look the map is drawn in: the standard look in each scheme and
+    /// every vendored Omarchy palette in its own mode, with the grounds the
+    /// map's words sit on there. The grounds are the stylesheet's, not the
+    /// map's: the map pane and the window's scene (`tc_glass_pane`,
+    /// `tc_glass_scene`) in the standard look, and all six of the skin's
+    /// grounds; each under the map's field veil as the map draws it, at its
+    /// centre and its edge.
+    fn every_look() -> Vec<(String, super::Palette, Option<omarchy::Palette>, Vec<Rgb>)> {
+        use crate::ui::omarchy::fixtures::FIXTURES;
+        use crate::ui::style::{Inks, brand_tokens};
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        let veiled = |palette: &super::Palette, grounds: Vec<Rgb>| {
+            let mut all = grounds.clone();
+            for g in grounds {
+                all.push(over_ground(&palette.map.field_outer, g));
+                all.push(over_ground(
+                    &palette.map.field_inner,
+                    over_ground(&palette.map.field_outer, g),
+                ));
+            }
+            all
+        };
+        let mut looks = Vec::new();
+        for (dark, css) in [
+            (false, brand_tokens::GLASS_LIGHT_CSS),
+            (true, brand_tokens::GLASS_DARK_CSS),
+        ] {
+            let palette = super::Palette::with_inks(ink, ground, &Inks::standard(dark), dark);
+            let grounds = veiled(
+                &palette,
+                vec![
+                    css_define(css, "tc_glass_pane"),
+                    css_define(css, "tc_glass_scene"),
+                ],
+            );
+            looks.push((format!("standard dark={dark}"), palette, None, grounds));
+        }
+        for (name, text) in FIXTURES {
+            let p = omarchy::parse(text, false).unwrap();
+            let dark = p.mode == omarchy::Mode::Dark;
+            let palette = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p), dark);
+            let grounds = veiled(&palette, p.grounds().to_vec());
+            looks.push((name.to_string(), palette, Some(p), grounds));
+        }
+        looks
+    }
+
+    /// Every word the map draws (`Word::ALL`, the only colours its text
+    /// calls take) is opaque and clears 4.5:1 on every ground it is drawn
+    /// on, in the standard look light and dark and in every Omarchy
+    /// palette. The Mac's statusOff sublabel (#8a8a90) measured 3.43:1 on
+    /// white and 3.09:1 on the light pane, and its dark tertiary text is
+    /// translucent (0.84).
+    #[test]
+    fn the_map_secondary_labels_clear_the_text_floor() {
+        let mut failures = Vec::new();
+        for (look, palette, _, grounds) in every_look() {
+            for word in super::Word::ALL {
+                let colour = super::word_colour(&palette, word);
+                if colour.alpha() < 1.0 {
+                    failures.push(format!("{look} {word:?}: alpha {:.2}", colour.alpha()));
+                }
+                for g in &grounds {
+                    let ratio = omarchy::contrast(rgb_of(&colour), *g);
+                    if ratio < omarchy::TEXT {
+                        failures.push(format!(
+                            "{look} {word:?} {} on {}: {ratio:.2}:1",
+                            rgb_of(&colour).hex(),
+                            g.hex()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// In the standard look the map draws the Mac's map colours wherever
+    /// they clear the floor, and raises only the words that do not, toward
+    /// the scheme's ink just far enough: the sublabel ends within a step of
+    /// 4.5:1. Every fill and ring is the Mac's.
+    #[test]
+    fn the_standard_map_is_the_macs_raised_only_to_the_floor() {
+        use crate::ui::style::Inks;
+        for dark in [false, true] {
+            let mac = MapColours::scheme(dark);
+            let drawn = MapColours::resolve(dark, &Inks::standard(dark));
+            assert_eq!(drawn.text_primary, mac.text_primary, "dark={dark}");
+            assert_eq!(drawn.status_off, mac.status_off, "dark={dark}");
+            assert_eq!(drawn.rule_fills, mac.rule_fills, "dark={dark}");
+            for (fill, mac_fill) in [
+                (drawn.status_on, mac.status_on),
+                (drawn.status_ask, mac.status_ask),
+                (drawn.status_outside, mac.status_outside),
+                (drawn.orb_shared, mac.orb_shared),
+                (drawn.orb_kept, mac.orb_kept),
+                (drawn.pane_opaque, mac.pane_opaque),
+                (drawn.field_inner, mac.field_inner),
+                (drawn.field_outer, mac.field_outer),
+            ] {
+                assert_eq!(fill, mac_fill, "dark={dark}");
+            }
+            assert_eq!(drawn.tools, mac.tools, "dark={dark}");
+        }
+        let light = MapColours::resolve(false, &Inks::standard(false));
+        assert_ne!(
+            light.sublabel,
+            parse("#8a8a90"),
+            "the sublabel was not raised"
+        );
+        let (_, _, _, grounds) = every_look().remove(0);
+        let least = grounds
+            .iter()
+            .map(|g| omarchy::contrast(rgb_of(&light.sublabel), *g))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (4.5..4.7).contains(&least),
+            "raised past the floor: {least:.2}:1 on its darkest ground"
+        );
+        // The light tertiary already clears: kept.
+        assert_eq!(light.text_tertiary, parse("#3d3d43"));
+        let dark = MapColours::resolve(true, &Inks::standard(true));
+        assert_eq!(dark.text_tertiary.alpha(), 1.0);
+    }
+
+    /// Under the Omarchy skin the map draws the skin's roles, not the
+    /// Mac's: what a folder's dot is drawn in, by rule, is the skin's
+    /// status colour (and no pixel is the Mac's), and its words, field and
+    /// panes are the skin's.
+    #[test]
+    fn the_map_palette_takes_its_fills_from_the_inks() {
+        let mut failures = Vec::new();
+        for (look, palette, skin, _) in every_look() {
+            let Some(p) = skin else { continue };
+            let dark = p.mode == omarchy::Mode::Dark;
+            let mac = MapColours::scheme(dark);
+            let rgba = |c: Rgb| gtk::gdk::RGBA::parse(c.hex()).unwrap();
+            for (mode, skin_ring, mac_ring) in [
+                (ProjectMode::AutoUpload, p.status_on, mac.status_on),
+                (ProjectMode::Ask, p.status_ask, mac.status_ask),
+                (ProjectMode::Ignore, p.status_outside, mac.status_outside),
+            ] {
+                let scene = traces_scene(&[]);
+                let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+                let at = Point::new(scene.space.width / 2.0, scene.space.height / 2.0);
+                let node = map_scene::Node::new(
+                    "folder:p",
+                    NodeKind::Folder(Some(mode)),
+                    at,
+                    20.0,
+                    "p",
+                    "",
+                );
+                let pixels = painted(580, 760, |cr| {
+                    draw_node(cr, &scene, &node, &fit, &palette, false, MapStyle::Launch);
+                });
+                let skin_px = pixels
+                    .iter()
+                    .filter(|px| near_colour(**px, &rgba(skin_ring)))
+                    .count();
+                let mac_px = pixels
+                    .iter()
+                    .filter(|px| near_colour(**px, &mac_ring))
+                    .count();
+                if skin_px < 10 || (rgba(skin_ring) != mac_ring && mac_px > skin_px) {
+                    failures.push(format!(
+                        "{look} {mode:?}: {skin_px} skin pixels, {mac_px} Mac pixels"
+                    ));
+                }
+            }
+            if super::word_colour(&palette, super::Word::Name) != rgba(p.ink) {
+                failures.push(format!("{look}: names are not the skin's ink"));
+            }
+            if palette.map.pane_opaque != rgba(p.bg) {
+                failures.push(format!("{look}: the open pile is not the skin's pane"));
+            }
+            if rgb_of(&palette.map.field_outer) != p.scene {
+                failures.push(format!("{look}: the field is not the skin's scene"));
+            }
+            if palette.map.orb_shared != rgba(p.accent) {
+                failures.push(format!("{look}: the shared orb is not the skin's accent"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     /// The map's colours are the Mac's flat-theme tokens in each scheme.
     #[test]
     fn the_map_colours_follow_the_scheme() {
@@ -3057,7 +3390,10 @@ mod tests {
         assert_eq!(light.tint(Tint::Primary), light.text_primary);
         assert_eq!(light.well_fill, parse("rgba(138,147,165,0.28)"));
         assert_eq!(dark.pane_opaque, parse("#0d1124"));
-        assert_eq!(Palette::fixed().map, light);
+        assert_eq!(
+            Palette::fixed().map,
+            MapColours::resolve(false, &crate::ui::style::Inks::standard(false))
+        );
     }
 
     fn traces_scene(entries: &[QueueEntry]) -> Scene {
@@ -3402,8 +3738,9 @@ mod tests {
 
     /// A node's words are in the Mac's text colours, not the theme's ink
     /// (`FlowMapView.drawNode`): its name in the primary text colour, its
-    /// sublabel in statusOff, both faded with the node; a "+N" in the
-    /// tertiary text colour.
+    /// sublabel in statusOff's text twin (#8a8a90 raised to the 4.5:1
+    /// floor, `the_standard_map_is_the_macs_raised_only_to_the_floor`),
+    /// both faded with the node; a "+N" in the tertiary text colour.
     #[test]
     fn a_nodes_words_are_in_the_macs_text_colours() {
         let palette = Palette {
@@ -3421,10 +3758,11 @@ mod tests {
         node.dim = 0.5;
         let (label, sublabel) = node_word_colours(&node, &palette);
         assert_eq!(label, parse("#1d1d1f").with_alpha(0.5));
-        assert_eq!(sublabel, parse("#8a8a90").with_alpha(0.5));
+        assert_eq!(sublabel, palette.map.sublabel.with_alpha(0.5));
+        assert_ne!(palette.map.sublabel, parse("#8a8a90"));
         assert_eq!(overflow_colour(&palette), parse("#3d3d43"));
         let dark = Palette {
-            map: MapColours::scheme(true),
+            map: MapColours::resolve(true, &crate::ui::style::Inks::standard(true)),
             ..palette
         };
         assert_eq!(overflow_colour(&dark), dark.map.text_tertiary);
@@ -3593,6 +3931,43 @@ mod tests {
         assert!(ink > 20, "only {ink} pixels of initials");
     }
 
+    /// The looks the comparison renders are drawn in: the standard look
+    /// light and dark, and two Omarchy palettes, one light and one dark.
+    fn render_looks() -> Vec<(String, Palette, bool)> {
+        use crate::ui::omarchy::fixtures::FIXTURES;
+        use crate::ui::style::Inks;
+        let mut looks = vec![
+            ("light".to_string(), Palette::fixed(), false),
+            (
+                "dark".to_string(),
+                Palette::with_inks(
+                    gtk::gdk::RGBA::WHITE,
+                    parse("#0d1124"),
+                    &Inks::standard(true),
+                    true,
+                ),
+                true,
+            ),
+        ];
+        for (name, text) in FIXTURES {
+            if !matches!(name, "catppuccin-latte" | "tokyo-night") {
+                continue;
+            }
+            let p = omarchy::parse(text, false).unwrap();
+            let dark = p.mode == omarchy::Mode::Dark;
+            let (r, g, b) = p.ink.unit();
+            let ink = gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0);
+            let (r, g, b) = p.bg.unit();
+            let ground = gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0);
+            looks.push((
+                format!("omarchy-{name}"),
+                Palette::with_inks(ink, ground, &Inks::omarchy(&p), dark),
+                dark,
+            ));
+        }
+        looks
+    }
+
     /// Renders the Private AI map from the Mac's recorded samples, as the
     /// Mac's `privateai-scene-<set>` renders were made: laid out in their
     /// 440 x 614 pane at scale 1 and drawn at 2x. Words are drawn with
@@ -3614,13 +3989,6 @@ mod tests {
         };
         let (w, h) = (440, 614);
         let space = Size::new(f64::from(w), f64::from(h));
-        let light = Palette::fixed();
-        let dark = Palette {
-            ink: gtk::gdk::RGBA::WHITE,
-            background: parse("#0d1124"),
-            map: MapColours::scheme(true),
-            ..light.clone()
-        };
         for set in ["normalDay", "empty", "armedFolder"] {
             let list: HarnessList = serde_json::from_value(read(set, "harness_list")).unwrap();
             let destinations: ToolDestinations =
@@ -3633,7 +4001,7 @@ mod tests {
             });
             let scene = inputs.scene(&BTreeMap::new(), space);
             let fit = MapGeometry::new(space, 1.0, None, scene.space);
-            for (scheme, palette) in [("light", light.clone()), ("dark", dark.clone())] {
+            for (scheme, palette, dark) in render_looks() {
                 let mut surface =
                     gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2)
                         .unwrap();
@@ -3642,13 +4010,7 @@ mod tests {
                     source(&cr, &palette.map.pane_opaque, 1.0);
                     let _ = cr.paint();
                     cr.scale(2.0, 2.0);
-                    field::draw(
-                        &cr,
-                        f64::from(w),
-                        f64::from(h),
-                        &palette.map,
-                        scheme == "dark",
-                    );
+                    field::draw(&cr, f64::from(w), f64::from(h), &palette.map, dark);
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
                         draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
@@ -3759,14 +4121,7 @@ mod tests {
             None,
             scene.space,
         );
-        let light = Palette::fixed();
-        let dark = Palette {
-            ink: gtk::gdk::RGBA::WHITE,
-            background: parse("#0d1124"),
-            map: MapColours::scheme(true),
-            ..light.clone()
-        };
-        for (scheme, palette) in [("light", light), ("dark", dark)] {
+        for (scheme, palette, dark) in render_looks() {
             for (style, open) in [
                 (MapStyle::Launch, false),
                 (MapStyle::Launch, true),
@@ -3781,13 +4136,7 @@ mod tests {
                     source(&cr, &ground, 1.0);
                     let _ = cr.paint();
                     cr.scale(2.0, 2.0);
-                    field::draw(
-                        &cr,
-                        f64::from(w),
-                        f64::from(h),
-                        &palette.map,
-                        scheme == "dark",
-                    );
+                    field::draw(&cr, f64::from(w), f64::from(h), &palette.map, dark);
                     draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
                     for node in &scene.nodes {
                         draw_node(&cr, &scene, node, &fit, &palette, false, style);

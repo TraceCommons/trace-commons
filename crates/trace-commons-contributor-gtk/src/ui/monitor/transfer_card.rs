@@ -94,9 +94,8 @@ fn coin(mark: CardMark) -> gtk::Widget {
     let area = gtk::DrawingArea::new();
     area.set_content_width(COIN_SIDE);
     area.set_content_height(COIN_SIDE);
-    area.set_draw_func(move |_, cr, _, _| {
-        let dark = adw::StyleManager::default().is_dark();
-        draw_coin(cr, &mark, &MapColours::scheme(dark));
+    area.set_draw_func(move |area, cr, _, _| {
+        draw_coin(cr, &mark, &map::Palette::current(area).map);
     });
     area.upcast()
 }
