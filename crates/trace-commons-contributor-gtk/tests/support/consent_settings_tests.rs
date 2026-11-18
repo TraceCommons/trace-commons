@@ -72,6 +72,8 @@ fn mounted_sharing_ask_each_time_withdraws_the_grant() {
         serde_json::json!({"granted": true, "include_existing": true}),
     );
     assert!(card.automatic.is_active());
+    // A status named the account this is pressed on (`GrantOwner`).
+    card.owner.borrow_mut().observe(Some("acct-a"));
     card.ask.set_active(true);
     fixture.drive_until(|| !fixture.calls_to("withdraw_automatic_grant").is_empty());
     assert_eq!(
@@ -103,7 +105,7 @@ fn mounted_sharing_automatic_asks_about_ask_folders_first() {
         "project_id": "p", "mode": "notify_only", "configured": true,
     }))
     .unwrap();
-    crate::ui::consent_settings::note_projects(&fixture.app, &[project.clone(), project]);
+    crate::ui::consent_settings::note_projects(&fixture.app, Some(&[project.clone(), project]));
     let card = &fixture.app.settings.sharing;
     assert!(card.ask.is_active());
     card.automatic.set_active(true);

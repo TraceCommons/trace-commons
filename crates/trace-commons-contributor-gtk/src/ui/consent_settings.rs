@@ -82,6 +82,115 @@ pub(crate) fn grant_lines(copy: &AutomaticGrantCopy) -> Option<Vec<&'static str>
     (!lines.iter().any(|l| l.is_empty()) && !copy.summary.is_empty()).then_some(lines)
 }
 
+/// The Automatic radio's line (`UsesScreenLayout.sharingOptions`): the
+/// first run's scope line when the core has one; else the grant table's
+/// path title, when its detail and scrub wording are there to stand
+/// behind it; else none.
+pub(crate) fn automatic_line<'a>(
+    automatic_scope: &'a str,
+    grant: &AutomaticGrantCopy,
+) -> Option<&'a str> {
+    if !automatic_scope.is_empty() {
+        return Some(automatic_scope);
+    }
+    let scrub = grant.patterns_only.is_some() || grant.model_scrubbed.is_some();
+    (!grant.path_automatic_title.is_empty() && !grant.path_automatic_detail.is_empty() && scrub)
+        .then_some(grant.path_automatic_title)
+}
+
+/// Whether Settings draws the sharing and Uses cards: only once a status
+/// has said first run is done (R-43, `availableBeforeOnboarding`), never on
+/// a guess.
+pub(crate) fn cards_shown(requires_onboarding: Option<bool>) -> bool {
+    requires_onboarding == Some(false)
+}
+
+/// The account a grant or withdrawal belongs to (the Mac's
+/// `settleAutomaticGrantOwner` and `accountReadGeneration`). A status read
+/// settles the owner; a status naming a different account starts a new
+/// generation, and a write pressed under the old one is not applied.
+#[derive(Debug, Default)]
+pub(crate) struct GrantOwner {
+    /// The account scope the last status read named; `None` before any
+    /// read, or after a failed one.
+    seen: Option<Option<String>>,
+    generation: u64,
+}
+
+impl GrantOwner {
+    pub(crate) fn observe(&mut self, scope: Option<&str>) {
+        let scope = scope.map(str::to_owned);
+        if self.seen.as_ref().is_some_and(|seen| *seen != scope) {
+            self.generation += 1;
+        }
+        self.seen = Some(scope);
+    }
+
+    /// A failed status read: no owner until the next one answers.
+    pub(crate) fn forget(&mut self) {
+        self.seen = None;
+    }
+
+    /// Whether the owner is known without asking again: a read named an
+    /// account (the Mac's `status.accountScope != nil`).
+    pub(crate) fn named(&self) -> bool {
+        matches!(self.seen, Some(Some(_)))
+    }
+
+    /// The generation a write is pressed under, or `None` while no status
+    /// has settled the owner.
+    pub(crate) fn begin(&self) -> Option<u64> {
+        self.seen.as_ref().map(|_| self.generation)
+    }
+
+    pub(crate) fn is_current(&self, pressed: u64) -> bool {
+        self.seen.is_some() && self.generation == pressed
+    }
+}
+
+/// The override in force, from `status.contribution_override`: its mode,
+/// or none.
+pub(crate) fn override_mode(value: &Value) -> Option<String> {
+    value.get("mode")?.as_str().map(str::to_owned)
+}
+
+/// What the radios show: nothing picked while an override is in force,
+/// since neither Ask each time nor the grant is what decides then.
+pub(crate) fn shown_path(
+    current: Option<SharingPath>,
+    override_mode: Option<&str>,
+) -> Option<SharingPath> {
+    if override_mode.is_some() {
+        None
+    } else {
+        current
+    }
+}
+
+/// Whether clearing the override confirms first
+/// (`MenuPanelData.clearNeedsConfirmation`): not under an Automatic
+/// override, which already sends everything; otherwise when the folders
+/// were not read, or one's own setting is Automatic or unreported.
+pub(crate) fn clear_needs_confirmation(projects: Option<&[Project]>, mode: Option<&str>) -> bool {
+    if mode == Some("auto_upload") {
+        return false;
+    }
+    let Some(projects) = projects else {
+        return true;
+    };
+    projects
+        .iter()
+        .any(|p| p.folder_mode.is_none() || p.folder_mode.as_deref() == Some("auto_upload"))
+}
+
+/// `clear_contribution_override` answered as the Mac decodes it
+/// (`ContributionOverrideClearResult { cleared: Bool }`).
+pub(crate) fn clear_confirmed(reply: &Result<Value, String>) -> bool {
+    reply
+        .as_ref()
+        .is_ok_and(|v| v.get("cleared").is_some_and(Value::is_boolean))
+}
+
 /// The list `set_consent_scopes` is sent (`ConsentScopeRows.nextScopes`):
 /// built from what the daemon reported, never from the ticks on screen.
 pub(crate) fn next_scopes(
@@ -174,10 +283,26 @@ pub(crate) struct SharingCard {
     /// The daemon's last `automatic_grant` answer, read; `None` until it
     /// answers, and the radios stay off and disabled until then.
     pub(crate) current: Cell<Option<SharingPath>>,
-    /// The folders `list_projects` last reported, for the Ask count.
-    pub(crate) projects: RefCell<Vec<Project>>,
+    /// The folders `list_projects` last reported, for the Ask count;
+    /// `None` when the last read did not answer.
+    pub(crate) projects: RefCell<Option<Vec<Project>>>,
     pub(crate) working: Cell<bool>,
     filling: Cell<bool>,
+    /// Whose grant a write belongs to (`GrantOwner`).
+    pub(crate) owner: RefCell<GrantOwner>,
+    /// The override in force, from the last status read; `None` for none.
+    pub(crate) override_mode: RefCell<Option<String>>,
+    /// Whether a status has been read, so the override is known.
+    pub(crate) status_read: Cell<bool>,
+    /// `status.contribution_mode_partial`.
+    pub(crate) partial: Cell<bool>,
+    /// What an override in force shows, and its clear.
+    override_box: gtk::Box,
+    override_value: gtk::Label,
+    override_partial: gtk::Label,
+    pub(crate) clear_override: gtk::Button,
+    /// The clear confirmation is open.
+    confirming: Cell<bool>,
 }
 
 impl SharingCard {
@@ -186,6 +311,8 @@ impl SharingCard {
         let modes = trace_commons_contributor::project_copy::contribution_mode_copy();
         let grant = trace_commons_contributor::consent_copy::automatic_contribution_copy(None);
         let root = style::card(gtk::Orientation::Vertical, space::S);
+        // Waits for first run (R-43) until a status says it is done.
+        root.set_visible(cards_shown(None));
         root.append(&style::eyebrow(uses.sharing));
         let ask = gtk::CheckButton::with_label(uses.ask_each_time);
         let automatic = gtk::CheckButton::with_label(modes.choices[1].label);
@@ -195,9 +322,29 @@ impl SharingCard {
             style::append_caveat(&root, grant.path_ask_first_title);
         }
         root.append(&automatic);
-        if !uses.automatic_scope.is_empty() {
-            style::append_caveat(&root, uses.automatic_scope);
+        if let Some(line) = automatic_line(uses.automatic_scope, &grant) {
+            style::append_caveat(&root, line);
         }
+        // An override in force decides for every folder, so the radios
+        // show nothing picked and this says what is in force, in the
+        // contribution-mode table's words, with its clear.
+        let override_box = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+        override_box.set_visible(false);
+        let override_head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let override_title = style::body(modes.title);
+        override_title.add_css_class("heading");
+        override_head.append(&override_title);
+        let override_value = style::body("");
+        override_head.append(&override_value);
+        override_box.append(&override_head);
+        let override_partial = style::caveat(modes.auto_partial);
+        override_partial.set_visible(false);
+        override_box.append(&override_partial);
+        style::append_caveat(&override_box, modes.override_active);
+        let clear_override = gtk::Button::with_label(modes.clear);
+        clear_override.set_halign(gtk::Align::Start);
+        override_box.append(&clear_override);
+        root.append(&override_box);
         if !uses.settings_sharing_note.is_empty() {
             style::append_caveat(&root, uses.settings_sharing_note);
         }
@@ -214,9 +361,18 @@ impl SharingCard {
             automatic,
             refusal,
             current: Cell::new(None),
-            projects: RefCell::new(Vec::new()),
+            projects: RefCell::new(None),
             working: Cell::new(false),
             filling: Cell::new(false),
+            owner: RefCell::new(GrantOwner::default()),
+            override_mode: RefCell::new(None),
+            status_read: Cell::new(false),
+            partial: Cell::new(false),
+            override_box,
+            override_value,
+            override_partial,
+            clear_override,
+            confirming: Cell::new(false),
         };
         card.render();
         card
@@ -226,7 +382,8 @@ impl SharingCard {
     /// the daemon has said.
     pub(crate) fn render(&self) {
         self.filling.set(true);
-        let current = self.current.get();
+        let mode = self.override_mode.borrow().clone();
+        let current = shown_path(self.current.get(), mode.as_deref());
         self.ask.set_active(current == Some(SharingPath::AskMe));
         self.automatic
             .set_active(current == Some(SharingPath::Automatic));
@@ -238,6 +395,27 @@ impl SharingCard {
         let enabled = current.is_some() && !self.working.get();
         self.ask.set_sensitive(enabled);
         self.automatic.set_sensitive(enabled);
+        let modes = trace_commons_contributor::project_copy::contribution_mode_copy();
+        match mode.as_deref() {
+            Some(mode) => {
+                let label = modes
+                    .choices
+                    .iter()
+                    .find(|c| c.mode == mode)
+                    .map_or("\u{2014}", |c| c.label);
+                self.override_value.set_text(label);
+                self.override_partial
+                    .set_visible(mode == "auto_upload" && self.partial.get());
+                self.override_box.set_visible(true);
+            }
+            None => self.override_box.set_visible(false),
+        }
+        self.clear_override.set_sensitive(
+            mode.is_some()
+                && self.status_read.get()
+                && !self.working.get()
+                && !self.confirming.get(),
+        );
         self.filling.set(false);
     }
 
@@ -266,6 +444,12 @@ pub(crate) fn wire(app: &Rc<App>) {
         });
     }
     let weak = Rc::downgrade(app);
+    card.clear_override.connect_clicked(move |_| {
+        if let Some(app) = weak.upgrade() {
+            choose_clear(&app);
+        }
+    });
+    let weak = Rc::downgrade(app);
     app.settings.uses.refresh.connect_clicked(move |_| {
         if let Some(app) = weak.upgrade() {
             app.refresh();
@@ -290,9 +474,10 @@ pub(crate) fn refresh(app: &Rc<App>) {
     });
 }
 
-/// `list_projects` answered: the folders the Ask count reads.
-pub(crate) fn note_projects(app: &Rc<App>, projects: &[Project]) {
-    *app.settings.sharing.projects.borrow_mut() = projects.to_vec();
+/// `list_projects` answered: the folders the Ask count and the override's
+/// clear read. `None` when it did not answer.
+pub(crate) fn note_projects(app: &Rc<App>, projects: Option<&[Project]>) {
+    *app.settings.sharing.projects.borrow_mut() = projects.map(<[Project]>::to_vec);
 }
 
 fn choose(app: &Rc<App>, path: SharingPath) {
@@ -307,21 +492,119 @@ fn choose(app: &Rc<App>, path: SharingPath) {
                 return;
             };
             set_working(app, true);
-            app.call(method, params, |app, result| {
-                if !ask_each_time_confirmed(&result) {
-                    app.settings
-                        .sharing
-                        .refuse(first_run_copy().uses.settings_sharing_save_failed);
-                }
-                set_working(app, false);
-                app.refresh();
+            settle_owner(app, move |app, pressed| {
+                let save_failed = first_run_copy().uses.settings_sharing_save_failed;
+                let Some(pressed) = pressed else {
+                    app.settings.sharing.refuse(save_failed);
+                    set_working(app, false);
+                    return;
+                };
+                app.call(method, params.clone(), move |app, result| {
+                    // Applied only to the account it was pressed on.
+                    let current = app.settings.sharing.owner.borrow().is_current(pressed);
+                    if !current || !ask_each_time_confirmed(&result) {
+                        app.settings.sharing.refuse(save_failed);
+                    }
+                    set_working(app, false);
+                    app.refresh();
+                });
             });
         }
-        SharingPath::Automatic => match first_step(asking_folders(&card.projects.borrow())) {
+        SharingPath::Automatic => match first_step(asking_folders(
+            card.projects.borrow().as_deref().unwrap_or_default(),
+        )) {
             FirstStep::KeepAsks(count) => keep_asks_question(app, count),
             FirstStep::Disclose { keep_folder_asks } => disclose_scrub(app, keep_folder_asks),
         },
     }
+}
+
+/// The Mac's `settleAutomaticGrantOwner`: a status that named an account
+/// settles it; otherwise status is read first, and a failed read settles
+/// nothing. `then` hears the generation the write is pressed under.
+fn settle_owner(app: &Rc<App>, then: impl FnOnce(&Rc<App>, Option<u64>) + 'static) {
+    if app.settings.sharing.owner.borrow().named() {
+        let pressed = app.settings.sharing.owner.borrow().begin();
+        then(app, pressed);
+        return;
+    }
+    app.call("status", serde_json::json!({}), move |app, result| {
+        let status = result
+            .ok()
+            .and_then(|v| serde_json::from_value::<crate::model::Status>(v).ok());
+        let mut owner = app.settings.sharing.owner.borrow_mut();
+        match status {
+            Some(status) => owner.observe(status.account_scope.as_deref()),
+            None => owner.forget(),
+        }
+        let pressed = owner.begin();
+        drop(owner);
+        then(app, pressed);
+    });
+}
+
+/// "Use each folder's setting" (`MenuPanelStore.chooseMixed`): only on a
+/// read status with an override in force and nothing else in flight. It
+/// confirms first, in the core's words, when clearing would resume
+/// unattended sending somewhere; without the core's confirmation nothing
+/// is cleared.
+fn choose_clear(app: &Rc<App>) {
+    let card = &app.settings.sharing;
+    let mode = card.override_mode.borrow().clone();
+    if mode.is_none() || !card.status_read.get() || card.working.get() || card.confirming.get() {
+        return;
+    }
+    card.refusal.set_visible(false);
+    let needs = clear_needs_confirmation(card.projects.borrow().as_deref(), mode.as_deref());
+    if !needs {
+        write_clear(app);
+        return;
+    }
+    let copy = trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
+    if copy.mode != trace_commons_contributor::project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE {
+        card.refuse(
+            trace_commons_contributor::project_copy::contribution_override_refusal_line(""),
+        );
+        return;
+    }
+    card.confirming.set(true);
+    card.render();
+    let dialog = adw::MessageDialog::new(Some(&app.window), Some(copy.title), Some(copy.body));
+    dialog.add_responses(&[("cancel", copy.cancel), ("confirm", copy.confirm)]);
+    dialog.set_close_response("cancel");
+    dialog.set_default_response(Some("cancel"));
+    let app = Rc::clone(app);
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        app.settings.sharing.confirming.set(false);
+        app.settings.sharing.render();
+        if response == "confirm" {
+            write_clear(&app);
+        }
+    });
+    dialog.present();
+}
+
+/// Sends `clear_contribution_override`, then re-reads: the card shows what
+/// the daemon says, never a guess. A refusal says the core's line.
+fn write_clear(app: &Rc<App>) {
+    set_working(app, true);
+    app.call(
+        "clear_contribution_override",
+        serde_json::json!({}),
+        |app, result| {
+            if !clear_confirmed(&result) {
+                let label = result.as_ref().err().cloned().unwrap_or_default();
+                app.settings.sharing.refuse(
+                    trace_commons_contributor::project_copy::contribution_override_refusal_line(
+                        &label,
+                    ),
+                );
+            }
+            set_working(app, false);
+            app.refresh();
+        },
+    );
 }
 
 fn set_working(app: &Rc<App>, working: bool) {
@@ -451,6 +734,17 @@ fn grant(app: &Rc<App>, witness_shown: Option<String>, keep_folder_asks: bool) {
             .ok()
             .and_then(|v| serde_json::from_value::<crate::model::Status>(v).ok())
         else {
+            app.settings.sharing.owner.borrow_mut().forget();
+            refused(app);
+            return;
+        };
+        // This fresh read settles whose grant it is (`GrantOwner`).
+        app.settings
+            .sharing
+            .owner
+            .borrow_mut()
+            .observe(status.account_scope.as_deref());
+        let Some(pressed) = app.settings.sharing.owner.borrow().begin() else {
             refused(app);
             return;
         };
@@ -475,9 +769,11 @@ fn grant(app: &Rc<App>, witness_shown: Option<String>, keep_folder_asks: bool) {
             return;
         };
         app.call(method, params, move |app, result| {
-            let granted = result
-                .as_ref()
-                .is_ok_and(|v| crate::first_run::acknowledged(&action, v));
+            // Applied only to the account it was pressed on.
+            let granted = app.settings.sharing.owner.borrow().is_current(pressed)
+                && result
+                    .as_ref()
+                    .is_ok_and(|v| crate::first_run::acknowledged(&action, v));
             if granted {
                 set_working(app, false);
             } else {
@@ -508,8 +804,20 @@ impl UsesCard {
         let words = trace_commons_contributor::shell_words_copy::settings_words();
         let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
         let root = style::card(gtk::Orientation::Vertical, space::S);
+        root.set_visible(cards_shown(None));
+        // The Mac's `GlassEyebrowCard(consentEyebrow, title: consentHeading)`:
+        // the eyebrow is drawn only when the core has one (the owner cut
+        // it), and the heading is the card's title.
+        if !shell.consent_eyebrow.is_empty() {
+            root.append(&style::eyebrow(shell.consent_eyebrow));
+        }
         let head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-        let heading = style::eyebrow(words.consent_heading);
+        let heading = gtk::Label::builder()
+            .label(words.consent_heading)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        heading.add_css_class("tc-card-title");
         heading.set_hexpand(true);
         head.append(&heading);
         let refresh = gtk::Button::with_label(shell.settings_refresh);
@@ -541,10 +849,36 @@ impl UsesCard {
     }
 }
 
-/// `status` answered: the daemon's list and sign-in.
+/// `status` answered: the daemon's list and sign-in, the account whose
+/// grant this is, the override in force, and whether first run is done.
 pub(crate) fn note_status(app: &Rc<App>, status: &crate::model::Status) {
     *app.settings.uses.reported.borrow_mut() =
         Some((status.logged_in, status.consent_scopes.clone()));
+    let card = &app.settings.sharing;
+    card.owner
+        .borrow_mut()
+        .observe(status.account_scope.as_deref());
+    *card.override_mode.borrow_mut() = status
+        .contribution_override
+        .as_ref()
+        .and_then(override_mode);
+    card.partial
+        .set(status.contribution_mode_partial == Some(true));
+    card.status_read.set(true);
+    card.render();
+    let shown = cards_shown(Some(super::onboarding::requires_onboarding(status)));
+    card.root.set_visible(shown);
+    app.settings.uses.root.set_visible(shown);
+    render_uses(app);
+}
+
+/// A later `status` read failed: the Uses rows go back to unavailable, and
+/// the override is no longer known, so nothing is pressable on it.
+pub(crate) fn note_status_failed(app: &Rc<App>) {
+    *app.settings.uses.reported.borrow_mut() = None;
+    let card = &app.settings.sharing;
+    card.status_read.set(false);
+    card.render();
     render_uses(app);
 }
 
@@ -663,6 +997,125 @@ mod tests {
             "name": name, "title": name, "always_on": always_on, "grants_data_use": true,
         }))
         .unwrap()
+    }
+
+    /// The Automatic radio's line: the core's scope line, else the grant
+    /// table's path title when its detail and scrub wording are there
+    /// (`UsesScreenLayout.sharingOptions`), else none.
+    #[test]
+    fn the_automatic_radio_falls_back_to_the_path_title() {
+        let mut grant = trace_commons_contributor::consent_copy::automatic_contribution_copy(None);
+        assert_eq!(automatic_line("Scope.", &grant), Some("Scope."));
+        assert!(!grant.path_automatic_title.is_empty());
+        if grant.patterns_only.is_some() || grant.model_scrubbed.is_some() {
+            assert_eq!(automatic_line("", &grant), Some(grant.path_automatic_title));
+        }
+        grant.path_automatic_detail = "";
+        assert_eq!(automatic_line("", &grant), None);
+    }
+
+    /// The sharing and Uses cards wait for first run (R-43): shown only on
+    /// a status that says setup is done, never on a guess.
+    #[test]
+    fn the_consent_cards_wait_for_first_run() {
+        assert!(cards_shown(Some(false)));
+        assert!(!cards_shown(Some(true)));
+        assert!(!cards_shown(None));
+    }
+
+    /// The Mac's account-generation guard: a write applies only to the
+    /// account that was current when the person pressed. A status with a
+    /// different account scope starts a new generation; one with the same
+    /// scope does not.
+    #[test]
+    fn a_grant_reply_applies_only_to_the_account_it_was_pressed_on() {
+        let mut owner = GrantOwner::default();
+        assert_eq!(owner.begin(), None, "no owner before a status read");
+        owner.observe(Some("acct-a"));
+        let pressed = owner.begin().expect("settled");
+        owner.observe(Some("acct-a"));
+        assert!(owner.is_current(pressed));
+        owner.observe(Some("acct-b"));
+        assert!(!owner.is_current(pressed));
+        // A nil scope (an older core, watch-only) is still an owner, as the
+        // Mac's published nil read is.
+        let mut older = GrantOwner::default();
+        older.observe(None);
+        let pressed = older.begin().expect("a nil scope is settled");
+        assert!(older.is_current(pressed));
+        older.observe(Some("acct-a"));
+        assert!(!older.is_current(pressed));
+        // A failed status read establishes no owner.
+        older.forget();
+        assert_eq!(older.begin(), None);
+    }
+
+    /// While an override is in force the radios show nothing picked: the
+    /// card must not say Ask each time while every folder sends.
+    #[test]
+    fn an_override_leaves_neither_radio_picked() {
+        assert_eq!(
+            shown_path(Some(SharingPath::AskMe), Some("auto_upload")),
+            None
+        );
+        assert_eq!(
+            shown_path(Some(SharingPath::Automatic), Some("ignore")),
+            None
+        );
+        assert_eq!(
+            shown_path(Some(SharingPath::AskMe), None),
+            Some(SharingPath::AskMe)
+        );
+    }
+
+    /// The override read from status: its mode, or none.
+    #[test]
+    fn the_override_is_read_from_status() {
+        assert_eq!(
+            override_mode(&json!({"mode": "auto_upload", "since": "x"})).as_deref(),
+            Some("auto_upload")
+        );
+        assert_eq!(override_mode(&json!(null)), None);
+        assert_eq!(override_mode(&json!({"mode": 3})), None);
+    }
+
+    /// Clearing confirms first unless the override is Automatic, and an
+    /// unread folder list or a folder with no reported own setting needs
+    /// the confirmation (`MenuPanelData.clearNeedsConfirmation`).
+    #[test]
+    fn clearing_the_override_confirms_as_the_mac_does() {
+        let ask = project("notify_only", Some("notify_only"), true, false);
+        let auto = project("auto_upload", Some("auto_upload"), true, false);
+        let unknown = project("notify_only", None, true, false);
+        assert!(!clear_needs_confirmation(None, Some("auto_upload")));
+        assert!(clear_needs_confirmation(None, Some("notify_only")));
+        assert!(!clear_needs_confirmation(
+            Some(&[ask.clone()]),
+            Some("ignore")
+        ));
+        assert!(clear_needs_confirmation(
+            Some(&[ask.clone(), auto]),
+            Some("ignore")
+        ));
+        assert!(clear_needs_confirmation(
+            Some(&[ask, unknown]),
+            Some("notify_only")
+        ));
+    }
+
+    /// The clear reply as the Mac decodes it
+    /// (`ContributionOverrideClearResult { cleared: Bool }`).
+    #[test]
+    fn a_clear_reply_is_checked_as_the_mac_checks_it() {
+        assert!(clear_confirmed(&Ok(
+            json!({"cleared": true, "returned": 2})
+        )));
+        assert!(clear_confirmed(&Ok(
+            json!({"cleared": false, "returned": 0})
+        )));
+        assert!(!clear_confirmed(&Ok(json!({"cleared": "yes"}))));
+        assert!(!clear_confirmed(&Ok(json!({}))));
+        assert!(!clear_confirmed(&Err("x".into())));
     }
 
     #[test]

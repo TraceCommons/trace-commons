@@ -1977,11 +1977,11 @@ pub fn refresh(app: &Rc<App>) {
     super::terminal_choice::refresh(app);
     super::consent_settings::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
-        let projects: Vec<Project> = result
+        let read: Option<Vec<Project>> = result
             .ok()
-            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok())
-            .unwrap_or_default();
-        super::consent_settings::note_projects(app, &projects);
+            .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok());
+        super::consent_settings::note_projects(app, read.as_deref());
+        let projects = read.unwrap_or_default();
         render_projects(app, &projects);
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {

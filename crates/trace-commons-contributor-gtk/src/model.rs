@@ -31,6 +31,13 @@ pub struct Status {
     /// New terms are owed: uploads wait until they are accepted again.
     #[serde(default)]
     pub terms_hold: bool,
+    /// The global override (#1173): `null`, or `{mode, since}` while one
+    /// is in force.
+    #[serde(default)]
+    pub contribution_override: Option<serde_json::Value>,
+    /// True when an `auto_upload` roll-up leaves some folders out (#1208).
+    #[serde(default)]
+    pub contribution_mode_partial: Option<bool>,
     #[serde(default)]
     pub queue_depth: u64,
     /// The daemon's unresolved decision count. Missing on older daemons;

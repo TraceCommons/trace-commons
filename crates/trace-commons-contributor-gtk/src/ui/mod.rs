@@ -810,6 +810,8 @@ impl App {
                 onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
+            } else {
+                consent_settings::note_status_failed(app);
             }
         });
         // Asked alongside the queue, not with `list_projects`, because this
