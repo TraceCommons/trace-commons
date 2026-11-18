@@ -14,8 +14,27 @@ workspace. It draws nothing and holds no words of its own.
   i y)`, `Release(s title)` and a `Version` property. A window is matched by
   the calling process's id and its title, and never a GtkApplicationWindow,
   so a caller can place only its own rail and panel.
-- `placement.js`: where each window goes. No GNOME imports, so it runs
-  under plain node.
+- `placement.js`: where each window goes, and whether a rail that took
+  focus gives it back. No GNOME imports, so `tests/placement.test.js` runs
+  it under Node's own test runner in CI (`package.json` only tells Node
+  the files are ES modules; it has no dependencies and is not packed).
+
+What the extension does to a window it places:
+
+- keeps it above other windows and on every workspace;
+- for the rail, puts it against the primary monitor's right work-area
+  edge, centred (the Mac's `EdgeRailGeometry.frame`); for the panel, puts
+  it near the press, inside an 8-pixel margin;
+- places it again when it changes size, or the monitors or work areas
+  change;
+- never lets the rail keep keyboard focus, as the Mac's non-activating
+  panel never does: a click that focuses it gives focus back to the window
+  that had it;
+- undoes all of this on `Release`, when the caller leaves the bus, and on
+  `disable()`. GNOME Shell disables every extension on the lock screen and
+  enables it again on unlock; the app's client (`src/edge/gnome.rs`)
+  remembers what it last asked for each window and asks again when the
+  name gets a new owner.
 
 The app works without the extension: no rail, and the panel as a plain
 window (`src/edge/capability.rs`). The app never asks anyone to install it.
@@ -34,5 +53,30 @@ run time. No GPL code is copied into this repository.
     # log out and in (Wayland), then
     gnome-extensions enable edge-surfaces@tracecommons.ai
 
-Packaging it for extensions.gnome.org, or alongside the Flatpak, is not
-done here.
+## Packing
+
+    crates/trace-commons-contributor-gtk/scripts/pack-gnome-shell-extension.sh [OUT_DIR]
+
+writes `edge-surfaces@tracecommons.ai.shell-extension.zip` with exactly the
+files the shell loads (a test in `src/edge/gnome.rs` holds the list to the
+imports): the file extensions.gnome.org takes and `gnome-extensions
+install` reads. CI packs it on every run. A Flatpak cannot install an
+extension into the host's shell, and neither the Flatpak nor the installer
+offers it: offering it needs words, and an offer is a notice, so that is
+the owner's call.
+
+## Against a real shell
+
+    crates/trace-commons-contributor-gtk/scripts/gnome-shell-extension-verify.sh
+
+starts a headless GNOME Shell (49 or later) on a private bus, with its own
+runtime, data and settings directories, enables this extension and a
+throwaway one that turns on unsafe mode so `org.gnome.Shell.Eval` can read
+Mutter's answer back, and runs the ignored
+`edge::gnome::live_tests::a_running_shell_holds_the_rail_and_the_panel`
+with the app's real client: the rail closed, open, and taller than the work
+area; the panel near a press; focus given back from the rail; disable
+undoing everything; re-enable and the client's replay; `Release`. Run on
+GNOME Shell 51.1 (Arch). Shell 46 to 50 are listed in `metadata.json` on
+the strength of the APIs used, all present since 45; 46 still needs a run
+on Ubuntu 24.04.

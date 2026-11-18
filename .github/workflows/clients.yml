@@ -450,6 +450,14 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
       - name: Validate the desktop entry and AppStream metainfo
         run: bash crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh
+      # The GNOME Shell extension's placement rules (placement.js) under the
+      # runner's own Node and its built-in test runner: nothing installed.
+      # No runner has GNOME Shell; the round trip against one is
+      # scripts/gnome-shell-extension-verify.sh, run by hand.
+      - name: Test the GNOME Shell extension's placement rules
+        run: node --test "crates/trace-commons-contributor-gtk/gnome-shell-extension/edge-surfaces@tracecommons.ai/tests/placement.test.js"
+      - name: Pack the GNOME Shell extension
+        run: bash crates/trace-commons-contributor-gtk/scripts/pack-gnome-shell-extension.sh "$RUNNER_TEMP"
 
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
