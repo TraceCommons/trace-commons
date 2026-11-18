@@ -21,9 +21,10 @@ pub fn supported() -> bool {
 
 /// The rail: on the overlay layer, over full-screen windows as the Mac's
 /// `.statusBar` panel is, anchored to the right edge alone so the
-/// compositor centres it vertically, reserving no space, and taking the
-/// keyboard only while open. Pinned to `monitor`, the first, as the Mac's
-/// is to its first screen; with none, the compositor picks.
+/// compositor centres it vertically, reserving no space, and taking no
+/// keyboard until clicked open (`set_rail_keyboard`). Pinned to `monitor`,
+/// the first, as the Mac's is to its first screen; with none, the
+/// compositor picks.
 pub fn make_rail(window: &gtk::Window, monitor: Option<&gtk::gdk::Monitor>) {
     window.init_layer_shell();
     window.set_monitor(monitor);
@@ -34,10 +35,14 @@ pub fn make_rail(window: &gtk::Window, monitor: Option<&gtk::gdk::Monitor>) {
     window.set_keyboard_mode(KeyboardMode::None);
 }
 
-/// An open rail may take the keyboard when clicked (a peek's controls are
-/// reachable by keyboard then); a closed one never does.
-pub fn set_rail_keyboard(window: &gtk::Window, open: bool) {
-    window.set_keyboard_mode(if open {
+/// Whether the rail takes the keyboard, as `edge::keyboard` decides: only
+/// after a click inside the open rail (owner, 2026-11-18, "Keyboard only
+/// after a click"), so Escape and Tab reach it; `None` again as it closes.
+/// Whether the compositor gives a surface the keyboard on the same click
+/// that switched it to on-demand is the compositor's to decide, and has not
+/// been checked on KWin or Hyprland.
+pub fn set_rail_keyboard(window: &gtk::Window, takes: bool) {
+    window.set_keyboard_mode(if takes {
         KeyboardMode::OnDemand
     } else {
         KeyboardMode::None

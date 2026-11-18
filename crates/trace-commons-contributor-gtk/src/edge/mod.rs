@@ -11,15 +11,16 @@
 //!
 //! * **wlr-layer-shell** (KDE Plasma, Hyprland, Sway and other wlroots
 //!   compositors): both are layer surfaces, anchored to the edge or near the
-//!   tray, over every window, taking keyboard focus only while open
-//!   ([`layer`], behind the `layer-shell` feature, Linux only).
+//!   tray, over every window. The rail takes the keyboard only after a
+//!   click inside it while open, and gives it back as it closes ([`keyboard`];
+//!   [`layer`], behind the `layer-shell` feature, Linux only).
 //! * **the GNOME Shell extension** in `gnome-shell-extension/`, on Wayland
 //!   or X11: both are ordinary windows the extension places and keeps
 //!   above ([`gnome`]). The open rail keeps the keyboard once clicked, so
 //!   Escape and Tab reach it, and a closed one never does (owner,
 //!   2026-11-18). The Mac's rail never becomes key and has no Escape; the
-//!   open rail taking the keyboard is a deliberate difference here and
-//!   under layer-shell (`layer::set_rail_keyboard`).
+//!   open rail taking the keyboard after a click is a deliberate
+//!   difference here and under layer-shell ([`keyboard`]).
 //! * **neither** (GNOME without the extension, or an X11 session other
 //!   than GNOME's with it): no rail, since a window that cannot be put at
 //!   the edge cannot be one, and the panel is a plain small window. GTK 4 has no X11 positioning or
@@ -32,6 +33,7 @@
 pub mod capability;
 pub mod geometry;
 pub mod gnome;
+pub mod keyboard;
 #[cfg(all(target_os = "linux", feature = "layer-shell"))]
 pub mod layer;
 pub mod opening;

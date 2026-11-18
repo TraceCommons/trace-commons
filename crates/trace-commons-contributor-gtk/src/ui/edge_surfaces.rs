@@ -265,15 +265,24 @@ fn monitors(display: &gtk::gdk::Display) -> Vec<gtk::gdk::Monitor> {
         .collect()
 }
 
-/// The rail's monitor: the first, as the Mac's rail is on
-/// `NSScreen.screens.first`.
-fn rail_monitor(window: &gtk::Window) -> Option<gtk::gdk::Monitor> {
-    monitors(&WidgetExt::display(window)).into_iter().next()
+/// The rail's monitor: under layer-shell the first, as the Mac's rail is on
+/// `NSScreen.screens.first`; under the GNOME extension the one the window
+/// is on, the primary (`geometry::rail_monitor`).
+fn rail_monitor(window: &gtk::Window, mode: RailMode) -> Option<gtk::gdk::Monitor> {
+    let display = WidgetExt::display(window);
+    let under_window = window
+        .surface()
+        .and_then(|surface| display.monitor_at_surface(&surface));
+    geometry::rail_monitor(
+        mode == RailMode::GnomeExtension,
+        under_window,
+        monitors(&display).into_iter().next(),
+    )
 }
 
 /// The rail's monitor's height, for the rail's tallest size.
-fn rail_monitor_height(window: &gtk::Window) -> i32 {
-    rail_monitor(window).map_or(1080, |monitor| monitor_rect(&monitor).height)
+fn rail_monitor_height(window: &gtk::Window, mode: RailMode) -> i32 {
+    rail_monitor(window, mode).map_or(1080, |monitor| monitor_rect(&monitor).height)
 }
 
 /// The panel's monitor: the one under the tray click, else the main
@@ -539,25 +548,34 @@ fn settings_section(peek: Peek) -> Section {
 
 // --- The rail --------------------------------------------------------------
 
-/// The rail window's title: on GNOME with the extension, the one title the
-/// extension places as the rail (`gnome::RAIL_TITLE`, never the main
-/// window's); elsewhere, the rail's name. Its accessible name is the
-/// rail's name either way.
+/// The rail window's title: on GNOME with the extension, the app's name,
+/// which is what Alt-Tab and the overview show for it there (owner,
+/// 2026-11-18, "The app's brand name"); the extension finds it by its
+/// marker (`gnome::surface_window`), never by title. Elsewhere, the rail's
+/// name. Its accessible name is the rail's name either way.
 fn rail_title(mode: RailMode) -> &'static str {
     match mode {
-        RailMode::GnomeExtension => gnome::RAIL_TITLE,
+        RailMode::GnomeExtension => crate::copy::APP_NAME,
         _ => monitor_screens_copy().edge_rail.rail_label,
     }
 }
 
-/// The panel window's title: on GNOME with the extension, the one title the
-/// extension places as the panel; a plain window keeps the app's name in
-/// its title bar.
-fn panel_title(mode: PanelMode) -> &'static str {
-    match mode {
-        PanelMode::GnomeExtension => gnome::PANEL_TITLE,
-        _ => crate::copy::APP_NAME,
-    }
+/// The panel window's title: the app's name, which a plain window shows in
+/// its title bar and GNOME's Alt-Tab shows for the extension's.
+fn panel_title(_mode: PanelMode) -> &'static str {
+    crate::copy::APP_NAME
+}
+
+/// A window for the rail or the panel: on GNOME with the extension, an
+/// application window of the app carrying its role's marker, so the
+/// extension can find it; elsewhere a plain window.
+fn surface_window(app: &App, gnome_role: Option<Role>, title: &str) -> gtk::Window {
+    let window = match (gnome_role, app.window.application()) {
+        (Some(role), Some(application)) => gnome::surface_window(&application, role).upcast(),
+        _ => gtk::Window::new(),
+    };
+    window.set_title(Some(title));
+    window
 }
 
 /// The rail's icons, top to bottom (owner, 2026-10-11): one per tab of the
@@ -618,6 +636,13 @@ struct Rail {
     peek: Cell<Peek>,
     tiles: Vec<(Peek, gtk::Button)>,
     peek_body: gtk::Box,
+    /// Whether a layer-shell rail takes the keyboard (owner, 2026-11-18,
+    /// "Keyboard only after a click").
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "layer-shell")),
+        allow(dead_code)
+    )]
+    keyboard: Rc<crate::edge::keyboard::RailKeyboard>,
     app: std::rc::Weak<App>,
 }
 
@@ -625,11 +650,13 @@ impl Rail {
     fn new(app: &Rc<App>, mode: RailMode) -> Rc<Self> {
         let words = monitor_screens_copy();
         let rail_words = &words.edge_rail;
-        let window = gtk::Window::builder()
-            .title(rail_title(mode))
-            .decorated(false)
-            .resizable(false)
-            .build();
+        let window = surface_window(
+            app,
+            (mode == RailMode::GnomeExtension).then_some(Role::Rail),
+            rail_title(mode),
+        );
+        window.set_decorated(false);
+        window.set_resizable(false);
         window.add_css_class("tc-edge-surface");
         // GTK opens a window at 200 x 200 unless asked; the closed rail is
         // its four-pixel zone from the first frame.
@@ -734,9 +761,10 @@ impl Rail {
 
         #[cfg(all(target_os = "linux", feature = "layer-shell"))]
         if mode == RailMode::LayerShell {
-            crate::edge::layer::make_rail(&window, rail_monitor(&window).as_ref());
+            crate::edge::layer::make_rail(&window, rail_monitor(&window, mode).as_ref());
         }
 
+        let keyboard = Rc::new(crate::edge::keyboard::RailKeyboard::default());
         let opening = {
             let next_turn: crate::edge::opening::NextTurn = Box::new(|step| {
                 glib::idle_add_local_once(step);
@@ -760,21 +788,27 @@ impl Rail {
                 let (window, root, zone) = (window.clone(), root.clone(), zone.clone());
                 let revealer = revealer.clone();
                 let weak_app = Rc::downgrade(app);
+                let keyboard = Rc::clone(&keyboard);
                 Box::new(move |open| {
                     zone.set_visible(!open);
                     // A hidden revealer that slides sideways still asks for
                     // its child's height; the closed rail is the zone alone.
                     revealer.set_visible(open);
-                    let (width, height) = geometry::rail_size(open, rail_monitor_height(&window));
+                    let (width, height) =
+                        geometry::rail_size(open, rail_monitor_height(&window, mode));
                     root.set_size_request(width, height);
                     if !open {
                         // GTK keeps a window at its largest size unless asked.
                         window.set_default_size(1, 1);
                     }
+                    // Opening by hover takes no keyboard; closing gives it
+                    // back, whatever closed it.
+                    let takes = keyboard.placed(open);
                     #[cfg(all(target_os = "linux", feature = "layer-shell"))]
                     if mode == RailMode::LayerShell {
-                        crate::edge::layer::set_rail_keyboard(&window, open);
+                        crate::edge::layer::set_rail_keyboard(&window, takes);
                     }
+                    let _ = takes;
                     // On GNOME the extension keeps the keyboard with the rail
                     // only while it is open, so it is told each time.
                     if mode == RailMode::GnomeExtension
@@ -810,6 +844,7 @@ impl Rail {
             peek: Cell::new(Peek::PrivateAi),
             tiles,
             peek_body,
+            keyboard,
             app: Rc::downgrade(app),
         });
 
@@ -871,6 +906,23 @@ impl Rail {
             });
         }
         rail.window.add_controller(motion);
+        // A press anywhere inside the open rail gives it the keyboard under
+        // layer-shell, before the tile or button under it sees the press.
+        #[cfg(all(target_os = "linux", feature = "layer-shell"))]
+        if mode == RailMode::LayerShell {
+            let press = gtk::GestureClick::new();
+            press.set_button(0);
+            press.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let weak = Rc::downgrade(&rail);
+            press.connect_pressed(move |_, _, _, _| {
+                if let Some(rail) = weak.upgrade()
+                    && rail.keyboard.pressed(rail.opening.is_open())
+                {
+                    crate::edge::layer::set_rail_keyboard(&rail.window, true);
+                }
+            });
+            rail.window.add_controller(press);
+        }
         let keys = gtk::EventControllerKey::new();
         {
             let weak = Rc::downgrade(&rail);
@@ -913,7 +965,8 @@ impl Rail {
         move |open| {
             let root = self.window.child();
             if let Some(root) = root {
-                let (width, height) = geometry::rail_size(open, rail_monitor_height(&self.window));
+                let (width, height) =
+                    geometry::rail_size(open, rail_monitor_height(&self.window, self.mode));
                 root.set_size_request(width, height);
             }
         }
@@ -1132,8 +1185,37 @@ fn folder_row(app: &Rc<App>, folder: &FolderNode) -> gtk::Button {
 fn render_private_ai(app: &Rc<App>, body: &gtk::Box, window: &gtk::Window) {
     let destination =
         trace_commons_contributor::private_inference_copy::private_inference_copy().destination;
-    if !status::private_ai_card(app.private_inference.near_ai_signed_in.get(), destination) {
-        return;
+    let weak = Rc::downgrade(app);
+    let window = window.downgrade();
+    let card = private_ai_card(
+        app.private_inference.near_ai_signed_in.get(),
+        destination,
+        &private_ai_label(app),
+        move |section| {
+            if let Some(window) = window.upgrade() {
+                window.set_visible(false);
+            }
+            if let Some(app) = weak.upgrade() {
+                open_settings(&app, section);
+            }
+        },
+    );
+    if let Some(card) = card {
+        body.append(&card);
+    }
+}
+
+/// The card itself, or `None` while it is not shown: `word` is the state
+/// word beside the name, and `open` is called with the Settings section a
+/// press on it opens.
+fn private_ai_card(
+    signed_in: Option<bool>,
+    destination: &str,
+    word: &impl IsA<gtk::Widget>,
+    open: impl Fn(Section) + 'static,
+) -> Option<gtk::Box> {
+    if !status::private_ai_card(signed_in, destination) {
+        return None;
     }
     let card = gtk::Box::new(gtk::Orientation::Horizontal, glass::space::S4);
     card.add_css_class("tc-glass-card");
@@ -1148,23 +1230,14 @@ fn render_private_ai(app: &Rc<App>, body: &gtk::Box, window: &gtk::Window) {
     name.add_css_class("tc-type-eyebrow");
     card.append(&name);
     let state = gtk::Button::builder()
-        .child(&private_ai_label(app))
+        .child(word)
         .valign(gtk::Align::Center)
         .margin_end(glass::space::CARD_PADDING_HORIZONTAL)
         .build();
     state.add_css_class("flat");
-    let weak = Rc::downgrade(app);
-    let window = window.downgrade();
-    state.connect_clicked(move |_| {
-        if let Some(window) = window.upgrade() {
-            window.set_visible(false);
-        }
-        if let Some(app) = weak.upgrade() {
-            open_settings(&app, Section::PrivateAI);
-        }
-    });
+    state.connect_clicked(move |_| open(Section::PrivateAI));
     card.append(&state);
-    body.append(&card);
+    Some(card)
 }
 
 struct Panel {
@@ -1175,12 +1248,14 @@ struct Panel {
 
 impl Panel {
     fn new(app: &Rc<App>, mode: PanelMode) -> Rc<Self> {
-        let window = gtk::Window::builder()
-            .title(panel_title(mode))
-            .resizable(false)
-            .decorated(mode == PanelMode::PlainWindow)
-            .hide_on_close(true)
-            .build();
+        let window = surface_window(
+            app,
+            (mode == PanelMode::GnomeExtension).then_some(Role::Panel),
+            panel_title(mode),
+        );
+        window.set_resizable(false);
+        window.set_decorated(mode == PanelMode::PlainWindow);
+        window.set_hide_on_close(true);
         window.add_css_class("tc-edge-surface");
         window.update_property(&[gtk::accessible::Property::Label(crate::copy::APP_NAME)]);
         let body = gtk::Box::builder()
@@ -1412,23 +1487,65 @@ mod tests {
         assert!(settings.contains("put_rail_away(app)"));
     }
 
-    /// The popover's Private AI card shows only while signed in, and its
-    /// word opens Private AI's Settings, not the tab (`PrivateAIStatusLabel
-    /// { open(.settings(.privateAI)) }`).
+    /// The popover's Private AI card shows only while signed in and with
+    /// the core's name for it, and its word opens Private AI's Settings, not
+    /// the tab (`PrivateAIStatusLabel { open(.settings(.privateAI)) }`).
     #[test]
-    fn the_popovers_private_ai_card_follows_the_mac() {
-        let render = body_of("render_private_ai");
-        assert!(render.contains("status::private_ai_card("));
-        assert!(render.contains("open_settings(&app, Section::PrivateAI)"));
-        assert!(!render.contains("PRIVATE_INFERENCE_SCREEN"));
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_popovers_private_ai_card_follows_the_mac() {
+        gtk::init().expect("GTK display");
+        let destination = "Private AI";
+        for (signed_in, name) in [
+            (None, destination),
+            (Some(false), destination),
+            (Some(true), ""),
+        ] {
+            let card = private_ai_card(signed_in, name, &gtk::Label::new(Some("On")), |_| {
+                panic!("a card that is not shown was opened")
+            });
+            assert!(card.is_none(), "{signed_in:?} {name:?}");
+        }
+        let opened: Rc<RefCell<Vec<Section>>> = Rc::default();
+        let card = {
+            let opened = Rc::clone(&opened);
+            private_ai_card(
+                Some(true),
+                destination,
+                &gtk::Label::new(Some("On")),
+                move |section| opened.borrow_mut().push(section),
+            )
+        }
+        .expect("shown while signed in");
+        let name = card
+            .first_child()
+            .and_downcast::<gtk::Label>()
+            .expect("the name first");
+        assert_eq!(name.text(), destination);
+        let word = card
+            .last_child()
+            .and_downcast::<gtk::Button>()
+            .expect("the word, a button");
+        assert_eq!(
+            word.child()
+                .and_downcast::<gtk::Label>()
+                .map(|label| label.text().to_string())
+                .as_deref(),
+            Some("On")
+        );
+        word.emit_clicked();
+        assert_eq!(*opened.borrow(), vec![Section::PrivateAI]);
     }
 
-    /// On GNOME the extension places the rail and the panel by their own
-    /// titles; elsewhere they keep their names.
+    /// On GNOME the rail and the panel are titled with the app's name, as
+    /// Alt-Tab shows them (owner, 2026-11-18); elsewhere the rail keeps its
+    /// name and the panel the app's.
     #[test]
-    fn the_windows_carry_the_extensions_titles_only_on_gnome() {
-        assert_eq!(rail_title(RailMode::GnomeExtension), gnome::RAIL_TITLE);
-        assert_eq!(panel_title(PanelMode::GnomeExtension), gnome::PANEL_TITLE);
+    fn the_windows_are_titled_with_the_apps_name_on_gnome() {
+        assert_eq!(rail_title(RailMode::GnomeExtension), crate::copy::APP_NAME);
+        assert_eq!(
+            panel_title(PanelMode::GnomeExtension),
+            crate::copy::APP_NAME
+        );
         assert_eq!(
             rail_title(RailMode::LayerShell),
             monitor_screens_copy().edge_rail.rail_label

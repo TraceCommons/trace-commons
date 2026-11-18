@@ -10,12 +10,16 @@ workspace. It draws nothing and holds no words of its own.
   description are the app's own words; `src/edge/gnome.rs` tests that.
 - `extension.js`: owns `ai.tracecommons.Contributor.EdgeSurfaces` on the
   session bus and exports `ai.tracecommons.Contributor.EdgeSurfaces1` at
-  `/ai/tracecommons/Contributor/EdgeSurfaces`: `Place(s title, s role, i x,
-  i y)`, `Release(s title)` and a `Version` property. A window is matched by
-  the calling process's id and its title, and never a GtkApplicationWindow,
-  so a caller can place only its own rail and panel.
-- `placement.js`: where each window goes, and whether a rail that took
-  focus gives it back. No GNOME imports, so `tests/placement.test.js` runs
+  `/ai/tracecommons/Contributor/EdgeSurfaces`: `Place(s role, i x, i y,
+  b open)`, `Release(s role)` and a `Version` property. A window is matched
+  by the calling connection (its process id and unique bus name, which GTK
+  tells Mutter) and by a hidden marker: a disabled action named for its
+  role, read back from the window's exported actions. Titles play no part;
+  the rail, the panel and the main window are all titled with the app's
+  name (owner, 2026-11-18). The main window carries no marker and is never
+  touched, and a caller can place only its own windows.
+- `placement.js`: where each window goes, which windows may be placed, and
+  where focus goes from the rail. No GNOME imports, so `tests/placement.test.js` runs
   it under Node's own test runner in CI (`package.json` only tells Node
   the files are ES modules; it has no dependencies and is not packed).
 
@@ -24,7 +28,8 @@ What the extension does to a window it places:
 - keeps it above other windows and on every workspace;
 - for the rail, puts it against the primary monitor's right work-area
   edge, centred (the Mac's `EdgeRailGeometry.frame`); for the panel, puts
-  it near the press, inside an 8-pixel margin;
+  it near the press on the monitor that was pressed, inside an 8-pixel
+  margin;
 - places it again when Mutter first shows it (whose own first placement
   would otherwise move it), when it changes size, and when the monitors or
   work areas change;
@@ -77,10 +82,15 @@ runtime, data and settings directories, enables this extension and a
 throwaway one that turns on unsafe mode so `org.gnome.Shell.Eval` can read
 Mutter's answer back, and runs the ignored
 `edge::gnome::live_tests::a_running_shell_holds_the_rail_and_the_panel`
-with the app's real client: the rail closed, open, and taller than the work
-area; the panel near a press; focus given back from the rail; disable
-undoing everything; re-enable and the client's replay; `Release`. Run on
-GNOME Shell 51.1 (Arch), and on GNOME Shell 46.0 (Ubuntu 24.04), where it
-failed until the extension placed a window again once shown. Shell 47 to
-50 are listed in `metadata.json` on the strength of the APIs used, all
-present since 45.
+with the app's real client and windows shaped as the app's: the rail and
+the panel found by their markers, all three titled with the app's name;
+the main window never moved, kept above or stuck, from before the first
+`Place` to the end; the rail closed, open, and taller than the work area;
+the panel near a press; focus given back from the rail; disable undoing
+everything; re-enable and the client's replay; `Release`. Each step polls
+for what it expects up to a deadline instead of sleeping a fixed time.
+The marker version (interface version 3) has been run on GNOME Shell 51.1
+(Arch). The title-matching version before it also ran on GNOME Shell 46.0
+(Ubuntu 24.04), where it failed until the extension placed a window again
+once shown; this version has not been run on 46. Shell 47 to 50 are listed
+in `metadata.json` on the strength of the APIs used, all present since 45.

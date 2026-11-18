@@ -7,11 +7,15 @@
 // them above other windows and shows them on every workspace. It draws
 // nothing and holds no words of its own.
 //
-// One narrow interface on the session bus: Place(title, role, x, y, open)
-// and Release(title). A window is matched by the calling process's id and
-// its title, and each role places only the one title placement.js names
-// for it, which no other window of the app carries: a caller can only ever
-// place its own rail and panel, never its main window or anyone else's.
+// One narrow interface on the session bus: Place(role, x, y, open) and
+// Release(role). A window is matched by the calling connection -- its
+// process id and its own unique bus name, both of which GTK tells Mutter --
+// and by a hidden marker only the rail and the panel carry: a disabled
+// action named for the role, which the extension reads back from the
+// window's exported action group (placement.js, markerFor). Titles play no
+// part: the rail, the panel and the main window are all titled with the
+// app's name (owner, 2026-11-18). The main window carries no marker, so it
+// is never touched, and a caller can only ever place its own windows.
 // Without this extension the app falls back on its own: no rail, a plain
 // panel window.
 //
@@ -28,12 +32,12 @@
 //
 // Written against GNOME Shell 46 (Ubuntu 24.04) and the ES module
 // extension API that 45 introduced, which 47-51 keep. Every Meta call here
-// (get_pid, get_title, get_gtk_window_object_path, get_frame_rect,
-// move_frame, make_above, stick, get_work_area_for_monitor,
-// located_on_workspace, focus, the minimized property, the unmanaging,
-// size-changed and shown signals, and the display's unset_input_focus,
-// get_current_time_roundtrip and window-created) is in mutter's public
-// API in each of those versions.
+// (get_pid, get_gtk_unique_bus_name, get_gtk_window_object_path and their
+// notify signals, get_frame_rect, move_frame, make_above, stick,
+// get_work_area_for_monitor, get_monitor, located_on_workspace, focus, the
+// minimized property, the unmanaging, size-changed and shown signals, and
+// the display's unset_input_focus, get_current_time_roundtrip and
+// window-created) is in mutter's public API in each of those versions.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -43,24 +47,23 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {
-    FOCUS_RESTORE, FOCUS_UNSET, ROLE_RAIL, focusAfter, frameFor, titleFor,
+    FocusKeeper, ROLE_PANEL, ROLE_RAIL, couldBeCallers, frameFor, isMarked, markerFor, monitorFor,
 } from './placement.js';
 
 const BUS_NAME = 'ai.tracecommons.Contributor.EdgeSurfaces';
 const OBJECT_PATH = '/ai/tracecommons/Contributor/EdgeSurfaces';
-const VERSION = 2;
+const VERSION = 3;
 
 const IFACE = `<node>
   <interface name="ai.tracecommons.Contributor.EdgeSurfaces1">
     <method name="Place">
-      <arg type="s" direction="in" name="title"/>
       <arg type="s" direction="in" name="role"/>
       <arg type="i" direction="in" name="x"/>
       <arg type="i" direction="in" name="y"/>
       <arg type="b" direction="in" name="open"/>
     </method>
     <method name="Release">
-      <arg type="s" direction="in" name="title"/>
+      <arg type="s" direction="in" name="role"/>
     </method>
     <property name="Version" type="u" access="read"/>
   </interface>
@@ -84,44 +87,53 @@ function callerPid(sender) {
 }
 
 /**
- * Whether `window` is the caller's window of that title. The title is one
- * only the rail or the panel carries (PlaceAsync refuses any other). As a
- * second guard, a GtkApplicationWindow -- the app's main window is one, and
- * GTK names it with an object path where it can -- is never matched; the
- * two windows placed here are plain GtkWindows.
+ * The actions a window exports, read from the caller's own connection at the
+ * window's object path; null when it cannot be read.
  */
-function matches(window, pid, title) {
-    return window.get_pid() === pid && window.get_title() === title &&
-        !window.get_gtk_window_object_path();
+function exportedActions(sender, path) {
+    return new Promise(resolve => {
+        Gio.DBus.session.call(
+            sender, path, 'org.gtk.Actions', 'List', null,
+            new GLib.VariantType('(as)'), Gio.DBusCallFlags.NONE, 2000, null,
+            (connection, result) => {
+                try {
+                    resolve(connection.call_finish(result).deepUnpack()[0]);
+                } catch {
+                    resolve(null);
+                }
+            });
+    });
 }
 
 export default class EdgeSurfacesExtension extends Extension {
     enable() {
-        // key: pid + '\n' + title ->
-        //   {pid, sender, title, role, at, open, window, signals, made: {above, stuck}}
+        // key: sender + '\n' + role ->
+        //   {pid, sender, role, at, open, window, signals, made: {above, stuck}}
         this._placements = new Map();
         // sender -> bus watch id, so a caller's placements end with it.
         this._watches = new Map();
-        this._lastFocus = null;
-        this._lastFocusId = 0;
-        // The idle callbacks window-created queued, removed on disable.
-        this._idles = new Set();
+        // window -> signal ids, for a caller's window whose path or bus
+        // name GTK has not told Mutter yet.
+        this._waiting = new Map();
+        this._focus = new FocusKeeper(global.display, {
+            isRail: w => this._placementOf(w)?.role === ROLE_RAIL,
+            isOpen: w => Boolean(this._placementOf(w)?.open),
+            onActiveWorkspace: w => w.located_on_workspace(
+                global.workspace_manager.get_active_workspace()),
+            isMinimized: w => w.minimized,
+        });
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._nameId = Gio.bus_own_name_on_connection(
             Gio.DBus.session, BUS_NAME, Gio.BusNameOwnerFlags.NONE, null, null);
-        this._created = global.display.connect('window-created', (_display, window) => {
-            // The title may arrive a moment after the window does.
-            const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                this._idles?.delete(id);
-                this._adopt(window);
-                return GLib.SOURCE_REMOVE;
-            });
-            this._idles.add(id);
-        });
+        // A new window has no path or bus name yet: GTK sends them after
+        // Mutter has made the window, so a caller's window is watched for
+        // them.
+        this._created = global.display.connect('window-created',
+            (_display, window) => this._consider(window));
         this._displayIds = [
             global.display.connect('workareas-changed', () => this._placeAll()),
-            global.display.connect('notify::focus-window', () => this._onFocus()),
+            global.display.connect('notify::focus-window', () => this._focus.onFocus()),
         ];
         this._monitorsId = Main.layoutManager.connect('monitors-changed', () => this._placeAll());
     }
@@ -129,21 +141,22 @@ export default class EdgeSurfacesExtension extends Extension {
     disable() {
         global.display.disconnect(this._created);
         this._created = 0;
-        for (const id of this._idles)
-            GLib.source_remove(id);
-        this._idles = null;
         for (const id of this._displayIds)
             global.display.disconnect(id);
         this._displayIds = [];
         Main.layoutManager.disconnect(this._monitorsId);
         this._monitorsId = 0;
+        for (const window of [...this._waiting.keys()])
+            this._stopWaiting(window);
+        this._waiting = null;
         for (const placement of this._placements.values())
             this._forget(placement);
         this._placements = null;
         for (const id of this._watches.values())
             Gio.bus_unwatch_name(id);
         this._watches = null;
-        this._setLastFocus(null);
+        this._focus.forget();
+        this._focus = null;
         Gio.bus_unown_name(this._nameId);
         this._nameId = 0;
         this._dbus.unexport();
@@ -154,8 +167,8 @@ export default class EdgeSurfacesExtension extends Extension {
         return VERSION;
     }
 
-    PlaceAsync([title, role, x, y, open], invocation) {
-        if (titleFor(role) === null || titleFor(role) !== title) {
+    PlaceAsync([role, x, y, open], invocation) {
+        if (markerFor(role) === null) {
             invocation.return_dbus_error('org.freedesktop.DBus.Error.InvalidArgs', 'role');
             return;
         }
@@ -165,55 +178,104 @@ export default class EdgeSurfacesExtension extends Extension {
                 invocation.return_dbus_error('org.freedesktop.DBus.Error.Failed', 'disabled');
                 return;
             }
-            const key = `${pid}\n${title}`;
+            const key = `${sender}\n${role}`;
             const at = x < 0 || y < 0 ? global.get_pointer().slice(0, 2) : [x, y];
             const old = this._placements.get(key);
-            if (old && old.window && old.sender === sender) {
+            if (old) {
                 // The rail opening or closing, or the panel asked for again:
                 // held as it is, only placed anew.
                 old.at = at;
                 old.open = open;
                 old.place?.();
-                if (global.display.focus_window === old.window)
-                    this._onFocus();
+                if (old.window && global.display.focus_window === old.window)
+                    this._focus.onFocus();
+                if (!old.window) {
+                    for (const actor of global.get_window_actors())
+                        this._consider(actor.meta_window);
+                }
                 invocation.return_value(null);
                 return;
             }
-            if (old)
-                this._forget(old);
             const placement = {
-                pid, sender, title, role, at, open, window: null, signals: [],
+                pid, sender, role, at, open, window: null, signals: [],
                 made: {above: false, stuck: false},
             };
             this._placements.set(key, placement);
             this._watch(sender);
-            const window = global.get_window_actors()
-                .map(actor => actor.meta_window)
-                .find(candidate => matches(candidate, pid, title));
-            if (window)
-                this._attach(placement, window);
+            for (const actor of global.get_window_actors())
+                this._consider(actor.meta_window);
             invocation.return_value(null);
         }).catch(() => invocation.return_dbus_error('org.freedesktop.DBus.Error.Failed', 'caller'));
     }
 
-    ReleaseAsync([title], invocation) {
-        callerPid(invocation.get_sender()).then(pid => {
-            const key = `${pid}\n${title}`;
-            const placement = this._placements?.get(key);
-            if (placement) {
-                this._forget(placement);
-                this._placements.delete(key);
-            }
-            invocation.return_value(null);
-        }).catch(() => invocation.return_dbus_error('org.freedesktop.DBus.Error.Failed', 'caller'));
+    ReleaseAsync([role], invocation) {
+        const key = `${invocation.get_sender()}\n${role}`;
+        const placement = this._placements?.get(key);
+        if (placement) {
+            this._forget(placement);
+            this._placements.delete(key);
+        }
+        invocation.return_value(null);
     }
 
-    _adopt(window) {
-        if (!this._placements)
+    /** The placements still waiting for a window, from `window`'s process. */
+    _waitingFor(window) {
+        const pid = window.get_pid();
+        return [...this._placements?.values() ?? []]
+            .filter(placement => !placement.window && placement.pid === pid);
+    }
+
+    /**
+     * Attaches `window` to a waiting placement of its caller if it carries
+     * that role's marker; a caller's window GTK has not described yet is
+     * watched until it is.
+     */
+    _consider(window) {
+        if (!this._placements || this._placementOf(window))
             return;
-        const placement = this._placements.get(`${window.get_pid()}\n${window.get_title()}`);
-        if (placement && !placement.window && matches(window, placement.pid, placement.title))
-            this._attach(placement, window);
+        const waiting = this._waitingFor(window);
+        if (waiting.length === 0)
+            return;
+        if (!window.get_gtk_window_object_path() || !window.get_gtk_unique_bus_name()) {
+            this._waitFor(window);
+            return;
+        }
+        this._stopWaiting(window);
+        for (const placement of waiting) {
+            if (!couldBeCallers(window, placement.pid, placement.sender))
+                continue;
+            const path = window.get_gtk_window_object_path();
+            exportedActions(placement.sender, path).then(names => {
+                if (!this._placements || placement.window ||
+                    this._placements.get(`${placement.sender}\n${placement.role}`) !== placement ||
+                    this._placementOf(window) ||
+                    !couldBeCallers(window, placement.pid, placement.sender) ||
+                    window.get_gtk_window_object_path() !== path ||
+                    !isMarked(placement.role, names))
+                    return;
+                this._attach(placement, window);
+            });
+        }
+    }
+
+    _waitFor(window) {
+        if (this._waiting.has(window))
+            return;
+        const again = () => this._consider(window);
+        this._waiting.set(window, [
+            window.connect('notify::gtk-window-object-path', again),
+            window.connect('notify::gtk-unique-bus-name', again),
+            window.connect('unmanaging', () => this._stopWaiting(window)),
+        ]);
+    }
+
+    _stopWaiting(window) {
+        const ids = this._waiting?.get(window);
+        if (!ids)
+            return;
+        for (const id of ids)
+            window.disconnect(id);
+        this._waiting.delete(window);
     }
 
     _attach(placement, window) {
@@ -227,9 +289,12 @@ export default class EdgeSurfacesExtension extends Extension {
             placement.made.stuck = true;
         }
         const place = () => {
-            const monitor = placement.role === ROLE_RAIL
-                ? global.display.get_primary_monitor()
-                : window.get_monitor();
+            let monitor = global.display.get_primary_monitor();
+            if (placement.role === ROLE_PANEL) {
+                // The monitor that was clicked, else the window's own.
+                const clicked = monitorFor(Main.layoutManager.monitors, placement.at);
+                monitor = clicked >= 0 ? clicked : window.get_monitor();
+            }
             const area = window.get_work_area_for_monitor(monitor);
             const rect = window.get_frame_rect();
             const frame = frameFor(placement.role, area, rect, placement.at);
@@ -254,10 +319,10 @@ export default class EdgeSurfacesExtension extends Extension {
         place();
         // A window placed now may have taken focus before it was known
         // to be the rail, and been noted as the window to go back to.
-        if (this._lastFocus === window)
-            this._setLastFocus(null);
+        if (this._focus.last === window)
+            this._focus.note(null);
         if (global.display.focus_window === window)
-            this._onFocus();
+            this._focus.onFocus();
     }
 
     /** Stops placing a window and undoes what placing it did. */
@@ -288,44 +353,6 @@ export default class EdgeSurfacesExtension extends Extension {
                 return placement;
         }
         return null;
-    }
-
-    _onFocus() {
-        const focused = global.display.focus_window;
-        const shell = {
-            isRail: w => this._placementOf(w)?.role === ROLE_RAIL,
-            isOpen: w => Boolean(this._placementOf(w)?.open),
-            // The window noted last is forgotten as it starts to go.
-            isManaged: w => w === this._lastFocus,
-            onActiveWorkspace: w => w.located_on_workspace(
-                global.workspace_manager.get_active_workspace()),
-            isMinimized: w => w.minimized,
-        };
-        const decision = focusAfter(focused, this._lastFocus, shell);
-        const now = global.display.get_current_time_roundtrip();
-        if (decision.action === FOCUS_RESTORE) {
-            // focus, not activate: it neither raises, nor switches
-            // workspace, nor unminimises.
-            decision.window.focus(now);
-            return;
-        }
-        if (decision.action === FOCUS_UNSET) {
-            global.display.unset_input_focus(now);
-            return;
-        }
-        if (focused && !shell.isRail(focused))
-            this._setLastFocus(focused);
-    }
-
-    _setLastFocus(window) {
-        if (this._lastFocus && this._lastFocusId)
-            this._lastFocus.disconnect(this._lastFocusId);
-        this._lastFocus = window;
-        // unmanaging, not unmanaged: focus moves on while a window is
-        // going, before unmanaged is sent.
-        this._lastFocusId = window
-            ? window.connect('unmanaging', () => this._setLastFocus(null))
-            : 0;
     }
 
     /** A caller's placements end when it leaves the bus. */

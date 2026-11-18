@@ -157,6 +157,18 @@ pub fn monitor_for_click(monitors: &[Rect], click: Option<(i32, i32)>) -> Option
     })
 }
 
+/// The monitor the rail is sized against. Under the GNOME extension it is
+/// the one the rail's window is on: the extension holds it to the primary
+/// monitor, which GDK 4 cannot name. Elsewhere, and before the window is on
+/// any, the first, which is where layer-shell pins it.
+pub fn rail_monitor<M>(extension: bool, under_window: Option<M>, first: Option<M>) -> Option<M> {
+    if extension {
+        under_window.or(first)
+    } else {
+        first
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +338,15 @@ mod tests {
         assert_eq!(monitor_for_click(&monitors, None), None);
         assert_eq!(monitor_for_click(&monitors, Some((0, 0))), None);
         assert_eq!(monitor_for_click(&monitors, Some((9000, 10))), None);
+    }
+
+    #[test]
+    fn under_the_extension_the_rail_is_sized_on_the_monitor_it_was_put_on() {
+        // GDK lists the monitors 0 then 1; the primary, where the extension
+        // puts the rail, is 1.
+        assert_eq!(rail_monitor(true, Some(1), Some(0)), Some(1));
+        assert_eq!(rail_monitor(true, None, Some(0)), Some(0));
+        // Layer-shell pins it to the first.
+        assert_eq!(rail_monitor(false, Some(1), Some(0)), Some(0));
     }
 }
