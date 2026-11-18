@@ -3384,8 +3384,8 @@ mod tests {
     }
 
     /// The pixels of a tool's initials on a node drawn at `zoom`, as
-    /// offsets from the node's centre: those in `colour`, apart from the
-    /// disc (drawn in an ink no letter uses).
+    /// offsets from the node's centre: what is drawn with the disc's ink
+    /// made clear, so only the letters' coverage counts, not their colour.
     fn initials_mask(
         kind: NodeKind,
         label: &str,
@@ -3393,10 +3393,10 @@ mod tests {
         colour: impl Fn(&Palette) -> gtk::gdk::RGBA,
     ) -> Vec<(i32, i32)> {
         let palette = Palette {
-            ink: gtk::gdk::RGBA::new(1.0, 0.0, 0.0, 1.0),
+            ink: gtk::gdk::RGBA::new(1.0, 0.0, 0.0, 0.0),
             ..Palette::fixed()
         };
-        let colour = colour(&palette);
+        let _ = colour(&palette);
         let space = Size::new(200.0, 200.0);
         let fit = MapGeometry::new(space, zoom, None, space);
         let node =
@@ -3419,17 +3419,12 @@ mod tests {
         surface.flush();
         let stride = surface.stride() as usize;
         let data = surface.data().unwrap();
+        // The disc's ink is clear here, so whatever is drawn is the
+        // letters: their coverage, whatever their colour.
         let mut mask = Vec::new();
         for y in 0..200usize {
             for x in 0..200usize {
-                let i = y * stride + x * 4;
-                let a = f64::from(data[i + 3]) / 255.0;
-                if a < 0.6 {
-                    continue;
-                }
-                let px = [data[i + 2], data[i + 1], data[i]].map(|v| f64::from(v) / a / 255.0);
-                let target = [colour.red(), colour.green(), colour.blue()].map(f64::from);
-                if (0..3).all(|k| (px[k] - target[k]).abs() < 0.2) {
+                if data[y * stride + x * 4 + 3] >= 128 {
                     mask.push((
                         x as i32 - centre.x.round() as i32,
                         y as i32 - centre.y.round() as i32,
