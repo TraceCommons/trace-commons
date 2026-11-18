@@ -12,9 +12,14 @@ pub mod credential;
 mod css_contract;
 mod first_run;
 mod first_run_screens;
+mod first_run_stage;
 mod first_run_terms;
 mod first_run_tools;
 pub mod funding;
+// The Mac's path data reader, as the Monitor port carries it (map-art).
+#[allow(dead_code)]
+#[path = "monitor/glyph.rs"]
+mod glyph;
 pub mod history;
 pub mod home;
 pub mod insights;

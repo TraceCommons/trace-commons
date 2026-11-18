@@ -137,3 +137,315 @@ pub const INSIGHTS_DARK_CSS: &str = r#"
 .tc-insights .heading { font-size: 1em; font-weight: 600; }
 .tc-insights .caption { font-size: 0.846154em; font-weight: 400; }
 "#;
+
+/// The painted Monitor window's tiers, type roles and inks, light scheme.
+pub const GLASS_LIGHT_CSS: &str = r#"
+@define-color tc_glass_pane #f2f3f6;
+@define-color tc_glass_card #fafafb;
+@define-color tc_glass_card_quiet #f8f9fa;
+@define-color tc_glass_well #dbdde3;
+@define-color tc_glass_control #fbfbfc;
+@define-color tc_glass_control_selected #0558b6;
+@define-color tc_glass_popover #f6f6f9;
+@define-color tc_glass_menu #f6f6f8;
+@define-color tc_glass_node_card #fdfdfe;
+@define-color tc_glass_scene #e6eaf1;
+@define-color tc_glass_ink #1d1d1f;
+@define-color tc_glass_ink_secondary #3c3c43;
+@define-color tc_glass_selected_ink #ffffff;
+@define-color tc_glass_toolbar_glyph #1d1d1f;
+@define-color tc_glass_toolbar_glyph_hidden #8a8a90;
+@define-color tc_glass_toolbar_expanded #0558b6;
+@define-color tc_glass_control_hover #dbdee4;
+@define-color tc_glass_row_hover #e8e9ec;
+@define-color tc_glass_tab_ember #056bdc;
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+/// The painted Monitor window's tiers, type roles and inks, dark scheme.
+pub const GLASS_DARK_CSS: &str = r#"
+@define-color tc_glass_pane #0d1124;
+@define-color tc_glass_card #0d1124;
+@define-color tc_glass_card_quiet #0d1124;
+@define-color tc_glass_well #090c19;
+@define-color tc_glass_control #090c19;
+@define-color tc_glass_control_selected #7ebcff;
+@define-color tc_glass_popover #0b0f22;
+@define-color tc_glass_menu #0b0f22;
+@define-color tc_glass_node_card #0b0f22;
+@define-color tc_glass_scene #070a1a;
+@define-color tc_glass_ink #f2f3f8;
+@define-color tc_glass_ink_secondary #d7d8df;
+@define-color tc_glass_selected_ink #071a2e;
+@define-color tc_glass_toolbar_glyph #e6e6ec;
+@define-color tc_glass_toolbar_glyph_hidden #83838c;
+@define-color tc_glass_toolbar_expanded #7ebcff;
+@define-color tc_glass_control_hover #353842;
+@define-color tc_glass_row_hover #191d2f;
+@define-color tc_glass_tab_ember #0091fd;
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+
+/// Radii, spacing and sizes of the glass system, as the flat theme draws them.
+pub mod glass {
+    pub mod radius {
+        pub const PANE: i32 = 20;
+        pub const CARD: i32 = 16;
+        pub const CARD_QUIET: i32 = 14;
+        pub const CONTROL: i32 = 11;
+        pub const TILE: i32 = 6;
+        pub const CHECKBOX: i32 = 5;
+        pub const PILL: i32 = 999;
+        pub const MENU_PANEL: i32 = 16;
+        pub const MENU_STATE_PILL: i32 = 22;
+    }
+    pub mod space {
+        pub const S1: i32 = 2;
+        pub const S2: i32 = 4;
+        pub const S3: i32 = 6;
+        pub const S4: i32 = 8;
+        pub const S5: i32 = 10;
+        pub const S6: i32 = 12;
+        pub const S7: i32 = 14;
+        pub const S8: i32 = 16;
+        pub const S9: i32 = 20;
+        pub const S10: i32 = 24;
+        pub const PANE_GAP: i32 = 10;
+        pub const WINDOW_PADDING: i32 = 0;
+        pub const WINDOW_CONTROLS_INSET: i32 = 30;
+        pub const WINDOW_CONTROLS_WIDTH: i32 = 78;
+        pub const PANE_PADDING: i32 = 12;
+        pub const INSPECTOR_PADDING_HORIZONTAL: i32 = 16;
+        pub const INSPECTOR_PADDING_VERTICAL: i32 = 18;
+        pub const TREE_INSET: i32 = 8;
+        pub const MAP_OVERLAY_INSET: i32 = 14;
+        pub const CARD_PADDING_VERTICAL: i32 = 12;
+        pub const CARD_PADDING_HORIZONTAL: i32 = 14;
+        pub const CARD_GAP: i32 = 10;
+        pub const INLINE_GAP: i32 = 6;
+        pub const MODAL_INSET_TOP: i32 = 52;
+        pub const MODAL_INSET: i32 = 28;
+        pub const EDGE_RAIL_INSET: i32 = 12;
+        pub const EDGE_RAIL_GAP: i32 = 16;
+    }
+}
+
+/// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.
+pub mod glyph {
+    pub const VIEW_MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M1,2h12M1,6h12M1,10h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
+    pub const GRAPH: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM0.5,7.5h13M4,7.5v4M8,7.5v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const MAP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M0.5,2.5l4-2,5,2,4-2v9l-4,2-5-2-4,2zM4.5,0.5v9M9.5,2.5v9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const INSPECTOR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM9,0.5v11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const GEAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15"><path d="M19.47,10.14L21.9,10.59L21.9,13.41L19.47,13.86L18.6,15.97L20,18L18,20L15.97,18.6L13.86,19.47L13.41,21.9L10.59,21.9L10.14,19.47L8.03,18.6L6,20L4,18L5.4,15.97L4.53,13.86L2.1,13.41L2.1,10.59L4.53,10.14L5.4,8.03L4,6L6,4L8.03,5.4L10.14,4.53L10.59,2.1L13.41,2.1L13.86,4.53L15.97,5.4L18,4L20,6L18.6,8.03ZM15.2,12A3.2,3.2,0,1,1,8.8,12A3.2,3.2,0,1,1,15.2,12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>"#;
+    pub const CHEVRON_DOWN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="10" height="10"><path d="M4,6.5l4,4,4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13"><path d="M3,7a2,2,0,0,1,2-2h4l2,2h8a2,2,0,0,1,2,2v9a2,2,0,0,1-2,2H5a2,2,0,0,1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const KEBAB: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 14" width="4" height="14"><path d="M3.6,2A1.6,1.6,0,1,1,0.4,2A1.6,1.6,0,1,1,3.6,2ZM3.6,7A1.6,1.6,0,1,1,0.4,7A1.6,1.6,0,1,1,3.6,7ZM3.6,12A1.6,1.6,0,1,1,0.4,12A1.6,1.6,0,1,1,3.6,12Z" fill="currentColor"/></svg>"#;
+    /// Every glyph by its name in `GlassGlyph`.
+    pub const ALL: &[(&str, &str)] = &[
+        ("viewMenu", VIEW_MENU),
+        ("graph", GRAPH),
+        ("map", MAP),
+        ("inspector", INSPECTOR),
+        ("gear", GEAR),
+        ("chevronDown", CHEVRON_DOWN),
+        ("folder", FOLDER),
+        ("kebab", KEBAB),
+    ];
+}
+
+/// The tool logos and the NEAR AI mark, exported from `GlassLogoPaths.swift`
+/// and `GlassBrandMark.swift`: SVG path data in each one's own viewBox
+/// (x, y, width, height).
+pub mod logo {
+    pub const CLAUDE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const CLAUDE: &[&str] = &[
+        "M4.709,15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0,11.784l.055-.352.48-.321.686.06,1.52.103,2.278.158,1.652.097,2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686,1.908,1.476,2.491,1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97,2.97,0,01-.104-.729L6.283.134,6.696,0l.996.134.42.364.62,1.414,1.002,2.229,1.555,3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286,1.851-.559,2.903-.364,1.942h.212l.243-.242.985-1.306,1.652-2.064.73-.82.85-.904.547-.431h1.033l.76,1.129-.34,1.166-1.064,1.347-.881,1.142-1.264,1.7-.79,1.36.073.11.188-.02,2.856-.606,1.543-.28,1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061,1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093,1.068,2.006,1.81,2.509,2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649,2.345,3.521.122,1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674,7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434,1.967-2.18,2.945-1.726,1.845-.414.164-.717-.37.067-.662.401-.589,2.388-3.036,1.44-1.882.93-1.086-.006-.158h-.055L4.132,18.56l-1.13.146-.487-.456.061-.746.231-.243,1.908-1.312-.006.006z",
+    ];
+    pub const CODEX_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const CODEX: &[&str] = &[
+        "M8.086.457a6.105,6.105,0,013.046-.415c1.333.153,2.521.72,3.564,1.7a.117.117,0,00.107.029c1.408-.346,2.762-.224,4.061.366l.063.03.154.076c1.357.703,2.33,1.77,2.918,3.198.278.679.418,1.388.421,2.126a5.655,5.655,0,01-.18,1.631.167.167,0,00.04.155,5.982,5.982,0,011.578,2.891c.385,1.901-.01,3.615-1.183,5.14l-.182.22a6.063,6.063,0,01-2.934,1.851.162.162,0,00-.108.102c-.255.736-.511,1.364-.987,1.992-1.199,1.582-2.962,2.462-4.948,2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145,0,00-.14-.032c-.518.167-1.04.191-1.604.185a5.924,5.924,0,01-2.595-.622,6.058,6.058,0,01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74,7.74,0,01-.495-1.283,6.11,6.11,0,01-.017-3.064.166.166,0,00.008-.074.115.115,0,00-.037-.064,5.958,5.958,0,01-1.38-2.202,5.196,5.196,0,01-.333-1.589,6.915,6.915,0,01.188-2.132c.45-1.484,1.309-2.648,2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129,0,00.087-.087A6.016,6.016,0,015.635,2.31C6.315,1.464,7.132.846,8.086.457zm-.804,7.85a.848.848,0,00-1.473.842l1.694,2.965-1.688,2.848a.849.849,0,001.46.864l1.94-3.272a.849.849,0,00.007-.854l-1.94-3.393zm5.446,6.24a.849.849,0,000,1.695h4.848a.849.849,0,000-1.696h-4.848z",
+    ];
+    pub const ANTIGRAVITY_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const ANTIGRAVITY: &[&str] = &[
+        "M20.616,10.835a14.147,14.147,0,01-4.45-3.001,14.111,14.111,0,01-3.678-6.452.503.503,0,00-.975,0,14.134,14.134,0,01-3.679,6.452,14.155,14.155,0,01-4.45,3.001c-.65.28-1.318.505-2.002.678a.502.502,0,000,.975c.684.172,1.35.397,2.002.677a14.147,14.147,0,014.45,3.001,14.112,14.112,0,013.679,6.453.502.502,0,00.975,0c.172-.685.397-1.351.677-2.003a14.145,14.145,0,013.001-4.45,14.113,14.113,0,016.453-3.678.503.503,0,000-.975,13.245,13.245,0,01-2.003-.678z",
+    ];
+    pub const OPEN_CODE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const OPEN_CODE: &[&str] = &["M16,6H8v12h8V6zm4,16H4V2h16v20z"];
+    pub const THEIA_VIEW_BOX: [f64; 4] = [0.0, 0.0, 64.0, 64.0];
+    pub const THEIA: &[&str] = &[
+        "M49.047,17.058A14.95,14.95,0,0,1,64,32.011c0,8.256-6.692,14.953-14.953,14.953h-32.96c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h7.68c1.173,0,2.128-.955,2.128-2.134s-.955-2.134-2.128-2.134h-1.7c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h5.122c1.185-.003,2.104-.97,2.134-2.134,0-1.18-.955-2.134-2.134-2.134H9.255c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h13.227c1.185-.003,2.104-.97,2.133-2.134,0-1.18-.955-2.134-2.134-2.134H19.5c-1.18,0-2.134-.955-2.134-2.134s.955-2.2,2.134-2.2zm-2.4,4.982c-4.6,0-8.306,3.72-8.306,8.306v3.323a8.3,8.3,0,0,0,8.306,8.306c4.586,0,8.306-3.714,8.306-8.306v-3.323a8.31,8.31,0,0,0-8.306-8.306zm2.837,7.853a2.01,2.01,0,0,1,2.005,2.005v.257a2.01,2.01,0,0,1-2.005,2.005H43.26a2.01,2.01,0,0,1-2.005-2.005V31.9a2.01,2.01,0,0,1,2.005-2.005zm-40.1,12.803a2,2,0,0,1,2.005,2.005v.257c0,1.106-.894,2.005-2.005,2.005h-7.38A2.01,2.01,0,0,1,0,44.959v-.257c0-1.112.9-2.005,2.005-2.005z",
+        "M12.802,17.092c1.106,0,2,.9,2,2.005v.263a2,2,0,0,1-2,2h-8.24c-1.106,0-2.005-.894-2.005-2v-.263a2.01,2.01,0,0,1,2.005-2.005z",
+        "M15.36,34.162a2.01,2.01,0,0,1,2.005,2.005v.257a2.01,2.01,0,0,1-2.005,2.005h-4.524a2.01,2.01,0,0,1-2.005-2.005v-.257a2.01,2.01,0,0,1,2.005-2.005z",
+    ];
+    pub const BRAND_MARK_VIEW_BOX: [f64; 4] = [82.96, 82.13, 234.08, 231.72];
+    pub const BRAND_MARK: &str = "M292.106,82.1357C283.445,82.1357,275.379,86.5848,270.847,93.9047L221.912,165.811C220.318,168.188,220.971,171.382,223.353,172.96C225.292,174.234,227.866,174.082,229.633,172.58L277.799,131.227C278.605,130.504,279.834,130.581,280.545,131.379C280.872,131.74,281.044,132.216,281.044,132.691V262.169C281.044,263.233,280.18,264.089,279.085,264.089C278.509,264.089,277.952,263.842,277.587,263.404L132.014,90.8817C127.271,85.3489,120.318,82.1548,112.982,82.1357H107.893C94.1229,82.1357,82.9648,93.1822,82.9648,106.814V289.167C82.9648,302.799,94.1229,313.846,107.893,313.846C116.554,313.846,124.62,309.397,129.153,302.077L178.087,230.17C179.681,227.793,179.028,224.599,176.646,223.021C174.707,221.747,172.133,221.899,170.366,223.401L122.2,264.754C121.394,265.477,120.165,265.401,119.454,264.602C119.128,264.241,118.955,263.766,118.955,263.29V133.775C118.955,132.71,119.819,131.854,120.914,131.854C121.49,131.854,122.047,132.102,122.412,132.539L267.966,305.1C272.709,310.632,279.662,313.827,286.998,313.846H292.087C305.857,313.846,317.034,302.799,317.034,289.167V106.833C317.034,93.2012,305.876,82.1548,292.106,82.1548V82.1357Z";
+}
+
+/// The Traces map's colours, as the Mac's flat theme draws them: a hex
+/// colour and its alpha.
+pub mod map {
+    pub type Rgba = (&'static str, f64);
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const MAP_ORB_SHARED: Rgba = ("#056bdc", 1.0);
+        pub const MAP_ORB_KEPT: Rgba = ("#cf5320", 1.0);
+        pub const PURPLE_SOFT: Rgba = ("#056bdc", 1.0);
+        pub const BLUE: Rgba = ("#2f6bc4", 1.0);
+        pub const STATUS_OFF: Rgba = ("#8a8a90", 1.0);
+        pub const STATUS_ON: Rgba = ("#1a8f4c", 1.0);
+        pub const STATUS_ON_TEXT: Rgba = ("#0b4628", 1.0);
+        pub const STATUS_ASK: Rgba = ("#a8690f", 1.0);
+        pub const STATUS_OUTSIDE: Rgba = ("#d0342c", 1.0);
+        pub const MAP_NODE_OFF: Rgba = ("#c4c9d2", 1.0);
+        pub const MAP_CREDENTIAL_ON: Rgba = ("#27a06b", 1.0);
+        pub const MAP_RULE_AUTO_FILL: Rgba = ("#d7f1e2", 1.0);
+        pub const MAP_RULE_ASK_FILL: Rgba = ("#f6ead0", 1.0);
+        pub const MAP_RULE_IGNORE_FILL: Rgba = ("#e4e4e7", 1.0);
+        pub const MAP_RULE_UNSET_FILL: Rgba = ("#ededf0", 1.0);
+        pub const PANE_OPAQUE: Rgba = ("#f2f3f6", 1.0);
+        pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const MAP_FIELD_INNER: Rgba = ("#ffffff", 0.1);
+        pub const MAP_FIELD_OUTER: Rgba = ("#ffffff", 0.22);
+        pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
+        pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const PURPLE_TEXT: Rgba = ("#023e83", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
+        pub const TOOL_THEIA: Rgba = ("#6152e0", 1.0);
+        pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);
+        pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const MAP_ORB_SHARED: Rgba = ("#0091fd", 1.0);
+        pub const MAP_ORB_KEPT: Rgba = ("#d95926", 1.0);
+        pub const PURPLE_SOFT: Rgba = ("#0091fd", 1.0);
+        pub const BLUE: Rgba = ("#3a7bd5", 1.0);
+        pub const STATUS_OFF: Rgba = ("#a9a9b0", 1.0);
+        pub const STATUS_ON: Rgba = ("#30d158", 1.0);
+        pub const STATUS_ON_TEXT: Rgba = ("#acedbc", 1.0);
+        pub const STATUS_ASK: Rgba = ("#ffc75c", 1.0);
+        pub const STATUS_OUTSIDE: Rgba = ("#ff6b6b", 1.0);
+        pub const MAP_NODE_OFF: Rgba = ("#5d5d63", 1.0);
+        pub const MAP_CREDENTIAL_ON: Rgba = ("#2c7a5b", 1.0);
+        pub const MAP_RULE_AUTO_FILL: Rgba = ("#12321f", 1.0);
+        pub const MAP_RULE_ASK_FILL: Rgba = ("#2b2412", 1.0);
+        pub const MAP_RULE_IGNORE_FILL: Rgba = ("#3a3a3e", 1.0);
+        pub const MAP_RULE_UNSET_FILL: Rgba = ("#2a2a2c", 1.0);
+        pub const PANE_OPAQUE: Rgba = ("#0d1124", 1.0);
+        pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const MAP_FIELD_INNER: Rgba = ("#070a1a", 0.15);
+        pub const MAP_FIELD_OUTER: Rgba = ("#070a1a", 0.32);
+        pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
+        pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const PURPLE_TEXT: Rgba = ("#c6e1ff", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
+        pub const TOOL_THEIA: Rgba = ("#9d93ff", 1.0);
+        pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);
+        pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);
+    }
+}
+
+/// The first run's stage colours, as the Mac's flat theme draws them: a
+/// hex colour and its alpha; and the motion curve's control points.
+pub mod first_run {
+    pub type Rgba = (&'static str, f64);
+    /// The token ease's cubic Bezier control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#e6eaf1", 1.0);
+        pub const SCENE_WARM: Rgba = ("#f6f7fa", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0070c6", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#9fdcff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#ffffff", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#1d2a4a", 0.14);
+        pub const FIRST_RUN_RULE: Rgba = ("#000000", 0.16);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
+        pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#070a1a", 1.0);
+        pub const SCENE_WARM: Rgba = ("#11152b", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#49c2ff", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#e2f6ff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#171c33", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#1a2039", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#1b2140", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#02030a", 0.5);
+        pub const FIRST_RUN_RULE: Rgba = ("#ffffff", 0.18);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
+        pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
+    }
+}
