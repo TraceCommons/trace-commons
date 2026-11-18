@@ -14,6 +14,7 @@
 //! the widgets and their drawing.
 
 pub mod demand;
+pub mod glass_paint;
 pub mod glyph;
 pub mod graph_footer;
 pub mod graph_model;

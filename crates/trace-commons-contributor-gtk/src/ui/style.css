@@ -533,13 +533,19 @@ window.tc-glass-window {
   color: @tc_glass_ink;
 }
 
+/* Out of focus a card dims with its pane, as every generated tier does:
+   the Mac's material path fills inactiveDim under its translucent cards. */
+window.tc-glass-window:backdrop .tc-glass-pane .tc-card {
+  background-color: @tc_glass_card_inactive;
+}
+
 /* The tab strip (`GlassRuleTabs`): the tabs share the strip's width
    equally, over a 1pt rule that runs the strip's full width. The title is
-   body type, medium, semibold when selected; the selected tab carries the
-   tabEmber line on the rule (fading to nothing at either end) and the
-   tabEmberHalo glow behind its title, brightest at the rule. The tabs
-   carry no side padding and their titles ellipsize, as the Mac's centred
-   titles do, so four equal tabs never set the main pane's minimum width. */
+   body type, medium, semibold when selected. The selected tab's ember
+   line and halo are drawn over the whole strip (`glass_paint::paint_ember`),
+   since the line reaches into the neighbouring tabs. The tabs carry no
+   side padding and their titles ellipsize, as the Mac's centred titles do,
+   so four equal tabs never set the main pane's minimum width. */
 .tc-glass-tabs {
   background: none;
   padding: 0 12px;
@@ -547,12 +553,15 @@ window.tc-glass-window {
   border-bottom: 1px solid @tc_glass_rule;
 }
 
+window.tc-glass-window:backdrop .tc-glass-tabs {
+  border-bottom-color: @tc_glass_rule_inactive;
+}
+
 .tc-glass-tabs .tc-tab {
   font-size: 1em;
   font-weight: 500;
   min-height: 38px;
   padding: 0;
-  margin-bottom: -1px;
   border-radius: 0;
   background-color: transparent;
   background-image: none;
@@ -571,48 +580,13 @@ window.tc-glass-window {
 
 .tc-glass-tabs .tc-tab:checked {
   background-color: transparent;
-  background-image: linear-gradient(to right, transparent, @tc_glass_tab_ember 30%, @tc_glass_tab_ember 70%, transparent),
-    radial-gradient(ellipse 55% 100% at 50% 100%, @tc_glass_tab_ember_halo, transparent);
-  background-size: 100% 2px, 100% 100%;
-  background-position: left bottom, center bottom;
-  background-repeat: no-repeat, no-repeat;
+  background-image: none;
   box-shadow: none;
   color: @tc_glass_ink;
 }
 
 .tc-glass-tabs .tc-tab:checked label {
   font-weight: 600;
-}
-
-/* The Private AI tab's dot: a circle in its state's status colour, as the
-   Mac's tab dot. The state's sentence is its tip and accessible name. */
-.tc-tab-dot {
-  min-width: 7px;
-  min-height: 7px;
-  padding: 0;
-  margin-left: 2px;
-  border-radius: 999px;
-  background-color: @tc_muted;
-}
-
-.tc-tab-dot.tc-clear {
-  background-color: @tc_status_on;
-}
-
-.tc-tab-dot.tc-attention {
-  background-color: @tc_status_ask;
-}
-
-.tc-tab-dot.tc-refused {
-  background-color: @tc_status_outside;
-}
-
-.tc-tab-dot.tc-held {
-  background-color: @tc_blue;
-}
-
-.tc-tab-dot.tc-neutral {
-  background-color: @tc_muted;
 }
 
 /* The toolbar's capsule holds the Graph, Map and Inspector toggles
@@ -659,6 +633,10 @@ window.tc-glass-window {
   color: @tc_glass_toolbar_glyph;
 }
 
+window.tc-glass-window:backdrop .tc-toolbar-toggle.tc-toolbar-gear {
+  background-color: @tc_glass_control_inactive;
+}
+
 .tc-toolbar-toggle.tc-toolbar-gear:hover {
   background-color: @tc_glass_control_hover;
 }
@@ -667,10 +645,13 @@ window.tc-glass-window {
    `GlassLegendCell`: a capsule well `size.controlLarge` high, the word in
    the secondary ink and the figure semibold and tabular in the primary.
    `GlassPillIconButton`: a round glass control 30 wide and `size.control`
-   high, its glyph in the primary ink. */
+   high, its glyph in the primary ink; the focus pill's glyph alone shows
+   its state (`focusInk`), never its fill. The range sits in an ink(0.07)
+   capsule. The legend cell's left padding is 2 less than the Mac's 10:
+   its dot's box is 2 wider than the dot, to hold the halo. */
 .tc-graph-legend-cell {
   min-height: 28px;
-  padding: 0 10px;
+  padding: 0 10px 0 8px;
   border-radius: 999px;
 }
 
@@ -702,8 +683,31 @@ window.tc-glass-window {
 }
 
 .tc-graph-pill:checked {
-  background-color: @tc_glass_control_selected;
-  color: @tc_glass_selected_ink;
+  background-color: @tc_glass_control;
+}
+
+window.tc-glass-window:backdrop .tc-graph-pill:checked {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-graph-pill.tc-focus-on {
+  color: @tc_glass_graph_focus_on;
+}
+
+.tc-graph-pill.tc-focus-idle {
+  color: @tc_glass_graph_focus_idle;
+}
+
+.tc-graph-pill.tc-focus-off {
+  color: @tc_glass_graph_focus_off;
+}
+
+.tc-graph-range {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background-color: @tc_glass_range_fill;
+  color: @tc_glass_ink;
 }
 
 .tc-graph-pill:disabled {

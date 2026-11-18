@@ -12,9 +12,9 @@
 //! are round glass pills (`GlassPillIconButton`).
 //!
 //! Deliberate platform differences: the bars swap in place on a period
-//! step (the Mac slides them), and the pills carry text glyphs and the
-//! focus button a themed icon, because the Mac draws SF Symbols there,
-//! which are Apple's and are not exported.
+//! step (the Mac slides them), and where the Mac draws SF Symbols, which
+//! are Apple's, the pills draw stock symbolic icons (`pill_symbol`, and
+//! `find-location` for the binoculars).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -23,6 +23,7 @@ use chrono::{DateTime, Utc};
 use gtk::prelude::*;
 use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
+use super::glass_paint;
 use super::graph_model::{self, Bucket, Window};
 
 /// The Mac's fixed footer height, rule included.
@@ -67,8 +68,82 @@ pub struct GraphFooter {
 /// (`GlassPillIconButton`, 30 by `size.control`).
 const PILL_CLASS: &str = "tc-graph-pill";
 
+/// The range label's capsule: `ink(0.07)`, primary ink, 8 each side,
+/// `size.control` high.
+const RANGE_CLASS: &str = "tc-graph-range";
+
+/// The focus button's icon. The Mac draws the SF Symbol `binoculars`, which
+/// is Apple's; GTK draws the stock symbolic icon for finding a place on a
+/// map, which Adwaita and Breeze both carry.
+const FOCUS_ICON: &str = "find-location-symbolic";
+
+/// The focus button's glyph ink (`TracesGraphFooter.focusInk`): only the
+/// glyph changes, never the pill's fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusInk {
+    /// `graphFocusOn`: the map is focused on the tool.
+    On,
+    /// `graphFocusIdle`: a tool can be focused.
+    Idle,
+    /// `graphFocusOff`: nothing to focus on.
+    Off,
+}
+
+impl FocusInk {
+    pub fn of(focused: bool, can_focus: bool) -> Self {
+        if !can_focus {
+            Self::Off
+        } else if focused {
+            Self::On
+        } else {
+            Self::Idle
+        }
+    }
+
+    pub fn css(self) -> &'static str {
+        match self {
+            Self::On => "tc-focus-on",
+            Self::Idle => "tc-focus-idle",
+            Self::Off => "tc-focus-off",
+        }
+    }
+}
+
+/// The stock symbolic icon drawn for a known text glyph, as the Mac's
+/// `GlassPillIconButton.symbol(for:)` draws an SF Symbol for it
+/// (`Controls.swift:424-432`): the glyph stays the core's word for the
+/// control, and an unknown glyph is drawn as text. Each name is in the
+/// Adwaita icon theme (GNOME 46 on) and in Breeze.
+pub fn pill_symbol(glyph: &str) -> Option<&'static str> {
+    match glyph {
+        // chevron.left
+        "\u{2039}" | "<" => Some("go-previous-symbolic"),
+        // chevron.right
+        "\u{203a}" | ">" => Some("go-next-symbolic"),
+        // minus
+        "\u{2212}" | "-" => Some("list-remove-symbolic"),
+        // plus
+        "+" => Some("list-add-symbolic"),
+        // chevron.right.to.line
+        "\u{203a}|" | ">|" => Some("go-last-symbolic"),
+        _ => None,
+    }
+}
+
+/// The pills' glyph size (`glassGlyph(11, weight: .semibold)`).
+const PILL_GLYPH: i32 = 11;
+
+fn pill_icon(name: &str) -> gtk::Image {
+    let icon = gtk::Image::from_icon_name(name);
+    icon.set_pixel_size(PILL_GLYPH);
+    icon
+}
+
 fn pill(glyph: &str, name: &str) -> gtk::Button {
-    let button = gtk::Button::with_label(glyph);
+    let button = match pill_symbol(glyph) {
+        Some(icon) => gtk::Button::builder().child(&pill_icon(icon)).build(),
+        None => gtk::Button::with_label(glyph),
+    };
     button.add_css_class("tc-glass-control");
     button.add_css_class(PILL_CLASS);
     button.set_tooltip_text(Some(name));
@@ -96,39 +171,31 @@ impl Series {
     }
 }
 
-fn rgba(hex: &str) -> gtk::gdk::RGBA {
-    gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK)
-}
-
 fn dark_scheme() -> bool {
     adw::StyleManager::default().is_dark()
 }
 
-/// `GlassStatusDot` at `size.dotLarge` with its halo: the series' ink, and
-/// a ring of it at a quarter.
+/// `GlassStatusDot` at `size.dotLarge` (8) with its halo, in a box just
+/// big enough for the halo, so the word sits 7 past the dot as on the Mac.
 fn legend_dot(series: Series) -> gtk::DrawingArea {
     let size = 8.0;
     let area = gtk::DrawingArea::builder()
-        .content_width(14)
-        .content_height(14)
+        .content_width(12)
+        .content_height(12)
         .valign(gtk::Align::Center)
         .build();
     area.set_accessible_role(gtk::AccessibleRole::Presentation);
     area.set_draw_func(move |_, context, width, height| {
-        let ink = rgba(series.ink(dark_scheme()));
-        let (x, y) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
-        let (r, g, b) = (
-            f64::from(ink.red()),
-            f64::from(ink.green()),
-            f64::from(ink.blue()),
+        let dark = dark_scheme();
+        glass_paint::paint_status_dot(
+            context,
+            f64::from(width) / 2.0,
+            f64::from(height) / 2.0,
+            size,
+            series.ink(dark),
+            true,
+            dark,
         );
-        context.set_source_rgba(r, g, b, 0.25);
-        context.set_line_width(3.0);
-        context.arc(x, y, size / 2.0 + 1.5, 0.0, std::f64::consts::TAU);
-        let _ = context.stroke();
-        context.set_source_rgba(r, g, b, 1.0);
-        context.arc(x, y, size / 2.0, 0.0, std::f64::consts::TAU);
-        let _ = context.fill();
     });
     area
 }
@@ -140,7 +207,8 @@ fn legend_cell(word: &str, series: Series) -> (gtk::Box, gtk::Label) {
     cell.add_css_class("tc-glass-well");
     cell.add_css_class("tc-graph-legend-cell");
     cell.set_hexpand(true);
-    let lead = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    // 7 from the dot's 8 to the word: the halo's box is 2 wider each side.
+    let lead = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     lead.append(&legend_dot(series));
     let name = gtk::Label::builder()
         .label(word)
@@ -162,6 +230,27 @@ pub const DOT_ROWS: usize = 7;
 
 /// The space between the matrix and the column's top and foot.
 const MATRIX_END: f64 = 6.0;
+
+/// Each column's matrix is a fixed 96 high (`GlassBarGraph`'s canvas,
+/// `.frame(height: 96)`), the columns top-aligned, the label under it.
+pub const MATRIX_HEIGHT: f64 = 96.0;
+
+/// Between the matrix and its label (`space.s2`).
+const LABEL_GAP: f64 = 4.0;
+
+/// The label row's least height (`.frame(minHeight: 12)`).
+const LABEL_MIN: f64 = 12.0;
+
+/// A bar label's size: caption (11), or micro (10) set regular in a thin
+/// graph (`GlassTokens.swift:722,724`).
+pub fn label_size(thin: bool) -> f64 {
+    if thin { 10.0 } else { 11.0 }
+}
+
+/// The label's line: caption's 16, micro's 13.
+fn label_line(thin: bool) -> f64 {
+    if thin { 13.0 } else { 16.0 }
+}
 
 /// The tapered matrix (`GlassBarGraph.dotAlphas`): each half of a column is
 /// `rows` dots, lit from the axis out in proportion to the value. Lit dots
@@ -226,20 +315,24 @@ impl GraphFooter {
         let bars = gtk::DrawingArea::builder()
             .hexpand(true)
             .vexpand(true)
+            .content_height((MATRIX_HEIGHT + LABEL_GAP + LABEL_MIN) as i32)
             .build();
         bars.set_accessible_role(gtk::AccessibleRole::Img);
 
         let previous = pill("\u{2039}", words.previous);
         let focus = gtk::ToggleButton::new();
-        focus.set_icon_name("zoom-fit-best-symbolic");
+        focus.set_child(Some(&pill_icon(FOCUS_ICON)));
         focus.add_css_class("tc-glass-control");
         focus.add_css_class(PILL_CLASS);
+        focus.add_css_class(FocusInk::Off.css());
         let zoom_out = pill(graph.zoom_out_glyph, graph.zoom_out);
         let range = gtk::Label::builder()
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
         range.add_css_class("tc-type-label");
+        // The range sits in its own capsule (`MonitorShell.swift:249-257`).
+        range.add_css_class(RANGE_CLASS);
         let zoom_in = pill(graph.zoom_in_glyph, graph.zoom_in);
         let next = pill("\u{203a}", words.next);
         let jump = pill(graph.jump_to_now_glyph, graph.jump_to_now);
@@ -304,11 +397,9 @@ impl GraphFooter {
         });
 
         let state = footer.state.clone();
-        footer
-            .bars
-            .set_draw_func(move |area, context, width, height| {
-                draw_bars(area, context, width, height, &state);
-            });
+        footer.bars.set_draw_func(move |_, context, width, _| {
+            draw_bars(context, width, &state);
+        });
 
         let motion = gtk::EventControllerMotion::new();
         let weak = Rc::downgrade(&footer);
@@ -439,87 +530,93 @@ impl GraphFooter {
         if self.focus.is_active() != focused {
             self.focus.set_active(focused);
         }
+        let ink = FocusInk::of(self.state.focused.get(), data.tool.is_some());
+        for each in [FocusInk::On, FocusInk::Idle, FocusInk::Off] {
+            if each != ink {
+                self.focus.remove_css_class(each.css());
+            }
+        }
+        self.focus.add_css_class(ink.css());
         self.bars.queue_draw();
     }
 }
 
-/// Shared rises from the axis and kept hangs from it, as tapered dot
-/// columns over a 1pt axis rule (`GlassBarGraph.drawMatrix`), against a
-/// floor of five so a single trace is not drawn as a full column
-/// (`scaleFloor`). Every period draws its column, lit or not; the hovered
-/// one takes a solid wash.
-fn draw_bars(
-    area: &gtk::DrawingArea,
-    context: &gtk::cairo::Context,
-    width: i32,
-    height: i32,
-    state: &State,
-) {
+/// Draws the graph for the footer's state.
+fn draw_bars(context: &gtk::cairo::Context, width: i32, state: &State) {
     let buckets = state.buckets.borrow();
-    if buckets.is_empty() || width <= 0 || height <= 0 {
+    paint_bars(
+        context,
+        f64::from(width),
+        &buckets,
+        state.hovered.get(),
+        dark_scheme(),
+    );
+}
+
+/// `GlassBarGraph`: shared rises from the axis and kept hangs from it, as
+/// tapered dot columns, against a floor of five so a single trace is not
+/// drawn as a full column (`scaleFloor`). Each column is its own 96-high
+/// canvas, as on the Mac: its unlit dots in `ink(0.09)` (0.2 under the
+/// pointer), the hovered one on an `ink(0.07)` wash, and its own stretch of
+/// the 1pt `ink(0.14)` axis rule, so the rule breaks at the gaps. Labels
+/// sit under the columns in `statusOff`, primary under the pointer.
+pub fn paint_bars(
+    context: &gtk::cairo::Context,
+    width: f64,
+    buckets: &[Bucket],
+    hovered: Option<usize>,
+    dark: bool,
+) {
+    use crate::ui::style::brand_tokens::glass::data;
+    if buckets.is_empty() || width <= 0.0 {
         return;
     }
-    #[allow(deprecated)]
-    let ink = area.style_context().color();
-    let (red, green, blue) = (
-        f64::from(ink.red()),
-        f64::from(ink.green()),
-        f64::from(ink.blue()),
-    );
-    let dark = dark_scheme();
-    let shared_ink = rgba(Series::Shared.ink(dark));
-    let kept_ink = rgba(Series::Kept.ink(dark));
-    let label_ink = rgba(if dark {
-        crate::ui::style::brand_tokens::glass::data::LABEL_DARK
-    } else {
-        crate::ui::style::brand_tokens::glass::data::LABEL_LIGHT
-    });
+    let shared_ink = Series::Shared.ink(dark);
+    let kept_ink = Series::Kept.ink(dark);
     let thin = is_thin(buckets.len());
     let (_, inset) = gaps(thin);
     let (across_dots, radius) = if thin { (1, 1.5) } else { (3, 1.9) };
-    // The label row under the columns (caption, micro when thin), with
-    // `space.s2` above it.
-    let labels = 16.0;
-    let plot = (f64::from(height) - labels).max(2.0);
-    let half = plot / 2.0;
-    let pitch = ((half - 1.0 - MATRIX_END) / DOT_ROWS as f64).max(0.5);
+    let half = MATRIX_HEIGHT / 2.0;
+    // Rows keep one pitch in every column, whatever its width.
+    let pitch = (half - 1.0 - MATRIX_END) / DOT_ROWS as f64;
     let maximum = buckets
         .iter()
         .map(|b| b.shared.max(b.kept))
         .max()
         .unwrap_or(0)
         .max(5) as f64;
-    let dot = |x: f64, y: f64, alpha: f64, lit: &gtk::gdk::RGBA, unlit: f64| {
+    let set = |(red, green, blue, alpha): (f64, f64, f64, f64)| {
+        context.set_source_rgba(red, green, blue, alpha);
+    };
+    let dot = |x: f64, y: f64, alpha: f64, lit: &str, unlit: (f64, f64, f64, f64)| {
         if alpha > 0.0 {
-            context.set_source_rgba(
-                f64::from(lit.red()),
-                f64::from(lit.green()),
-                f64::from(lit.blue()),
-                alpha,
-            );
+            let (red, green, blue) = glass_paint::channels(lit);
+            context.set_source_rgba(red, green, blue, alpha);
         } else {
-            context.set_source_rgba(red, green, blue, unlit);
+            set(unlit);
         }
+        context.new_path();
         context.arc(x, y, radius, 0.0, std::f64::consts::TAU);
         let _ = context.fill();
     };
     for (index, (bucket, (left, column))) in buckets
         .iter()
-        .zip(columns(f64::from(width), buckets.len()))
+        .zip(columns(width, buckets.len()))
         .enumerate()
     {
-        let hovered = state.hovered.get() == Some(index);
-        if hovered {
+        let is_hovered = hovered == Some(index);
+        if is_hovered {
             let corner = if thin {
                 3.0
             } else {
                 f64::from(crate::ui::style::brand_tokens::glass::radius::CONTROL)
             };
-            rounded_rect(context, left, 0.0, column, plot, corner);
-            context.set_source_rgba(red, green, blue, 0.07);
+            context.new_path();
+            rounded_rect(context, left, 0.0, column, MATRIX_HEIGHT, corner);
+            set(glass_paint::ink(dark, 0.07));
             let _ = context.fill();
         }
-        let unlit = if hovered { 0.2 } else { 0.09 };
+        let unlit = glass_paint::ink(dark, if is_hovered { 0.2 } else { 0.09 });
         let across = pitch.min((column - inset * 2.0) / across_dots as f64);
         let first = left + (column - across * across_dots as f64) / 2.0 + across / 2.0;
         let up = dot_alphas(bucket.shared as f64, maximum, DOT_ROWS);
@@ -528,22 +625,26 @@ fn draw_bars(
             let x = first + dot_column as f64 * across;
             for row in 0..DOT_ROWS {
                 let offset = pitch * (row as f64 + 0.5) + 0.5;
-                dot(x, half - offset, up[row], &shared_ink, unlit);
-                dot(x, half + offset, down[row], &kept_ink, unlit);
+                dot(x, half - offset, up[row], shared_ink, unlit);
+                dot(x, half + offset, down[row], kept_ink, unlit);
             }
         }
+        // This column's stretch of the axis rule.
+        context.new_path();
+        context.rectangle(left, half - 0.5, column, 1.0);
+        set(glass_paint::ink(dark, 0.14));
+        let _ = context.fill();
         if !bucket.label.is_empty() {
-            if hovered {
-                context.set_source_rgba(red, green, blue, 1.0);
-            } else {
-                context.set_source_rgba(
-                    f64::from(label_ink.red()),
-                    f64::from(label_ink.green()),
-                    f64::from(label_ink.blue()),
-                    1.0,
-                );
-            }
-            context.set_font_size(if thin { 9.0 } else { 10.0 });
+            let ink = match (is_hovered, dark) {
+                (true, false) => data::TEXT_PRIMARY_LIGHT,
+                (true, true) => data::TEXT_PRIMARY_DARK,
+                (false, false) => data::LABEL_LIGHT,
+                (false, true) => data::LABEL_DARK,
+            };
+            let (red, green, blue) = glass_paint::channels(ink);
+            context.set_source_rgb(red, green, blue);
+            let size = label_size(thin);
+            context.set_font_size(size);
             if let Ok(extents) = context.text_extents(&bucket.label) {
                 // Centred under the column; in a thin graph the first and
                 // last hug the outer edge, so neither is cut.
@@ -555,14 +656,14 @@ fn draw_bars(
                 } else {
                     left + column / 2.0 - extents.x_advance() / 2.0
                 };
-                context.move_to(x, f64::from(height) - 3.0);
+                // On the label line's baseline, the line under the gap.
+                let line = label_line(thin);
+                let baseline = MATRIX_HEIGHT + LABEL_GAP + (line - size) / 2.0 + size * 0.8;
+                context.move_to(x, baseline);
                 let _ = context.show_text(&bucket.label);
             }
         }
     }
-    context.set_source_rgba(red, green, blue, 0.14);
-    context.rectangle(0.0, half - 0.5, f64::from(width), 1.0);
-    let _ = context.fill();
 }
 
 fn rounded_rect(context: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -651,26 +752,295 @@ mod tests {
         assert!(columns(0.0, 7).is_empty());
     }
 
-    /// The legend is two equal capsule wells and the controls round glass
-    /// pills, each styled in the sheet.
+    fn empty_week() -> Vec<Bucket> {
+        ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            .iter()
+            .map(|label| Bucket {
+                start: chrono::NaiveDate::from_ymd_opt(2026, 11, 9)
+                    .and_then(|day| day.and_hms_opt(0, 0, 0))
+                    .expect("a date"),
+                shared: 0,
+                kept: 0,
+                label: (*label).to_string(),
+            })
+            .collect()
+    }
+
+    /// `GlassBarGraph` drawn over the pane's ground: seven 30-wide columns
+    /// 6 apart (246 across). Unlit dots are `ink(0.09)`, black in light,
+    /// not the text colour; the hovered column is washed in `ink(0.07)`
+    /// with its dots at 0.2; and each column's canvas draws its own stretch
+    /// of the `ink(0.14)` axis, so the gaps between columns have none
+    /// (`Indicators.swift:405-420,505-528`).
     #[test]
-    fn the_legend_and_pills_are_glass() {
-        let css = include_str!("../style.css");
-        let rule = |selector: &str| {
-            css.split(&format!("\n{selector} {{"))
-                .nth(1)
-                .and_then(|rest| rest.split('}').next())
-                .unwrap_or_else(|| panic!("no {selector} rule"))
-                .to_string()
+    fn the_bars_are_drawn_in_the_macs_overlay_ink_column_by_column() {
+        use super::glass_paint::paint_tests::{near, over, paint};
+        let ground = (0xf2, 0xf3, 0xf6);
+        let black = (0, 0, 0);
+        let buckets = empty_week();
+        let pixel = paint(246, 120, ground, |context| {
+            paint_bars(context, 246.0, &buckets, Some(3), false);
+        });
+        // Column 0's middle dot nearest the axis: (15, 44.6), radius 1.9,
+        // at the pitch (48 - 1 - 6) / 7.
+        assert!(
+            near(pixel(14, 44), over(black, 0.09, ground), 1),
+            "unlit {:?}",
+            pixel(14, 44)
+        );
+        // The same dot in the hovered column (3, from 108): 0.2 on the wash.
+        let washed = over(black, 0.07, ground);
+        let washed = (washed.0 as u8, washed.1 as u8, washed.2 as u8);
+        assert!(
+            near(pixel(122, 44), over(black, 0.2, washed), 2),
+            "hovered {:?}",
+            pixel(122, 44)
+        );
+        // The wash itself, away from the dots, and none on other columns.
+        assert!(
+            near(pixel(123, 2), over(black, 0.07, ground), 1),
+            "wash {:?}",
+            pixel(123, 2)
+        );
+        assert!(near(pixel(15, 2), (0xf2, 0xf3, 0xf6), 1));
+        // The axis: a 1pt rule at 47.5..48.5, half on row 47, inside a
+        // column; nothing in the 6pt gap between columns 0 and 1.
+        assert!(
+            near(pixel(2, 47), over(black, 0.07, ground), 1),
+            "axis {:?}",
+            pixel(2, 47)
+        );
+        assert!(
+            near(pixel(32, 47), (0xf2, 0xf3, 0xf6), 1),
+            "gap {:?}",
+            pixel(32, 47)
+        );
+        // Dark: white overlay ink.
+        let ground = (0x17, 0x1b, 0x2d);
+        let pixel = paint(246, 120, ground, |context| {
+            paint_bars(context, 246.0, &buckets, None, true);
+        });
+        assert!(
+            near(pixel(14, 44), over((255, 255, 255), 0.09, ground), 1),
+            "dark unlit {:?}",
+            pixel(14, 44)
+        );
+        assert!(near(pixel(32, 47), (0x17, 0x1b, 0x2d), 1));
+    }
+
+    /// Bar labels: caption (11) under a full graph, micro set regular (10)
+    /// under a thin one (`Indicators.swift:427`, `GlassTokens.swift:722,724`),
+    /// under a 96-high matrix.
+    #[test]
+    fn the_bar_labels_are_caption_or_micro() {
+        assert_eq!(label_size(false), 11.0);
+        assert_eq!(label_size(true), 10.0);
+        assert_eq!(MATRIX_HEIGHT, 96.0);
+    }
+
+    /// The pills draw the symbol the Mac draws for each of the core's text
+    /// glyphs (`GlassPillIconButton.symbol(for:)`): chevron.left,
+    /// chevron.right, minus, plus and chevron.right.to.line, as stock
+    /// icons of the same shape; an unknown glyph stays text.
+    #[test]
+    fn the_pills_draw_the_macs_symbols_as_stock_icons() {
+        let graph = monitor_screens_copy().traces_graph;
+        assert_eq!(pill_symbol("\u{2039}"), Some("go-previous-symbolic"));
+        assert_eq!(pill_symbol("\u{203a}"), Some("go-next-symbolic"));
+        assert_eq!(
+            pill_symbol(graph.zoom_out_glyph),
+            Some("list-remove-symbolic")
+        );
+        assert_eq!(pill_symbol(graph.zoom_in_glyph), Some("list-add-symbolic"));
+        assert_eq!(
+            pill_symbol(graph.jump_to_now_glyph),
+            Some("go-last-symbolic")
+        );
+        assert_eq!(pill_symbol("\u{00bb}"), None);
+    }
+
+    /// The focus button's glyph (`TracesGraphFooter.focusInk`): off with
+    /// nothing to focus, on while focused, idle otherwise.
+    #[test]
+    fn the_focus_glyph_takes_the_macs_three_inks() {
+        assert_eq!(FocusInk::of(true, false), FocusInk::Off);
+        assert_eq!(FocusInk::of(false, false), FocusInk::Off);
+        assert_eq!(FocusInk::of(true, true), FocusInk::On);
+        assert_eq!(FocusInk::of(false, true), FocusInk::Idle);
+    }
+
+    /// Measured, with the app's stylesheet: the pills are 30 by 26
+    /// (`GlassPillIconButton`), the legend cells 28 high
+    /// (`size.controlLarge`), the range capsule 26 high (`size.control`),
+    /// and the focus pill takes the ink for its state (`focusInk`,
+    /// `MonitorShell.swift:242,305-308`).
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_footer_controls_are_the_macs_sizes() {
+        adw::init().expect("GTK display");
+        crate::ui::style::install();
+        let footer = GraphFooter::new();
+        let window = gtk::Window::builder().child(&footer.root).build();
+        footer.root.set_reveal_child(true);
+        window.present();
+        let context = gtk::glib::MainContext::default();
+        while context.pending() {
+            context.iteration(false);
+        }
+        let size = |widget: &gtk::Widget| {
+            let (width, ..) = widget.measure(gtk::Orientation::Horizontal, -1);
+            let (height, ..) = widget.measure(gtk::Orientation::Vertical, -1);
+            (width, height)
         };
-        let cell = rule(".tc-graph-legend-cell");
-        assert!(cell.contains("border-radius: 999px;"));
-        assert!(cell.contains("min-height: 28px;"));
-        assert!(rule(".tc-graph-legend-value").contains("font-weight: 600;"));
-        let pill = rule(&format!(".{PILL_CLASS}"));
-        assert!(pill.contains("min-width: 30px;"));
-        assert!(pill.contains("min-height: 26px;"));
-        assert!(pill.contains("border-radius: 999px;"));
+        for pill in [
+            &footer.zoom_out,
+            &footer.zoom_in,
+            &footer.next,
+            &footer.jump,
+        ] {
+            assert_eq!(size(pill.upcast_ref()), (30, 26));
+        }
+        assert_eq!(size(footer.focus.upcast_ref()), (30, 26));
+        assert_eq!(size(footer.range.upcast_ref()).1, 26);
+        let cell = footer.kept_value.parent().expect("the kept cell");
+        assert_eq!(size(&cell).1, 28);
+        footer.render(GraphData {
+            tool: Some("Codex".into()),
+            ..GraphData::default()
+        });
+        assert!(footer.focus.has_css_class(FocusInk::Idle.css()));
+        footer.set_focused(true);
+        assert!(footer.focus.has_css_class(FocusInk::On.css()));
+        assert!(!footer.focus.has_css_class(FocusInk::Idle.css()));
+        window.close();
+    }
+
+    /// Writes the footer's cairo pieces, the legend dots, the tab dot and
+    /// the tab ember into `TC_LOOK_RENDER_DIR` as raw ARGB32 at 2x, for
+    /// comparison with the Mac's renders. No display needed.
+    #[test]
+    #[ignore = "writes comparison renders; set TC_LOOK_RENDER_DIR"]
+    fn write_look_renders() {
+        use super::glass_paint;
+        let Ok(dir) = std::env::var("TC_LOOK_RENDER_DIR") else {
+            return;
+        };
+        let save = |name: &str,
+                    width: i32,
+                    height: i32,
+                    ground: (f64, f64, f64),
+                    paint: &dyn Fn(&gtk::cairo::Context)| {
+            let surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width * 2, height * 2)
+                    .expect("a surface");
+            {
+                let context = gtk::cairo::Context::new(&surface).expect("a context");
+                context.set_source_rgb(ground.0, ground.1, ground.2);
+                let _ = context.paint();
+                context.scale(2.0, 2.0);
+                paint(&context);
+            }
+            surface.flush();
+            let stride = surface.stride();
+            let mut surface = surface;
+            let data = surface.data().expect("pixels").to_vec();
+            std::fs::write(
+                format!("{dir}/{name}-{}x{}x{stride}.argb", width * 2, height * 2),
+                data,
+            )
+            .expect("written");
+        };
+        let days = [
+            "Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Mon", "Tue",
+        ];
+        let counts = [
+            (0, 0),
+            (2, 1),
+            (5, 0),
+            (0, 3),
+            (9, 2),
+            (1, 1),
+            (0, 0),
+            (12, 4),
+            (3, 0),
+            (0, 6),
+            (7, 1),
+        ];
+        let buckets: Vec<Bucket> = days
+            .iter()
+            .zip(counts)
+            .map(|(label, (shared, kept))| Bucket {
+                start: chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+                    .and_then(|day| day.and_hms_opt(0, 0, 0))
+                    .expect("a date"),
+                shared,
+                kept,
+                label: (*label).to_string(),
+            })
+            .collect();
+        for dark in [false, true] {
+            let scheme = if dark { "dark" } else { "light" };
+            let pane = if dark {
+                (0x17, 0x1b, 0x2d)
+            } else {
+                (0xf2, 0xf3, 0xf6)
+            };
+            let pane = (
+                f64::from(pane.0) / 255.0,
+                f64::from(pane.1) / 255.0,
+                f64::from(pane.2) / 255.0,
+            );
+            save(&format!("bars-{scheme}"), 408, 115, pane, &|context| {
+                paint_bars(context, 408.0, &buckets, Some(4), dark);
+            });
+            let well = if dark {
+                (0x0e, 0x11, 0x1d)
+            } else {
+                (0xdb, 0xdd, 0xe3)
+            };
+            let well = (
+                f64::from(well.0) / 255.0,
+                f64::from(well.1) / 255.0,
+                f64::from(well.2) / 255.0,
+            );
+            save(&format!("legend-dot-{scheme}"), 14, 14, well, &|context| {
+                glass_paint::paint_status_dot(
+                    context,
+                    7.0,
+                    7.0,
+                    8.0,
+                    Series::Shared.ink(dark),
+                    true,
+                    dark,
+                );
+            });
+            save(&format!("tab-dots-{scheme}"), 60, 12, pane, &|context| {
+                for (index, tone) in [
+                    crate::ui::style::Tone::Clear,
+                    crate::ui::style::Tone::Attention,
+                    crate::ui::style::Tone::Refused,
+                    crate::ui::style::Tone::Held,
+                    crate::ui::style::Tone::Neutral,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let ink = glass_paint::tab_dot_ink(tone, dark);
+                    glass_paint::paint_status_dot(
+                        context,
+                        6.0 + 12.0 * index as f64,
+                        6.0,
+                        6.0,
+                        ink,
+                        false,
+                        dark,
+                    );
+                }
+            });
+            save(&format!("tab-ember-{scheme}"), 440, 38, pane, &|context| {
+                glass_paint::paint_ember(context, 38.0, 220.0, 110.0, dark);
+            });
+        }
     }
 
     #[test]

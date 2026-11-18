@@ -91,7 +91,9 @@ class InsightsTokensTests(unittest.TestCase):
     def test_generated_rules_are_scoped_to_insights(self):
         for scheme in generate.SCHEMES:
             css = generate.render_insights_css(self.tokens, scheme)
-            self.assertTrue(all(line.startswith('.tc-insights') for line in css.splitlines()))
+            # Every rule is Insights', focused or in an unfocused glass window.
+            self.assertTrue(all(line.startswith(('.tc-insights', 'window.tc-glass-window:backdrop .tc-insights'))
+                                for line in css.splitlines()))
             self.assertIn('button:focus-visible', css)
             self.assertIn('button:checked', css)
 
@@ -172,13 +174,10 @@ class GlassTokensTests(unittest.TestCase):
                 css = generate.render_glass_css(self.tokens, scheme)
                 edge = generate.flat_color(self.tokens, "edgeHighContrast", scheme)
                 self.assertEqual(palette["edgeHighContrast"], generate.css_rgba(edge, "test"))
-                rule = [line for line in css.splitlines() if line.startswith("window.tc-high-contrast")]
-                self.assertEqual(len(rule), 1)
-                for name in ("pane", "popover", "menu", "node-card"):
-                    self.assertIn(f"window.tc-high-contrast .tc-glass-{name}", rule[0])
-                for name in ("card", "card-quiet", "well", "control"):
-                    self.assertNotIn(f".tc-glass-{name},", rule[0] + ",")
-                self.assertIn("border: 1px solid @tc_glass_edge_high_contrast;", rule[0])
+                stroked = sorted(line.split(" ")[1] for line in css.splitlines()
+                                 if line.startswith("window.tc-high-contrast"))
+                self.assertEqual(stroked, sorted(f".tc-glass-{name}" for name in
+                                                 ("pane", "popover", "menu", "node-card")))
 
     def test_tab_strip_takes_the_rule_and_the_ember_halo(self):
         # GlassRuleTabs: a 1pt `rule` under the strip and a `tabEmberHalo`
@@ -201,6 +200,93 @@ class GlassTokensTests(unittest.TestCase):
             for token, name in (("dataShared", "SHARED"), ("dataKept", "KEPT"), ("statusOff", "LABEL")):
                 hex_ = generate.flat_color(self.tokens, token, scheme)["hex"].upper()
                 self.assertIn(f'pub const {name}_{scheme.upper()}: &str = "{hex_}";', rust)
+
+    def test_unfocused_window_dims_every_tier_as_the_macs_material_path(self):
+        # GlassPaneFill's material path fills inactiveDim under the pane's
+        # translucent cards, wells and controls, so they dim with the pane.
+        # Linux paints every tier opaque over the pane, so each tier's
+        # unfocused fill is the tier over the dimmed pane. Expected values
+        # are worked by hand from GlassTokens.swift's flat theme:
+        # paneOpaque (:129) + paneFill (:410) + inactiveDim (:135), then
+        # cardFill (:411), wellFill (:136) over the card, rule (:176).
+        expected = {
+            "light": {"pane": "#e8e9ec", "card": "#f6f6f7", "well": "#d8dae0", "rule": "#cccdd0"},
+            "dark": {"pane": "#15192a", "card": "#121628", "well": "#0d0f1c", "rule": "#313544"},
+        }
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                css = generate.render_glass_css(self.tokens, scheme)
+                for name, value in expected[scheme].items():
+                    self.assertIn(f"@define-color tc_glass_{name}_inactive {value};", css)
+                # Every tier, not only the pane, has its unfocused fill.
+                for tier, css_name, _, _, _ in generate.GLASS_TIERS:
+                    self.assertIn(
+                        f"window.tc-glass-window:backdrop .tc-glass-{css_name} "
+                        f"{{ background-color: @tc_glass_{generate.snake(tier)}_inactive; }}", css)
+
+    def test_unfocused_window_dims_insights(self):
+        # Insights paints its own opaque ground and cards; unfocused, they
+        # take the dimmed pane's values (hand-worked above), so Insights is
+        # not an undimmed block in a dimmed pane.
+        expected = {"light": ("#e8e9ec", "#f6f6f7"), "dark": ("#15192a", "#121628")}
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                ground, card = expected[scheme]
+                css = generate.render_insights_css(self.tokens, scheme)
+                self.assertIn(f"window.tc-glass-window:backdrop .tc-insights {{ background: {ground}; }}", css)
+                self.assertIn("window.tc-glass-window:backdrop .tc-insights .tc-insights-card, "
+                              "window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary "
+                              f"{{ background: {card}; }}", css)
+
+    def test_high_contrast_edge_is_an_overlay_not_a_border(self):
+        # GlassEdgeModifier strokes the tier's shape: an overlay that takes
+        # no layout space. A CSS border would grow the widget by 1px a side,
+        # so the stroke is an inset shadow drawn with the tier's own shadow.
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                css = generate.render_glass_css(self.tokens, scheme)
+                lines = [line for line in css.splitlines() if line.startswith("window.tc-high-contrast")]
+                self.assertTrue(lines)
+                for line in lines:
+                    self.assertNotIn("border", line)
+                    self.assertIn("box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, ", line)
+                pane = [line for line in lines if line.startswith("window.tc-high-contrast .tc-glass-pane ")]
+                self.assertEqual(len(pane), 1)
+                # The pane keeps its drop shadow under the stroke.
+                drop = {"light": "0px 14px 30px rgba(0, 0, 0, 0.12)", "dark": "0px 18px 36px rgba(2, 3, 10, 0.6)"}
+                self.assertTrue(pane[0].endswith(f"{drop[scheme]}; }}"), pane[0])
+
+    def test_status_and_graph_inks_are_the_macs_flat_values(self):
+        # GlassTokens.swift: statusOn (:52), statusAsk (:54), statusOff
+        # (:56), statusOutside (:58), flat theme; graphFocusOn/Idle/Off
+        # (:232-236); textPrimary (:31); GlassColor.ink is pure black in
+        # light and white in dark (:252).
+        rust = "\n".join(generate.render_glass_rust(self.tokens))
+        for name, light, dark in (
+            ("ON", "#1A8F4C", "#30D158"), ("ASK", "#A8690F", "#FFC75C"),
+            ("OFF", "#8A8A90", "#A9A9B0"), ("OUTSIDE", "#D0342C", "#FF6B6B"),
+        ):
+            self.assertIn(f'pub const {name}_LIGHT: &str = "{light}";', rust)
+            self.assertIn(f'pub const {name}_DARK: &str = "{dark}";', rust)
+        self.assertIn('pub const TEXT_PRIMARY_LIGHT: &str = "#1D1D1F";', rust)
+        # GlassRuleTabs' ember and halo (tabEmber :178, tabEmberHalo :180).
+        self.assertIn('pub const EMBER_LIGHT: &str = "#056BDC";', rust)
+        self.assertIn('pub const EMBER_DARK: &str = "#0091FD";', rust)
+        self.assertIn('pub const HALO_LIGHT: (&str, f64) = ("#056BDC", 0.28);', rust)
+        self.assertIn('pub const HALO_DARK: (&str, f64) = ("#0091FD", 0.31);', rust)
+        self.assertIn('pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";', rust)
+        for scheme, values in (
+            ("light", ("#1f6fd1", "#3c3c42", "#a1a1a6", "rgba(0, 0, 0, 0.07)")),
+            ("dark", ("#4da3ff", "#d6d6dc", "#6b6b70", "rgba(255, 255, 255, 0.07)")),
+        ):
+            with self.subTest(scheme=scheme):
+                css = generate.render_glass_css(self.tokens, scheme)
+                on, idle, off, range_fill = values
+                self.assertIn(f"@define-color tc_glass_graph_focus_on {on};", css)
+                self.assertIn(f"@define-color tc_glass_graph_focus_idle {idle};", css)
+                self.assertIn(f"@define-color tc_glass_graph_focus_off {off};", css)
+                # The range capsule's fill (MonitorShell.swift:255).
+                self.assertIn(f"@define-color tc_glass_range_fill {range_fill};", css)
 
     def test_glyphs_come_from_the_swift_path_data(self):
         glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())

@@ -180,6 +180,10 @@ else
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
     ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
     ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
+    ui::monitor::graph_footer::tests::mounted_footer_controls_are_the_macs_sizes \
+    ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
+    ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
+    ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \

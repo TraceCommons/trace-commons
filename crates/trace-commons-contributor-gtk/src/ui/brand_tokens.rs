@@ -112,6 +112,9 @@ pub const INSIGHTS_LIGHT_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #dbdee4; }
 .tc-insights stackswitcher button:checked { background: #0558b6; color: #ffffff; }
 .tc-insights .caption, .tc-insights .dim-label { color: #3c3c43; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #e8e9ec; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #f6f6f7; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #f8f8f9; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
@@ -131,6 +134,9 @@ pub const INSIGHTS_DARK_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #3b3d47; }
 .tc-insights stackswitcher button:checked { background: #7ebcff; color: #071a2e; }
 .tc-insights .caption, .tc-insights .dim-label { color: #d8d9e0; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #15192a; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #121628; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #0f121d; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
@@ -149,6 +155,15 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_popover #f6f6f9;
 @define-color tc_glass_menu #f6f6f8;
 @define-color tc_glass_node_card #fdfdfe;
+@define-color tc_glass_pane_inactive #e8e9ec;
+@define-color tc_glass_card_inactive #f6f6f7;
+@define-color tc_glass_card_quiet_inactive #f4f4f6;
+@define-color tc_glass_well_inactive #d8dae0;
+@define-color tc_glass_control_inactive #f8f8f9;
+@define-color tc_glass_control_selected_inactive #0558b6;
+@define-color tc_glass_popover_inactive #f5f5f7;
+@define-color tc_glass_menu_inactive #f4f4f6;
+@define-color tc_glass_node_card_inactive #fbfbfc;
 @define-color tc_glass_scene #e6eaf1;
 @define-color tc_glass_ink #1d1d1f;
 @define-color tc_glass_ink_secondary #3c3c43;
@@ -161,8 +176,12 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_tab_ember #056bdc;
 @define-color tc_glass_rule #d5d6d8;
 @define-color tc_glass_tab_ember_halo rgba(5, 107, 220, 0.28);
-@define-color tc_glass_pane_inactive #e8e9ec;
+@define-color tc_glass_rule_inactive #cccdd0;
 @define-color tc_glass_edge_high_contrast rgba(29, 29, 31, 0.55);
+@define-color tc_glass_graph_focus_on #1f6fd1;
+@define-color tc_glass_graph_focus_idle #3c3c42;
+@define-color tc_glass_graph_focus_off #a1a1a6;
+@define-color tc_glass_range_fill rgba(0, 0, 0, 0.07);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -173,7 +192,18 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
-window.tc-high-contrast .tc-glass-pane, window.tc-high-contrast .tc-glass-popover, window.tc-high-contrast .tc-glass-menu, window.tc-high-contrast .tc-glass-node-card { border: 1px solid @tc_glass_edge_high_contrast; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
@@ -197,6 +227,15 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_popover #0d1124;
 @define-color tc_glass_menu #0d1124;
 @define-color tc_glass_node_card #0d1124;
+@define-color tc_glass_pane_inactive #15192a;
+@define-color tc_glass_card_inactive #121628;
+@define-color tc_glass_card_quiet_inactive #131728;
+@define-color tc_glass_well_inactive #0d0f1c;
+@define-color tc_glass_control_inactive #0f121d;
+@define-color tc_glass_control_selected_inactive #7ebcff;
+@define-color tc_glass_popover_inactive #0d1123;
+@define-color tc_glass_menu_inactive #0d1123;
+@define-color tc_glass_node_card_inactive #0d1123;
 @define-color tc_glass_scene #070a1a;
 @define-color tc_glass_ink #f2f3f8;
 @define-color tc_glass_ink_secondary #d8d9e0;
@@ -209,8 +248,12 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_tab_ember #0091fd;
 @define-color tc_glass_rule #333646;
 @define-color tc_glass_tab_ember_halo rgba(0, 145, 253, 0.31);
-@define-color tc_glass_pane_inactive #15192a;
+@define-color tc_glass_rule_inactive #313544;
 @define-color tc_glass_edge_high_contrast rgba(242, 242, 244, 0.4);
+@define-color tc_glass_graph_focus_on #4da3ff;
+@define-color tc_glass_graph_focus_idle #d6d6dc;
+@define-color tc_glass_graph_focus_off #6b6b70;
+@define-color tc_glass_range_fill rgba(255, 255, 255, 0.07);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -221,7 +264,18 @@ pub const GLASS_DARK_CSS: &str = r#"
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
-window.tc-high-contrast .tc-glass-pane, window.tc-high-contrast .tc-glass-popover, window.tc-high-contrast .tc-glass-menu, window.tc-high-contrast .tc-glass-node-card { border: 1px solid @tc_glass_edge_high_contrast; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
@@ -285,12 +339,46 @@ pub mod glass {
         pub const KEPT_LIGHT: &str = "#2F6BC4";
         /// `statusOff`, light.
         pub const LABEL_LIGHT: &str = "#8A8A90";
+        /// `textPrimary`, light.
+        pub const TEXT_PRIMARY_LIGHT: &str = "#1D1D1F";
         /// `dataShared`, dark.
         pub const SHARED_DARK: &str = "#8A3DFF";
         /// `dataKept`, dark.
         pub const KEPT_DARK: &str = "#3A7BD5";
         /// `statusOff`, dark.
         pub const LABEL_DARK: &str = "#A9A9B0";
+        /// `textPrimary`, dark.
+        pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
+    }
+    /// The tab strip's ember line and its halo, as colour and alpha.
+    pub mod tabs {
+        /// `tabEmber`, light.
+        pub const EMBER_LIGHT: &str = "#056BDC";
+        /// `tabEmberHalo`, light.
+        pub const HALO_LIGHT: (&str, f64) = ("#056BDC", 0.28);
+        /// `tabEmber`, dark.
+        pub const EMBER_DARK: &str = "#0091FD";
+        /// `tabEmberHalo`, dark.
+        pub const HALO_DARK: (&str, f64) = ("#0091FD", 0.31);
+    }
+    /// Status dot inks: on, ask, off and outside.
+    pub mod status {
+        /// `statusOn`, light.
+        pub const ON_LIGHT: &str = "#1A8F4C";
+        /// `statusAsk`, light.
+        pub const ASK_LIGHT: &str = "#A8690F";
+        /// `statusOff`, light.
+        pub const OFF_LIGHT: &str = "#8A8A90";
+        /// `statusOutside`, light.
+        pub const OUTSIDE_LIGHT: &str = "#D0342C";
+        /// `statusOn`, dark.
+        pub const ON_DARK: &str = "#30D158";
+        /// `statusAsk`, dark.
+        pub const ASK_DARK: &str = "#FFC75C";
+        /// `statusOff`, dark.
+        pub const OFF_DARK: &str = "#A9A9B0";
+        /// `statusOutside`, dark.
+        pub const OUTSIDE_DARK: &str = "#FF6B6B";
     }
 }
 

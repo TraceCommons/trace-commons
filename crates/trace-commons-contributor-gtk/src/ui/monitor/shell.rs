@@ -52,7 +52,7 @@ use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
 use super::tabs::{self, Back, Location, MapView, Route, Tab, TracesPage};
 use super::three_pane::ThreePane;
-use super::{demand, glyph, graph_model};
+use super::{demand, glass_paint, glyph, graph_model};
 use crate::ui::style::brand_tokens;
 use crate::ui::{App, style};
 
@@ -114,9 +114,6 @@ const NOTICE_BACKDROP_CLASS: &str = "tc-notice-backdrop";
 /// (`.tc-notice-closable .tc-notice-surface` in `style.css`): the surface
 /// alone, not every card nested in it.
 const NOTICE_SURFACE_CLASS: &str = "tc-notice-surface";
-
-/// The Private AI tab's status dot: a circle in its tone's status colour.
-const TAB_DOT_CLASS: &str = "tc-tab-dot";
 
 /// The window's class while the desktop asks for high contrast. The
 /// generated glass sheet strokes the tiers that carry edge layers under it.
@@ -296,7 +293,9 @@ pub struct Shell {
     window: adw::ApplicationWindow,
     app: RefCell<Weak<App>>,
     tabs: Vec<(Tab, gtk::ToggleButton)>,
-    inference_dot: gtk::Label,
+    /// The Private AI tab's dot, and the tone it is drawn in.
+    inference_dot: gtk::DrawingArea,
+    inference_tone: Rc<Cell<style::Tone>>,
     breadcrumb: gtk::Box,
     content: gtk::Stack,
     graph_toggle: gtk::ToggleButton,
@@ -401,11 +400,33 @@ impl Shell {
         let traces_badge = gtk::Label::builder().visible(false).build();
         traces_badge.add_css_class("tc-count-badge");
         traces_badge.set_valign(gtk::Align::Center);
-        // A status-coloured circle, as the Mac's tab dot: no glyph, its
-        // state in its tip and accessible name (`render_inference_state`).
-        let inference_dot = gtk::Label::builder().visible(false).build();
-        inference_dot.add_css_class(TAB_DOT_CLASS);
-        inference_dot.set_valign(gtk::Align::Center);
+        // The Mac's tab dot (`GlassStatusDot(status, size: 6)`): a 6px
+        // circle in its state's colour, its state in its tip and
+        // accessible name (`render_inference_state`). A fixed-size drawing,
+        // so no line of text can stretch it.
+        let inference_tone = Rc::new(Cell::new(style::Tone::Neutral));
+        let inference_dot = gtk::DrawingArea::builder()
+            .content_width(glass_paint::TAB_DOT)
+            .content_height(glass_paint::TAB_DOT)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .hexpand(false)
+            .vexpand(false)
+            .visible(false)
+            .build();
+        let tone = inference_tone.clone();
+        inference_dot.set_draw_func(move |_, context, width, height| {
+            let dark = adw::StyleManager::default().is_dark();
+            glass_paint::paint_status_dot(
+                context,
+                f64::from(width) / 2.0,
+                f64::from(height) / 2.0,
+                f64::from(glass_paint::TAB_DOT),
+                glass_paint::tab_dot_ink(tone.get(), dark),
+                false,
+                dark,
+            );
+        });
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         strip.add_css_class("tc-glass-tabs");
         // The tabs share the strip's width equally (`GlassRuleTabs`), and
@@ -416,7 +437,11 @@ impl Shell {
         strip.update_property(&[gtk::accessible::Property::Label(words.shell.tabs_label)]);
         let mut tab_buttons: Vec<(Tab, gtk::ToggleButton)> = Vec::new();
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
-            let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
+            // `space.inlineGap` between the title and its mark.
+            let content = gtk::Box::new(
+                gtk::Orientation::Horizontal,
+                brand_tokens::glass::space::INLINE_GAP,
+            );
             let title = gtk::Label::builder()
                 .label(tab.title())
                 .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -441,6 +466,57 @@ impl Shell {
             strip.append(&button);
             tab_buttons.push((tab, button));
         }
+
+        // The selected tab's ember line and halo (`GlassRuleTabs.emberGlow`)
+        // are drawn once over the whole strip: the line reaches 0.3 of a
+        // tab's width into each neighbour, which a tab's own background
+        // could not.
+        let ember = gtk::DrawingArea::builder()
+            .can_target(false)
+            .can_focus(false)
+            .build();
+        ember.set_accessible_role(gtk::AccessibleRole::Presentation);
+        {
+            let tabs: Vec<gtk::ToggleButton> = tab_buttons
+                .iter()
+                .map(|(_, button)| button.clone())
+                .collect();
+            ember.set_draw_func(move |area, context, _, height| {
+                let Some(selected) = tabs
+                    .iter()
+                    .find(|button| button.is_active() && button.is_visible())
+                else {
+                    return;
+                };
+                let Some(bounds) = selected.compute_bounds(area) else {
+                    return;
+                };
+                glass_paint::paint_ember(
+                    context,
+                    f64::from(height),
+                    f64::from(bounds.x()),
+                    f64::from(bounds.width()),
+                    adw::StyleManager::default().is_dark(),
+                );
+            });
+            for (_, button) in &tab_buttons {
+                let weak = ember.downgrade();
+                button.connect_toggled(move |_| {
+                    if let Some(ember) = weak.upgrade() {
+                        ember.queue_draw();
+                    }
+                });
+            }
+            let weak = ember.downgrade();
+            adw::StyleManager::default().connect_dark_notify(move |_| {
+                if let Some(ember) = weak.upgrade() {
+                    ember.queue_draw();
+                }
+            });
+        }
+        let strip_glow = gtk::Overlay::builder().child(&strip).build();
+        strip_glow.add_overlay(&ember);
+        strip_glow.set_clip_overlay(&ember, true);
 
         // --- The breadcrumb, the screens and the notices ----------------
         let breadcrumb = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XS);
@@ -699,7 +775,7 @@ impl Shell {
         // The rounded corners clip what the pane holds.
         main.set_overflow(gtk::Overflow::Hidden);
         main.append(&handle);
-        main.append(&strip);
+        main.append(&strip_glow);
         main.append(&breadcrumb);
         main.append(&over_content);
         main.append(&graph.root);
@@ -772,6 +848,7 @@ impl Shell {
             app: RefCell::new(Weak::new()),
             tabs: tab_buttons,
             inference_dot,
+            inference_tone,
             breadcrumb,
             content,
             graph_toggle,
@@ -1218,15 +1295,6 @@ impl Shell {
     /// unreported state is no dot: unknown is neither on nor off.
     pub fn render_inference_state(&self, state: &str) {
         let dot = &self.inference_dot;
-        for tone in [
-            style::Tone::Neutral,
-            style::Tone::Clear,
-            style::Tone::Attention,
-            style::Tone::Held,
-            style::Tone::Refused,
-        ] {
-            dot.remove_css_class(tone.css());
-        }
         if state.is_empty() {
             dot.set_visible(false);
             return;
@@ -1235,7 +1303,8 @@ impl Shell {
             crate::copy::private_inference_state_tone(state),
         );
         let line = crate::copy::private_inference_state_line(state);
-        dot.add_css_class(tone.css());
+        self.inference_tone.set(tone);
+        dot.queue_draw();
         dot.set_tooltip_text(Some(line));
         dot.update_property(&[gtk::accessible::Property::Label(line)]);
         dot.set_visible(true);
@@ -2542,112 +2611,184 @@ mod tests {
         );
     }
 
-    /// The tab strip is `GlassRuleTabs`: equal tabs across the strip over a
-    /// full-width rule, medium titles that turn semibold when selected, and
-    /// the selected tab's ember line with its halo.
+    /// The tab strip, measured with the app's stylesheet (`GlassRuleTabs`):
+    /// four tabs of one width across the strip, each `segmentedTrack` +
+    /// `space.s4` (38) high, the title in body type set medium and
+    /// semibold once selected (`Navigation.swift:283-286`); the Private AI
+    /// dot a 6px circle whatever the line height (`Navigation.swift:70`).
     #[test]
-    fn the_tab_strip_is_the_macs_rule_tabs() {
-        let css = include_str!("../style.css");
-        let rule = |selector: &str| {
-            css.split(&format!("\n{selector} {{"))
-                .nth(1)
-                .and_then(|rest| rest.split('}').next())
-                .unwrap_or_else(|| panic!("no {selector} rule"))
-                .to_string()
-        };
-        assert!(rule(".tc-glass-tabs").contains("border-bottom: 1px solid @tc_glass_rule;"));
-        assert!(rule(".tc-glass-tabs .tc-tab label").contains("font-weight: 500;"));
-        assert!(rule(".tc-glass-tabs .tc-tab:checked label").contains("font-weight: 600;"));
-        let checked = rule(".tc-glass-tabs .tc-tab:checked");
-        assert!(checked.contains("@tc_glass_tab_ember 30%"));
-        assert!(
-            checked.contains("radial-gradient(") && checked.contains("@tc_glass_tab_ember_halo")
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_tab_strip_is_the_macs_rule_tabs() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        pump();
+        let shell = &mounted.shell;
+        shell.pick_tab(Tab::Traces);
+        shell.render_inference_state(
+            trace_commons_contributor::private_inference_copy::STATE_LABELS[0],
         );
-        // The strip is laid out to fill: homogeneous, and no left packing.
-        let source = include_str!("shell.rs");
-        let strip = source
-            .split("let strip = gtk::Box::new")
-            .nth(1)
-            .and_then(|rest| rest.split("for (index, tab)").next())
-            .expect("the strip's construction");
-        assert!(strip.contains("strip.set_homogeneous(true);"));
-        assert!(!strip.contains("gtk::Align::Start"));
-        // Four equal tabs must not set the main pane's minimum: no side
-        // padding, and titles that ellipsize.
-        assert!(rule(".tc-glass-tabs .tc-tab").contains("padding: 0;"));
-        let tabs = source
-            .split("for (index, tab) in Tab::ALL")
-            .nth(1)
-            .and_then(|rest| rest.split("strip.append(&button);").next())
-            .expect("the tabs' construction");
-        assert!(tabs.contains("EllipsizeMode::End"));
+        pump_until(|| shell.tabs.iter().all(|(_, button)| button.width() > 0));
+        let widths: Vec<i32> = shell
+            .tabs
+            .iter()
+            .map(|(_, button)| button.width())
+            .collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "{widths:?}"
+        );
+        for (tab, button) in &shell.tabs {
+            let (height, ..) = button.measure(gtk::Orientation::Vertical, -1);
+            assert_eq!(height, 38, "{tab:?}");
+            let mut inside = Vec::new();
+            descendants(button.upcast_ref(), &mut inside);
+            let title = inside
+                .iter()
+                .find_map(|widget| widget.downcast_ref::<gtk::Label>())
+                .expect("a title");
+            let weight = title
+                .pango_context()
+                .font_description()
+                .map(|font| font.weight());
+            let expected = if *tab == Tab::Traces {
+                gtk::pango::Weight::Semibold
+            } else {
+                gtk::pango::Weight::Medium
+            };
+            assert_eq!(weight, Some(expected), "{tab:?}");
+        }
+        let dot = &shell.inference_dot;
+        assert!(dot.is_visible());
+        assert_eq!(dot.measure(gtk::Orientation::Horizontal, -1).0, 6);
+        assert_eq!(dot.measure(gtk::Orientation::Vertical, -1).0, 6);
+        assert_eq!((dot.width(), dot.height()), (6, 6));
     }
 
-    /// The toolbar is the Mac's: 28 by 24 toggles in a capsule, and a 28px
-    /// round Settings button on a control's fill.
+    /// The toolbar, measured: `GlassToolbarButton`s 28 by 24 and the round
+    /// Settings button 28 across (`GlassRoundButton`).
     #[test]
-    fn the_toolbar_controls_are_the_macs_size() {
-        let css = include_str!("../style.css");
-        let rule = |selector: &str| {
-            css.split(&format!("\n{selector} {{"))
-                .nth(1)
-                .and_then(|rest| rest.split('}').next())
-                .unwrap_or_else(|| panic!("no {selector} rule"))
-                .to_string()
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_toolbar_controls_are_the_macs_size() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        pump();
+        let shell = &mounted.shell;
+        let size = |widget: &gtk::Widget| {
+            (
+                widget.measure(gtk::Orientation::Horizontal, -1).0,
+                widget.measure(gtk::Orientation::Vertical, -1).0,
+            )
         };
-        let toggle = rule(".tc-toolbar-toggle");
-        assert!(toggle.contains("min-width: 28px;") && toggle.contains("min-height: 24px;"));
-        let gear = rule(".tc-toolbar-toggle.tc-toolbar-gear");
-        assert!(gear.contains("min-width: 28px;") && gear.contains("min-height: 28px;"));
-        assert!(gear.contains("background-color: @tc_glass_control;"));
-        assert!(rule(".tc-toolbar-capsule").contains("padding: 2px;"));
-    }
-
-    /// The Private AI tab's dot is a status-coloured circle with no glyph
-    /// (`MonitorWindowView`'s tab dot), one colour per tone.
-    #[test]
-    fn the_private_ai_dot_is_a_status_circle() {
-        let css = include_str!("../style.css");
-        let rule = |selector: &str| {
-            css.split(&format!("\n{selector} {{"))
-                .nth(1)
-                .and_then(|rest| rest.split('}').next())
-                .unwrap_or_else(|| panic!("no {selector} rule"))
-                .to_string()
-        };
-        let dot = rule(&format!(".{TAB_DOT_CLASS}"));
-        assert!(dot.contains("min-width: 7px;") && dot.contains("min-height: 7px;"));
-        assert!(dot.contains("border-radius: 999px;"));
-        for (tone, colour) in [
-            (style::Tone::Clear, "@tc_status_on"),
-            (style::Tone::Attention, "@tc_status_ask"),
-            (style::Tone::Refused, "@tc_status_outside"),
-            (style::Tone::Held, "@tc_blue"),
-            (style::Tone::Neutral, "@tc_muted"),
+        for toggle in [
+            &shell.graph_toggle,
+            &shell.map_toggle,
+            &shell.inspector_toggle,
         ] {
-            assert!(
-                rule(&format!(".{TAB_DOT_CLASS}.{}", tone.css()))
-                    .contains(&format!("background-color: {colour};")),
-                "{tone:?}"
-            );
+            assert_eq!(size(toggle.upcast_ref()), (28, 24));
         }
-        let source = include_str!("shell.rs");
-        let render = source
-            .split("pub fn render_inference_state")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }\n").next())
-            .expect("render_inference_state");
-        assert!(!render.contains(".glyph()"), "the dot draws no glyph");
+        assert_eq!(size(shell.settings_button.upcast_ref()), (28, 28));
     }
 
-    /// Increase Contrast: the window wears the class the generated sheet
-    /// strokes the edged tiers under (`GlassEdgeModifier`'s increased
-    /// branch), and only while the desktop asks for high contrast.
+    /// Increase Contrast strokes the pane as an overlay (`strokeBorder`):
+    /// turning it on moves nothing.
     #[test]
-    fn high_contrast_is_a_class_on_the_window() {
-        assert_eq!(HIGH_CONTRAST_CLASS, "tc-high-contrast");
-        for sheet in [brand_tokens::GLASS_LIGHT_CSS, brand_tokens::GLASS_DARK_CSS] {
-            assert!(sheet.contains(&format!("window.{HIGH_CONTRAST_CLASS} .tc-glass-pane")));
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_high_contrast_takes_no_layout_space() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        pump();
+        let mut all = Vec::new();
+        descendants(mounted.shell.root.upcast_ref(), &mut all);
+        let pane = all
+            .iter()
+            .find(|widget| widget.has_css_class("tc-glass-pane"))
+            .expect("a pane")
+            .clone();
+        let measure = |pane: &gtk::Widget| {
+            (
+                pane.measure(gtk::Orientation::Horizontal, -1),
+                pane.measure(gtk::Orientation::Vertical, -1),
+            )
+        };
+        mounted.window.remove_css_class(HIGH_CONTRAST_CLASS);
+        pump();
+        let plain = measure(&pane);
+        mounted.window.add_css_class(HIGH_CONTRAST_CLASS);
+        pump();
+        assert_eq!(measure(&pane), plain);
+    }
+
+    /// Out of focus every fill drawn from the pane's ground dims with it
+    /// (`GlassPaneFill`'s inactiveDim under the translucent tiers). The
+    /// generated tiers and Insights carry their `:backdrop` twins (pinned
+    /// in `test_generate.py`); every rule here that paints a ground-derived
+    /// fill must have one too, or it would stay bright in a dimmed pane.
+    #[test]
+    fn every_hand_written_glass_fill_dims_out_of_focus() {
+        // The sheet without its comments.
+        let mut css = String::new();
+        let mut rest = include_str!("../style.css");
+        while let Some(start) = rest.find("/*") {
+            css.push_str(&rest[..start]);
+            rest = rest[start..]
+                .split_once("*/")
+                .map_or("", |(_, after)| after);
         }
+        css.push_str(rest);
+        let tiers = [
+            "pane",
+            "card",
+            "card_quiet",
+            "well",
+            "control",
+            "popover",
+            "menu",
+            "node_card",
+            "rule",
+        ];
+        let rules: Vec<(String, String)> = css
+            .split('}')
+            .filter_map(|block| {
+                let (selector, body) = block.split_once('{')?;
+                let selector = selector.split_whitespace().collect::<Vec<_>>().join(" ");
+                Some((selector, body.to_string()))
+            })
+            .collect();
+        let mut checked = 0;
+        for (selector, body) in &rules {
+            if selector.starts_with("window.tc-glass-window:backdrop")
+                || selector.contains(":hover")
+            {
+                continue;
+            }
+            for tier in tiers {
+                let token = format!("@tc_glass_{tier}");
+                // A fill or an edge in that tier's colour, not a text ink.
+                let paints = body.split(';').any(|declaration| {
+                    let Some((property, value)) = declaration.split_once(':') else {
+                        return false;
+                    };
+                    let property = property.trim();
+                    (property.starts_with("background") || property.starts_with("border"))
+                        && value
+                            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '@'))
+                            .any(|word| word == token)
+                });
+                if !paints {
+                    continue;
+                }
+                checked += 1;
+                let twin = format!("window.tc-glass-window:backdrop {selector}");
+                let dimmed = format!("@tc_glass_{tier}_inactive;");
+                assert!(
+                    rules
+                        .iter()
+                        .any(|(other, body)| *other == twin && body.contains(&dimmed)),
+                    "{selector} paints @tc_glass_{tier} with no unfocused twin"
+                );
+            }
+        }
+        // The pane's notice ground, a card, the tab rule and the gear.
+        assert!(checked >= 4, "checked {checked}");
     }
 }
