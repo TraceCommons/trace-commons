@@ -121,7 +121,6 @@ pub fn card(
 
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let mark = coin(card_mark(transfer));
-    mark.add_css_class("tc-map-transfer-mark");
     mark.set_valign(gtk::Align::Center);
     mark.set_accessible_role(gtk::AccessibleRole::Presentation);
     head.append(&mark);
