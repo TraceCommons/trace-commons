@@ -983,7 +983,7 @@ pub struct Settings {
 /// deliberately not parsed into an enum here: a label a later daemon grows
 /// would then have to be spelled in this shell before it could be shown, and
 /// the shared table already answers an unknown label safely.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PrivateInferenceState {
     #[serde(default)]
     pub state: String,
@@ -1344,6 +1344,10 @@ pub struct GateStatus {
     pub automatic_contribution_held: Option<HeldSessions>,
     #[serde(default)]
     pub grant_voids: Option<Vec<serde_json::Value>>,
+    /// The Private AI destination's state, which the Private AI map's
+    /// credential falls back to when `tool_destinations` does not say.
+    #[serde(default)]
+    pub private_inference_state: Option<PrivateInferenceState>,
 }
 
 /// `status.automatic_contribution_held`'s count.
