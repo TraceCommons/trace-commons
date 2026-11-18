@@ -12,6 +12,14 @@
 // title, so a caller can only ever place its own windows. Without this
 // extension the app falls back on its own: no rail, a plain panel window.
 //
+// The rail never keeps keyboard focus (the Mac's is a non-activating
+// panel): when a click gives it focus, focus goes back to the window that
+// had it. Both windows are placed again when the monitors or work areas
+// change. Everything this does to a window is undone by Release, by the
+// caller leaving the bus, and by disable() -- which GNOME Shell calls on
+// every screen lock; the app asks again when the name returns
+// (src/edge/gnome.rs).
+//
 // Written against GNOME Shell 46 (Ubuntu 24.04) and the ES module
 // extension API that 45 introduced, which 47-51 keep. Every Meta call here
 // (get_pid, get_title, get_gtk_window_object_path, get_frame_rect,
@@ -23,7 +31,9 @@ import GLib from 'gi://GLib';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {ROLE_PANEL, ROLE_RAIL, frameFor} from './placement.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+import {ROLE_PANEL, ROLE_RAIL, focusToRestore, frameFor} from './placement.js';
 
 const BUS_NAME = 'ai.tracecommons.Contributor.EdgeSurfaces';
 const OBJECT_PATH = '/ai/tracecommons/Contributor/EdgeSurfaces';
@@ -75,8 +85,13 @@ function matches(window, pid, title) {
 
 export default class EdgeSurfacesExtension extends Extension {
     enable() {
-        // key: pid + '\n' + title -> {pid, title, role, at, window, signals}
+        // key: pid + '\n' + title ->
+        //   {pid, sender, title, role, at, window, signals, made: {above, stuck}}
         this._placements = new Map();
+        // sender -> bus watch id, so a caller's placements end with it.
+        this._watches = new Map();
+        this._lastFocus = null;
+        this._lastFocusId = 0;
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._nameId = Gio.bus_own_name_on_connection(
@@ -88,14 +103,28 @@ export default class EdgeSurfacesExtension extends Extension {
                 return GLib.SOURCE_REMOVE;
             });
         });
+        this._displayIds = [
+            global.display.connect('workareas-changed', () => this._placeAll()),
+            global.display.connect('notify::focus-window', () => this._onFocus()),
+        ];
+        this._monitorsId = Main.layoutManager.connect('monitors-changed', () => this._placeAll());
     }
 
     disable() {
         global.display.disconnect(this._created);
         this._created = 0;
+        for (const id of this._displayIds)
+            global.display.disconnect(id);
+        this._displayIds = [];
+        Main.layoutManager.disconnect(this._monitorsId);
+        this._monitorsId = 0;
         for (const placement of this._placements.values())
             this._forget(placement);
         this._placements = null;
+        for (const id of this._watches.values())
+            Gio.bus_unwatch_name(id);
+        this._watches = null;
+        this._setLastFocus(null);
         Gio.bus_unown_name(this._nameId);
         this._nameId = 0;
         this._dbus.unexport();
@@ -111,14 +140,23 @@ export default class EdgeSurfacesExtension extends Extension {
             invocation.return_dbus_error('org.freedesktop.DBus.Error.InvalidArgs', 'role');
             return;
         }
-        callerPid(invocation.get_sender()).then(pid => {
+        const sender = invocation.get_sender();
+        callerPid(sender).then(pid => {
+            if (!this._placements) {
+                invocation.return_dbus_error('org.freedesktop.DBus.Error.Failed', 'disabled');
+                return;
+            }
             const key = `${pid}\n${title}`;
             const old = this._placements.get(key);
             if (old)
                 this._forget(old);
             const at = x < 0 || y < 0 ? global.get_pointer().slice(0, 2) : [x, y];
-            const placement = {pid, title, role, at, window: null, signals: []};
+            const placement = {
+                pid, sender, title, role, at, window: null, signals: [],
+                made: {above: false, stuck: false},
+            };
             this._placements.set(key, placement);
+            this._watch(sender);
             const window = global.get_window_actors()
                 .map(actor => actor.meta_window)
                 .find(candidate => matches(candidate, pid, title));
@@ -131,7 +169,7 @@ export default class EdgeSurfacesExtension extends Extension {
     ReleaseAsync([title], invocation) {
         callerPid(invocation.get_sender()).then(pid => {
             const key = `${pid}\n${title}`;
-            const placement = this._placements.get(key);
+            const placement = this._placements?.get(key);
             if (placement) {
                 this._forget(placement);
                 this._placements.delete(key);
@@ -150,8 +188,14 @@ export default class EdgeSurfacesExtension extends Extension {
 
     _attach(placement, window) {
         placement.window = window;
-        window.make_above();
-        window.stick();
+        if (!window.is_above()) {
+            window.make_above();
+            placement.made.above = true;
+        }
+        if (!window.is_on_all_workspaces()) {
+            window.stick();
+            placement.made.stuck = true;
+        }
         const place = () => {
             const monitor = placement.role === ROLE_RAIL
                 ? global.display.get_primary_monitor()
@@ -162,22 +206,86 @@ export default class EdgeSurfacesExtension extends Extension {
             if (frame.x !== rect.x || frame.y !== rect.y)
                 window.move_frame(true, frame.x, frame.y);
         };
+        placement.place = place;
         placement.signals = [
             window.connect('size-changed', place),
             window.connect('unmanaged', () => {
                 placement.signals = [];
                 placement.window = null;
+                placement.place = null;
+                placement.made = {above: false, stuck: false};
             }),
         ];
         place();
     }
 
+    /** Stops placing a window and undoes what placing it did. */
     _forget(placement) {
-        if (placement.window) {
+        const window = placement.window;
+        if (window) {
             for (const id of placement.signals)
-                placement.window.disconnect(id);
+                window.disconnect(id);
+            if (placement.made.above && window.is_above())
+                window.unmake_above();
+            if (placement.made.stuck && window.is_on_all_workspaces())
+                window.unstick();
         }
         placement.signals = [];
         placement.window = null;
+        placement.place = null;
+        placement.made = {above: false, stuck: false};
+    }
+
+    _placeAll() {
+        for (const placement of this._placements?.values() ?? [])
+            placement.place?.();
+    }
+
+    _isRail(window) {
+        for (const placement of this._placements?.values() ?? []) {
+            if (placement.window === window)
+                return placement.role === ROLE_RAIL;
+        }
+        return false;
+    }
+
+    _onFocus() {
+        const focused = global.display.focus_window;
+        const back = focusToRestore(focused, this._lastFocus, w => this._isRail(w));
+        if (back) {
+            back.activate(global.get_current_time());
+            return;
+        }
+        if (focused && !this._isRail(focused))
+            this._setLastFocus(focused);
+    }
+
+    _setLastFocus(window) {
+        if (this._lastFocus && this._lastFocusId)
+            this._lastFocus.disconnect(this._lastFocusId);
+        this._lastFocus = window;
+        this._lastFocusId = window
+            ? window.connect('unmanaged', () => this._setLastFocus(null))
+            : 0;
+    }
+
+    /** A caller's placements end when it leaves the bus. */
+    _watch(sender) {
+        if (this._watches.has(sender))
+            return;
+        this._watches.set(sender, Gio.bus_watch_name_on_connection(
+            Gio.DBus.session, sender, Gio.BusNameWatcherFlags.NONE, null, () => {
+                for (const [key, placement] of [...this._placements ?? []]) {
+                    if (placement.sender !== sender)
+                        continue;
+                    this._forget(placement);
+                    this._placements.delete(key);
+                }
+                const id = this._watches?.get(sender);
+                if (id) {
+                    this._watches.delete(sender);
+                    Gio.bus_unwatch_name(id);
+                }
+            }));
     }
 }

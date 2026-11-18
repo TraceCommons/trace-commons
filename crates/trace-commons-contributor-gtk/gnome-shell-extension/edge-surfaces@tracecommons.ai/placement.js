@@ -26,3 +26,17 @@ export function frameFor(role, area, size, at) {
         : area.y + area.height - size.height - MARGIN;
     return {x: left, y: top};
 }
+
+/**
+ * The rail never keeps keyboard focus: on the Mac it is a non-activating
+ * panel that "never takes focus from the app in front". Mutter focuses a
+ * window when it is clicked, so when focus lands on a rail this names the
+ * window to give it back to, or null to leave it where it is.
+ */
+export function focusToRestore(focused, previous, isRail) {
+    if (!focused || !isRail(focused))
+        return null;
+    if (!previous || previous === focused || isRail(previous))
+        return null;
+    return previous;
+}
