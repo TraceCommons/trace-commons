@@ -2084,7 +2084,11 @@ mod tests {
         let settings = gtk::Settings::default().expect("settings");
         settings.set_gtk_enable_animations(true);
 
-        // The first card ever shown slides in from above its place.
+        // A card the stack has never held slides in from above its place.
+        // The stack remembers every card it has held, as the Mac's `seen`
+        // does, and these empty cards were all shown once while the shell
+        // was built, so this one gets words it has never had.
+        card(Notice::Health).append(&gtk::Label::new(Some("A card never shown")));
         card(Notice::Health).set_visible(true);
         let health = slide(shell, Notice::Health);
         let slid = Cell::new(false);
