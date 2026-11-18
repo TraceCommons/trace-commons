@@ -98,7 +98,9 @@ impl Fixture {
                 // Private AI's saved-account panel; refused, it stays empty.
                 | "managed_snapshot"
                 // The Traces map's tool read; refused, it draws no tools.
-                | "tool_destinations" => {
+                | "tool_destinations"
+                // Home's Insights hero; refused, it draws its teaser.
+                | "insights_glance" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected credential-side operation: {method}"),
