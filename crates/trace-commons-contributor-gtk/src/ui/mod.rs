@@ -8,12 +8,14 @@
 pub(crate) mod account_change;
 pub mod balance;
 pub mod community_brand;
+pub(crate) mod consent_settings;
 pub mod credential;
 mod css_contract;
 mod first_run;
 mod first_run_terms;
 pub mod funding;
 pub mod history;
+pub(crate) mod history_detail;
 pub mod home;
 pub mod insights;
 pub mod legacy_move;
@@ -26,14 +28,21 @@ mod onboarding_nearai;
 mod onboarding_wallet;
 pub mod preview;
 pub mod private_inference;
+pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
+pub(crate) mod sent_training;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
+pub(crate) mod terms_hold;
 pub mod update;
 pub mod wrap_row;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_fixture.rs"]
+pub(crate) mod consent_fixture;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -127,16 +136,16 @@ type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 /// response. Nothing here is computed from a duration this process picked --
 /// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
 pub struct PendingUndo {
-    /// Every entry this approval covers. A row's Submit holds exactly one; a
-    /// project group's Submit all holds every entry `approve` reported
-    /// approved, which is why Undo must cancel each of them rather than
-    /// assuming there is only ever one.
+    /// The entries this approval is shown to cover: one for a row's Submit,
+    /// the sendable rows this window saw for a folder's Submit all. The
+    /// inspector lists them; Undo does not read them for a folder, which it
+    /// cancels by `project_id` (`queue::undo_cancel_params`).
     pub entry_ids: Vec<String>,
     pub project_label: String,
     /// The folder whose Submit all this is; `None` for one trace's Submit.
     /// The inspector's demand tells the two apart (`monitor::demand`).
     pub folder: Option<String>,
-    /// When this window offered the undo, which is what the bar's "held 41s"
+    /// When this window offered the undo, which is what the bar's "Approved 41s ago"
     /// counts up from. It counts *up* on purpose: the app cannot see the
     /// watcher's sweep, so a countdown would be a promise it cannot keep.
     pub approved_at: chrono::DateTime<chrono::Utc>,
@@ -240,6 +249,8 @@ pub struct App {
     pub rollup: RefCell<HistoryRollup>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
+    pub undo_writing: RefCell<std::collections::HashSet<queue::UndoIdentity>>,
     /// The folder whose Submit all is waiting on the daemon's answer, as
     /// the Mac's `TracesStore.submittingFolder`: a demand on the inspector.
     pub submitting_folder: RefCell<Option<String>>,
@@ -506,6 +517,7 @@ impl App {
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
+            undo_writing: RefCell::new(Default::default()),
             submitting_folder: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
@@ -801,6 +813,8 @@ impl App {
                 onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
+            } else {
+                consent_settings::note_status_failed(app);
             }
         });
         // Asked alongside the queue, not with `list_projects`, because this
@@ -1137,16 +1151,23 @@ impl App {
         // reworded (K5), and armed folders the gate is holding.
         let rewordings = status.arming_rewording_notices();
         let held = status.gate_held_notice();
+        let terms = terms_hold::notice_words(status.terms_hold);
         // The legacy invite migration notice is the account's: it changes
         // what the contributor's sessions go under, and they are told on
         // whichever screen they are reading (the consent spec requires it in
         // every shell).
         let migration = status.legacy_migration_notice();
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(!notices.is_empty() || !rewordings.is_empty() || held.is_some());
+            column.set_visible(
+                terms.is_some() || !notices.is_empty() || !rewordings.is_empty() || held.is_some(),
+            );
         }
         if let Some(column) = self.account_notices.parent() {
             column.set_visible(migration.is_some() || offer_shown);
+        }
+        // First: until the terms are accepted again, nothing uploads.
+        if let Some(words) = &terms {
+            self.void_notices.append(&terms_hold::card(self, words));
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
@@ -1581,9 +1602,9 @@ impl App {
     ///
     /// This is the single place both the queue row's Submit and the project
     /// group's Submit all reach the toast, so the two controls cannot drift
-    /// in how they read the same response. `entry_ids` is the set the undo
-    /// bar's `Undo` must cancel: one id for a row, every entry a project
-    /// call approved for a group.
+    /// in how they read the same response. `entry_ids` is what the undo
+    /// card lists: one id for a row, the sendable rows seen for a group.
+    /// Undo cancels a row by its id and a group by its `project_id`.
     ///
     /// `offer_undo` is only called when the daemon returned a `hold_until`:
     /// `approve > 0` with no `hold_until` means the hold is configured off,

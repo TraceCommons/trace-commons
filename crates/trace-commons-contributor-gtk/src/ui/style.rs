@@ -662,11 +662,29 @@ pub fn wrap_append(row: &super::wrap_row::WrapRow, widget: &impl IsA<gtk::Widget
 /// Appends to a grid of equal tiles (a homogeneous `GtkFlowBox`). The flow
 /// box's own child wrapper takes no focus, so the keyboard reaches the tile
 /// itself in one step.
+///
+/// A grid with nothing in it to focus (the stat cards: figures and words)
+/// is taken off the Tab chain. A `GtkFlowBox` answers Tab as handled even
+/// when the tile it offered focus to refused it, so focus stayed where it
+/// was: Tab never got past it to the records below (KDE box, 2026-11-18).
 pub fn grid_append(grid: &gtk::FlowBox, widget: &impl IsA<gtk::Widget>) {
     grid.insert(widget, -1);
     if let Some(child) = widget.parent() {
         child.set_focusable(false);
     }
+    grid.set_can_focus(takes_focus(grid.upcast_ref()));
+}
+
+/// Whether anything inside `root` can hold keyboard focus.
+fn takes_focus(root: &gtk::Widget) -> bool {
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if widget.can_focus() && (widget.is_focusable() || takes_focus(&widget)) {
+            return true;
+        }
+        child = widget.next_sibling();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -681,6 +699,51 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{brand_tokens, stylesheet};
+
+    /// A grid of figures is no stop on the Tab chain, and Tab goes on
+    /// past it; a grid of buttons still takes focus on its tiles.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_tab_passes_a_grid_of_figures() {
+        use gtk::prelude::*;
+        adw::init().expect("GTK display unavailable");
+        let mount = |tile: gtk::Widget| {
+            let grid = gtk::FlowBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .homogeneous(true)
+                .build();
+            super::grid_append(&grid, &tile);
+            let after = gtk::Button::with_label("after");
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            column.append(&grid);
+            column.append(&after);
+            let window = gtk::Window::builder().child(&column).build();
+            window.present();
+            let context = gtk::glib::MainContext::default();
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < until {
+                context.iteration(false);
+            }
+            // From no focus, as the first Tab into a window that opened
+            // with none.
+            gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+            window.child_focus(gtk::DirectionType::TabForward);
+            let focus = gtk::prelude::GtkWindowExt::focus(&window);
+            window.destroy();
+            (focus, after.upcast::<gtk::Widget>())
+        };
+        let figure = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        figure.append(&gtk::Label::new(Some("3")));
+        let (focus, after) = mount(figure.upcast());
+        assert_eq!(focus, Some(after), "Tab stopped on a grid of figures");
+        let button = gtk::Button::with_label("tile");
+        let (focus, _) = mount(button.clone().upcast());
+        assert_eq!(
+            focus,
+            Some(button.upcast()),
+            "a grid of buttons is passed over"
+        );
+    }
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]

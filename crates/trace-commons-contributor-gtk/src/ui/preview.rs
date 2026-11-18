@@ -125,6 +125,10 @@ struct Sheet {
     /// tab. A person who is deciding should not have to go back to a tab to
     /// re-read what the payload was.
     manifest_slot: gtk::Box,
+    /// Why this trace is held for a person, and how unsure the scrubber
+    /// was (the Mac review card's reasons and `unsure` row). Refilled on
+    /// every `load`; nothing of one trace's survives into the next.
+    pub(crate) held_slot: gtk::Box,
 
     /// The two counts the tab strip carries: how many turns are in the
     /// trace, and how many permissions the contribution would run under.
@@ -227,6 +231,32 @@ const TABS: [Tab; 4] = [
 /// The stack child that shows the redacted body itself.
 const TRANSCRIPT_TAB: &str = "would-be-sent";
 
+/// The sheet's width as it opens, and the narrowest it goes, on a screen
+/// that has room for it.
+const SHEET_WIDTH: i32 = 900;
+
+/// The width the sheet opens at and requests: `SHEET_WIDTH`, but never
+/// more than `room`, the monitor's (else the window's) width in logical
+/// pixels, so a narrow screen does not cut its buttons off at the side.
+/// An unknown or empty `room` leaves `SHEET_WIDTH`.
+fn sheet_width(room: Option<i32>) -> i32 {
+    match room {
+        Some(room) if room > 0 => room.min(SHEET_WIDTH),
+        _ => SHEET_WIDTH,
+    }
+}
+
+/// The room the sheet has over `parent`: the width of the monitor it is
+/// on, else its own width once it has one.
+fn room_over(parent: &gtk::Window) -> Option<i32> {
+    parent
+        .surface()
+        .and_then(|surface| WidgetExt::display(parent).monitor_at_surface(&surface))
+        .map(|monitor| monitor.geometry().width())
+        .filter(|width| *width > 0)
+        .or_else(|| Some(parent.width()).filter(|width| *width > 0))
+}
+
 impl Sheet {
     fn present(
         app: &Rc<App>,
@@ -235,10 +265,13 @@ impl Sheet {
         term: Option<String>,
         tab: Option<String>,
     ) {
+        // The opening width and the request below agree (the libadwaita
+        // 1.5 fix needs them to), and neither is wider than the screen.
+        let width = sheet_width(room_over(app.window.upcast_ref()));
         let window = adw::Window::builder()
             .transient_for(&app.window)
             .modal(true)
-            .default_width(900)
+            .default_width(width)
             .default_height(720)
             .build();
 
@@ -273,6 +306,10 @@ impl Sheet {
         let manifest_slot = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .build();
+        let held_slot = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XXS)
+            .build();
 
         // Green, a padlock's worth of words, and a glyph -- the status of
         // the whole sheet, said before anything asks for a decision.
@@ -295,6 +332,7 @@ impl Sheet {
         sheet_header.set_margin_end(space::L);
         sheet_header.append(&identity);
         sheet_header.append(&manifest_slot);
+        sheet_header.append(&held_slot);
         sheet_header.append(&status_row);
 
         let stack = gtk::Stack::builder()
@@ -599,9 +637,8 @@ impl Sheet {
         correction_group.append(&correction_caption);
         correction_group.set_visible(false);
 
-        let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
+        let skip = gtk::Button::with_label(copy::not_this_one());
         skip.add_css_class("tc-quiet");
-        skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
         let close = gtk::Button::with_label(copy::CLOSE);
         close.add_css_class("tc-quiet");
         let contribute = gtk::Button::with_label(copy::CONTRIBUTE);
@@ -684,6 +721,13 @@ impl Sheet {
         content.append(&stack);
         content.append(&footer_rule);
         content.append(&footer);
+        // libadwaita 1.5 (Ubuntu 24.04) lays the content out as tall as it
+        // is at its narrowest, inside a window sized for its real width: at
+        // the window's minimum height the footer's buttons ended below the
+        // sheet (GNOME box, 2026-11-18). The sheet is no narrower than it
+        // opens, so the two heights agree; on a screen narrower than
+        // `SHEET_WIDTH` it opens and stays at the screen's width.
+        content.set_width_request(width);
         window.set_content(Some(&content));
 
         let sheet = Rc::new(Sheet {
@@ -707,6 +751,7 @@ impl Sheet {
             identity_agent,
             identity_when,
             manifest_slot,
+            held_slot,
             count_whats_in_it,
             count_permissions,
             search_entry: search_entry.clone(),
@@ -1036,7 +1081,12 @@ impl Sheet {
     fn load(self: &Rc<Self>) {
         let request = self.epoch.begin();
         *self.body.borrow_mut() = None;
-        for container in [&self.permissions, &self.whats_in_it, &self.removed_summary] {
+        for container in [
+            &self.permissions,
+            &self.whats_in_it,
+            &self.removed_summary,
+            &self.held_slot,
+        ] {
             while let Some(child) = container.first_child() {
                 container.remove(&child);
             }
@@ -1061,6 +1111,7 @@ impl Sheet {
         ));
         self.identity_when
             .set_text(&human_when(entry.discovered_at));
+        super::queue::append_held_facts(&self.held_slot, entry);
         // A new entry is a new decision, and nothing about the previous
         // one may carry into it: the pin is dropped here and only set again
         // by a preview that actually came back for THIS entry. The verdict
@@ -1657,19 +1708,15 @@ impl Sheet {
 
     fn dismiss_current(self: &Rc<Self>) {
         let Some(entry) = self.current() else { return };
-        let entry_id = entry.entry_id.clone();
         let sheet = Rc::clone(self);
-        self.app.call(
-            "dismiss",
-            serde_json::json!({ "entry_id": entry_id.clone() }),
-            move |app, result| {
-                if result.is_ok() {
-                    app.note_dismissed(&entry_id);
-                }
-                app.refresh();
+        // Asks first, as the Mac's `dismissModal`; the sheet moves on only
+        // once the daemon has taken it.
+        super::queue::confirm_dismiss(&self.app, &self.window, entry, move |app, dismissed| {
+            app.refresh();
+            if dismissed {
                 sheet.advance();
-            },
-        );
+            }
+        });
     }
 
     /// Approve exactly the bytes this sheet described, render the toast
@@ -1689,6 +1736,12 @@ impl Sheet {
     /// (`approved: 0`), which renders "Nothing sent" and offers no undo --
     /// fail-closed, the same rule a genuinely skipped entry gets.
     fn approve_current(self: &Rc<Self>) {
+        // Only a preview that came back for this entry is something a
+        // Contribute can cover; the button is drawn off without one, and
+        // a press that reaches here anyway sends nothing.
+        if !self.pinned.get() {
+            return;
+        }
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
@@ -2499,6 +2552,19 @@ fn admission_ready(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The sheet asks for no more than the screen has (F-4): 1280 wide at
+    /// 150% is 853 logical pixels, and the sheet opens and stays inside it.
+    #[test]
+    fn the_sheet_is_never_wider_than_the_room_it_has() {
+        use super::{SHEET_WIDTH, sheet_width};
+        assert_eq!(sheet_width(Some(1920)), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(900)), 900);
+        assert_eq!(sheet_width(Some(853)), 853);
+        assert_eq!(sheet_width(None), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(0)), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(-1)), SHEET_WIDTH);
+    }
+
     /// The control that prepares an evidence-bearing session is offered on
     /// the strength of `admission_evidence_required` -- a consequence of how
     /// the contributor enrolled, not a preference anyone sets. A contributor

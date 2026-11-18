@@ -195,6 +195,27 @@ else
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
+    ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
+    ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::queue::consent_mounted_tests::mounted_held_trace_shows_its_reasons_and_no_row_submit \
+    ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
+    ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
+    ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
+    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
+    ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
+    ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::history::consent_mounted_tests::mounted_tab_reaches_a_history_folders_records \
+    ui::style::tests::mounted_tab_passes_a_grid_of_figures \
+    ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
+    ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
+    ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
+    ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
+    ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
     ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \

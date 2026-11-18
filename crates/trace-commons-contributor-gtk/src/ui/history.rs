@@ -784,7 +784,9 @@ const WITHDRAWABLE_STATUSES: [&str; 6] = [
 /// so the button would have nothing to send and would fail for a reason the
 /// contributor could do nothing about.
 fn offers_withdrawal(record: &HistoryRecord) -> bool {
-    WITHDRAWABLE_STATUSES.contains(&record.status.as_str()) && !record.submission_id.is_empty()
+    !record.previous_account
+        && WITHDRAWABLE_STATUSES.contains(&record.status.as_str())
+        && !record.submission_id.is_empty()
 }
 
 /// The withdraw button, or -- once an attempt has been made -- what that
@@ -1355,6 +1357,10 @@ fn grouped(value: f64) -> String {
     if value < 0.0 { format!("-{out}") } else { out }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_history_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
 
@@ -1492,7 +1498,26 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         }
+    }
+
+    /// Never on a previous account's row (the Mac's `isWithdrawable`): the
+    /// current account cannot withdraw it, and the daemon refuses it.
+    #[test]
+    fn a_previous_accounts_record_is_not_offered_withdrawal() {
+        let wire: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted", "previous_account": true,
+        }))
+        .unwrap();
+        assert!(wire.previous_account);
+        assert!(!offers_withdrawal(&wire));
+        let current: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted",
+        }))
+        .unwrap();
+        assert!(!current.previous_account);
+        assert!(offers_withdrawal(&current));
     }
 
     #[test]
@@ -1610,6 +1635,7 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: Some(12.5),
             explanations: vec![],
+            previous_account: false,
         };
         let line = credit_line(&record).expect("a final figure is a figure");
         assert_eq!(line, "credit 12.5");
@@ -1630,6 +1656,7 @@ mod tests {
             credit_points_pending: 3.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         };
         assert_eq!(
             credit_line(&record).as_deref(),
