@@ -246,6 +246,8 @@ pub struct App {
     pub rollup: RefCell<HistoryRollup>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
+    pub undo_writing: RefCell<std::collections::HashSet<queue::UndoIdentity>>,
     /// The folder whose Submit all is waiting on the daemon's answer, as
     /// the Mac's `TracesStore.submittingFolder`: a demand on the inspector.
     pub submitting_folder: RefCell<Option<String>>,
@@ -512,6 +514,7 @@ impl App {
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
+            undo_writing: RefCell::new(Default::default()),
             submitting_folder: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),

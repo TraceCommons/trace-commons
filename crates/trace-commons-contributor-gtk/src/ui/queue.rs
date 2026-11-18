@@ -372,24 +372,26 @@ pub fn wire(app: &Rc<App>) {
         // after this window last listed the folder) or by the trace's
         // `entry_id`. The card is cleared only once the daemon confirms;
         // a refusal keeps it and says the shared line.
-        let params = {
+        let (pressed, params) = {
             let held = app_for_undo.undo.borrow();
             match held.as_ref() {
-                Some(undo) => undo_cancel_params(undo),
+                Some(undo) => (undo.identity(), undo_cancel_params(undo)),
                 None => return,
             }
         };
+        if !begin_undo_write(&mut app_for_undo.undo_writing.borrow_mut(), &pressed) {
+            return;
+        }
         app_for_undo.call("cancel", params, move |app, result| {
-            let confirmed = app
-                .undo
-                .borrow()
-                .as_ref()
-                .is_some_and(|undo| undo_reply_confirmed(undo, &result));
-            if confirmed {
-                app.dismiss_undo();
-            } else {
-                let label = result.err().unwrap_or_default();
-                app.toast(undo_refusal_line(&label));
+            end_undo_write(&mut app.undo_writing.borrow_mut(), &pressed);
+            let settled = settle_undo(&pressed, app.undo.borrow().as_ref(), &result);
+            match settled {
+                UndoSettle::Dismiss => app.dismiss_undo(),
+                UndoSettle::Keep => {}
+                UndoSettle::Refused => {
+                    let label = result.err().unwrap_or_default();
+                    app.toast(undo_refusal_line(&label));
+                }
             }
             app.refresh();
         });
@@ -1952,16 +1954,41 @@ pub(crate) fn undo_cancel_params(undo: &super::PendingUndo) -> serde_json::Value
     }
 }
 
+/// Which undo a press took back: its folder or trace and the instant it
+/// was offered. The reply is settled against this, not against whatever
+/// the single slot holds by then (`settle_undo`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UndoIdentity {
+    pub folder: Option<String>,
+    pub entry_id: Option<String>,
+    pub approved_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl super::PendingUndo {
+    pub(crate) fn identity(&self) -> UndoIdentity {
+        UndoIdentity {
+            folder: self.folder.clone(),
+            entry_id: if self.folder.is_some() {
+                None
+            } else {
+                self.entry_ids.first().cloned()
+            },
+            approved_at: self.approved_at,
+        }
+    }
+}
+
 /// Whether the daemon took the Undo, read as the Mac decodes the reply: a
 /// folder's carries a non-negative integer `canceled`
 /// (`CancelFolderResult`), a trace's is an object whose `ok`, if present,
-/// is a bool (`OkReply`).
+/// is a bool (`OkReply`). The shape is chosen by the undo that was
+/// pressed.
 pub(crate) fn undo_reply_confirmed(
-    undo: &super::PendingUndo,
+    pressed: &UndoIdentity,
     reply: &Result<serde_json::Value, String>,
 ) -> bool {
     let Ok(value) = reply else { return false };
-    if undo.folder.is_some() {
+    if pressed.folder.is_some() {
         value
             .get("canceled")
             .and_then(serde_json::Value::as_u64)
@@ -1973,6 +2000,52 @@ pub(crate) fn undo_reply_confirmed(
                 .is_none_or(|ok| ok.is_boolean() || ok.is_null())
         })
     }
+}
+
+/// What an Undo's reply does to the card.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UndoSettle {
+    /// The cancel landed and the slot still holds the pressed undo.
+    Dismiss,
+    /// The cancel landed, but the slot is empty or holds a later approval:
+    /// leave it alone, and say nothing.
+    Keep,
+    /// The daemon did not take it back: the card (if still there) stays,
+    /// and the shared line is said.
+    Refused,
+}
+
+/// Settle an Undo's reply against the undo that was pressed, as the Mac's
+/// `undoFolder` / `undoContribute` clear only their own slot.
+pub(crate) fn settle_undo(
+    pressed: &UndoIdentity,
+    slot: Option<&super::PendingUndo>,
+    reply: &Result<serde_json::Value, String>,
+) -> UndoSettle {
+    if !undo_reply_confirmed(pressed, reply) {
+        return UndoSettle::Refused;
+    }
+    if slot.is_some_and(|held| &held.identity() == pressed) {
+        UndoSettle::Dismiss
+    } else {
+        UndoSettle::Keep
+    }
+}
+
+/// The in-flight guard: `false` when a cancel for this undo is already
+/// out, as the Mac's `writing.contains(id)`.
+pub(crate) fn begin_undo_write(
+    in_flight: &mut std::collections::HashSet<UndoIdentity>,
+    pressed: &UndoIdentity,
+) -> bool {
+    in_flight.insert(pressed.clone())
+}
+
+pub(crate) fn end_undo_write(
+    in_flight: &mut std::collections::HashSet<UndoIdentity>,
+    pressed: &UndoIdentity,
+) {
+    in_flight.remove(pressed);
 }
 
 /// What a refused Undo says: the Traces tab's shared line for that label,
@@ -2184,6 +2257,8 @@ mod tests {
         use serde_json::json;
         let folder = pending_undo(&["a"], Some("p"));
         let trace = pending_undo(&["a"], None);
+        let folder = folder.identity();
+        let trace = trace.identity();
         assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 2}))));
         assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 0}))));
         for bad in [
@@ -2203,6 +2278,59 @@ mod tests {
         assert!(!undo_reply_confirmed(&trace, &Ok(json!(null))));
         assert!(!undo_reply_confirmed(&trace, &Ok(json!({"ok": "yes"}))));
         assert!(!undo_reply_confirmed(&trace, &Err("not-cancelable".into())));
+    }
+
+    /// The Undo reply is settled against the undo that was pressed, not
+    /// whatever the single slot holds when the reply lands (the Mac keeps
+    /// `lastContributed` and `lastContributedFolder` apart for the same
+    /// reason). A confirmed cancel clears the card only while the slot
+    /// still holds the pressed undo; a later Submit's card survives it, and
+    /// an emptied slot (Let it send, an expired hold) earns no refusal.
+    #[test]
+    fn an_undo_reply_settles_only_the_undo_that_was_pressed() {
+        use serde_json::json;
+        let pressed = pending_undo(&["a"], Some("p"));
+        let identity = pressed.identity();
+        let ok = Ok(json!({"canceled": 1}));
+        assert_eq!(
+            settle_undo(&identity, Some(&pressed), &ok),
+            UndoSettle::Dismiss
+        );
+        // A later trace Submit replaced the card while the folder's cancel
+        // was in flight: the folder's confirmation must not clear it.
+        let mut later = pending_undo(&["b"], None);
+        later.approved_at = pressed.approved_at + chrono::Duration::seconds(1);
+        assert_eq!(settle_undo(&identity, Some(&later), &ok), UndoSettle::Keep);
+        // The same folder submitted again: a newer approval, kept.
+        let mut again = pending_undo(&["a"], Some("p"));
+        again.approved_at = pressed.approved_at + chrono::Duration::seconds(2);
+        assert_eq!(settle_undo(&identity, Some(&again), &ok), UndoSettle::Keep);
+        // Let it send emptied the slot: the cancel still landed, nothing to
+        // clear, and no refusal is shown.
+        assert_eq!(settle_undo(&identity, None, &ok), UndoSettle::Keep);
+        // The reply's shape is read for the pressed kind: a trace's
+        // `OkReply` does not confirm a folder's cancel even if the slot
+        // now holds a trace's undo.
+        assert_eq!(
+            settle_undo(&identity, Some(&later), &Ok(json!({}))),
+            UndoSettle::Refused
+        );
+        assert_eq!(
+            settle_undo(&identity, Some(&pressed), &Err("not-cancelable".into())),
+            UndoSettle::Refused
+        );
+    }
+
+    /// A second press while the first cancel is in flight sends nothing,
+    /// as the Mac's `writing.contains(id)` guard.
+    #[test]
+    fn a_second_undo_press_waits_for_the_first() {
+        let pressed = pending_undo(&["a"], Some("p"));
+        let mut in_flight = std::collections::HashSet::new();
+        assert!(begin_undo_write(&mut in_flight, &pressed.identity()));
+        assert!(!begin_undo_write(&mut in_flight, &pressed.identity()));
+        end_undo_write(&mut in_flight, &pressed.identity());
+        assert!(begin_undo_write(&mut in_flight, &pressed.identity()));
     }
 
     /// The arming offer stays up until the daemon answers, and a refusal
