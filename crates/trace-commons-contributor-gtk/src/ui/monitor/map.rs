@@ -2890,6 +2890,143 @@ mod tests {
         assert!(ink > 20, "only {ink} pixels of initials");
     }
 
+    /// Renders the Private AI map from the Mac's recorded samples, as the
+    /// Mac's `privateai-scene-<set>` renders were made: laid out in their
+    /// 440 x 614 pane at scale 1 and drawn at 2x. Words are drawn with
+    /// cairo's own text, since the widget's fonts need a display, so they
+    /// are placed as the map places them but not set in its font. Writes
+    /// raw premultiplied BGRA into `TC_MAP_RENDER_DIR`.
+    #[test]
+    #[ignore = "writes comparison renders; set TC_MAP_RENDER_DIR"]
+    fn render_private_ai_map_for_comparison() {
+        let Ok(dir) = std::env::var("TC_MAP_RENDER_DIR") else {
+            return;
+        };
+        let samples = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../macos/Sources/TCShellCore/DataContract/RecordedSamples");
+        let read = |set: &str, method: &str| -> serde_json::Value {
+            let text =
+                std::fs::read_to_string(samples.join(set).join(format!("{method}.json"))).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let (w, h) = (440, 614);
+        let space = Size::new(f64::from(w), f64::from(h));
+        let light = Palette::fixed();
+        let dark = Palette {
+            ink: gtk::gdk::RGBA::WHITE,
+            background: parse("#0d1124"),
+            map: MapColours::scheme(true),
+            ..light.clone()
+        };
+        for set in ["normalDay", "empty", "armedFolder"] {
+            let list: HarnessList = serde_json::from_value(read(set, "harness_list")).unwrap();
+            let destinations: ToolDestinations =
+                serde_json::from_value(read(set, "tool_destinations")).unwrap();
+            let status: GateStatus = serde_json::from_value(read(set, "status")).unwrap();
+            let inputs = SceneInputs::private_ai(PrivateAiInputs {
+                harnesses: Some(list.harnesses.iter().map(HarnessRow::from_model).collect()),
+                private_ai: map_scene::private_ai_label(Some(&destinations), Some(&status)),
+                destinations: Some(destinations),
+            });
+            let scene = inputs.scene(&BTreeMap::new(), space);
+            let fit = MapGeometry::new(space, 1.0, None, scene.space);
+            for (scheme, palette) in [("light", light.clone()), ("dark", dark.clone())] {
+                let mut surface =
+                    gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2)
+                        .unwrap();
+                {
+                    let cr = gtk::cairo::Context::new(&surface).unwrap();
+                    source(&cr, &palette.map.pane_opaque, 1.0);
+                    let _ = cr.paint();
+                    cr.scale(2.0, 2.0);
+                    draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
+                    for node in &scene.nodes {
+                        draw_node(&cr, &scene, node, &fit, &palette, false);
+                    }
+                    let (label, sublabel, label_offset, sublabel_offset) =
+                        map_scene::label_type(fit.scale);
+                    let text = |t: &str,
+                                at: Point,
+                                size: f64,
+                                bold: bool,
+                                anchor: f64,
+                                c: gtk::gdk::RGBA| {
+                        cr.select_font_face(
+                            "sans-serif",
+                            gtk::cairo::FontSlant::Normal,
+                            if bold {
+                                gtk::cairo::FontWeight::Bold
+                            } else {
+                                gtk::cairo::FontWeight::Normal
+                            },
+                        );
+                        cr.set_font_size(size);
+                        let e = cr.text_extents(t).unwrap();
+                        source(&cr, &c, 1.0);
+                        cr.move_to(
+                            at.x - e.x_advance() * anchor,
+                            at.y - e.y_bearing() - e.height() / 2.0,
+                        );
+                        let _ = cr.show_text(t);
+                        cr.new_path();
+                    };
+                    for node in &scene.nodes {
+                        let centre = fit.point(node.at);
+                        let radius = node.radius * fit.scale;
+                        let ink = palette.ink(node.dim);
+                        if node.label_beside() {
+                            let gap = 6.0 * fit.scale.max(map_scene::LABEL_FLOOR);
+                            text(
+                                &node.label,
+                                Point::new(centre.x - radius - gap, centre.y),
+                                label,
+                                true,
+                                1.0,
+                                ink,
+                            );
+                        } else {
+                            text(
+                                &node.label,
+                                Point::new(centre.x, centre.y + radius + label_offset),
+                                label,
+                                true,
+                                0.5,
+                                ink,
+                            );
+                        }
+                        if let Some(line) = node.sublabel.as_deref() {
+                            text(
+                                line,
+                                Point::new(centre.x, centre.y + radius + sublabel_offset),
+                                sublabel,
+                                false,
+                                0.5,
+                                palette.ink(0.6 * node.dim),
+                            );
+                        }
+                    }
+                    for overflow in &scene.overflows {
+                        text(
+                            &format!("+{}", overflow.count),
+                            fit.point(overflow.at),
+                            10.0,
+                            false,
+                            0.5,
+                            palette.ink(0.6),
+                        );
+                    }
+                }
+                surface.flush();
+                let name = format!(
+                    "{dir}/privateai-scene-{set}-{scheme}-{}x{}.bgra",
+                    w * 2,
+                    h * 2
+                );
+                std::fs::write(name, &*surface.data().unwrap()).unwrap();
+            }
+        }
+    }
+
     /// Renders the Traces map's drawing (no words: they need a widget's
     /// fonts) in each scheme, for comparison with the Mac's. Writes raw
     /// premultiplied BGRA into `TC_MAP_RENDER_DIR`.
