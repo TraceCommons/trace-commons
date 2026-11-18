@@ -153,3 +153,120 @@ fn mounted_withdraw_asks_first_then_sends_the_record() {
         serde_json::json!({"submission_id": "sub-1"})
     );
 }
+
+fn describe(widget: &gtk::Widget) -> String {
+    let name = widget
+        .downcast_ref::<gtk::Button>()
+        .and_then(|b| b.label().or_else(|| b.tooltip_text()))
+        .map(|l| l.to_string())
+        .unwrap_or_default();
+    format!("{}({name})", widget.type_().name())
+}
+
+/// Tab forward from the window `presses` times, as GtkWindow's Tab binding
+/// does, and say where focus landed each time.
+fn tab_walk(fixture: &Fixture, presses: usize) -> Vec<gtk::Widget> {
+    let window: &gtk::Window = fixture.app.window.upcast_ref();
+    let mut landed = Vec::new();
+    for _ in 0..presses {
+        window.child_focus(gtk::DirectionType::TabForward);
+        fixture.settle();
+        if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
+            landed.push(focus);
+        }
+    }
+    landed
+}
+
+/// Keyboard reach in Traces > History > a folder (KDE box, 2026-11-18):
+/// Tab went from the update notice's Close, or with the notice closed from
+/// the "Traces" breadcrumb, and never reached the records. Every record's
+/// Open is on the Tab chain, with the notices open or closed.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_tab_reaches_a_history_folders_records() {
+    let fixture = Fixture::new("HistoryTab", &["history_rollup", "list_history"]);
+    let app = &fixture.app;
+    app.window.present();
+    *app.history_location.borrow_mut() = crate::queue_folders::Location::Project("p1".into());
+    assert!(app.shell.open(app, "history"));
+    super::refresh(app);
+    fixture.drive_until(|| !fixture.calls_to("history_rollup").is_empty());
+    fixture.answer("history_rollup", Ok(serde_json::json!({})));
+    fixture.drive_until(|| !fixture.calls_to("list_history").is_empty());
+    let record = |id: &str| {
+        serde_json::json!({
+            "submission_id": id, "status": "accepted",
+            "project_label": "proj", "project_id": "p1",
+        })
+    };
+    fixture.answer(
+        "list_history",
+        Ok(serde_json::json!({"history": [record("sub-1"), record("sub-2")]})),
+    );
+    let open_word = trace_commons_contributor::preview_copy::monitor_screens_copy()
+        .shell
+        .open;
+    let opens = || -> Vec<gtk::Widget> {
+        let mut out = Vec::new();
+        let mut pending = vec![app.history.root.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = pending.pop() {
+            if widget
+                .downcast_ref::<gtk::Button>()
+                .is_some_and(|b| b.label().as_deref() == Some(open_word))
+            {
+                out.push(widget.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                pending.push(current);
+            }
+        }
+        out
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while opens().len() < 2 || !opens().iter().all(|w| w.is_drawable()) {
+        assert!(std::time::Instant::now() < deadline, "the records drew");
+        fixture.context.iteration(false);
+    }
+    let check = |when: &str| {
+        let landed = tab_walk(&fixture, 120);
+        let trail: Vec<String> = landed.iter().map(describe).collect();
+        for open in opens() {
+            assert!(
+                landed.contains(&open),
+                "{when}: Tab never reached a record's {open_word}; it went {trail:?}"
+            );
+        }
+    };
+    check("with the notices as they open");
+    // Close every notice the window shows, then walk again.
+    for button in descendants_of(app.window.upcast_ref())
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .filter(|b| {
+            b.is_drawable()
+                && b.icon_name().as_deref() == Some("window-close-symbolic")
+                && b.ancestor(gtk::Overlay::static_type()).is_some()
+        })
+    {
+        button.emit_clicked();
+        fixture.settle();
+    }
+    check("with the notices closed");
+}
+
+fn descendants_of(root: &gtk::Widget) -> Vec<gtk::Widget> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(widget) = pending.pop() {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            pending.push(current);
+        }
+        out.push(widget);
+    }
+    out
+}

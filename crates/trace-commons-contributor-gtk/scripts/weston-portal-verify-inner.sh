@@ -206,6 +206,7 @@ else
     ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
     ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
     ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::history::consent_mounted_tests::mounted_tab_reaches_a_history_folders_records \
     ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
     ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
     ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
