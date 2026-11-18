@@ -582,9 +582,42 @@ window.tc-glass-window {
   font-weight: 600;
 }
 
-/* The toolbar's capsule holds the Graph, Map and Inspector toggles: a glass
-   control, its glyphs in the toolbar ink while the pane is shown and in the
-   hidden ink while it is not. */
+/* The Private AI tab's dot: a circle in its state's status colour, as the
+   Mac's tab dot. The state's sentence is its tip and accessible name. */
+.tc-tab-dot {
+  min-width: 7px;
+  min-height: 7px;
+  padding: 0;
+  margin-left: 2px;
+  border-radius: 999px;
+  background-color: @tc_muted;
+}
+
+.tc-tab-dot.tc-clear {
+  background-color: @tc_status_on;
+}
+
+.tc-tab-dot.tc-attention {
+  background-color: @tc_status_ask;
+}
+
+.tc-tab-dot.tc-refused {
+  background-color: @tc_status_outside;
+}
+
+.tc-tab-dot.tc-held {
+  background-color: @tc_blue;
+}
+
+.tc-tab-dot.tc-neutral {
+  background-color: @tc_muted;
+}
+
+/* The toolbar's capsule holds the Graph, Map and Inspector toggles
+   (`GlassToolbarGroup`): a glass control, 2px around and between its
+   buttons. Each toggle is `GlassToolbarButton`'s 28 by 24 capsule, its glyph
+   in the toolbar ink while the pane is shown and in the hidden ink while it
+   is not. Settings is `GlassRoundButton`: a 28px round control. */
 .tc-toolbar-capsule {
   padding: 2px;
 }
@@ -594,8 +627,9 @@ window.tc-glass-window {
   background-image: none;
   box-shadow: none;
   border: none;
-  min-height: 0;
-  padding: 4px 8px;
+  min-height: 24px;
+  min-width: 28px;
+  padding: 0;
   border-radius: 999px;
   color: @tc_glass_toolbar_glyph_hidden;
 }
@@ -616,8 +650,15 @@ window.tc-glass-window {
   opacity: 0.45;
 }
 
-.tc-toolbar-gear {
+.tc-toolbar-toggle.tc-toolbar-gear {
+  min-width: 28px;
+  min-height: 28px;
+  background-color: @tc_glass_control;
   color: @tc_glass_toolbar_glyph;
+}
+
+.tc-toolbar-toggle.tc-toolbar-gear:hover {
+  background-color: @tc_glass_control_hover;
 }
 
 /* --- The graph footer (`monitor::graph_footer`) ---------------------

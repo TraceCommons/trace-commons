@@ -115,6 +115,9 @@ const NOTICE_BACKDROP_CLASS: &str = "tc-notice-backdrop";
 /// alone, not every card nested in it.
 const NOTICE_SURFACE_CLASS: &str = "tc-notice-surface";
 
+/// The Private AI tab's status dot: a circle in its tone's status colour.
+const TAB_DOT_CLASS: &str = "tc-tab-dot";
+
 /// The window's class while the desktop asks for high contrast. The
 /// generated glass sheet strokes the tiers that carry edge layers under it.
 const HIGH_CONTRAST_CLASS: &str = "tc-high-contrast";
@@ -370,7 +373,8 @@ impl Shell {
         let graph_toggle = toolbar_toggle(brand_tokens::glyph::GRAPH);
         let map_toggle = toolbar_toggle(brand_tokens::glyph::MAP);
         let inspector_toggle = toolbar_toggle(brand_tokens::glyph::INSPECTOR);
-        let capsule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        // `GlassToolbarGroup`: 2px between its buttons.
+        let capsule = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         capsule.add_css_class("tc-glass-control");
         capsule.add_css_class("tc-toolbar-capsule");
         capsule.set_valign(gtk::Align::Center);
@@ -397,7 +401,10 @@ impl Shell {
         let traces_badge = gtk::Label::builder().visible(false).build();
         traces_badge.add_css_class("tc-count-badge");
         traces_badge.set_valign(gtk::Align::Center);
+        // A status-coloured circle, as the Mac's tab dot: no glyph, its
+        // state in its tip and accessible name (`render_inference_state`).
         let inference_dot = gtk::Label::builder().visible(false).build();
+        inference_dot.add_css_class(TAB_DOT_CLASS);
         inference_dot.set_valign(gtk::Align::Center);
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         strip.add_css_class("tc-glass-tabs");
@@ -1225,7 +1232,6 @@ impl Shell {
             crate::copy::private_inference_state_tone(state),
         );
         let line = crate::copy::private_inference_state_line(state);
-        dot.set_label(tone.glyph());
         dot.add_css_class(tone.css());
         dot.set_tooltip_text(Some(line));
         dot.update_property(&[gtk::accessible::Property::Label(line)]);
@@ -2551,7 +2557,9 @@ mod tests {
         assert!(rule(".tc-glass-tabs .tc-tab:checked label").contains("font-weight: 600;"));
         let checked = rule(".tc-glass-tabs .tc-tab:checked");
         assert!(checked.contains("@tc_glass_tab_ember 30%"));
-        assert!(checked.contains("radial-gradient(") && checked.contains("@tc_glass_tab_ember_halo"));
+        assert!(
+            checked.contains("radial-gradient(") && checked.contains("@tc_glass_tab_ember_halo")
+        );
         // The strip is laid out to fill: homogeneous, and no left packing.
         let source = include_str!("shell.rs");
         let strip = source
@@ -2563,6 +2571,63 @@ mod tests {
         assert!(!strip.contains("gtk::Align::Start"));
     }
 
+    /// The toolbar is the Mac's: 28 by 24 toggles in a capsule, and a 28px
+    /// round Settings button on a control's fill.
+    #[test]
+    fn the_toolbar_controls_are_the_macs_size() {
+        let css = include_str!("../style.css");
+        let rule = |selector: &str| {
+            css.split(&format!("\n{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        let toggle = rule(".tc-toolbar-toggle");
+        assert!(toggle.contains("min-width: 28px;") && toggle.contains("min-height: 24px;"));
+        let gear = rule(".tc-toolbar-toggle.tc-toolbar-gear");
+        assert!(gear.contains("min-width: 28px;") && gear.contains("min-height: 28px;"));
+        assert!(gear.contains("background-color: @tc_glass_control;"));
+        assert!(rule(".tc-toolbar-capsule").contains("padding: 2px;"));
+    }
+
+    /// The Private AI tab's dot is a status-coloured circle with no glyph
+    /// (`MonitorWindowView`'s tab dot), one colour per tone.
+    #[test]
+    fn the_private_ai_dot_is_a_status_circle() {
+        let css = include_str!("../style.css");
+        let rule = |selector: &str| {
+            css.split(&format!("\n{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        let dot = rule(&format!(".{TAB_DOT_CLASS}"));
+        assert!(dot.contains("min-width: 7px;") && dot.contains("min-height: 7px;"));
+        assert!(dot.contains("border-radius: 999px;"));
+        for (tone, colour) in [
+            (style::Tone::Clear, "@tc_status_on"),
+            (style::Tone::Attention, "@tc_status_ask"),
+            (style::Tone::Refused, "@tc_status_outside"),
+            (style::Tone::Held, "@tc_blue"),
+            (style::Tone::Neutral, "@tc_muted"),
+        ] {
+            assert!(
+                rule(&format!(".{TAB_DOT_CLASS}.{}", tone.css()))
+                    .contains(&format!("background-color: {colour};")),
+                "{tone:?}"
+            );
+        }
+        let source = include_str!("shell.rs");
+        let render = source
+            .split("pub fn render_inference_state")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("render_inference_state");
+        assert!(!render.contains(".glyph()"), "the dot draws no glyph");
+    }
+
     /// Increase Contrast: the window wears the class the generated sheet
     /// strokes the edged tiers under (`GlassEdgeModifier`'s increased
     /// branch), and only while the desktop asks for high contrast.
@@ -2570,9 +2635,7 @@ mod tests {
     fn high_contrast_is_a_class_on_the_window() {
         assert_eq!(HIGH_CONTRAST_CLASS, "tc-high-contrast");
         for sheet in [brand_tokens::GLASS_LIGHT_CSS, brand_tokens::GLASS_DARK_CSS] {
-            assert!(sheet.contains(&format!(
-                "window.{HIGH_CONTRAST_CLASS} .tc-glass-pane"
-            )));
+            assert!(sheet.contains(&format!("window.{HIGH_CONTRAST_CLASS} .tc-glass-pane")));
         }
     }
 }

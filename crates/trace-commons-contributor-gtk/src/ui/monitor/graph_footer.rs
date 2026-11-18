@@ -620,8 +620,15 @@ mod tests {
         let mut sorted = full.clone();
         sorted.sort_by(f64::total_cmp);
         assert_eq!(full, sorted);
-        assert_ne!(dot_alphas(9.0, 40.0, DOT_ROWS), dot_alphas(11.0, 40.0, DOT_ROWS));
-        assert!(dot_alphas(f64::INFINITY, 40.0, DOT_ROWS).iter().all(|a| *a <= 1.0));
+        assert_ne!(
+            dot_alphas(9.0, 40.0, DOT_ROWS),
+            dot_alphas(11.0, 40.0, DOT_ROWS)
+        );
+        assert!(
+            dot_alphas(f64::INFINITY, 40.0, DOT_ROWS)
+                .iter()
+                .all(|a| *a <= 1.0)
+        );
     }
 
     /// Every period has its column, with the Mac's gap between columns,
