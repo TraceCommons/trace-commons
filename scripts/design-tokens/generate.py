@@ -669,6 +669,183 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     return palette
 
 
+
+# The translucent window KDE blur shows through (`ui::glass_backdrop`): the
+# panes carry the Mac's material stack as one colour, and the tiers inside a
+# pane take their flat fills with their own alpha, composited by GTK over it.
+# The Liquid Glass tint is the veil at this share of its alpha
+# (GlassTheme.swift:82 `glassTintShare`); the compositor's blur stands in for
+# the glass itself, which adds no frost of its own.
+GLASS_TINT_SHARE = 0.25
+# Tiers whose blurred fill is their flat token with alpha. A popover and a
+# menu are surfaces of their own, which no blur reaches, and a node card
+# floats over the map, which the Mac blurs within the window and Linux does
+# not: those three keep their opaque painted fills.
+GLASS_BLUR_TIERS = ["card", "cardQuiet", "well", "control", "controlSelected"]
+# The desktops a blurred pane may sit over: the blur averages what is behind,
+# and these are the extremes it can average to.
+GLASS_BLUR_DESKTOPS = ["#000000", "#ffffff"]
+
+
+def rgba_stack(layers: list[dict]) -> tuple[float, float, float, float]:
+    """Source-over compositing of colour entries, bottom first, onto nothing:
+    the colour and alpha one layer must carry to look the same."""
+    r = g = b = a = 0.0
+    for entry in layers:
+        alpha = float(entry.get("alpha", 1))
+        c = [int(entry["hex"][i:i + 2], 16) for i in (1, 3, 5)]
+        out = alpha + a * (1 - alpha)
+        if out == 0:
+            continue
+        r, g, b = ((c[i] * alpha + (r, g, b)[i] * a * (1 - alpha)) / out for i in range(3))
+        a = out
+    return r, g, b, a
+
+
+def css_rgba_tuple(colour: tuple[float, float, float, float]) -> str:
+    r, g, b, a = colour
+    return f"rgba({round(r)}, {round(g)}, {round(b)}, {round(a, 4):g})"
+
+
+def entry_of(colour: tuple[float, float, float, float]) -> dict:
+    """An rgba tuple back as a colour entry, at the precision CSS carries."""
+    r, g, b, a = colour
+    return {"hex": "#" + "".join(f"{round(c):02x}" for c in (r, g, b)), "alpha": round(a, 4)}
+
+
+def blur_pane_layers(tokens: dict, scheme: str, share: float, dimmed: bool) -> list[dict]:
+    """GlassPaneFill's layers over the glass: the tint, the veil, paneFill,
+    and inactiveDim out of focus."""
+    veil = flat_color(tokens, "glassVeil", scheme)
+    tint = dict(veil, alpha=float(veil.get("alpha", 1)) * share)
+    layers = [tint, veil, flat_fill(tokens, "paneFill", scheme)]
+    if dimmed:
+        layers.append(flat_color(tokens, "inactiveDim", scheme))
+    return layers
+
+
+def blur_failures(tokens: dict, scheme: str, share: float) -> list[str]:
+    """Every text that would read under 4.5:1 over a black or a white
+    desktop at this tint share, focused or not."""
+    painted = glass_palette(tokens, scheme)
+    fills = {"card": flat_fill(tokens, "cardFill", scheme),
+             "cardQuiet": flat_fill(tokens, "cardFillQuiet", scheme),
+             "control": flat_fill(tokens, "controlFill", scheme)}
+    failures = []
+    for desktop in GLASS_BLUR_DESKTOPS:
+        for dimmed in (False, True):
+            pane = entry_of(rgba_stack(blur_pane_layers(tokens, scheme, share, dimmed)))
+            ground = opaque_over(pane, desktop)
+            surfaces = {"pane": ground}
+            for tier, fill in fills.items():
+                surfaces[tier] = opaque_over(fill, ground)
+            for surface, colour in surfaces.items():
+                for ink in ("ink", "inkSecondary"):
+                    ratio = contrast(painted[ink], colour)
+                    if ratio < 4.5:
+                        focus = "unfocused" if dimmed else "focused"
+                        failures.append(f"{ink} on translucent {surface} over {desktop}, {focus}, "
+                                        f"is {ratio:.2f}:1")
+            selected = opaque_over(flat_color(tokens, "controlSelected", scheme), ground)
+            if contrast(painted["selectedInk"], selected) < 4.5:
+                failures.append(f"selection text on translucent controlSelected over {desktop}")
+    return failures
+
+
+def glass_blur_tint_share(tokens: dict, scheme: str) -> float:
+    """The Mac's tint share, or the smallest lift in 0.05 steps at which every
+    text still reads over a black or white desktop. KWin's blur adds no frost
+    of its own, as the Mac's material does; a lift is a deviation from the
+    Mac, kept as small as the 4.5:1 floor allows."""
+    share = GLASS_TINT_SHARE
+    while share <= 0.5 + 1e-9:
+        if not blur_failures(tokens, scheme, share):
+            return round(share, 2)
+        share += 0.05
+    raise TokenError(f"glass {scheme}: translucent pane unreadable at every tint share: "
+                     + "; ".join(blur_failures(tokens, scheme, GLASS_TINT_SHARE)))
+
+
+def glass_blur_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    """The colours the translucent window redefines, as CSS: the panes as the
+    Mac's material stack in one colour, the tiers inside them with alpha."""
+    share = glass_blur_tint_share(tokens, scheme)
+    palette = {"scene": "transparent"}
+    palette["pane"] = css_rgba_tuple(rgba_stack(blur_pane_layers(tokens, scheme, share, False)))
+    palette["paneInactive"] = css_rgba_tuple(rgba_stack(blur_pane_layers(tokens, scheme, share, True)))
+    fills = {"card": flat_fill(tokens, "cardFill", scheme),
+             "cardQuiet": flat_fill(tokens, "cardFillQuiet", scheme),
+             "well": flat_color(tokens, "wellFill", scheme),
+             "control": flat_fill(tokens, "controlFill", scheme),
+             "controlSelected": flat_color(tokens, "controlSelected", scheme),
+             "rule": flat_color(tokens, "rule", scheme)}
+    for tier, fill in fills.items():
+        # Inside a pane a tier dims with the pane beneath it, not by itself.
+        palette[tier] = palette[tier + "Inactive"] = css_rgba_tuple(rgba_stack([fill]))
+    # As the painted palette: the hover that shows on each control, stacked
+    # on the control's own fill, and a row's hover over the pane.
+    hover = "controlOnCardHover" if scheme == "light" else "controlOnMenuHover"
+    palette["controlHover"] = css_rgba_tuple(rgba_stack([fills["control"], flat_color(tokens, hover, scheme)]))
+    palette["rowHover"] = css_rgba_tuple(rgba_stack([flat_color(tokens, "rowHover", scheme)]))
+    return palette
+
+
+GLASS_BLUR_COLOURS = [
+    ("scene", "scene"),
+    ("pane", "pane"),
+    ("paneInactive", "pane_inactive"),
+    *[(t, snake(t)) for t in GLASS_BLUR_TIERS],
+    *[(t + "Inactive", snake(t) + "_inactive") for t in GLASS_BLUR_TIERS],
+    ("rule", "rule"),
+    ("ruleInactive", "rule_inactive"),
+    ("controlHover", "control_hover"),
+    ("rowHover", "row_hover"),
+]
+
+
+def render_glass_blur_css(tokens: dict, scheme: str) -> str:
+    """Loaded after the painted sheet while blur is granted: it redefines the
+    colours the panes and tiers paint with, so every rule naming them, the
+    hand-written ones in style.css included, follows."""
+    palette = glass_blur_palette(tokens, scheme)
+    out = [f"@define-color tc_glass_{name} {palette[key]};" for key, name in GLASS_BLUR_COLOURS]
+    # GlassWindowConfigurator: no background, no window shadow. libadwaita's
+    # window.csd outline and 1px ring would draw a rectangle across the gaps;
+    # the shadow's extent stays, transparent, as the resize margin (its own
+    # `0 0 14px 5px transparent` on :backdrop), and a maximized or tiled
+    # window keeps libadwaita's zero or 20px extent without the ring.
+    out.append("window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop "
+               "{ outline: none; box-shadow: 0 0 14px 5px transparent; }")
+    out.append("window.tc-glass-window.maximized, window.tc-glass-window.fullscreen "
+               "{ box-shadow: none; }")
+    out.append("window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, "
+               "window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, "
+               "window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }")
+    return "\n".join(out)
+
+
+def render_insights_blur_css(tokens: dict, scheme: str) -> str:
+    """Insights over a translucent pane: no ground of its own, cards and the
+    switcher with their fills' alpha, in and out of focus alike."""
+    card = flat_fill(tokens, "cardFill", scheme)
+    control = flat_fill(tokens, "controlFill", scheme)
+    card_hover = (rgba_stack([card, flat_color(tokens, "controlOnCardHover", scheme)]) if scheme == "light"
+                  else rgba_stack([flat_color(tokens, "cardHover", scheme)]))
+    control_hover = rgba_stack([control, flat_color(tokens, "controlOnCardHover" if scheme == "light"
+                                                    else "controlOnMenuHover", scheme)])
+    cards = ".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary"
+    out = []
+    for prefix in ("", "window.tc-glass-window:backdrop "):
+        out += [f"{prefix}.tc-insights {{ background: transparent; }}",
+                ", ".join(prefix + part.strip() for part in cards.split(","))
+                + f" {{ background: {css_rgba(card, 'cardFill')}; }}",
+                f"{prefix}.tc-insights stackswitcher {{ background: {css_rgba(control, 'controlFill')}; }}"]
+    out += [".tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover "
+            f"{{ background: {css_rgba_tuple(card_hover)}; }}",
+            f".tc-insights stackswitcher button:hover {{ background: {css_rgba_tuple(control_hover)}; }}"]
+    return "\n".join(out)
+
+
 GLASS_COLOURS = [
     ("scene", "scene"),
     ("ink", "ink"),
@@ -891,6 +1068,16 @@ def render_gtk(tokens: dict) -> str:
         out.append(f"/// The painted Monitor window's tiers, type roles and inks, {scheme} scheme.")
         out.append(f'pub const GLASS_{scheme.upper()}_CSS: &str = r#"')
         out.append(render_glass_css(tokens, scheme))
+        out.append('"#;')
+    for scheme in SCHEMES:
+        out.append(f"/// The translucent window's colours over the painted ones, {scheme} scheme,")
+        out.append("/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).")
+        out.append(f'pub const GLASS_{scheme.upper()}_BLUR_CSS: &str = r#"')
+        out.append(render_glass_blur_css(tokens, scheme))
+        out.append('"#;')
+        out.append(f"/// Insights over the translucent pane, {scheme} scheme.")
+        out.append(f'pub const INSIGHTS_{scheme.upper()}_BLUR_CSS: &str = r#"')
+        out.append(render_insights_blur_css(tokens, scheme))
         out.append('"#;')
     out.append("")
     out.extend(render_glass_rust(tokens))

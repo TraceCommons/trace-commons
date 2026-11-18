@@ -321,5 +321,162 @@ class GlassTokensTests(unittest.TestCase):
         self.assertEqual(first, generate.render_gtk(self.tokens))
 
 
+def rgba(text):
+    """`rgba(r, g, b, a)` as four floats."""
+    inner = text.strip()
+    assert inner.startswith("rgba(") and inner.endswith(")"), text
+    r, g, b, a = (float(v) for v in inner[5:-1].split(","))
+    return r, g, b, a
+
+
+def stack(*layers):
+    """Source-over compositing of (hex, alpha) layers, bottom first, onto
+    nothing: the colour and alpha one layer must carry to look the same."""
+    r = g = b = a = 0.0
+    for hex_, alpha in layers:
+        c = [int(hex_[i:i + 2], 16) for i in (1, 3, 5)]
+        out = alpha + a * (1 - alpha)
+        r, g, b = ((c[i] * alpha + (r, g, b)[i] * a * (1 - alpha)) / out for i in range(3))
+        a = out
+    return r, g, b, a
+
+
+def over_ground(colour, ground):
+    """An rgba tuple flattened over an opaque hex ground, as hex."""
+    r, g, b, a = colour
+    base = [int(ground[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(c * a + base[i] * (1 - a)):02x}" for i, c in enumerate((r, g, b)))
+
+
+class GlassBlurTokensTests(unittest.TestCase):
+    """The translucent window KDE blur shows through. Values pinned to the
+    Mac's flat theme: macos/Sources/TCDesign/Generated/GlassTokens.swift and
+    Tokens/GlassTheme.swift."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def assertRgba(self, text, expected):
+        got = rgba(text)
+        for g, e in zip(got[:3], expected[:3]):
+            self.assertAlmostEqual(g, e, delta=0.51, msg=text)
+        self.assertAlmostEqual(got[3], expected[3], delta=0.0006, msg=text)
+
+    def test_tint_share_is_the_macs_in_dark_and_the_smallest_readable_lift_in_light(self):
+        # GlassTheme.swift:82 `glassTintShare = 0.25`: the Liquid Glass tint
+        # is the veil at a quarter of its alpha. Dark reads at that share
+        # over any desktop; light's secondary text over a black desktop,
+        # unfocused, does not (4.38:1). 0.30 is the first step that does
+        # (4.54:1).
+        self.assertEqual(generate.GLASS_TINT_SHARE, 0.25)
+        self.assertEqual(generate.glass_blur_tint_share(self.tokens, "dark"), 0.25)
+        self.assertEqual(generate.glass_blur_tint_share(self.tokens, "light"), 0.3)
+
+    def test_pane_is_the_macs_material_stack_in_one_colour(self):
+        # GlassPaneFill (GlassBackdrop.swift:156-170): the glass, tinted with
+        # the veil at the tint share, then glassVeil, then paneFill, and
+        # inactiveDim over all of it out of focus. GlassTokens.swift:131
+        # glassVeil flat: 0x070A1A @0.68, light 0xE3E6EC @0.66.
+        cases = {
+            "dark": (("#070a1a", 0.68), 0.25, ("#ffffff", 0.04), ("#070a1a", 0.14)),
+            "light": (("#e3e6ec", 0.66), 0.3, ("#f4f6f9", 0.08), ("#000000", 0.04)),
+        }
+        for scheme, (veil, share, pane_fill, dim) in cases.items():
+            with self.subTest(scheme=scheme):
+                palette = generate.glass_blur_palette(self.tokens, scheme)
+                tint = (veil[0], veil[1] * share)
+                self.assertRgba(palette["pane"], stack(tint, veil, pane_fill))
+                self.assertRgba(palette["paneInactive"], stack(tint, veil, pane_fill, dim))
+
+    def test_tiers_inside_a_pane_take_the_flat_fills_with_their_alpha(self):
+        # GlassTier.fill (GlassStyle.swift:207-233): everything inside a pane
+        # is painted with the token's own alpha over the pane, and dims with
+        # the pane beneath it rather than with a fill of its own.
+        cases = {
+            "dark": {"card": ("#0d1124", 0.35), "cardQuiet": ("#0d1124", 0.28),
+                     "well": ("#000000", 0.3), "control": ("#000000", 0.3),
+                     "rule": ("#ffffff", 0.12)},
+            "light": {"card": ("#ffffff", 0.6), "cardQuiet": ("#ffffff", 0.5),
+                      "well": ("#8a93a5", 0.28), "control": ("#ffffff", 0.7),
+                      "rule": ("#000000", 0.12)},
+        }
+        for scheme, tiers in cases.items():
+            palette = generate.glass_blur_palette(self.tokens, scheme)
+            for tier, layer in tiers.items():
+                with self.subTest(scheme=scheme, tier=tier):
+                    self.assertRgba(palette[tier], stack(layer))
+                    self.assertEqual(palette[tier + "Inactive"], palette[tier])
+
+    def test_separate_surfaces_and_unblurred_floats_stay_painted(self):
+        # A popover and a menu are their own surfaces, with no blur behind
+        # them; a node card floats over the map, which the Mac blurs within
+        # the window (GlassFloatingBlur) and Linux does not. All three keep
+        # their opaque painted fills.
+        for scheme in generate.SCHEMES:
+            css = generate.render_glass_blur_css(self.tokens, scheme)
+            for name in ("popover", "menu", "node_card"):
+                with self.subTest(scheme=scheme, tier=name):
+                    self.assertNotIn(f"@define-color tc_glass_{name} ", css)
+                    self.assertNotIn(f"@define-color tc_glass_{name}_inactive ", css)
+
+    def test_the_window_is_clear_and_draws_no_frame_across_the_gaps(self):
+        # GlassBackdrop.swift:219-227: not opaque, no window shadow; the
+        # desktop shows in the gaps. libadwaita's window.csd outline and
+        # 1px ring would draw a rectangle across them; the shadow's extent
+        # stays, transparent, as the resize margin.
+        for scheme in generate.SCHEMES:
+            css = generate.render_glass_blur_css(self.tokens, scheme)
+            with self.subTest(scheme=scheme):
+                self.assertIn("@define-color tc_glass_scene transparent;", css)
+                self.assertIn("window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop "
+                              "{ outline: none; box-shadow: 0 0 14px 5px transparent; }", css)
+                self.assertIn("window.tc-glass-window.maximized, window.tc-glass-window.fullscreen "
+                              "{ box-shadow: none; }", css)
+
+    def test_text_reads_over_a_black_or_white_desktop_in_both_focus_states(self):
+        for scheme in generate.SCHEMES:
+            palette = generate.glass_palette(self.tokens, scheme)
+            blur = generate.glass_blur_palette(self.tokens, scheme)
+            for desktop in ("#000000", "#ffffff"):
+                for focus in ("pane", "paneInactive"):
+                    ground = over_ground(rgba(blur[focus]), desktop)
+                    surfaces = {"pane": ground}
+                    for tier in ("card", "cardQuiet", "control"):
+                        surfaces[tier] = over_ground(rgba(blur[tier]), ground)
+                    for surface, colour in surfaces.items():
+                        for ink in ("ink", "inkSecondary"):
+                            with self.subTest(scheme=scheme, desktop=desktop, focus=focus,
+                                              surface=surface, ink=ink):
+                                self.assertGreaterEqual(
+                                    generate.contrast(palette[ink], colour), 4.5)
+
+    def test_a_veil_too_thin_to_read_over_the_desktop_is_rejected(self):
+        self.tokens["themes"]["flatDark"]["color"]["glassVeil"] = {"hex": "#070a1a", "alpha": 0.2}
+        with self.assertRaisesRegex(generate.TokenError, "translucent"):
+            generate.glass_blur_palette(self.tokens, "dark")
+
+    def test_insights_lets_the_pane_show_and_fills_with_alpha(self):
+        # Insights sits in a pane: its ground is the pane's, so it paints
+        # none of its own over the translucent pane, and its cards and
+        # switcher take cardFill and controlFill with their alpha.
+        for scheme in generate.SCHEMES:
+            css = generate.render_insights_blur_css(self.tokens, scheme)
+            card = generate.css_rgba(generate.flat_fill(self.tokens, "cardFill", scheme), "cardFill")
+            control = generate.css_rgba(generate.flat_fill(self.tokens, "controlFill", scheme), "controlFill")
+            with self.subTest(scheme=scheme):
+                self.assertIn(".tc-insights { background: transparent; }", css)
+                self.assertIn(".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary "
+                              f"{{ background: {card}; }}", css)
+                self.assertIn(f".tc-insights stackswitcher {{ background: {control}; }}", css)
+                # The unfocused twins the painted sheet carries are undone.
+                self.assertIn("window.tc-glass-window:backdrop .tc-insights { background: transparent; }", css)
+
+    def test_blur_sheets_reach_rust(self):
+        out = generate.render_gtk(self.tokens)
+        for name in ("GLASS_LIGHT_BLUR_CSS", "GLASS_DARK_BLUR_CSS",
+                     "INSIGHTS_LIGHT_BLUR_CSS", "INSIGHTS_DARK_BLUR_CSS"):
+            self.assertIn(f"pub const {name}: &str", out)
+
+
 if __name__ == '__main__':
     unittest.main()

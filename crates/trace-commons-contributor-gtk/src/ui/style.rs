@@ -430,19 +430,54 @@ pub fn install() {
         _ => {}
     }
 
+    PROVIDER.with(|slot| slot.replace(Some(provider.clone())));
     load(&provider, manager.is_dark());
     let p = provider.clone();
     manager.connect_dark_notify(move |manager| load(&p, manager.is_dark()));
 }
 
+thread_local! {
+    /// The one provider [`install`] made, for [`set_translucent`] to reload.
+    static PROVIDER: std::cell::RefCell<Option<gtk::CssProvider>> =
+        const { std::cell::RefCell::new(None) };
+    /// Whether the translucent glass sheet is loaded (`ui::glass_backdrop`).
+    static TRANSLUCENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn load(provider: &gtk::CssProvider, dark: bool) {
-    provider.load_from_data(&stylesheet(dark));
+    provider.load_from_data(&stylesheet_for(dark, TRANSLUCENT.with(|on| on.get())));
+}
+
+/// Whether the translucent glass sheet is loaded.
+pub fn is_translucent() -> bool {
+    TRANSLUCENT.with(|on| on.get())
+}
+
+/// Load the translucent glass sheet over the painted one, or take it off.
+/// Only `ui::glass_backdrop` calls this, and only while KDE's blur is
+/// granted: without blur behind it a translucent pane fails the contrast
+/// floors over a busy desktop.
+pub fn set_translucent(on: bool) {
+    if TRANSLUCENT.with(|current| current.replace(on)) == on {
+        return;
+    }
+    if let Some(provider) = PROVIDER.with(|slot| slot.borrow().clone()) {
+        load(&provider, adw::StyleManager::default().is_dark());
+    }
+}
+
+/// The painted stylesheet for one scheme ([`stylesheet_for`]).
+#[cfg(test)]
+fn stylesheet(dark: bool) -> String {
+    stylesheet_for(dark, false)
 }
 
 /// The whole stylesheet for one scheme: the generated accent and status
 /// roles first, since the palette refers to them by name, then the palette,
-/// then the rules.
-fn stylesheet(dark: bool) -> String {
+/// then the rules. `translucent` appends the blur sheets last: they redefine
+/// the glass colours, and GTK resolves a `@define-color` to its last
+/// definition, so every rule naming one follows, hand-written ones included.
+fn stylesheet_for(dark: bool, translucent: bool) -> String {
     let (brand, glass, tokens) = if dark {
         (
             brand_tokens::DARK_CSS,
@@ -461,10 +496,25 @@ fn stylesheet(dark: bool) -> String {
     } else {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
-    format!(
+    let mut sheet = format!(
         "{brand}\n{glass}\n{tokens}\n{}\n{insights}",
         include_str!("style.css")
-    )
+    );
+    if translucent {
+        let (glass, insights) = if dark {
+            (
+                brand_tokens::GLASS_DARK_BLUR_CSS,
+                brand_tokens::INSIGHTS_DARK_BLUR_CSS,
+            )
+        } else {
+            (
+                brand_tokens::GLASS_LIGHT_BLUR_CSS,
+                brand_tokens::INSIGHTS_LIGHT_BLUR_CSS,
+            )
+        };
+        sheet.push_str(&format!("\n{glass}\n{insights}"));
+    }
+    sheet
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -680,25 +730,88 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use super::{brand_tokens, stylesheet};
+    use super::{brand_tokens, stylesheet, stylesheet_for};
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn both_schemes_parse_with_insights_styles() {
         assert_eq!(std::env::consts::OS, "linux");
         adw::init().expect("GTK display unavailable");
-        for dark in [false, true] {
+        for (dark, translucent) in [(false, false), (true, false), (false, true), (true, true)] {
             let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let captured = errors.clone();
             let provider = gtk::CssProvider::new();
             provider.connect_parsing_error(move |_, _, error| {
                 captured.borrow_mut().push(error.to_string());
             });
-            provider.load_from_data(&stylesheet(dark));
+            provider.load_from_data(&stylesheet_for(dark, translucent));
             assert!(
                 errors.borrow().is_empty(),
-                "dark={dark}: {:?}",
+                "dark={dark} translucent={translucent}: {:?}",
                 errors.borrow()
+            );
+        }
+    }
+
+    /// The translucent sheet works by redefining colours the painted rules
+    /// already name, which holds only if GTK resolves a `@define-color` to
+    /// its LAST definition in a provider. Pinned against GTK itself.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn gtk_resolves_a_redefined_colour_to_its_last_definition() {
+        assert_eq!(std::env::consts::OS, "linux");
+        adw::init().expect("GTK display unavailable");
+        use gtk::prelude::*;
+        let display = gtk::gdk::Display::default().expect("display");
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(
+            "@define-color tc_probe #ff0000;\n\
+             label.tc-probe { color: @tc_probe; }\n\
+             @define-color tc_probe #0000ff;",
+        );
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        let label = gtk::Label::new(None);
+        label.add_css_class("tc-probe");
+        let window = gtk::Window::new();
+        window.set_child(Some(&label));
+        #[allow(deprecated)]
+        let colour = label.style_context().color();
+        gtk::style_context_remove_provider_for_display(&display, &provider);
+        window.destroy();
+        assert_eq!(
+            (colour.red(), colour.green(), colour.blue()),
+            (0.0, 0.0, 1.0),
+            "{colour:?}"
+        );
+    }
+
+    /// The translucent sheets come after everything they redefine, and the
+    /// painted stylesheet carries none of them.
+    #[test]
+    fn the_translucent_sheet_is_last_and_only_when_asked() {
+        for dark in [false, true] {
+            let (glass, insights) = if dark {
+                (
+                    brand_tokens::GLASS_DARK_BLUR_CSS,
+                    brand_tokens::INSIGHTS_DARK_BLUR_CSS,
+                )
+            } else {
+                (
+                    brand_tokens::GLASS_LIGHT_BLUR_CSS,
+                    brand_tokens::INSIGHTS_LIGHT_BLUR_CSS,
+                )
+            };
+            let painted = stylesheet(dark);
+            assert!(!painted.contains("@define-color tc_glass_scene transparent;"));
+            let translucent = stylesheet_for(dark, true);
+            assert!(translucent.starts_with(&painted), "dark={dark}");
+            assert!(
+                translucent.ends_with(&format!("\n{glass}\n{insights}")),
+                "dark={dark}"
             );
         }
     }

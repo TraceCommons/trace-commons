@@ -294,6 +294,76 @@ window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_gl
 .tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
 .tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
 "#;
+/// The translucent window's colours over the painted ones, light scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_LIGHT_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(229, 232, 237, 0.7491);
+@define-color tc_glass_pane_inactive rgba(217, 220, 225, 0.7592);
+@define-color tc_glass_card rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected rgba(5, 88, 182, 1);
+@define-color tc_glass_card_inactive rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet_inactive rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well_inactive rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control_inactive rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected_inactive rgba(5, 88, 182, 1);
+@define-color tc_glass_rule rgba(0, 0, 0, 0.12);
+@define-color tc_glass_rule_inactive rgba(0, 0, 0, 0.12);
+@define-color tc_glass_control_hover rgba(213, 216, 223, 0.784);
+@define-color tc_glass_row_hover rgba(0, 0, 0, 0.04);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, light scheme.
+pub const INSIGHTS_LIGHT_BLUR_CSS: &str = r#"
+.tc-insights { background: transparent; }
+.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+.tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: rgba(209, 213, 220, 0.712); }
+.tc-insights stackswitcher button:hover { background: rgba(213, 216, 223, 0.784); }
+"#;
+/// The translucent window's colours over the painted ones, dark scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_DARK_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(20, 23, 38, 0.745);
+@define-color tc_glass_pane_inactive rgba(18, 21, 36, 0.7807);
+@define-color tc_glass_card rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected rgba(126, 188, 255, 1);
+@define-color tc_glass_card_inactive rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet_inactive rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected_inactive rgba(126, 188, 255, 1);
+@define-color tc_glass_rule rgba(255, 255, 255, 0.12);
+@define-color tc_glass_rule_inactive rgba(255, 255, 255, 0.12);
+@define-color tc_glass_control_hover rgba(108, 108, 108, 0.426);
+@define-color tc_glass_row_hover rgba(255, 255, 255, 0.05);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, dark scheme.
+pub const INSIGHTS_DARK_BLUR_CSS: &str = r#"
+.tc-insights { background: transparent; }
+.tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+.tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+.tc-insights button.tc-insights-card:hover, .tc-insights button.tc-insights-summary:hover { background: rgba(255, 255, 255, 0.08); }
+.tc-insights stackswitcher button:hover { background: rgba(108, 108, 108, 0.426); }
+"#;
 
 /// Radii, spacing and sizes of the glass system, as the flat theme draws them.
 pub mod glass {
