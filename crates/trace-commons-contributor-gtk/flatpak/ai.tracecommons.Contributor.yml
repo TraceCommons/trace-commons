@@ -35,12 +35,16 @@
 # the tarball distribution the design spec also asks for has no such limit,
 # because it is not confined.
 app-id: ai.tracecommons.Contributor
+# GNOME 48 since 2026-11-17 (owner decision); it was 46 before. The
+# runtime branch is named again in release-apps.yml's linux-flatpak job,
+# which installs exactly this Platform and Sdk branch, and
+# release_pipeline.rs holds the two together.
 runtime: org.gnome.Platform
-runtime-version: '46'
+runtime-version: '48'
 sdk: org.gnome.Sdk
 # No sdk-extensions entry for rust-stable here anymore. The first real
-# release run (app-v0.1.0, run 31959830328) proved org.gnome.Sdk//46
-# resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
+# release run (app-v0.1.0, run 31959830328, then on runtime 46) proved
+# org.gnome.Sdk//46 resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
 # the newer //24.08 branch only reaches 1.89.0, still 7 minors short of this
 # crate's rust-version = "1.96" floor. The build is network-sandboxed, so
 # rustup cannot fetch a newer toolchain at build time either. The
