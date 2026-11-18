@@ -69,6 +69,10 @@ pub(super) struct Coordinator {
     uses_action: gtk::Button,
     customize: gtk::Button,
     customize_box: gtk::Box,
+    /// The Customize card, risen to its place when it opens.
+    customize_lift: super::lift::Lift,
+    /// Uses' title, which gives way to the opened card as on the Mac.
+    uses_title: RefCell<Option<gtk::Widget>>,
     customizing: Cell<bool>,
     join_body: gtk::Box,
     start: gtk::Button,
@@ -89,6 +93,8 @@ pub(super) struct Coordinator {
     /// The NEAR AI credit section, drawn once an enrollment is held.
     payout: RefCell<Option<Rc<super::payout_link::PayoutLinkView>>>,
     payout_shown: Cell<bool>,
+    /// The animated stage under every step (`FirstRunStage.swift`).
+    stage: Rc<super::first_run_stage_view::Stage>,
 }
 
 fn name(step: Step) -> &'static str {
@@ -158,7 +164,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let stack = gtk::Stack::builder()
         .vexpand(true)
         .vhomogeneous(false)
-        .transition_type(gtk::StackTransitionType::SlideLeftRight)
+        // Steps fade into each other, as the Mac's do, so the stage's N and
+        // tiles carry the move between them.
+        .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let heading = adw::WindowTitle::new(crate::copy::APP_NAME, "");
     let error = body_label("");
@@ -167,6 +175,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let back = gtk::Button::with_label(copy.frame.back);
     let start = primary(copy.uses.start);
     start.set_sensitive(false);
+    let tools = Rc::new(RefCell::new(Tools::default()));
+    let stage = super::first_run_stage_view::Stage::new(tools.clone());
+    let customize_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let c = Rc::new(Coordinator {
         app: Rc::downgrade(app),
         window: window.downgrade(),
@@ -176,7 +187,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
             daemon_started: true,
             ..State::default()
         }),
-        tools: Rc::new(RefCell::new(Tools::default())),
+        tools,
         runner: RefCell::new(Runner::default()),
         done: RefCell::new(None),
         accepted: RefCell::new(None),
@@ -196,7 +207,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         uses_flow: gtk::Box::new(gtk::Orientation::Vertical, 0),
         uses_action: primary(copy.join.skip),
         customize: gtk::Button::with_label(copy.frame.custom_setup_instead),
-        customize_box: gtk::Box::new(gtk::Orientation::Vertical, 12),
+        customize_box: customize_box.clone(),
+        customize_lift: super::lift::Lift::new(&customize_box),
+        uses_title: RefCell::new(None),
         customizing: Cell::new(false),
         join_body: gtk::Box::new(gtk::Orientation::Vertical, 16),
         start: start.clone(),
@@ -212,6 +225,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         referral: RefCell::new(String::new()),
         payout: RefCell::new(None),
         payout_shown: Cell::new(false),
+        stage: stage.clone(),
     });
     if let Some(handed) = super::roots::take_first_run_handoff() {
         let mut state = c.state.borrow_mut();
@@ -240,7 +254,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     });
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("tc-root");
+    content.add_css_class("tc-first-run-stage");
     content.append(&adw::HeaderBar::builder().title_widget(&heading).build());
+    content.append(stage.thread());
     // Every step the same width, as the Mac's frame holds its content to
     // one column (`FirstRunFrame`).
     let scroll = gtk::ScrolledWindow::builder()
@@ -248,6 +264,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         .vexpand(true)
         .child(&super::first_run_screens::column(&stack))
         .build();
+    stage.follow(&scroll);
     content.append(&scroll);
     // Back at the bar's left, as on the Mac (`FirstRunFrame.actionBar`).
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -260,7 +277,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     footer.append(&back);
     footer.append(&error);
     content.append(&footer);
-    window.set_content(Some(&content));
+    window.set_content(Some(&stage.wrap(&content)));
     window.connect_close_request({
         let c = c.clone();
         move |_| {
@@ -288,19 +305,23 @@ impl Coordinator {
                 }
             }
         };
-        let welcome = screens::welcome(next.clone(), {
+        let (welcome, rises) = screens::welcome(next.clone(), {
             let weak = weak.clone();
             move || {
                 if let Some(c) = weak.upgrade() {
+                    c.stage.set_agent(true);
                     c.stack.set_visible_child_name("agent");
                 }
             }
         });
+        welcome.prepend(&self.stage.slot(Step::Welcome));
+        self.stage.set_rises(rises);
         self.stack.add_named(&welcome, Some("welcome"));
         let agent = screens::agent_configuration({
             let weak = weak.clone();
             move || {
                 if let Some(c) = weak.upgrade() {
+                    c.stage.set_agent(false);
                     c.stack.set_visible_child_name("welcome");
                 }
             }
@@ -314,6 +335,15 @@ impl Coordinator {
                 }
             }
         });
+        tools.root.prepend(&self.stage.slot(Step::Tools));
+        tools.connect_changed({
+            let stage = Rc::downgrade(&self.stage);
+            move || {
+                if let Some(stage) = stage.upgrade() {
+                    stage.refresh();
+                }
+            }
+        });
         self.stack.add_named(&tools.root, Some("tools"));
         if let Some(app) = self.app.upgrade() {
             super::roots::follow_held_watches(&app, window.upcast_ref(), &tools);
@@ -324,6 +354,7 @@ impl Coordinator {
             copy.private_ai.title_light,
             copy.private_ai.title_bold,
         ));
+        private_ai.prepend(&self.stage.slot(Step::PrivateAi));
         private_ai.append(&self.private_body);
         let button = primary(copy.frame.continue_button);
         button.connect_clicked({
@@ -334,6 +365,7 @@ impl Coordinator {
         self.stack.add_named(&private_ai, Some("private-ai"));
 
         let traces = page(&title(copy.traces.title_light, copy.traces.title_bold));
+        traces.prepend(&self.stage.slot(Step::Traces));
         traces.append(&self.traces_body);
         let button = primary(copy.frame.continue_button);
         button.connect_clicked({
@@ -344,10 +376,15 @@ impl Coordinator {
         self.stack.add_named(&traces, Some("traces"));
 
         let uses_page = page(&title(copy.uses.title_light, copy.uses.title_bold));
-        uses_page.append(&self.uses_flow);
+        *self.uses_title.borrow_mut() = uses_page.first_child();
+        // The flow's captions sit under the stage's graphic, above the
+        // title, as the Mac sets them inside its graphic.
+        let uses_slot = self.stage.slot(Step::Uses);
+        uses_page.prepend(&uses_slot);
+        uses_page.insert_child_after(&self.uses_flow, Some(&uses_slot));
         uses_page.append(&self.uses_card);
-        self.customize_box.set_visible(false);
-        uses_page.append(&self.customize_box);
+        self.customize_lift.set_visible(false);
+        uses_page.append(&self.customize_lift);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         self.customize.add_css_class("flat");
         self.customize.connect_clicked({
@@ -370,9 +407,11 @@ impl Coordinator {
 
         let terms = TermsPage::new(next.clone());
         *self.accepted.borrow_mut() = Some(terms.accepted);
+        terms.root.prepend(&self.stage.slot(Step::Terms));
         self.stack.add_named(&terms.root, Some("terms"));
 
         let join_page = page(&title(copy.join.title_light, copy.join.title_bold));
+        join_page.prepend(&self.stage.slot(Step::Join));
         join_page.append(&body_label(copy.join.body));
         join_page.append(&self.join_body);
         let note = body_label(copy.join.no_sharing);
@@ -405,6 +444,21 @@ impl Coordinator {
             Step::Join => copy.frame.step_join,
         });
         self.stack.set_visible_child_name(name(step));
+        self.stage.set_agent(false);
+        self.stage.set_step(step, !self.busy.get(), {
+            let weak = Rc::downgrade(self);
+            Rc::new(move |picked| {
+                if let Some(c) = weak.upgrade() {
+                    if !c.busy.get() {
+                        if c.customizing.get() {
+                            c.close_customize();
+                        }
+                        c.state.borrow_mut().back_to(picked);
+                        c.show();
+                    }
+                }
+            })
+        });
         self.back.set_visible(step != Step::Welcome);
         self.error.set_visible(false);
         match step {
@@ -450,6 +504,7 @@ impl Coordinator {
     }
     fn set_busy(&self, busy: bool) {
         self.busy.set(busy);
+        self.stage.set_enabled(!busy);
         self.stack.set_sensitive(!busy || self.login_waiting.get());
         self.back.set_sensitive(!busy || self.login_waiting.get());
     }
@@ -634,12 +689,18 @@ impl Coordinator {
         let options = self.options.borrow().clone();
         let state = self.state.borrow().clone();
         clear(&self.uses_flow);
+        self.stage.set_sharing(state.sharing);
         let gate = if state.sharing_chosen && state.sharing == Sharing::Automatic {
             modes.choices[1].label
         } else {
             copy.uses.you_review
         };
-        self.uses_flow.append(&screens::uses_flow(gate));
+        let (flow, relayout) = screens::uses_flow(gate, {
+            let stage = Rc::downgrade(&self.stage);
+            move || stage.upgrade().map_or(1.0, |s| s.scale())
+        });
+        self.stage.set_captions(relayout);
+        self.uses_flow.append(&flow);
         clear(&self.uses_card);
         for option in uses::shown_optional_scopes(&options, copy.uses.credit_scope) {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -773,10 +834,25 @@ impl Coordinator {
         if self.busy.get() || !self.tools.borrow().watches_anything() {
             return;
         }
+        // The card rises from where Uses' card was to the top, as the
+        // graphic and the title give way (`FirstRunFrame`'s `open`).
+        let page = self.customize_lift.parent();
+        let from = page.as_ref().and_then(|page| {
+            self.uses_card
+                .compute_point(page, &gtk::graphene::Point::new(0.0, 0.0))
+                .map(|p| f64::from(p.y()))
+        });
         self.customizing.set(true);
+        self.stage.set_open(true);
         self.uses_card.set_visible(false);
         self.uses_flow.set_visible(false);
-        self.customize_box.set_visible(true);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            title.set_visible(false);
+        }
+        self.customize_lift.set_visible(true);
+        if let (Some(page), Some(from)) = (page, from) {
+            self.customize_lift.slide_from(&page, from);
+        }
         self.update_uses_action();
         clear(&self.customize_box);
         let spinner = gtk::Spinner::new();
@@ -794,9 +870,14 @@ impl Coordinator {
 
     fn close_customize(self: &Rc<Self>) {
         self.customizing.set(false);
+        self.stage.set_open(false);
         self.uses_card.set_visible(true);
         self.uses_flow.set_visible(true);
-        self.customize_box.set_visible(false);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            title.set_visible(true);
+        }
+        self.customize_lift.settle();
+        self.customize_lift.set_visible(false);
         self.update_uses_action();
     }
 
@@ -1067,6 +1148,7 @@ impl Coordinator {
         // As the Mac's Join when its account goes: the organization check
         // and its one automatic Start may run again.
         let forward = join::can_forward(&state);
+        self.stage.join_signed_in(forward);
         if join::forward_lost(self.forward.replace(forward), forward) {
             self.org_checked.set(false);
             self.auto_started.set(false);

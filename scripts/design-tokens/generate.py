@@ -914,6 +914,44 @@ def render_tile_rust(tokens: dict) -> list[str]:
     return out
 
 
+# The colours the Mac's animated first run draws its stage with
+# (`FirstRunStage.swift`, `GlassBrandMarkDrawing`): the scene, the glow
+# behind the N and the beams, the tool tiles and their tints, the orbs and
+# the dashed rules, and the marker check's well and stroke
+# (`FirstRunMarkerCheck`). The Linux stage reads them from
+# `brand_tokens::first_run`.
+FIRST_RUN_COLOURS = [
+    "sceneBase", "sceneWarm", "firstRunGlow", "firstRunBeam", "firstRunBeamCore",
+    "firstRunCard", "firstRunCardSolid", "firstRunTile", "firstRunTileShadow", "firstRunRule",
+    "firstRunApprove", "firstRunApproveDeep", "heroInk", "wellFill",
+    "textPrimary", "textSecondary", "textTertiary",
+    "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode",
+    "tintAccent", "toggleOn",
+]
+
+
+def render_first_run_rust(tokens: dict) -> list[str]:
+    out = ["/// The first run's stage colours, as the Mac's flat theme draws them: a",
+           "/// hex colour and its alpha; and the motion curve's control points.",
+           "pub mod first_run {",
+           "    pub type Rgba = (&'static str, f64);"]
+    motion = tokens["motion"]
+    ease = ", ".join(rust_float(motion[k]) for k in ("easeX1", "easeY1", "easeX2", "easeY2"))
+    out.append("    /// The token ease's cubic Bezier control points (x1, y1, x2, y2).")
+    out.append(f"    pub const EASE: [f64; 4] = [{ease}];")
+    for scheme in SCHEMES:
+        out.append(f"    /// The {scheme} scheme.")
+        out.append(f"    pub mod {scheme} {{")
+        out.append("        use super::Rgba;")
+        for name in FIRST_RUN_COLOURS:
+            colour = flat_color(tokens, name, scheme)
+            alpha = rust_float(colour.get("alpha", 1))
+            out.append(f'        pub const {snake(name).upper()}: Rgba = ("{colour["hex"].lower()}", {alpha});')
+        out.append("    }")
+    out.append("}")
+    return out
+
+
 def render_gtk(tokens: dict) -> str:
     values = role_values(tokens)
     out = [
@@ -972,6 +1010,8 @@ def render_gtk(tokens: dict) -> str:
     out.extend(render_logos_rust(parse_logos(LOGOS.read_text()), parse_brand_mark(BRAND_MARK.read_text())))
     out.append("")
     out.extend(render_map_rust(tokens))
+    out.append("")
+    out.extend(render_first_run_rust(tokens))
     out.append("")
     return "\n".join(out)
 

@@ -8,12 +8,13 @@
 //! (`roots::present`, which writes the declaration to the settings file and
 //! starts the daemon) and with it running (the coordinator, which sends the
 //! planner's `Commit::Roots`).
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use adw::prelude::*;
 use trace_commons_contributor::first_run_copy::first_run_copy;
 use trace_commons_contributor::source::discovery;
 
+use super::first_run_marker_check::MarkerCheck;
 use super::onboarding::body_label;
 use crate::first_run::tools::{
     AddOutcome, AddedFolder, FolderKind, Found, ToolAnswer, Tools, add_outcome,
@@ -40,6 +41,13 @@ pub(super) struct ToolsScreen {
     refusal: RefCell<Option<crate::first_run::tools::Refusal>>,
     /// The attached daemon's last settings answer, as Tools reads it.
     watches: RefCell<crate::first_run::tools::Watches>,
+    /// When each row's check last changed (monotonic seconds), by tool or
+    /// folder: a row rebuilt mid-stroke carries on drawing.
+    toggled: RefCell<HashMap<String, f64>>,
+    /// The rows' marker checks, alive while their rows are.
+    marks: RefCell<Vec<Rc<MarkerCheck>>>,
+    /// Told after anything Tools shows changes: found, watched or not.
+    on_change: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 /// The tool's name, as the Mac's `SourceKind.displayName` gives it.
@@ -132,6 +140,9 @@ pub(super) fn build(
         host_hint_command,
         refusal: RefCell::new(None),
         watches: RefCell::new(Default::default()),
+        toggled: RefCell::new(HashMap::new()),
+        marks: RefCell::new(Vec::new()),
+        on_change: RefCell::new(None),
     });
     let add = gtk::Button::with_label(copy.tools.add_tool);
     add.add_css_class("flat");
@@ -192,7 +203,37 @@ pub(super) fn build(
     screen
 }
 
+fn now() -> f64 {
+    glib::monotonic_time() as f64 / 1e6
+}
+
 impl ToolsScreen {
+    /// `changed` runs after anything Tools shows changes: discovery
+    /// landing, a tool watched or not, a folder added. The first run's
+    /// stage redraws from it, since with animations off nothing else would.
+    pub fn connect_changed(&self, changed: impl Fn() + 'static) {
+        *self.on_change.borrow_mut() = Some(Rc::new(changed));
+    }
+
+    /// A row's marker check: `check` over the drawing, carrying on from
+    /// the last change of `key`.
+    fn mark(self: &Rc<Self>, check: gtk::CheckButton, key: &str) -> gtk::Overlay {
+        check.connect_toggled({
+            let weak = Rc::downgrade(self);
+            let key = key.to_owned();
+            move |_| {
+                if let Some(screen) = weak.upgrade() {
+                    screen.toggled.borrow_mut().insert(key.clone(), now());
+                }
+            }
+        });
+        let since = self.toggled.borrow().get(key).copied();
+        let mark = MarkerCheck::new(check, since);
+        let root = mark.root.clone();
+        self.marks.borrow_mut().push(mark);
+        root
+    }
+
     fn discover(self: &Rc<Self>) {
         // The core's loading line, for any computer (owner, 2026-11-17).
         let loading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -307,6 +348,10 @@ impl ToolsScreen {
     fn update(&self) {
         self.continue_button
             .set_sensitive(!self.busy.get() && self.tools.borrow().can_continue());
+        let changed = self.on_change.borrow().clone();
+        if let Some(changed) = changed {
+            changed();
+        }
     }
 
     fn rerender(self: &Rc<Self>) {
@@ -322,6 +367,7 @@ impl ToolsScreen {
         while let Some(child) = self.rows.first_child() {
             self.rows.remove(&child);
         }
+        self.marks.borrow_mut().clear();
         let copy = first_run_copy();
         let tools = self.tools.borrow().clone();
         for found in tools.listed() {
@@ -352,7 +398,8 @@ impl ToolsScreen {
                     }
                 }
             });
-            self.rows.append(&check);
+            let mark = self.mark(check, &found.source);
+            self.rows.append(&mark);
         }
         let twice = tools.watched_twice();
         for folder in tools.added.iter() {
@@ -388,7 +435,7 @@ impl ToolsScreen {
                     }
                 }
             });
-            row.append(&check);
+            row.append(&self.mark(check, &folder.path));
             let meta = gtk::Label::builder()
                 .label(copy.tools.added_by_you)
                 .xalign(0.0)
