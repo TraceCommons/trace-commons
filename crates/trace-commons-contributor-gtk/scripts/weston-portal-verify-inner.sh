@@ -232,6 +232,7 @@ else
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
+    ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \

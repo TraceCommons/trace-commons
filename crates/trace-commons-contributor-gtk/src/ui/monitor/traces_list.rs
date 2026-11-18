@@ -1385,17 +1385,4 @@ mod tests {
         assert_eq!(held_word(&entry("a", "p")), None);
         assert!(row_offers_send(&entry("a", "p"), false));
     }
-
-    /// The row menu's Dismiss trace asks first, through the queue's one
-    /// confirmation (`queue::confirm_dismiss`), as the Mac's `dismissModal`.
-    #[test]
-    fn dismissing_a_trace_asks_first() {
-        let queue = include_str!("../queue.rs");
-        let at = queue
-            .find("pub(crate) fn dismiss_entry(")
-            .expect("queue::dismiss_entry");
-        let body = &queue[at..at + queue[at..].find("\n}\n").unwrap()];
-        assert!(body.contains("confirm_dismiss("), "{body}");
-        assert!(!body.contains("\"dismiss\""), "{body}");
-    }
 }

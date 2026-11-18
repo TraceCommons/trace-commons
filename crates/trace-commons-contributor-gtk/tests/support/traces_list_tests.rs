@@ -370,3 +370,91 @@ fn mounted_the_folder_lists_icons_are_in_the_theme() {
         assert!(theme.has_icon(name), "{name} is not in the icon theme");
     }
 }
+
+/// The row menu's Dismiss trace asks first, through the queue's one
+/// confirmation (`queue::confirm_dismiss`), as the Mac's `dismissModal`:
+/// Keep it sends nothing, and only Dismiss sends `dismiss` for that trace.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_the_row_menus_dismiss_asks_first() {
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().unwrap();
+    adw::init().expect("GTK display unavailable");
+    let application = adw::Application::builder()
+        .application_id("ai.tracecommons.TracesListDismissTest")
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    application
+        .register(None::<&gtk::gio::Cancellable>)
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("tc-traces-dismiss-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (worker, jobs, _results) = Worker::fixture(dir.clone());
+    let app = App::build(&application, worker);
+    app.window.present();
+    settle(&context);
+
+    let tree = trace_commons_contributor::preview_copy::monitor_traces_copy().tree;
+    let row = super::session_row(&app, &entry("d1", "api", 3), false, false);
+    let kebab = with_class(&row, "tc-tree-kebab")
+        .remove(0)
+        .downcast::<gtk::MenuButton>()
+        .expect("the row menu is a menu button");
+    let popover = kebab.popover().expect("the row menu's popover");
+    let mut items = Vec::new();
+    descendants(popover.upcast_ref(), &mut items);
+    let dismiss = items
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|b| b.label().as_deref() == Some(tree.dismiss_session))
+        .expect("the row menu offers Dismiss trace");
+
+    let mut seen = Vec::new();
+    calls(&jobs, &mut seen);
+    seen.clear();
+    let sent_dismiss = |seen: &[(String, serde_json::Value)]| {
+        seen.iter()
+            .filter(|(method, _)| method == "dismiss")
+            .map(|(_, params)| params.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Picking it asks, in the core's words, and sends nothing yet.
+    dismiss.emit_clicked();
+    settle(&context);
+    let asked = dialogs();
+    assert_eq!(asked.len(), 1, "Dismiss trace asks first");
+    assert_eq!(
+        asked[0].heading().as_deref(),
+        Some(tree.dismiss_session_title)
+    );
+    calls(&jobs, &mut seen);
+    assert!(
+        sent_dismiss(&seen).is_empty(),
+        "sent before the answer: {seen:?}"
+    );
+
+    // Keep it sends nothing.
+    asked[0].response("keep");
+    settle(&context);
+    calls(&jobs, &mut seen);
+    assert!(sent_dismiss(&seen).is_empty(), "Keep it sent: {seen:?}");
+    assert!(dialogs().is_empty(), "Keep it closes the dialog");
+
+    // Dismiss sends `dismiss` for this trace, once.
+    dismiss.emit_clicked();
+    settle(&context);
+    let asked = dialogs();
+    assert_eq!(asked.len(), 1, "asked again");
+    asked[0].response("dismiss");
+    settle(&context);
+    calls(&jobs, &mut seen);
+    assert_eq!(
+        sent_dismiss(&seen),
+        [serde_json::json!({"entry_id": "d1"})],
+        "one dismiss for the trace"
+    );
+
+    app.window.close();
+    let _ = std::fs::remove_dir_all(dir);
+}
