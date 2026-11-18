@@ -135,8 +135,9 @@ pub const GATE_NOT_PINNED_HELP: &str = "This device isn't connected yet, so this
 /// the screen that uses it is built, rather than each shell writing its own.
 ///
 /// **Shown only where a model pass runs on every automatic session.** On the
-/// client the model pass is optional: it runs with `pii_filter = near-ai` or
-/// `TRACE_PRIVACY_FILTER_BACKEND` set, and on a default config only the fixed
+/// client the model pass is optional: it runs only with
+/// `TRACE_PRIVACY_FILTER_BACKEND` naming a sidecar or self-hosted filter
+/// (the client-side NEAR AI scan is retired), and on a default config only the fixed
 /// patterns run, which would make the second sentence untrue. The spec's R1
 /// makes the witness's certified full pipeline a precondition of automatic
 /// contribution, so a shell renders this only on the grant screen for a route
@@ -1601,14 +1602,6 @@ pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
 /// Local route, no model privacy filter attached.
 pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Local redaction uses fixed patterns.";
 
-/// Local route, NEAR AI's hosted privacy filter attached.
-///
-/// Approved by the owner 2026-11-04 (Settings copy pass 2, P183). The client's NEAR AI adapter
-/// (`NearAiPrivacyFilterAdapter`) makes an ordinary HTTPS call and checks no
-/// attestation. The same trust statement `AUTO_RAW_SEND_BOTH_ENCLAVES` makes
-/// for the witness's hop, made here for this computer's own.
-pub const DISCLOSURE_LOCAL_FILTER_NEAR_AI: &str = "Remaining text then goes to NEAR AI's privacy filter. Its attestation isn't checked, so you trust NEAR AI with that text.";
-
 /// Local route, a privacy-filter endpoint named in the environment.
 ///
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P184).
@@ -1622,9 +1615,9 @@ pub const DISCLOSURE_LOCAL_FILTER_SIDECAR: &str =
 
 /// Local route, a filter setting the redactor refuses to build.
 ///
-/// Approved by the owner 2026-11-04 (Settings copy pass 2, P205). `build_redactor_with` refuses an unknown
-/// `pii_filter`, and the protocol crate refuses a malformed environment
-/// backend; neither falls back to patterns only.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P205). The
+/// protocol crate refuses a malformed environment backend; it does not fall
+/// back to patterns only.
 pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str =
     "The privacy filter setting is invalid, so nothing is sent until it's fixed.";
 
@@ -1818,7 +1811,6 @@ pub fn local_filter_line(filter: crate::disclosure::LocalFilter) -> &'static str
     use crate::disclosure::LocalFilter;
     match filter {
         LocalFilter::None => DISCLOSURE_LOCAL_FILTER_NONE,
-        LocalFilter::NearAi => DISCLOSURE_LOCAL_FILTER_NEAR_AI,
         LocalFilter::SelfHosted => DISCLOSURE_LOCAL_FILTER_SELF_HOSTED,
         LocalFilter::Sidecar => DISCLOSURE_LOCAL_FILTER_SIDECAR,
         LocalFilter::Invalid => DISCLOSURE_LOCAL_FILTER_INVALID,
@@ -3536,7 +3528,6 @@ mod tests {
         use crate::disclosure::LocalFilter;
         let lines: Vec<&str> = [
             LocalFilter::None,
-            LocalFilter::NearAi,
             LocalFilter::SelfHosted,
             LocalFilter::Sidecar,
             LocalFilter::Invalid,
@@ -3549,10 +3540,6 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-        // The NEAR AI filter is a hop this app does not attest.
-        // Settings copy pass 2 (owner, 2026-11-04, P183) words it "isn't checked".
-        assert!(lines[1].contains("NEAR AI"));
-        assert!(lines[1].contains("attestation isn't checked"));
     }
 
     /// Receipts: the fetch is a disclosure to the provider (spec, the

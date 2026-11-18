@@ -13,11 +13,8 @@
 //!    process waits for the first run's Join, after Terms
 //!    ([`take_pending_invite`]).
 //!
-//! 3. **The banner's two actions open something.** `not-logged-in` opens
-//!    the first run; `near-ai-notice-not-acknowledged` opens the extra
-//!    privacy scan's notice ([`present_scan_recovery`]), in the core's words
-//!    (`privacy_scan_copy`), which is the only thing in this application
-//!    that calls `acknowledge_near_ai_notice`.
+//! 3. **The banner's one action opens something.** `not-logged-in` opens
+//!    the first run. Every other health label is a plain line.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -196,7 +193,6 @@ pub(super) fn take_pending_invite() -> Option<String> {
 pub fn present_for_health(app: &Rc<App>, label: &str) {
     match health_screen(label) {
         Some(HealthScreen::FirstRun) => present(app),
-        Some(HealthScreen::ScanRecovery) => present_scan_recovery(app),
         None => {}
     }
 }
@@ -206,8 +202,6 @@ pub fn present_for_health(app: &Rc<App>, label: &str) {
 enum HealthScreen {
     /// The first run, whose Join signs in again.
     FirstRun,
-    /// The extra privacy scan's notice.
-    ScanRecovery,
 }
 
 /// The screen that answers a health label, if there is one.
@@ -219,96 +213,8 @@ enum HealthScreen {
 fn health_screen(label: &str) -> Option<HealthScreen> {
     match label {
         "not-logged-in" => Some(HealthScreen::FirstRun),
-        "near-ai-notice-not-acknowledged" => Some(HealthScreen::ScanRecovery),
         _ => None,
     }
-}
-
-/// The extra privacy scan's notice, while the daemon holds uploads for
-/// `near-ai-notice-not-acknowledged`: the whole disclosure, then Not now or
-/// Confirm, which records the acknowledgement. Every word is the core's
-/// (`privacy_scan_copy`), laid out as the Tauri shell's recovery prompt is.
-/// A failed acknowledgement says uploads stay paused, and Confirm stays.
-pub fn present_scan_recovery(app: &Rc<App>) {
-    super::style::install();
-    let copy = trace_commons_contributor::privacy_scan_copy::privacy_scan_copy();
-    let window = adw::Window::builder()
-        .transient_for(&app.window)
-        .modal(true)
-        .default_width(560)
-        .title(copy.title)
-        .build();
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
-    let title = gtk::Label::builder()
-        .label(copy.title)
-        .xalign(0.0)
-        .wrap(true)
-        .build();
-    title.add_css_class("tc-flow-title");
-    body.append(&title);
-    body.append(&body_label(copy.local_always));
-    body.append(&body_label(copy.offer));
-    let disclosure = body_label(copy.disclosure);
-    disclosure.add_css_class("tc-flow-emphasis");
-    body.append(&disclosure);
-    let failed = body_label(copy.recovery_failed);
-    failed.add_css_class("tc-refused");
-    failed.set_visible(false);
-    body.append(&failed);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label(copy.recovery_cancel);
-    let confirm = gtk::Button::with_label(copy.recovery_confirm);
-    confirm.add_css_class("suggested-action");
-    cancel.connect_clicked({
-        let window = window.downgrade();
-        move |_| {
-            if let Some(window) = window.upgrade() {
-                window.close();
-            }
-        }
-    });
-    confirm.connect_clicked({
-        let app = app.clone();
-        let window = window.downgrade();
-        let failed = failed.clone();
-        move |button| {
-            button.set_sensitive(false);
-            button.set_label(copy.recovery_working);
-            failed.set_visible(false);
-            let window = window.clone();
-            let failed = failed.clone();
-            let button = button.clone();
-            app.call(
-                "acknowledge_near_ai_notice",
-                serde_json::json!({}),
-                move |_, result| {
-                    if result.is_ok() {
-                        if let Some(window) = window.upgrade() {
-                            window.close();
-                        }
-                        return;
-                    }
-                    failed.set_visible(true);
-                    button.set_label(copy.recovery_confirm);
-                    button.set_sensitive(true);
-                },
-            );
-        }
-    });
-    actions.append(&cancel);
-    actions.append(&confirm);
-    body.append(&actions);
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.add_css_class("tc-root");
-    content.append(&adw::HeaderBar::new());
-    content.append(&body);
-    window.set_content(Some(&content));
-    window.present();
 }
 
 pub(super) fn body_label(text: &str) -> gtk::Label {
@@ -430,21 +336,22 @@ mod tests {
     /// a button that goes nowhere.
     #[test]
     fn every_actionable_health_label_has_a_screen() {
-        for label in ["not-logged-in", "near-ai-notice-not-acknowledged"] {
-            assert!(
-                copy::health_action(label).is_some(),
-                "{label} should offer an action"
-            );
-            assert!(
-                health_screen(label).is_some(),
-                "{label} offers an action but has no screen to open"
-            );
-        }
-        assert_eq!(health_screen("not-logged-in"), Some(HealthScreen::FirstRun));
-        assert_eq!(
-            health_screen("near-ai-notice-not-acknowledged"),
-            Some(HealthScreen::ScanRecovery)
+        let label = "not-logged-in";
+        assert!(
+            copy::health_action(label).is_some(),
+            "{label} should offer an action"
         );
+        assert_eq!(health_screen(label), Some(HealthScreen::FirstRun));
+    }
+
+    /// The client-side NEAR AI second scan is retired (#2180): its notice
+    /// label, should an older daemon still send it, is a plain line with no
+    /// button and nowhere to go, as on the Mac.
+    #[test]
+    fn the_retired_scan_label_offers_no_button() {
+        let label = "near-ai-notice-not-acknowledged";
+        assert!(copy::health_action(label).is_none());
+        assert!(health_screen(label).is_none());
     }
 
     #[test]

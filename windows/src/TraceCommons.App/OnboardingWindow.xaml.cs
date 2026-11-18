@@ -107,9 +107,6 @@ public sealed partial class OnboardingWindow : Window
     private async void OnConsent(object sender, RoutedEventArgs e) =>
         await ViewModel.ConfirmConsentAsync();
 
-    private async void OnScan(object sender, RoutedEventArgs e) =>
-        await ViewModel.ConfirmScanAsync();
-
     private async void OnIgnoreProject(object sender, RoutedEventArgs e)
     {
         if (sender is Button { DataContext: ProjectViewModel project })

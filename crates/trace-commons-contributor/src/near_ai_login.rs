@@ -1489,7 +1489,6 @@ mod tests {
             user_subject: "sha256:00".into(),
             device_key_id: "sha256:00".into(),
             consent_scopes: Vec::new(),
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,

@@ -8,7 +8,6 @@ public sealed class HealthNavigationTests
     [Theory]
     [InlineData("not-logged-in", HealthNavigationTarget.Connect)]
     [InlineData("queue-full", HealthNavigationTarget.Waiting)]
-    [InlineData("near-ai-notice-not-acknowledged", HealthNavigationTarget.ExistingOnboarding)]
     public void RecoveryActionsReachTheirIntendedExistingSurface(string label, HealthNavigationTarget target)
     {
         Assert.NotNull(HealthCopy.ForLabel(label)!.ActionLabel);

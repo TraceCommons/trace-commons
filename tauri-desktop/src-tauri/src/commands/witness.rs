@@ -208,7 +208,6 @@ mod tests {
                 "user_subject": "alice",
                 "device_key_id": "sha256:aa",
                 "consent_scopes": ["debugging_evaluation"],
-                "pii_filter": null,
                 "allowed_hosts": null,
             }))
             .unwrap();
@@ -250,7 +249,7 @@ mod tests {
         let facts = serde_json::json!({
             "route": "local",
             "witness": null,
-            "local_filter": "near_ai",
+            "local_filter": "sidecar",
             "receipts": {"endpoint_configured": false, "check_attestation": false},
             "attested_bodies": false,
         });

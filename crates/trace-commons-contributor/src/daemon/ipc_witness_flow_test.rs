@@ -116,12 +116,12 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             calls.lock().unwrap().push("collateral".into());
             include_str!("../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json")
         }}}))
-        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();move |headers: axum::http::HeaderMap, Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();async move{
+        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();move |headers: axum::http::HeaderMap, Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();async move{
             calls.lock().unwrap().push("witness".into());
             // A review a person asked for is not background work (#1014).
             assert!(headers.get(trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER).is_none());
             let raw=serde_json::from_value(request["raw_contribution"].clone()).unwrap();
-            let redactor=crate::envelope::build_redactor_with(&cfg,None,None).unwrap();
+            let redactor=crate::envelope::build_redactor(None).unwrap();
             let mut envelope=crate::envelope::redact_to_envelope(&redactor,raw).await.unwrap();
             crate::envelope::apply_granted_scopes(&mut envelope,&serde_json::from_value::<Vec<_>>(request["granted_scopes"].clone()).unwrap(),&serde_json::from_value::<Vec<_>>(request["granted_uses"].clone()).unwrap());
             let mut bytes=serde_json::to_vec_pretty(&envelope).unwrap(); bytes.push(b'\n');
@@ -182,14 +182,13 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
     let settings = s.settings.lock().unwrap().clone();
     let opts = crate::submit::SubmitOptions {
         dry_run: false,
-        pii_filter: None,
         no_reasoning: false,
         machine_readable: true,
         unenrolled_preview: false,
         remediate_quarantined: false,
         verdict: None,
     };
-    let mut context = crate::submit::SubmitContext::new(&s.store, &cfg, &opts, None).unwrap();
+    let mut context = crate::submit::SubmitContext::new(&s.store, &cfg, &opts).unwrap();
     let mut state = super::super::super::state::DaemonState::new();
     let mut health = Default::default();
     let mut uploader = super::super::super::uploader::Uploader {

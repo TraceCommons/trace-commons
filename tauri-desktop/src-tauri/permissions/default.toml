@@ -39,7 +39,6 @@ permissions = [
   "allow-scrubber-pattern-names",
   "allow-enroll-with-invite",
   "allow-set-consent-scopes",
-  "allow-acknowledge-near-ai-notice",
   "allow-grant-void-notice",
   "allow-witness-capacity-notice",
   "allow-acknowledge-grant-voids",

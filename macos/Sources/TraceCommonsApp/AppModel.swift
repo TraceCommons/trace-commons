@@ -2597,11 +2597,6 @@ final class AppModel: ObservableObject {
         return outcome
     }
 
-    /// Records that the NEAR AI first-use notice was shown, and clears the
-    /// health label that otherwise keeps the daemon refusing that filter.
-    /// Refreshes settings and status afterward so `nearAIConfigured` /
-    /// `health` reflect the daemon's own post-acknowledgment state rather
-    /// than an assumption made here.
     /// Records that one void notice was shown, then re-reads status so the
     /// daemon's own list, not an assumption made here, decides what stays.
     func acknowledgeGrantVoid(id: UInt64) {
@@ -2896,17 +2891,6 @@ final class AppModel: ObservableObject {
                 self.refreshProjects()
                 self.refreshAudit()
             }
-        }
-    }
-
-    func acknowledgeNearAINotice() {
-        perform(
-            "acknowledge_near_ai_notice",
-            work: { try $0.acknowledgeNearAINotice() }
-        ) { _ in
-            self.refreshSettings()
-            self.refreshStatus()
-            self.refreshAudit()
         }
     }
 
