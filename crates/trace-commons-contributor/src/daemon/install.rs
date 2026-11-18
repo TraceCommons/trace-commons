@@ -30,7 +30,7 @@ pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
     format!(
         "[Unit]\n\
          Description={app} background uploader{channel}\n\
-         Documentation=https://github.com/zmanian/trace-commons-server\n\
+         Documentation=https://github.com/TraceCommons/trace-commons\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
@@ -163,6 +163,15 @@ mod tests {
         )));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// The unit's documentation link names the repository as it is now
+    /// called, not its pre-rename name.
+    #[test]
+    fn the_unit_documents_the_current_repository() {
+        let unit = systemd_unit_text("/x", "/y");
+        assert!(unit.contains("\nDocumentation=https://github.com/TraceCommons/trace-commons\n"));
+        assert!(!unit.contains("zmanian/trace-commons-server"));
     }
 
     /// A staging daemon gets its own unit, so it runs beside a production
