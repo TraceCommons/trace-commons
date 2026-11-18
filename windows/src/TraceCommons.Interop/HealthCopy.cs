@@ -95,11 +95,6 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 "Not connected.",
                 "",
                 "Reconnect"),
-            "near-ai-notice-not-acknowledged" => new HealthCopy(
-                "One thing to confirm.",
-                "You chose the extra privacy scan, which sends message text to NEAR AI. "
-                + "Confirm you're OK with that and contributions resume.",
-                "Review and confirm"),
             "privacy-filter-canary-failed" => new HealthCopy(
                 "Privacy scan failed its self-test.",
                 "",

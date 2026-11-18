@@ -873,8 +873,6 @@ pub const NOT_CONNECTED: &str = "Not connected";
 // the words live in `trace_commons_contributor::source_copy` and this
 // shell re-exports the one definition.
 pub use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
-pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
-pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 
 // --- Settings: how it behaves --------------------------------------------
 //

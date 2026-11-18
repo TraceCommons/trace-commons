@@ -561,7 +561,6 @@ fn the_near_ai_hosts_in_a_build_are_the_channel_s() {
     };
     let inference = host(channel::NEAR_AI_INFERENCE_BASE);
     assert_eq!(host(channel::NEAR_AI_ATTESTATION_GATEWAY), inference);
-    assert_eq!(host(channel::NEAR_AI_PRIVACY_FILTER_BASE), inference);
     let (platform, expected_inference) = if cfg!(feature = "near-ai-staging") {
         ("cloud-platform-stg.near.ai", "cloud-stg-api.near.ai")
     } else {
@@ -655,7 +654,6 @@ fn config(ingest_url: &str) -> ContributorConfig {
         user_subject: "alice".into(),
         device_key_id: "sha256:00".into(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,

@@ -1209,7 +1209,6 @@ mod tests {
         cfg.consent_scopes_chosen = Some(true);
         cfg.ingest_url = base.clone();
         cfg.allowed_hosts = Some("127.0.0.1".to_string());
-        cfg.pii_filter = Some(format!("{base}/privacy-filter"));
         cfg.inference_receipt_endpoint = Some(format!("{base}/inference"));
         s.store.save_config(&cfg).unwrap();
         let queue_before = s.queue.lock().unwrap().all().to_vec();

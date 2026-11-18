@@ -63,7 +63,6 @@ pub fn contributor_disclosure_copy() -> Value {
         "admission": witness.admission,
         "onboarding": witness.onboarding,
         "onboarding_shell": crate::onboarding_copy::onboarding_copy(),
-        "privacy_scan": crate::privacy_scan_copy::privacy_scan_copy(),
         "source_settings": source_copy::source_settings_copy(),
         "source_check_lines": source_checks,
         "insights_ui": crate::insights::service::ui_copy(),
@@ -152,7 +151,6 @@ mod tests {
             "admission",
             "onboarding",
             "onboarding_shell",
-            "privacy_scan",
             "source_settings",
             "source_check_lines",
             "insights_ui",
@@ -177,10 +175,6 @@ mod tests {
         assert_eq!(
             copy["witness_review"],
             serde_json::to_value(crate::witness_copy::witness_copy().review).unwrap()
-        );
-        assert_eq!(
-            copy["privacy_scan"],
-            serde_json::to_value(crate::privacy_scan_copy::privacy_scan_copy()).unwrap()
         );
         assert_eq!(
             copy["onboarding_shell"],

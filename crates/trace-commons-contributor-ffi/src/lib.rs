@@ -6639,21 +6639,6 @@ pub extern "C" fn tc_withdrawal_confirmation_prompt_text() -> *mut c_char {
     })
 }
 
-/// The extra privacy scan's words (`privacy_scan_copy::privacy_scan_copy`),
-/// for onboarding's scan screen and the recovery prompt shown while the
-/// daemon holds uploads for `near-ai-notice-not-acknowledged`, as a JSON
-/// object of `PrivacyScanCopy`'s fields.
-///
-/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
-/// on a caught panic.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
-    guarded_string_no_err(|| {
-        let copy = trace_commons_contributor::privacy_scan_copy::privacy_scan_copy();
-        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
-    })
-}
-
 /// The "keychain" block of the private-AI credential status
 /// (`DaemonSettings::keychain_status_json`): what the credential store at
 /// `config_dir` currently holds, as labels and booleans only -- never the

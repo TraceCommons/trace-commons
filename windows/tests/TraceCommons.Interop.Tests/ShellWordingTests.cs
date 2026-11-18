@@ -57,7 +57,7 @@ public class ShellWordingTests
             // written a second time in the GTK and macOS shells today.
             { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
-            { "TraceCommons.Interop/HealthCopy.cs", 10 },
+            { "TraceCommons.Interop/HealthCopy.cs", 6 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },
             { "TraceCommons.Interop/OriginalSearchOutcome.cs", 4 },
             // PendingInviteActivation.cs predates this guard: it merged to
@@ -88,7 +88,7 @@ public class ShellWordingTests
             // guard already watches for the witness row specifically; the rest
             // of its wording is unmoved. Four of its sentences moved into
             // WatchCopy.cs, which is why this entry ratcheted down.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 15 },
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 14 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
@@ -117,7 +117,7 @@ public class ShellWordingTests
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
             // "For 1 hour" became "1 hour".
             { "TraceCommons.App/MainWindow.xaml", 17 },
-            { "TraceCommons.App/OnboardingWindow.xaml", 16 },
+            { "TraceCommons.App/OnboardingWindow.xaml", 11 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };
 

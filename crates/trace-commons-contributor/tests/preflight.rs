@@ -84,7 +84,6 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         user_subject: "user-test".to_string(),
         device_key_id: "sha256:test".to_string(),
         consent_scopes: vec!["debugging_evaluation".to_string()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -119,7 +118,6 @@ fn unenrolled_preview_config() -> trace_commons_contributor::config::Contributor
         user_subject: "unenrolled-preview-placeholder".to_string(),
         device_key_id: "unenrolled-preview-placeholder".to_string(),
         consent_scopes: vec!["debugging_evaluation".to_string()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -468,7 +466,7 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     use chrono::{DateTime, Utc};
     use trace_commons_contributor::envelope::{
         build_deterministic_preview_redactor, build_preview_raw_contribution,
-        build_raw_contribution, build_redactor_with, envelope_size, redact_to_envelope,
+        build_raw_contribution, build_redactor, envelope_size, redact_to_envelope,
     };
     use trace_commons_contributor::source::TraceSource as _;
 
@@ -492,8 +490,7 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     let preview_cfg = unenrolled_preview_config();
     let enrolled_cfg = enrolled_config();
     let preview_redactor = build_deterministic_preview_redactor(transcript.cwd.as_deref());
-    let enrolled_redactor =
-        build_redactor_with(&enrolled_cfg, transcript.cwd.as_deref(), None).unwrap();
+    let enrolled_redactor = build_redactor(transcript.cwd.as_deref()).unwrap();
     let preview = redact_to_envelope(
         &preview_redactor,
         build_preview_raw_contribution(&transcript, &preview_cfg, now),
@@ -528,34 +525,12 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     );
 }
 
+/// Every route that once turned on the retired client-side NEAR AI second
+/// scan, all at once -- the CLI flag, the credential in the environment, and
+/// the environment's backend switch -- with a classifier listening: the run
+/// succeeds, the classifier hears nothing, and no notice or marker appears.
 #[test]
-fn failed_near_ai_dry_run_keeps_notice_and_device_state_unburned() {
-    let fixture_dir = tempfile::tempdir().unwrap();
-    let config_dir = tempfile::tempdir().unwrap();
-    write_enrolled_config(config_dir.path());
-    let trajectory = write_trajectory(fixture_dir.path(), "inspect this session");
-    let output = json_submit_command(config_dir.path(), &trajectory, true)
-        .arg("--pii-filter")
-        .arg("near-ai")
-        .output()
-        .unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert!(!output.status.success());
-    assert_eq!(document["results"][0]["reason"], "pii-filter-unavailable");
-    assert!(
-        document["notices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|notice| notice.as_str().unwrap_or_default().contains("NEAR AI"))
-    );
-    assert!(!config_dir.path().join("near-ai-notice-shown").exists());
-    assert!(!config_dir.path().join("device.pk8").exists());
-}
-
-#[test]
-fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
+fn the_retired_near_ai_scan_sends_a_classifier_nothing() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
     write_enrolled_config(config_dir.path());
@@ -564,6 +539,7 @@ fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
     let output = json_submit_command(config_dir.path(), &trajectory, true)
         .arg("--pii-filter")
         .arg("near-ai")
+        .env("TRACE_PRIVACY_FILTER_BACKEND", "near-ai")
         .env("TRACE_NEAR_AI_PRIVACY_API_KEY", "test-key")
         .env("TRACE_NEAR_AI_PRIVACY_BASE_URL", base_url)
         .output()
@@ -577,8 +553,17 @@ fn successful_near_ai_dry_run_records_notice_without_generating_device_key() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(requests.load(Ordering::SeqCst) > 0);
-    assert!(config_dir.path().join("near-ai-notice-shown").exists());
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "no message text may be sent to a NEAR AI classifier from the client"
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !document.to_string().contains("NEAR AI"),
+        "no notice names the retired scan: {document}"
+    );
+    assert!(!config_dir.path().join("near-ai-notice-shown").exists());
     assert!(!config_dir.path().join("device.pk8").exists());
 }
 
@@ -636,24 +621,33 @@ fn unenrolled_preview_ignores_stale_receipts() {
     assert_eq!(document["results"][0]["unenrolled_preview"], true);
 }
 
+/// `--pii-filter` named the retired client-side NEAR AI second scan. An
+/// older script that still passes it keeps working: the flag is accepted
+/// and ignored, and the run is the one it would be without it -- local
+/// scrubbing only.
 #[test]
-fn pii_filter_refusal_fails_enrolled_dry_run_and_real_submit() {
+fn the_retired_pii_filter_flag_is_accepted_and_ignored() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let trajectory = write_trajectory(fixture_dir.path(), "inspect this session");
-
-    for dry_run in [true, false] {
+    let outcome = |extra: &[&str]| {
         let config_dir = tempfile::tempdir().unwrap();
         write_enrolled_config(config_dir.path());
-        let output = json_submit_command(config_dir.path(), &trajectory, dry_run)
-            .arg("--pii-filter")
-            .arg("near-ai")
+        let output = json_submit_command(config_dir.path(), &trajectory, true)
+            .args(extra)
             .output()
             .unwrap();
         assert!(
-            !output.status.success(),
-            "dry_run={dry_run} stdout={}",
-            String::from_utf8_lossy(&output.stdout)
+            output.status.success(),
+            "{extra:?} stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        document["results"][0]["outcome"].clone()
+    };
+    let without = outcome(&[]);
+    for value in ["near-ai", "bogus"] {
+        assert_eq!(outcome(&["--pii-filter", value]), without, "{value}");
     }
 }
 
