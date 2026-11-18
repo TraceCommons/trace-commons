@@ -2,6 +2,7 @@
 // only; run alone in the Weston session with --exact --ignored
 // --test-threads=1.
 
+use adw::prelude::*;
 use serde_json::json;
 
 use crate::ui::PendingUndo;
@@ -70,7 +71,6 @@ fn mounted_trace_undo_cancels_by_entry_id() {
 }
 
 fn texts(root: &gtk::Widget) -> Vec<String> {
-    use adw::prelude::*;
     let mut out = Vec::new();
     let mut pending = vec![root.clone()];
     while let Some(widget) = pending.pop() {
