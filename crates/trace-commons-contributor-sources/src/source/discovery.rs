@@ -298,24 +298,13 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
         let candidate = describe_opencode(&path.join("opencode.db"));
         return vec![candidate];
     }
-    let homes: Vec<SourceCandidate> = [
-        (
-            SOURCE_CLAUDE_CODE,
-            "projects",
-            claude_code_layout as fn(&Path) -> Tally,
-        ),
-        (SOURCE_CODEX, "sessions", codex_layout),
-    ]
-    .into_iter()
-    .filter_map(|(source, store, layout)| {
-        let at = path.join(store);
-        if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
-            return None;
-        }
-        let tally = layout(&at);
-        (tally.count > 0).then(|| row(source, at, tally))
-    })
-    .collect();
+    let homes: Vec<SourceCandidate> = [SOURCE_CLAUDE_CODE, SOURCE_CODEX]
+        .into_iter()
+        .filter_map(|source| {
+            let (at, tally) = store_in_home(source, path)?;
+            Some(row(source, at, tally))
+        })
+        .collect();
     if !homes.is_empty() {
         return homes;
     }
@@ -334,6 +323,33 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     .filter(|(_, tally)| tally.count > 0)
     .map(|(source, tally)| row(source, path.to_path_buf(), tally))
     .collect()
+}
+
+/// The store inside `path` when `path` is `source`'s home: `projects` for
+/// Claude Code, `sessions` for Codex, a real folder (never followed
+/// through a symlink) holding at least one session. `None` for any other
+/// tool or folder. The one rule both the chooser ([`describe_folder`]) and
+/// the daemon's declarations ([`declared_store`]) apply.
+fn store_in_home(source: &str, path: &Path) -> Option<(PathBuf, Tally)> {
+    let (store, layout): (&str, fn(&Path) -> Tally) = match source {
+        SOURCE_CLAUDE_CODE => ("projects", claude_code_layout),
+        SOURCE_CODEX => ("sessions", codex_layout),
+        _ => return None,
+    };
+    let at = path.join(store);
+    if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let tally = layout(&at);
+    (tally.count > 0).then_some((at, tally))
+}
+
+/// Where a folder declared for `source` is read: a Claude Code or Codex
+/// home at the store inside it, as the chooser offers a home
+/// ([`describe_folder`]); any other folder as it is. A terminal opened in
+/// the folder a person picked declares the home, not the store.
+pub fn declared_store(source: &str, path: &Path) -> PathBuf {
+    store_in_home(source, path).map_or_else(|| path.to_path_buf(), |(at, _)| at)
 }
 
 /// The config files a coding tool keeps beside its store: never an export,
@@ -1120,6 +1136,63 @@ mod tests {
         let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
         assert_eq!(row.path, picked.path().join("sessions"));
         assert_eq!(row.session_count, 1);
+    }
+
+    /// A folder declared for Claude Code or Codex is read where the chooser
+    /// reads it: a tool's home at its store, a store as it is, and any
+    /// other folder as it is (#2171 review, finding 4).
+    #[test]
+    fn a_declared_folder_is_read_at_the_store_the_chooser_finds() {
+        let claude_home = Scratch::new("declared-claude-home");
+        std::fs::write(claude_home.path().join("settings.json"), b"{}").unwrap();
+        write_session(
+            &claude_home.path().join("projects/-Users-someone-code-app"),
+            &format!("{A_UUID}.jsonl"),
+        );
+        let codex_home = Scratch::new("declared-codex-home");
+        write_session(
+            &codex_home.path().join("sessions/2026/08/20"),
+            "rollout-2026-08-20T10-00-00-abc.jsonl",
+        );
+        let unrelated = Scratch::new("declared-unrelated");
+        std::fs::write(unrelated.path().join("notes.txt"), b"x").unwrap();
+
+        // Home: the store under it, as `describe_folder` offers it.
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, claude_home.path()),
+            claude_home.path().join("projects")
+        );
+        assert_eq!(
+            declared_store(SOURCE_CODEX, codex_home.path()),
+            codex_home.path().join("sessions")
+        );
+        for (source, home) in [
+            (SOURCE_CLAUDE_CODE, &claude_home),
+            (SOURCE_CODEX, &codex_home),
+        ] {
+            let row = only(&describe_folder(home.path()), source);
+            assert_eq!(declared_store(source, home.path()), row.path);
+        }
+        // Store: as it is.
+        let store = claude_home.path().join("projects");
+        assert_eq!(declared_store(SOURCE_CLAUDE_CODE, &store), store);
+        let store = codex_home.path().join("sessions");
+        assert_eq!(declared_store(SOURCE_CODEX, &store), store);
+        // Unrelated, missing, or another tool's home: as it is.
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, unrelated.path()),
+            unrelated.path()
+        );
+        let missing = unrelated.path().join("not-there");
+        assert_eq!(declared_store(SOURCE_CODEX, &missing), missing);
+        assert_eq!(
+            declared_store(SOURCE_CODEX, claude_home.path()),
+            claude_home.path()
+        );
+        assert_eq!(
+            declared_store(SOURCE_GEMINI_CLI, claude_home.path()),
+            claude_home.path()
+        );
     }
 
     /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is

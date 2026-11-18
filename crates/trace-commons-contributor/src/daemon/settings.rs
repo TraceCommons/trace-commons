@@ -1681,12 +1681,18 @@ impl DaemonSettings {
         if self.claude_source.is_none()
             && let Some(path) = self.legacy_claude_root.take()
         {
-            self.claude_source = Some(SourceDeclaration::Watch { path });
+            self.claude_source = read_at_store(
+                crate::source::SOURCE_CLAUDE_CODE,
+                Some(SourceDeclaration::Watch { path }),
+            );
         }
         if self.codex_source.is_none()
             && let Some(path) = self.legacy_codex_root.take()
         {
-            self.codex_source = Some(SourceDeclaration::Watch { path });
+            self.codex_source = read_at_store(
+                crate::source::SOURCE_CODEX,
+                Some(SourceDeclaration::Watch { path }),
+            );
         }
         self.legacy_claude_root = None;
         self.legacy_codex_root = None;
@@ -2035,18 +2041,28 @@ pub fn apply_settings_object(
             // application shells refuse to start on. Kept because the C ABI
             // documents these exact keys and both native shells send them.
             "claude_root" => {
-                settings.claude_source = parse_optional_root(value)?;
+                settings.claude_source = read_at_store(
+                    crate::source::SOURCE_CLAUDE_CODE,
+                    parse_optional_root(value)?,
+                );
             }
             "codex_root" => {
-                settings.codex_source = parse_optional_root(value)?;
+                settings.codex_source =
+                    read_at_store(crate::source::SOURCE_CODEX, parse_optional_root(value)?);
             }
             // The full declaration, including the one thing a path cannot
             // say: off.
             "claude_source" => {
-                settings.claude_source = parse_source_declaration(value)?;
+                settings.claude_source = read_at_store(
+                    crate::source::SOURCE_CLAUDE_CODE,
+                    parse_source_declaration(value)?,
+                );
             }
             "codex_source" => {
-                settings.codex_source = parse_source_declaration(value)?;
+                settings.codex_source = read_at_store(
+                    crate::source::SOURCE_CODEX,
+                    parse_source_declaration(value)?,
+                );
             }
             "gemini_source" => {
                 settings.gemini_source = parse_source_declaration(value)?;
@@ -2346,6 +2362,23 @@ fn parse_ranged_u64(
         Ok(n)
     } else {
         Err(ERR_SETTINGS_INVALID_VALUE)
+    }
+}
+
+/// A Claude Code or Codex watch declaration, read where the chooser reads
+/// the same folder (`discovery::declared_store`): a tool's home at the
+/// store inside it, anything else as declared. The old-portal command
+/// declares the terminal's folder, and a terminal opened in the folder a
+/// person picked is in the home, not the store.
+fn read_at_store(
+    source: &str,
+    declaration: Option<SourceDeclaration>,
+) -> Option<SourceDeclaration> {
+    match declaration {
+        Some(SourceDeclaration::Watch { path }) => Some(SourceDeclaration::Watch {
+            path: crate::source::discovery::declared_store(source, &path),
+        }),
+        other => other,
     }
 }
 
@@ -5525,6 +5558,125 @@ mod tests {
             "legacy key must not be rewritten: {raw}"
         );
         assert!(raw.contains("claude_source"));
+    }
+
+    /// Homes with a session in their store, and a folder that is neither,
+    /// for the declared-folder tests below.
+    use serde_json::json;
+
+    fn declared_folders() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("r3c");
+        let project = claude.join("projects/-home-tc-code-app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let codex = dir.path().join("codex-home");
+        let day = codex.join("sessions/2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-08-20T10-00-00-abc.jsonl"), b"{}\n").unwrap();
+        let unrelated = dir.path().join("notes");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        (dir, claude, codex, unrelated)
+    }
+
+    fn watched(path: &std::path::Path) -> Option<SourceDeclaration> {
+        Some(SourceDeclaration::Watch {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The old-portal command declares the terminal's folder: a Claude Code
+    /// or Codex home is read at its store, as the chooser reads a home;
+    /// a store and any other folder are read as they are (#2171 review,
+    /// finding 4). Every spelling of the declaration takes the same rule.
+    #[test]
+    fn a_declared_tool_home_is_read_at_its_store() {
+        let (_dir, claude, codex, unrelated) = declared_folders();
+        let claude_store = claude.join("projects");
+        let codex_store = codex.join("sessions");
+        let cases = [
+            ("claude_root", json!(claude), &claude_store),
+            (
+                "claude_source",
+                json!({"mode":"watch","path":claude}),
+                &claude_store,
+            ),
+            ("claude_root", json!(claude_store), &claude_store),
+            (
+                "claude_source",
+                json!({"mode":"watch","path":claude_store}),
+                &claude_store,
+            ),
+            ("claude_root", json!(unrelated), &unrelated),
+            (
+                "claude_source",
+                json!({"mode":"watch","path":unrelated}),
+                &unrelated,
+            ),
+            ("codex_root", json!(codex), &codex_store),
+            (
+                "codex_source",
+                json!({"mode":"watch","path":codex}),
+                &codex_store,
+            ),
+            ("codex_root", json!(codex_store), &codex_store),
+            (
+                "codex_source",
+                json!({"mode":"watch","path":unrelated}),
+                &unrelated,
+            ),
+        ];
+        for (key, value, read_at) in cases {
+            let mut settings = DaemonSettings::default();
+            apply_settings_object(&mut settings, &json!({ key: value.clone() })).unwrap();
+            let declared = if key.starts_with("claude") {
+                settings.claude_source
+            } else {
+                settings.codex_source
+            };
+            assert_eq!(declared, watched(read_at), "{key} = {value}");
+        }
+        // Another tool's home is not this tool's: as it is.
+        let mut settings = DaemonSettings::default();
+        apply_settings_object(&mut settings, &json!({"codex_root": claude})).unwrap();
+        assert_eq!(settings.codex_source, watched(&claude));
+        // Off stays off.
+        apply_settings_object(&mut settings, &json!({"claude_source": {"mode":"off"}})).unwrap();
+        assert_eq!(settings.claude_source, Some(SourceDeclaration::Off));
+    }
+
+    /// A settings file from before declarations, naming a tool's home, is
+    /// read at the store too.
+    #[test]
+    fn a_legacy_root_naming_a_tool_home_loads_at_its_store() {
+        let (_dir, claude, codex, unrelated) = declared_folders();
+        for (claude_root, codex_root, claude_at, codex_at) in [
+            (
+                &claude,
+                &codex,
+                claude.join("projects"),
+                codex.join("sessions"),
+            ),
+            (&unrelated, &unrelated, unrelated.clone(), unrelated.clone()),
+        ] {
+            let (_d, store) = temp_store();
+            let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+            let obj = legacy.as_object_mut().unwrap();
+            obj.remove("claude_source");
+            obj.remove("codex_source");
+            obj.insert("claude_root".into(), json!(claude_root));
+            obj.insert("codex_root".into(), json!(codex_root));
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            let loaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(loaded.claude_source, watched(&claude_at));
+            assert_eq!(loaded.codex_source, watched(&codex_at));
+        }
     }
 
     #[test]
