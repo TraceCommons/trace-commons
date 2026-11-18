@@ -63,6 +63,10 @@ pub mod size {
     pub const KEBAB: i32 = 22;
     /// `GlassTokens.Size.watchSwitchWidth`: the Automatic switch's column.
     pub const SWITCH: i32 = 38;
+    /// `GlassTokens.Size.watchSwitchHeight`.
+    pub const SWITCH_HEIGHT: i32 = 22;
+    /// `GlassTokens.Size.controlLarge`: the round History button's side.
+    pub const ROUND_BUTTON: i32 = 28;
     /// `GlassTokens.Size.submitPill`: the Submit pill's height.
     pub const SUBMIT_PILL: i32 = 24;
     /// The Submit column title's least width (`.frame(minWidth: 128)`).
@@ -640,7 +644,7 @@ fn select_on_click(row: &gtk::Box, app: &Rc<App>, clicked: Selection) {
         gesture.set_state(gtk::EventSequenceState::Claimed);
         let next = toggled(clicked.clone(), &app.shell.inspector.selection());
         app.shell.select(&app, next);
-        crate::ui::queue::render(&app);
+        crate::ui::queue::focus_list(&app);
     });
     row.add_controller(click);
 }
@@ -754,11 +758,12 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
                 let Some(app) = weak.upgrade() else {
                     return glib::Propagation::Stop;
                 };
+                // Traces with no project are never armed: the switch goes
+                // back, and the line under the row already says why.
                 if node.is_bucket {
                     if wanted {
-                        app.toast(monitor_traces_copy().tree.unresolved_bucket_note);
+                        switch.set_active(false);
                     }
-                    switch.set_active(false);
                     return glib::Propagation::Stop;
                 }
                 request(
@@ -1006,6 +1011,14 @@ mod tests {
         assert_eq!(
             size::SWITCH,
             mac_number(TOKENS, "static let watchSwitchWidth: CGFloat =")
+        );
+        assert_eq!(
+            size::SWITCH_HEIGHT,
+            mac_number(TOKENS, "static let watchSwitchHeight: CGFloat =")
+        );
+        assert_eq!(
+            size::ROUND_BUTTON,
+            mac_number(TOKENS, "static let controlLarge: CGFloat =")
         );
         assert_eq!(
             size::SUBMIT_PILL,

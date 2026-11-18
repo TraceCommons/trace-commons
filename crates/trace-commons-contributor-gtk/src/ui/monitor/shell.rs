@@ -1120,6 +1120,8 @@ impl Shell {
         self.render_graph(app);
         // The selection's tool is ringed on the map, the others faded.
         self.map.render(app);
+        // The folder list draws the selected row, wherever it was chosen.
+        crate::ui::queue::render_list(app);
         self.apply();
     }
 

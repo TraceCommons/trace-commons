@@ -135,6 +135,22 @@ fn mounted_the_folder_list_is_the_macs() {
     app.window.present();
     settle(&context);
     let page: gtk::Widget = app.queue.root.clone().upcast();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(page.is_mapped() && page.width() > 0) && Instant::now() < deadline {
+        settle(&context);
+    }
+    assert!(
+        page.is_mapped(),
+        "the Traces tab is not on screen to measure"
+    );
+
+    // The heading's round History button, `controlLarge` square.
+    let round = with_class(&page, "tc-tree-round").remove(0);
+    assert_eq!(
+        (round.width(), round.height()),
+        (size::ROUND_BUTTON, size::ROUND_BUTTON),
+        "the History button"
+    );
 
     // The column titles: the folders in this computer's words, Submit and
     // Auto, as the Mac's eyebrow capitals.
@@ -167,7 +183,8 @@ fn mounted_the_folder_list_is_the_macs() {
     // Laid out at the Mac's measures: a 40 row, a 22 tile 8 + 16 + 8 in,
     // and the row menu's 22 column ending 6 in from the row's end.
     for row in &rows {
-        assert!(row.height() >= size::ROW, "a row {} high", row.height());
+        // One line of sub-line: exactly the Mac's least height.
+        assert_eq!(row.height(), size::ROW, "a row {} high", row.height());
         let tile = with_class(row, "tc-tree-tile-folder").remove(0);
         let at = bounds(&tile, row);
         assert_eq!(
@@ -195,6 +212,22 @@ fn mounted_the_folder_list_is_the_macs() {
     // whose only trace cannot go, offers no Submit at all.
     let api = &rows[0];
     let pill = with_class(api, "tc-tree-submit").remove(0);
+    assert_eq!(pill.height(), size::SUBMIT_PILL, "the Submit pill's height");
+    // The Automatic switch is the Mac's watch switch, and the Auto title
+    // stands over it: their right edges meet.
+    let switch = with_class(api, "tc-tree-switch").remove(0);
+    assert_eq!(
+        (switch.width(), switch.height()),
+        (size::SWITCH, size::SWITCH_HEIGHT),
+        "the Automatic switch"
+    );
+    let auto = &with_class(&page, "tc-tree-column")[2];
+    let title_end = bounds(auto, &page).x() + bounds(auto, &page).width();
+    let switch_end = bounds(&switch, &page).x() + bounds(&switch, &page).width();
+    assert!(
+        (title_end - switch_end).abs() <= 1.0,
+        "Auto ends at {title_end}, its switches at {switch_end}"
+    );
     assert_eq!(
         pill.downcast_ref::<gtk::Button>()
             .unwrap()

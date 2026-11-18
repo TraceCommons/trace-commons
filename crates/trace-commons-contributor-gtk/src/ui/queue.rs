@@ -498,8 +498,7 @@ pub fn wire(app: &Rc<App>) {
         let rows = traces_list::visible_rows(&tree, &app.queue.expanded.borrow());
         if let Some(next) = traces_list::moved(&current, down, &rows) {
             app.shell.select(&app, next);
-            render(&app);
-            app.queue.list.grab_focus();
+            focus_list(&app);
         }
         gtk::glib::Propagation::Stop
     });
@@ -545,23 +544,13 @@ pub fn render(app: &Rc<App>) {
     let view = &app.queue;
     view.first_contribution
         .set_visible(app.rollup.borrow().all_time.total() == 0);
-    clear(&view.list);
     clear(&view.disclosure);
-    // Rebuilt below alongside `view.list`: every row is redrawn from
-    // scratch each render, so the old widgets in here are already gone.
-    app.card_widgets.borrow_mut().clear();
 
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
     // The certificate section filters the same rows, and `certificate::held`
     // takes a slice so it can be tested without a window.
     let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
-    // The folders the core lists, ignored ones left out, newest waiting
-    // trace first (`TracesTree.build`): a folder with nothing waiting is
-    // still a row, so the list is empty only when there are no folders.
-    let tree = TracesTree::build(&entries, &app.projects.borrow(), None);
-    view.empty.set_visible(tree.folders.is_empty());
-    view.scroller.set_visible(!tree.folders.is_empty());
 
     // Grouped by project, in the order each project's first entry appears.
     // Each entry keeps the index it had in the flat `pending` list --
@@ -617,6 +606,69 @@ pub fn render(app: &Rc<App>) {
         }
     }
 
+    // Sessions that were queued and then resolved without being sent.
+    // Surfacing them is what keeps "not sent" distinguishable from "sent",
+    // and it is why the queue can always explain itself. Collapsed, because
+    // they are a record rather than a decision owed.
+    //
+    // Drawn from `queue_outcome_counts`, not from `entries`. This used to
+    // filter `entries` for the resolved states and list them one per line,
+    // which looked right and could never show anything: `list_pending`
+    // answers with `queue.pending()`, which is entries in the pending state
+    // and no others, so the filter had nothing to find. The daemon rolls
+    // these up by `reason_label` instead, and that roll-up is the only way
+    // to reach them over this socket -- at the cost of the per-session
+    // project label, which the count carries no room for.
+    let counts = app.outcome_counts.borrow();
+    let total: u64 = counts.values().sum();
+    if total > 0 {
+        let expander = gtk::Expander::builder()
+            .label(copy::no_longer_waiting(total))
+            .build();
+        let inner = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        inner.set_margin_top(space::S);
+        for (label, count) in counts.iter() {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+            line.append(&style::tag("Not sent", Tone::Refused));
+            style::append_meta(&line, format!("{count} - {}", copy::reason_sentence(label)));
+            inner.append(&line);
+        }
+        // What this list does not cover, said rather than left to be
+        // assumed. See `copy::NOT_OFFERED_BOUND`.
+        style::append_caveat(&inner, copy::NOT_OFFERED_BOUND);
+        expander.set_child(Some(&inner));
+        view.disclosure.append(&expander);
+    }
+
+    drop(entries);
+    render_list(app);
+    render_undo(app);
+
+    // The set of cards just changed -- new rows, or none at all yet
+    // measured -- so re-derive what is actually on screen once GTK has had
+    // a chance to allocate them, rather than trusting whatever was visible
+    // before this render.
+    app.schedule_visible_preview_update();
+}
+
+/// The folder list alone (`TracesTreeView`): a row per listed folder and
+/// the traces of the open ones, redrawn from scratch. `render` calls it,
+/// and a selection made anywhere (`Shell::select`) redraws it, so the
+/// selected row is always the inspector's subject.
+pub(crate) fn render_list(app: &Rc<App>) {
+    let view = &app.queue;
+    clear(&view.list);
+    // Rebuilt below alongside `view.list`: every row is redrawn from
+    // scratch, so the old widgets in here are already gone.
+    app.card_widgets.borrow_mut().clear();
+    let entries = app.entries.borrow();
+    // The folders the core lists, ignored ones left out, newest waiting
+    // trace first (`TracesTree.build`): a folder with nothing waiting is
+    // still a row, so the list is empty only when there are no folders.
+    let tree = TracesTree::build(&entries, &app.projects.borrow(), None);
+    drop(entries);
+    view.empty.set_visible(tree.folders.is_empty());
+    view.scroller.set_visible(!tree.folders.is_empty());
     // The selection, revealed once when it moves (`reveal`): a trace
     // selected from elsewhere opens its folder.
     let selection = app.shell.inspector.selection();
@@ -655,47 +707,15 @@ pub fn render(app: &Rc<App>) {
         }
     }
 
-    // Sessions that were queued and then resolved without being sent.
-    // Surfacing them is what keeps "not sent" distinguishable from "sent",
-    // and it is why the queue can always explain itself. Collapsed, because
-    // they are a record rather than a decision owed.
-    //
-    // Drawn from `queue_outcome_counts`, not from `entries`. This used to
-    // filter `entries` for the resolved states and list them one per line,
-    // which looked right and could never show anything: `list_pending`
-    // answers with `queue.pending()`, which is entries in the pending state
-    // and no others, so the filter had nothing to find. The daemon rolls
-    // these up by `reason_label` instead, and that roll-up is the only way
-    // to reach them over this socket -- at the cost of the per-session
-    // project label, which the count carries no room for.
-    let counts = app.outcome_counts.borrow();
-    let total: u64 = counts.values().sum();
-    if total > 0 {
-        let expander = gtk::Expander::builder()
-            .label(copy::no_longer_waiting(total))
-            .build();
-        let inner = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        inner.set_margin_top(space::S);
-        for (label, count) in counts.iter() {
-            let line = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-            line.append(&style::tag("Not sent", Tone::Refused));
-            style::append_meta(&line, format!("{count} - {}", copy::reason_sentence(label)));
-            inner.append(&line);
-        }
-        // What this list does not cover, said rather than left to be
-        // assumed. See `copy::NOT_OFFERED_BOUND`.
-        style::append_caveat(&inner, copy::NOT_OFFERED_BOUND);
-        expander.set_child(Some(&inner));
-        view.disclosure.append(&expander);
-    }
-
-    render_undo(app);
-
-    // The set of cards just changed -- new rows, or none at all yet
-    // measured -- so re-derive what is actually on screen once GTK has had
-    // a chance to allocate them, rather than trusting whatever was visible
-    // before this render.
+    // The set of rows just changed, so re-derive what is on screen once
+    // GTK has allocated them.
     app.schedule_visible_preview_update();
+}
+
+/// Moves the keyboard to the folder list, as a click on a row does on the
+/// Mac (its tree is one focusable list).
+pub(crate) fn focus_list(app: &Rc<App>) {
+    app.queue.list.grab_focus();
 }
 
 /// Show or hide the undo bar, and move its elapsed figure.
@@ -1424,7 +1444,7 @@ pub(crate) fn toggle_folder(app: &Rc<App>, project_id: &str) {
             open.insert(project_id.to_string());
         }
     }
-    render(app);
+    render_list(app);
 }
 
 /// One trace's `Submit` from its row: one click that builds, pins and

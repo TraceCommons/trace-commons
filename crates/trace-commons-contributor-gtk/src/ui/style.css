@@ -1063,8 +1063,20 @@ window.tc-glass-window:backdrop .tc-tree-split-menu > button {
   color: @tc_glass_selected_ink;
 }
 
-.tc-tree-switch {
-  min-width: 38px;
+/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
+   `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
+   slider, so a 17-wide slider in 2 of padding is 38 wide. */
+switch.tc-tree-switch {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
+  border-radius: 999px;
+}
+
+switch.tc-tree-switch > slider {
+  min-width: 17px;
+  min-height: 18px;
+  margin: 0;
 }
 
 .tc-tree-menu-current {
