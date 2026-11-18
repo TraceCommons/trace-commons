@@ -354,7 +354,7 @@ pub(super) fn follow_held_watches(
             let weak_screen = weak_screen.clone();
             app.call("get_settings", serde_json::json!({}), move |_, result| {
                 if let (Some(screen), Ok(settings)) = (weak_screen.upgrade(), result) {
-                    screen.record_held(crate::first_run::tools::held_watches(&settings));
+                    screen.record_watches(crate::first_run::tools::Watches::read(&settings));
                 }
             });
         }

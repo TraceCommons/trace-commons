@@ -274,7 +274,9 @@ pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value,
         .collect();
     let mut changes = Vec::new();
     for key in keys {
-        if before.get(key) == after.get(key) {
+        // The daemon's count of declaration writes, not a setting: it moves
+        // with the declaration the change list already names.
+        if key == "source_revisions" || before.get(key) == after.get(key) {
             continue;
         }
         let old = shown_before.get(key).cloned().unwrap_or(Value::Null);

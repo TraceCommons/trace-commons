@@ -56,12 +56,67 @@ pub fn tool_for_settings_key(settings_key: &str) -> Option<&'static str> {
     })
 }
 
-/// Whether a refusal on Tools no longer holds: its old-portal line named
-/// `refused`, and the daemon now newly holds that tool, so the command was
-/// run and the folder is watched. A refusal that named no tool, or a
-/// different tool newly held, leaves the refusal shown.
-pub fn refusal_ended(refused: Option<&str>, newly_held: &BTreeSet<String>) -> bool {
-    refused.is_some_and(|tool| newly_held.contains(tool))
+/// What the attached daemon's `get_settings` answer says about the tools:
+/// which it watches ([`held_watches`]), and how many times each one's
+/// declaration has been written ([`declaration_revisions`]). Never where.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Watches {
+    pub held: BTreeSet<String>,
+    pub revisions: BTreeMap<String, u64>,
+}
+
+impl Watches {
+    pub fn read(settings: &Value) -> Self {
+        Self {
+            held: held_watches(settings),
+            revisions: declaration_revisions(settings),
+        }
+    }
+}
+
+/// Each tool's declaration revision in the daemon's `get_settings` answer
+/// (`source_revisions`, by settings key): absent for a declaration never
+/// written through the daemon, and from a daemon that predates the count.
+pub fn declaration_revisions(settings: &Value) -> BTreeMap<String, u64> {
+    let Some(revisions) = settings.get("source_revisions") else {
+        return BTreeMap::new();
+    };
+    TOOL_ORDER
+        .iter()
+        .filter_map(|source| {
+            let key = trace_commons_contributor::daemon::settings::source_settings_key(source)?;
+            let revision = revisions.get(key)?.as_u64()?;
+            Some(((*source).to_owned(), revision))
+        })
+        .collect()
+}
+
+/// A refusal shown on Tools: the tool its old-portal line named, and what
+/// the daemon's last answer before it said ([`Watches`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub tool: &'static str,
+    pub before: Watches,
+}
+
+/// Whether `refusal` no longer holds by the daemon's answer `now`: the
+/// command was run. Either the daemon newly holds the tool, or it held the
+/// tool already and the tool's declaration has been written since -- the
+/// command for another folder of a tool already watched landed (#2171
+/// review 2, finding 4). Another tool newly held or written, an answer
+/// that changed nothing for the tool, or a daemon that reports no
+/// revisions leaves the refusal shown.
+pub fn refusal_ended(refusal: Option<&Refusal>, now: &Watches) -> bool {
+    refusal.is_some_and(|refusal| {
+        let tool = refusal.tool;
+        let before = &refusal.before;
+        now.held.contains(tool)
+            && (!before.held.contains(tool)
+                || now
+                    .revisions
+                    .get(tool)
+                    .is_some_and(|revision| before.revisions.get(tool) != Some(revision)))
+    })
 }
 
 /// What a folder picked with "add your tool" is.
@@ -650,8 +705,8 @@ mod tests {
     /// A refusal whose old-portal line names a tool ends when the daemon
     /// newly holds that tool (the command was run): Tools hides the failure
     /// line and the command. Another tool newly held, a read that holds
-    /// nothing new, or a refusal that named no tool leaves it shown
-    /// (#2171 review 2, finding 1).
+    /// nothing new, or no refusal leaves it shown (#2171 review 2,
+    /// finding 1).
     #[test]
     fn a_refusal_ends_when_the_daemon_newly_holds_its_tool() {
         assert_eq!(
@@ -661,21 +716,65 @@ mod tests {
         assert_eq!(tool_for_settings_key("codex_source"), Some(SOURCE_CODEX));
         assert_eq!(tool_for_settings_key("trajectory_source"), None);
         assert_eq!(tool_for_settings_key("claude_root"), None);
-        let refused = tool_for_settings_key("claude_source");
-        let mut tools = discovered();
-        let newly = tools.record_held(held(&[SOURCE_CODEX]));
-        assert_eq!(newly, held(&[SOURCE_CODEX]));
-        assert!(!refusal_ended(refused, &newly));
-        let newly = tools.record_held(held(&[SOURCE_CODEX]));
-        assert!(newly.is_empty());
-        assert!(!refusal_ended(refused, &newly));
-        let newly = tools.record_held(held(&[SOURCE_CODEX, SOURCE_CLAUDE_CODE]));
-        assert_eq!(newly, held(&[SOURCE_CLAUDE_CODE]));
-        assert!(refusal_ended(refused, &newly));
-        assert!(!refusal_ended(None, &newly));
-        // Read again: Claude Code is no longer new.
-        let newly = tools.record_held(held(&[SOURCE_CODEX, SOURCE_CLAUDE_CODE]));
-        assert!(!refusal_ended(refused, &newly));
+        let watches = |sources: &[&str]| Watches {
+            held: held(sources),
+            revisions: BTreeMap::new(),
+        };
+        let refusal = Refusal {
+            tool: tool_for_settings_key("claude_source").unwrap(),
+            before: Watches::default(),
+        };
+        assert!(!refusal_ended(Some(&refusal), &watches(&[SOURCE_CODEX])));
+        assert!(!refusal_ended(Some(&refusal), &Watches::default()));
+        let both = watches(&[SOURCE_CODEX, SOURCE_CLAUDE_CODE]);
+        assert!(refusal_ended(Some(&refusal), &both));
+        assert!(!refusal_ended(None, &both));
+    }
+
+    /// A refusal for another folder of a tool the daemon already watches
+    /// ends once the command lands: the tool stays held, and its
+    /// declaration's revision moves. Another tool's revision moving, an
+    /// answer with the same revision, or a daemon with no revisions leaves
+    /// it shown (#2171 review 2, finding 4).
+    #[test]
+    fn a_refusal_for_a_tool_already_held_ends_when_its_declaration_is_written() {
+        let settings = |revisions: Value| {
+            json!({
+                "claude_source_mode": "watch",
+                "codex_source_mode": "watch",
+                "source_revisions": revisions,
+            })
+        };
+        let before = Watches::read(&settings(json!({"codex_source": 4})));
+        assert_eq!(before.held, held(&[SOURCE_CLAUDE_CODE, SOURCE_CODEX]));
+        assert_eq!(
+            before.revisions,
+            BTreeMap::from([(SOURCE_CODEX.to_owned(), 4)])
+        );
+        let refusal = Refusal {
+            tool: SOURCE_CLAUDE_CODE,
+            before,
+        };
+        assert!(!refusal_ended(Some(&refusal), &refusal.before));
+        assert!(!refusal_ended(
+            Some(&refusal),
+            &Watches::read(&settings(json!({"codex_source": 5})))
+        ));
+        assert!(refusal_ended(
+            Some(&refusal),
+            &Watches::read(&settings(json!({"codex_source": 4, "claude_source": 1})))
+        ));
+        // A daemon that reports no revisions cannot say; the refusal stays.
+        let older = Watches::read(&json!({
+            "claude_source_mode": "watch",
+            "codex_source_mode": "watch",
+        }));
+        assert!(older.revisions.is_empty());
+        let refusal = Refusal {
+            tool: SOURCE_CLAUDE_CODE,
+            before: older.clone(),
+        };
+        assert!(!refusal_ended(Some(&refusal), &older));
     }
 
     /// A held tool this window's discovery cannot see still has its row.

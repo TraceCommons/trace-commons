@@ -331,8 +331,20 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod mounted_tests {
     use super::*;
-    use crate::first_run::tools::{Found, Tools};
+    use crate::first_run::tools::{Found, Tools, Watches};
     use std::{cell::RefCell, rc::Rc};
+
+    /// The daemon's answer as Tools reads it: `held` watched, with the
+    /// declaration revisions `revisions`.
+    fn watching(held: &[&str], revisions: &[(&str, u64)]) -> Watches {
+        Watches {
+            held: held.iter().map(|s| (*s).to_owned()).collect(),
+            revisions: revisions
+                .iter()
+                .map(|(tool, revision)| ((*tool).to_owned(), *revision))
+                .collect(),
+        }
+    }
 
     fn init() -> glib::MainContext {
         let context = glib::MainContext::default();
@@ -453,7 +465,7 @@ mod mounted_tests {
         };
         assert!(!checks()[0].is_active());
         assert!(!screen.continue_button.is_sensitive());
-        screen.record_held(["claude-code".to_owned()].into_iter().collect());
+        screen.record_watches(watching(&["claude-code"], &[]));
         let check = checks()[0].clone();
         assert!(check.is_active());
         assert_eq!(check.tooltip_text(), None);
@@ -611,14 +623,10 @@ mod mounted_tests {
         };
         assert!(shown(failed));
         assert!(shown(&hint.command));
-        screen.record_held(["codex".to_owned()].into_iter().collect());
+        screen.record_watches(watching(&["codex"], &[]));
         assert!(shown(failed), "another tool held hid the failure line");
         assert!(shown(&hint.command), "another tool held hid the command");
-        screen.record_held(
-            ["codex".to_owned(), "claude-code".to_owned()]
-                .into_iter()
-                .collect(),
-        );
+        screen.record_watches(watching(&["codex", "claude-code"], &[]));
         assert!(
             !shown(failed),
             "the refused tool is held: failure line still shown"
@@ -628,6 +636,66 @@ mod mounted_tests {
             "the refused tool is held: command still shown"
         );
         assert!(screen.continue_button.is_sensitive());
+    }
+
+    /// A refusal for another folder of a tool the daemon already watches:
+    /// the tool stays held, so only its declaration's revision says the
+    /// command landed. Another tool's revision moving leaves the failure
+    /// line and the command shown; the refused tool's hides both (#2171
+    /// review 2, finding 4).
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn a_refusal_for_a_held_tool_hides_once_its_declaration_is_written() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let window = gtk::Window::new();
+        let screen = super::super::first_run_tools::build(
+            Rc::new(RefCell::new(Tools::default())),
+            &window,
+            || {},
+        );
+        screen.record_watches(watching(&["claude-code", "codex"], &[("codex", 2)]));
+        let failed = first_run_copy().folders.settings_failed;
+        let hint = super::super::roots::host_folder_hint("claude_source").expect("approved");
+        screen.show_host_hint(Some(&hint));
+        screen.finish(Some(failed));
+        let root: gtk::Widget = screen.root.clone().upcast();
+        let shown = |label: &gtk::Widget| {
+            let mut current = Some(label.clone());
+            while let Some(w) = current {
+                if !w.is_visible() {
+                    return false;
+                }
+                if w == root {
+                    return true;
+                }
+                current = w.parent();
+            }
+            false
+        };
+        let failure: gtk::Widget = screen.failure.clone().upcast();
+        assert!(shown(&failure));
+        screen.record_watches(watching(&["claude-code", "codex"], &[("codex", 2)]));
+        assert!(shown(&failure), "an unchanged answer hid the failure line");
+        screen.record_watches(watching(&["claude-code", "codex"], &[("codex", 3)]));
+        assert!(shown(&failure), "another tool's write hid the failure line");
+        screen.record_watches(watching(
+            &["claude-code", "codex"],
+            &[("claude-code", 1), ("codex", 3)],
+        ));
+        assert!(
+            !shown(&failure),
+            "the refused tool's declaration landed: failure line still shown"
+        );
+        let command = descendants(&root)
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .find(|l| l.text() == hint.command.as_str())
+            .map(|l| l.upcast::<gtk::Widget>());
+        assert!(
+            command.is_none_or(|l| !shown(&l)),
+            "the refused tool's declaration landed: command still shown"
+        );
     }
 
     #[test]

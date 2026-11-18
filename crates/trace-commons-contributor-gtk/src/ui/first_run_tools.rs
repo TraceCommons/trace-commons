@@ -34,8 +34,12 @@ pub(super) struct ToolsScreen {
     host_hint: gtk::Box,
     host_hint_line: gtk::Label,
     host_hint_command: gtk::Label,
-    /// The tool the shown hint names ([`super::roots::HostFolderHint::tool`]).
-    hint_tool: std::cell::Cell<Option<&'static str>>,
+    /// The refusal the shown hint is for: the tool it names
+    /// ([`super::roots::HostFolderHint::tool`]) and the daemon's answer
+    /// before it.
+    refusal: RefCell<Option<crate::first_run::tools::Refusal>>,
+    /// The attached daemon's last settings answer, as Tools reads it.
+    watches: RefCell<crate::first_run::tools::Watches>,
 }
 
 /// The tool's name, as the Mac's `SourceKind.displayName` gives it.
@@ -126,7 +130,8 @@ pub(super) fn build(
         host_hint,
         host_hint_line,
         host_hint_command,
-        hint_tool: std::cell::Cell::new(None),
+        refusal: RefCell::new(None),
+        watches: RefCell::new(Default::default()),
     });
     let add = gtk::Button::with_label(copy.tools.add_tool);
     add.add_css_class("flat");
@@ -217,27 +222,33 @@ impl ToolsScreen {
     }
 
     /// Show the tools the attached daemon already watches
-    /// (`Tools::record_held`). Not while a commit holds the answers it
-    /// started from. When the daemon newly holds the tool a refusal's
-    /// old-portal line named, the command was run: the failure line and
-    /// the command no longer apply and are hidden
+    /// (`Tools::record_held`), from its settings answer `now`. Not while a
+    /// commit holds the answers it started from. When the command a
+    /// refusal's old-portal line gave has landed -- the daemon newly holds
+    /// that tool, or holds it still with its declaration written since --
+    /// the failure line and the command no longer apply and are hidden
     /// (`first_run::tools::refusal_ended`).
-    pub fn record_held(self: &Rc<Self>, held: std::collections::BTreeSet<String>) {
-        if self.busy.get() || self.tools.borrow().held == held {
+    pub fn record_watches(self: &Rc<Self>, now: crate::first_run::tools::Watches) {
+        if self.busy.get() {
             return;
         }
-        let newly = self.tools.borrow_mut().record_held(held);
-        if crate::first_run::tools::refusal_ended(self.hint_tool.get(), &newly) {
+        if crate::first_run::tools::refusal_ended(self.refusal.borrow().as_ref(), &now) {
             self.hide_refusal();
         }
-        self.render();
+        let held_changed = self.tools.borrow().held != now.held;
+        let held = now.held.clone();
+        *self.watches.borrow_mut() = now;
+        if held_changed {
+            self.tools.borrow_mut().record_held(held);
+            self.render();
+        }
     }
 
     /// Hide the failure line and the hint under it.
     fn hide_refusal(&self) {
         self.failure.set_visible(false);
         self.host_hint.set_visible(false);
-        self.hint_tool.set(None);
+        self.refusal.replace(None);
     }
 
     /// The commit ended: on failure say so with `failure`, and let Continue
@@ -261,11 +272,14 @@ impl ToolsScreen {
                 self.host_hint_line.set_label(hint.line);
                 super::service_dialog::set_command(&self.host_hint_command, &hint.command);
                 self.host_hint.set_visible(true);
-                self.hint_tool.set(Some(hint.tool));
+                self.refusal.replace(Some(crate::first_run::tools::Refusal {
+                    tool: hint.tool,
+                    before: self.watches.borrow().clone(),
+                }));
             }
             None => {
                 self.host_hint.set_visible(false);
-                self.hint_tool.set(None);
+                self.refusal.replace(None);
             }
         }
     }

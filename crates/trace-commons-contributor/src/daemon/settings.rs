@@ -790,6 +790,17 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub managed_folder_settings: Vec<crate::managed::folder::FolderSettings>,
 
+    /// How many times each source declaration has been written through
+    /// [`apply_settings_object`], by its settings key (`claude_source` for
+    /// `claude_root` too). A shell compares two reads to tell that a
+    /// declaration landed while the tool's mode stayed "watch" -- a folder
+    /// declared from a terminal for a tool the daemon already watches --
+    /// which the mode alone cannot say; the declaration's path is never
+    /// reported (`ipc::redacted_settings`), and a count names none.
+    /// `#[serde(default)]`: a file from before it loads with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_revisions: BTreeMap<String, u64>,
+
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
     /// Revision 2's `digest_enabled` is `notify.digest`, and no
@@ -1444,6 +1455,7 @@ impl Default for DaemonSettings {
             managed_favorite_models: Vec::new(),
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
+            source_revisions: BTreeMap::new(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -2316,6 +2328,25 @@ pub fn apply_settings_object(
         }
         // SET-SETTINGS-KEYS-END
         changed = true;
+    }
+    // Every declaration written counts, whether or not its folder moved:
+    // a command run for the folder already watched has landed too.
+    for key in obj.keys() {
+        let declaration = match key.as_str() {
+            "claude_root" => "claude_source",
+            "codex_root" => "codex_source",
+            other => match crate::source::declarable_source_names()
+                .filter_map(source_settings_key)
+                .find(|declared| *declared == other)
+            {
+                Some(declared) => declared,
+                None => continue,
+            },
+        };
+        *settings
+            .source_revisions
+            .entry(declaration.to_string())
+            .or_insert(0) += 1;
     }
     Ok(changed)
 }
@@ -5701,6 +5732,40 @@ mod tests {
             assert_eq!(loaded.claude_source, watched(&claude_at));
             assert_eq!(loaded.codex_source, watched(&codex_at));
         }
+    }
+
+    /// A declaration written while the tool's mode stays "watch" -- a folder
+    /// declared from a terminal for a tool the daemon already watches -- is
+    /// told apart by its revision: a count of writes of that declaration,
+    /// carried in the settings answer with no path (#2171 review 2,
+    /// finding 4). Other settings leave it as it is.
+    #[test]
+    fn writing_a_declaration_counts_a_revision_the_settings_answer_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("revision-folder-a");
+        let b = dir.path().join("revision-folder-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut s = DaemonSettings::default();
+        assert!(s.source_revisions.is_empty());
+        apply_settings_object(&mut s, &json!({"claude_root": a})).unwrap();
+        assert_eq!(s.source_revisions.get("claude_source"), Some(&1));
+        apply_settings_object(
+            &mut s,
+            &json!({"claude_source": {"mode": "watch", "path": b}}),
+        )
+        .unwrap();
+        assert_eq!(s.source_revisions.get("claude_source"), Some(&2));
+        apply_settings_object(&mut s, &json!({"local_notifications": false})).unwrap();
+        assert_eq!(s.source_revisions.get("claude_source"), Some(&2));
+        assert_eq!(s.source_revisions.get("codex_source"), None);
+        apply_settings_object(&mut s, &json!({"codex_root": a})).unwrap();
+        assert_eq!(s.source_revisions.get("codex_source"), Some(&1));
+
+        let blob = super::super::ipc::redacted_settings(&s);
+        assert_eq!(blob["source_revisions"]["claude_source"], 2);
+        assert_eq!(blob["source_revisions"]["codex_source"], 1);
+        assert!(!blob.to_string().contains("revision-folder"));
     }
 
     /// A settings file declaring a tool's home in `claude_source` /
