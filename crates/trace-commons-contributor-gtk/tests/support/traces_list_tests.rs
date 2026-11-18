@@ -227,8 +227,10 @@ fn mounted_the_folder_list_is_the_macs() {
     // The Automatic switch is the Mac's watch switch, and the Auto title
     // stands over it: their right edges meet.
     let switch = with_class(api, "tc-tree-switch").remove(0);
+    // Its drawn box, padding included (`width()` is the content box).
+    let drawn = bounds(&switch, &page);
     assert_eq!(
-        (switch.width(), switch.height()),
+        (drawn.width().round() as i32, drawn.height().round() as i32),
         (size::SWITCH, size::SWITCH_HEIGHT),
         "the Automatic switch"
     );
