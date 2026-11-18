@@ -42,15 +42,11 @@ use crate::ui::style::{self, space};
 use adw::prelude::*;
 
 /// Where a run of onboarding has got to.
-///
-/// `Scan` is skipped unless the operator offers the second scanner, which
-/// the shell learns from `get_settings` rather than assuming.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Step {
     Welcome,
     Connect,
     Consent,
-    Scan,
     Watch,
     Done,
 }
@@ -61,7 +57,6 @@ impl Step {
             Step::Welcome => "welcome",
             Step::Connect => "connect",
             Step::Consent => "consent",
-            Step::Scan => "scan",
             Step::Watch => "watch",
             Step::Done => "done",
         }
@@ -102,11 +97,6 @@ pub struct Onboarding {
     /// scope is not in here: it is drawn but never toggleable.
     scope_checks: RefCell<Vec<(String, gtk::CheckButton)>>,
     consent_body: gtk::Box,
-    scan_local_only: gtk::CheckButton,
-    /// Whether the operator offers the second scanner. Decided from
-    /// `get_settings` before Consent hands off, so the flow can skip a
-    /// screen that would otherwise offer a choice that does not exist.
-    scan_offered: std::cell::Cell<bool>,
 }
 
 /// Whether onboarding has been walked to the end for the currently enrolled
@@ -299,8 +289,6 @@ pub(super) fn join_surface(
         connection_busy: std::cell::Cell::new(false),
         scope_checks: RefCell::new(Vec::new()),
         consent_body: gtk::Box::new(gtk::Orientation::Vertical, space::M),
-        scan_local_only: gtk::CheckButton::new(),
-        scan_offered: std::cell::Cell::new(false),
     });
     let page = connect_page(app, &onboarding);
     page.connect_map({
@@ -398,11 +386,6 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         .spacing(space::M)
         .build();
 
-    let scan_local_only = gtk::CheckButton::builder()
-        .label(copy::ONBOARD_SCAN_LOCAL_ONLY)
-        .active(true)
-        .build();
-
     let onboarding = Rc::new(Onboarding {
         window: window.clone(),
         stack: stack.clone(),
@@ -416,8 +399,6 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         connection_busy: std::cell::Cell::new(false),
         scope_checks: RefCell::new(Vec::new()),
         consent_body: consent_body.clone(),
-        scan_local_only: scan_local_only.clone(),
-        scan_offered: std::cell::Cell::new(false),
     });
 
     stack.add_named(&welcome_page(&onboarding), Some(Step::Welcome.page_name()));
@@ -429,7 +410,6 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         &consent_page(app, &onboarding),
         Some(Step::Consent.page_name()),
     );
-    stack.add_named(&scan_page(app, &onboarding), Some(Step::Scan.page_name()));
     stack.add_named(&watch_page(app, &onboarding), Some(Step::Watch.page_name()));
     stack.add_named(&done_page(app, &onboarding), Some(Step::Done.page_name()));
 
@@ -461,11 +441,7 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
 /// an action resolve on a screen this window already has, so the button now
 /// opens that screen.
 ///
-/// `not-logged-in` is answered by Connect. `near-ai-notice-not-acknowledged`
-/// is answered by the privacy screen, whose choice is the only thing in this
-/// application that calls `acknowledge_near_ai_notice` -- without that call
-/// the daemon refuses the filter indefinitely, which is precisely the state
-/// the banner is reporting.
+/// `not-logged-in` is answered by Connect.
 ///
 /// Deliberately not routed through [`present_if_needed`]: that function
 /// decides whether to interrupt someone at launch, and its "already
@@ -488,7 +464,6 @@ pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
         "welcome" => Step::Welcome,
         "connect" => Step::Connect,
         "consent" => Step::Consent,
-        "scan" => Step::Scan,
         "watch" => Step::Watch,
         "done" => Step::Done,
         _ => return false,
@@ -517,7 +492,6 @@ pub fn present_for_health(app: &Rc<App>, label: &str) {
 fn health_step(label: &str) -> Option<Step> {
     match label {
         "not-logged-in" => Some(Step::Connect),
-        "near-ai-notice-not-acknowledged" => Some(Step::Scan),
         _ => None,
     }
 }
@@ -578,17 +552,10 @@ impl Onboarding {
         self.stack.set_visible_child_name(step.page_name());
     }
 
-    /// Leave Consent for whichever screen is actually next.
-    ///
-    /// Screen 4 exists only where the operator offers the second scanner.
-    /// Showing it otherwise would present a choice between one option and
-    /// an option that does not exist.
+    /// Leave Consent for the next screen. The optional NEAR AI second scan
+    /// that once came between is retired.
     fn after_consent(self: &Rc<Self>) {
-        if self.scan_offered.get() {
-            self.go(Step::Scan);
-        } else {
-            self.go(Step::Watch);
-        }
+        self.go(Step::Watch);
     }
 }
 
@@ -981,8 +948,7 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     outer
 }
 
-/// Fill the consent screen from `consent_options`, and decide on the way
-/// past whether screen 4 has anything to offer.
+/// Fill the consent screen from `consent_options`.
 pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
     if onboarding.joined.is_some() {
         return;
@@ -995,19 +961,6 @@ pub(super) fn load_consent_options(app: &Rc<App>, onboarding: &Rc<Onboarding>) {
                 serde_json::from_value(value.get("scopes").cloned().unwrap_or_default())
                     .unwrap_or_default();
             render_scopes(&onboarding, &scopes);
-        }
-    });
-    app.call("get_settings", serde_json::json!({}), {
-        let onboarding = onboarding.clone();
-        move |_app, result| {
-            let offered = result
-                .ok()
-                .and_then(|v| {
-                    v.get("near_ai_configured")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                .unwrap_or(false);
-            onboarding.scan_offered.set(offered);
         }
     });
 }
@@ -1174,46 +1127,6 @@ fn consent_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     }
                 },
             );
-        }
-    });
-    outer.append(&button_row(&next));
-    outer
-}
-
-fn scan_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
-    let (outer, body) = page(copy::ONBOARD_SCAN_TITLE);
-    body.append(&body_label(copy::ONBOARD_SCAN_LOCAL_ALWAYS));
-    body.append(&body_label(copy::ONBOARD_SCAN_OFFER));
-    let disclosure = body_label(copy::ONBOARD_SCAN_DISCLOSURE);
-    disclosure.add_css_class("tc-brand-notice");
-    body.append(&disclosure);
-
-    body.append(&onboarding.scan_local_only);
-    let with_near = gtk::CheckButton::builder()
-        .label(copy::ONBOARD_SCAN_WITH_NEAR)
-        .group(&onboarding.scan_local_only)
-        .build();
-    body.append(&with_near);
-
-    let next = gtk::Button::with_label(copy::ONBOARD_CONTINUE);
-    next.add_css_class("suggested-action");
-    next.connect_clicked({
-        let app = app.clone();
-        let onboarding = onboarding.clone();
-        let with_near = with_near.clone();
-        move |_| {
-            if with_near.is_active() {
-                // Without this the daemon refuses the filter forever and
-                // the contributor experiences unexplained paralysis. It is
-                // the only way an app-only contributor clears the notice,
-                // because they never see the CLI's stdout version.
-                app.call("acknowledge_near_ai_notice", serde_json::json!({}), {
-                    let onboarding = onboarding.clone();
-                    move |_app, _result| onboarding.go(Step::Watch)
-                });
-            } else {
-                onboarding.go(Step::Watch);
-            }
         }
     });
     outer.append(&button_row(&next));
@@ -1597,16 +1510,15 @@ mod tests {
     /// a button that goes nowhere.
     #[test]
     fn every_actionable_health_label_has_a_screen() {
-        for label in ["not-logged-in", "near-ai-notice-not-acknowledged"] {
-            assert!(
-                copy::health_action(label).is_some(),
-                "{label} should offer an action"
-            );
-            assert!(
-                health_step(label).is_some(),
-                "{label} offers an action but has no screen to open"
-            );
-        }
+        let label = "not-logged-in";
+        assert!(
+            copy::health_action(label).is_some(),
+            "{label} should offer an action"
+        );
+        assert!(
+            health_step(label).is_some(),
+            "{label} offers an action but has no screen to open"
+        );
     }
 
     #[test]

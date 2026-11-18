@@ -2838,12 +2838,6 @@ char*       tc_quit_reason_prompt_json(int32_t stops_compute, int32_t stops_priv
  */
 char*       tc_withdrawal_confirmation_prompt_text(void);
 
-/* The extra privacy scan's words (privacy_scan_copy::privacy_scan_copy), for
- * onboarding's scan screen and the near-ai-notice recovery prompt. NULL only
- * on a caught panic.
- */
-char*       tc_privacy_scan_copy_json(void);
-
 /* ------------------------------------------------------------------------
  * K5 (#1173): the disclosure bundle and the Flow 1 decisions, which were
  * taken in the Tauri shell and are now core functions. Each export is the

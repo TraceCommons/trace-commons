@@ -16,7 +16,6 @@ public struct HealthLineCopy: Decodable, Equatable, Sendable {
     /// on the button's words or the label.
     public enum ActionKind: String, Decodable, Sendable {
         case reconnect
-        case privacyScanNotice = "privacy_scan_notice"
         case reviewQueue = "review_queue"
     }
 

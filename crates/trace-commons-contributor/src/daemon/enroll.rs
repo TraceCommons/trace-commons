@@ -254,60 +254,9 @@ fn persist_scope_choice(
     Ok(candidate)
 }
 
-/// Record that the NEAR AI first-use disclosure was shown in a UI, and clear
-/// the health label blocking on it. This is the only way an app-only
-/// contributor (never touching the CLI, which shows the same notice on
-/// stdout) can become unstuck.
-///
-/// Audited (`near-ai-notice-acknowledged`): this asserts, on the socket
-/// caller's unverified word, that a third-party-scan disclosure was shown to
-/// someone. A notice nobody actually saw is not a notice, so defeating this
-/// gate is at least as consequential as arming auto-upload, and less
-/// recoverable: traces may already have gone out under the false
-/// acknowledgment before anyone notices.
-pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Request) -> Response {
-    // The audit entry goes down FIRST, before the marker exists. There is
-    // no "un-acknowledge" operation to roll back to, so ordering is what
-    // makes this fail-closed: if the record cannot be persisted, the gate
-    // is never cleared and traces cannot go out under an acknowledgment
-    // nobody can see. The reverse order would leave the gate cleared with
-    // no record of who cleared it, which is precisely the failure this
-    // entry exists to prevent.
-    if let Err(_e) = audit::append(
-        &shared.store,
-        &AuditEntry {
-            at: Utc::now(),
-            action: "near-ai-notice-acknowledged".to_string(),
-            project_label: None,
-            detail: None,
-        },
-    ) {
-        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
-    }
-    match shared.store.ensure_near_ai_notice_shown() {
-        Ok(_created) => {
-            // Every session refused while the notice was outstanding was
-            // refused for timing, not for anything about the session, and
-            // nothing else will ever move it again -- so re-offer them, and
-            // clear the gate's label. The acknowledgment is the event the
-            // refusal was waiting for. The same step runs on every daemon
-            // tick, so a CLI acknowledgement gets it too.
-            let outcome = super::settle_near_ai_notice(shared, Utc::now());
-            let reoffered = outcome.reoffered;
-            Response::ok(
-                req.id,
-                json!({ "acknowledged": true, "reoffered": reoffered }),
-            )
-        }
-        Err(_e) => Response::err(req.id, ERR_UNAVAILABLE, "notice-write-failed"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING;
-    use crate::daemon::ipc::EVENT_QUEUE_CHANGED;
 
     #[test]
     fn consent_options_lists_every_valid_scope_with_a_description() {
@@ -757,82 +706,6 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
-    #[test]
-    fn acknowledging_the_near_ai_notice_clears_the_blocking_health_label() {
-        let s = shared();
-        s.health
-            .lock()
-            .unwrap()
-            .fail(LABEL_NEAR_AI_NOTICE_PENDING, chrono::Utc::now());
-        let r =
-            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(s.store.near_ai_notice_shown());
-        assert!(s.health.lock().unwrap().ok());
-    }
-
-    /// Sessions refused while the notice was outstanding come back once it
-    /// is acknowledged.
-    ///
-    /// Before this they were lost: `Refused`, which nothing moves, and the
-    /// watcher does not re-offer a session whose file has not changed. A
-    /// refusal for any other reason is about the session and is left alone.
-    #[test]
-    fn acknowledging_the_notice_re_offers_the_sessions_it_had_blocked() {
-        let s = shared();
-        let blocked = uuid::Uuid::new_v4();
-        let other = uuid::Uuid::new_v4();
-        {
-            let mut q = s.queue.lock().unwrap();
-            for (id, hash) in [(blocked, "sha256:blocked"), (other, "sha256:other")] {
-                q.upsert(
-                    crate::daemon::queue::QueueEntry {
-                        entry_id: id,
-                        session_hash: hash.to_string(),
-                        approved_scopes: Some(vec!["debugging_evaluation".to_string()]),
-                        ..Default::default()
-                    },
-                    100,
-                )
-                .unwrap();
-            }
-            q.set_state(
-                blocked,
-                crate::daemon::queue::QueueState::Refused,
-                Some(LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
-            );
-            q.set_state(
-                other,
-                crate::daemon::queue::QueueState::Refused,
-                Some("secret-leak-detected".to_string()),
-            );
-        }
-        let mut events = s.events.subscribe();
-
-        let r =
-            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert_eq!(r.result.as_ref().unwrap()["reoffered"], 1);
-
-        let q = s.queue.lock().unwrap();
-        let back = q.all().iter().find(|e| e.entry_id == blocked).unwrap();
-        assert_eq!(back.state, crate::daemon::queue::QueueState::Pending);
-        assert_eq!(
-            back.reason_label, None,
-            "the gate is open; the label may not say otherwise"
-        );
-        assert_eq!(
-            back.approved_scopes, None,
-            "an approval given before the notice is asked for again, not carried over"
-        );
-        let untouched = q.all().iter().find(|e| e.entry_id == other).unwrap();
-        assert_eq!(untouched.state, crate::daemon::queue::QueueState::Refused);
-        drop(q);
-
-        let published = events.try_recv().expect("a queue-changed event");
-        assert_eq!(published.event, EVENT_QUEUE_CHANGED);
-    }
-
     fn enrolled_shared() -> DaemonShared {
         let s = shared();
         s.store
@@ -851,7 +724,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -983,23 +855,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn acknowledging_the_near_ai_notice_appends_an_audit_entry() {
-        // The caller asserts, on its own unverified word, that a
-        // third-party disclosure was shown to someone -- exactly the kind
-        // of consequential-and-otherwise-invisible action this log exists
-        // for.
-        let s = shared();
-        let r =
-            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
-        assert!(r.error.is_none(), "{:?}", r.error);
-        let entries = audit::load(&s.store).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].action, "near-ai-notice-acknowledged");
-    }
-
-    /// Make the audit log unappendable: `audit::load` reads it as UTF-8 and
-    /// fails on bytes that are not, so every subsequent `append` fails.
     fn break_the_audit_log(store: &crate::config::ConfigStore) {
         store
             .write_daemon_file(crate::config::DAEMON_AUDIT_FILE, &[0xff, 0xfe, 0xff])
@@ -1023,23 +878,6 @@ mod tests {
             s.store.load_config().unwrap().unwrap().consent_scopes,
             vec!["debugging_evaluation".to_string()],
             "the widening must not stand without a record of it"
-        );
-    }
-
-    #[test]
-    fn the_near_ai_notice_gate_stays_closed_when_its_audit_entry_cannot_be_written() {
-        // There is no un-acknowledge operation to roll back to, so the
-        // record goes down before the marker: a failure leaves the gate
-        // closed rather than cleared-and-unrecorded.
-        let s = shared();
-        break_the_audit_log(&s.store);
-        let r =
-            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
-        let err = r.error.expect("an unwritable audit log must fail the call");
-        assert_eq!(err.message, "audit-write-failed");
-        assert!(
-            !s.store.near_ai_notice_shown(),
-            "the gate must not be cleared without a record of who cleared it"
         );
     }
 }

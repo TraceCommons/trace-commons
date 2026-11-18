@@ -62,9 +62,6 @@ public sealed class DaemonSettingsSnapshot
     [JsonPropertyName("codex_root_configured")]
     public bool CodexRootConfigured { get; set; }
 
-    [JsonPropertyName("near_ai_configured")]
-    public bool NearAiConfigured { get; set; }
-
     [JsonPropertyName("admission_evidence_required")]
     public bool? AdmissionEvidenceRequired { get; set; }
 

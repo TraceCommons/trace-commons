@@ -40,8 +40,8 @@ use uuid::Uuid;
 
 use super::health::{
     HealthState, LABEL_ADMISSION_LIMIT_REACHED, LABEL_ADMISSION_REFUSED, LABEL_CANARY_FAILED,
-    LABEL_CLAIM_MINT_FAILED, LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING,
-    LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
+    LABEL_CLAIM_MINT_FAILED, LABEL_INGEST_UNREACHABLE, LABEL_NOT_LOGGED_IN,
+    LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
@@ -49,8 +49,8 @@ use super::state::DaemonState;
 use crate::config::ConfigStore;
 use crate::source::{SessionRef, TraceSource};
 use crate::submit::{
-    PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
-    SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
+    PRECONDITION_CANARY_FAILED, PRECONDITION_NOT_LOGGED_IN, SubmitContext, SubmitOutcome,
+    SubmitPreconditionFailure,
 };
 use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
@@ -437,7 +437,6 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         UploadDecision::RateLimited { .. } | UploadDecision::Paced { .. } => None,
         UploadDecision::Refused { reason_label, .. } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
-            LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
             LABEL_NOT_LOGGED_IN => Some(LABEL_NOT_LOGGED_IN),
             _ => None,
         },
@@ -481,7 +480,6 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
 pub fn precondition_health_label(e: &anyhow::Error) -> &'static str {
     match e.downcast_ref::<SubmitPreconditionFailure>().map(|f| f.0) {
         Some(PRECONDITION_CANARY_FAILED) => LABEL_CANARY_FAILED,
-        Some(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED) => LABEL_NEAR_AI_NOTICE_PENDING,
         Some(PRECONDITION_NOT_LOGGED_IN) => LABEL_NOT_LOGGED_IN,
         _ => LABEL_PII_FILTER_UNAVAILABLE,
     }
@@ -532,7 +530,6 @@ impl Uploader<'_, '_> {
         }
         let fingerprint = super::preview::input_fingerprint(
             self.ctx.effective_cfg(),
-            self.ctx.near_ai(),
             self.settings.ironwire_attested_bodies,
         );
         artifact.validate(
@@ -625,21 +622,6 @@ impl Uploader<'_, '_> {
         }
         // Enrollment is live, so retract the not-logged-in condition if it was set.
         self.health.resolve(LABEL_NOT_LOGGED_IN);
-
-        if self.settings.near_ai.is_some() && !self.store.near_ai_notice_shown() {
-            // The one-time notice is delivered interactively. Under a service
-            // manager its output goes to a log nobody reads, so a daemon that
-            // consumed the marker would send the contributor's text to a third
-            // party with the notice never actually delivered.
-            self.health.fail(LABEL_NEAR_AI_NOTICE_PENDING, now);
-            return Some(UploadDecision::Refused {
-                reason_label: LABEL_NEAR_AI_NOTICE_PENDING.to_string(),
-                review_limits: None,
-            });
-        }
-        // Near-AI notice requirement is met (either not configured or already shown),
-        // so retract the notice-pending condition if it was set.
-        self.health.resolve(LABEL_NEAR_AI_NOTICE_PENDING);
         None
     }
 
@@ -698,7 +680,6 @@ impl Uploader<'_, '_> {
         // "unknown, so re-ask": fail-closed.
         let inputs_now = super::preview::input_fingerprint(
             self.ctx.effective_cfg(),
-            self.ctx.near_ai(),
             self.settings.ironwire_attested_bodies,
         );
         if entry.approved_inputs.as_deref() != Some(inputs_now.as_str()) {
@@ -1551,7 +1532,7 @@ mod tests {
         /// ordinary case where nothing moved between approval and upload.
         fn entry_for(&self, hash: &str, cfg: &crate::config::ContributorConfig) -> QueueEntry {
             QueueEntry {
-                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None, false)),
+                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, false)),
                 ..self.entry(hash)
             }
         }
@@ -1575,7 +1556,6 @@ mod tests {
     fn dry_run_opts() -> crate::submit::SubmitOptions {
         crate::submit::SubmitOptions {
             dry_run: true,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
@@ -1683,7 +1663,7 @@ mod tests {
             };
             let entry = session.entry_for(&session.current_hash(), &cfg);
             let opts = dry_run_opts();
-            let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
             let mut state = DaemonState::new();
             let mut health = HealthState::default();
             let settings = settings();
@@ -1749,7 +1729,7 @@ mod tests {
         session.add_subagent("agent-a");
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
@@ -1780,7 +1760,7 @@ mod tests {
         session.append_more_events();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
@@ -1806,7 +1786,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -1863,7 +1843,7 @@ mod tests {
         settings: DaemonSettings,
     ) -> (UploadDecision, DaemonState) {
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(store, cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(store, cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let decision = Uploader {
@@ -2311,7 +2291,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2325,14 +2304,13 @@ mod tests {
 
         let opts = crate::submit::SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -2424,14 +2402,13 @@ mod tests {
 
         let opts = crate::submit::SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -2503,7 +2480,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2540,7 +2516,7 @@ mod tests {
         );
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2565,7 +2541,6 @@ mod tests {
         use crate::config::WitnessSettings;
         type Change = Box<dyn Fn(&mut crate::config::ContributorConfig, &mut SettingsLike)>;
         struct SettingsLike {
-            near_ai: Option<crate::envelope::NearAiSettings>,
             attested_bodies: bool,
         }
         let changes: Vec<(&str, Change)> = vec![
@@ -2582,10 +2557,6 @@ mod tests {
                 Box::new(|c, _| c.consent_scopes.push("model_training".into())),
             ),
             (
-                "privacy filter",
-                Box::new(|c, _| c.pii_filter = Some("near-ai".into())),
-            ),
-            (
                 "receipt endpoint",
                 Box::new(|c, _| c.inference_receipt_endpoint = Some("https://r.invalid".into())),
             ),
@@ -2600,16 +2571,6 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "classifier",
-                Box::new(|_, s| {
-                    s.near_ai = Some(crate::envelope::NearAiSettings {
-                        api_key: "k".into(),
-                        base_url: Some("https://classifier.invalid".into()),
-                        model: Some("m".into()),
-                    })
-                }),
-            ),
             ("attested bodies", Box::new(|_, s| s.attested_bodies = true)),
         ];
         for (name, change) in &changes {
@@ -2621,14 +2582,13 @@ mod tests {
 
             let mut cfg = approved_under.clone();
             let mut now = SettingsLike {
-                near_ai: None,
                 attested_bodies: false,
             };
             change(&mut cfg, &mut now);
             store.save_config(&cfg).unwrap();
 
             let opts = dry_run_opts();
-            let mut ctx = SubmitContext::new(&store, &cfg, &opts, now.near_ai.clone()).unwrap();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
             let mut state = DaemonState::new();
             let mut health = HealthState::default();
             let mut settings = settings();
@@ -2676,7 +2636,7 @@ mod tests {
         };
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2718,7 +2678,6 @@ mod tests {
         let err = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2739,7 +2698,6 @@ mod tests {
         crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2760,7 +2718,6 @@ mod tests {
         let (_summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2773,7 +2730,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2805,7 +2762,6 @@ mod tests {
         let (_summary, _body, mut envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2821,7 +2777,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -2844,7 +2800,6 @@ mod tests {
         let (summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2857,7 +2812,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -2880,7 +2835,7 @@ mod tests {
         assert!(entry.approved_inputs.is_none());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2901,7 +2856,7 @@ mod tests {
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
 
         // Log out underneath the running context.
         store.wipe().unwrap();
@@ -2931,7 +2886,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         for _ in 0..BURST_MAX_UPLOADS {
@@ -2977,7 +2932,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         let mut health = HealthState::default();
@@ -3008,7 +2963,7 @@ mod tests {
 
         let entry = session.entry_for("sha256:an-earlier-version", &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         let mut health = HealthState::default();
@@ -3041,7 +2996,6 @@ mod tests {
         let (summary, _body, envelope) = crate::daemon::preview::build_preview(
             store,
             Some(cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -3073,7 +3027,7 @@ mod tests {
         entry.approved_verdict = Some("failed".to_string());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3111,7 +3065,7 @@ mod tests {
         assert_eq!(entry.approved_verdict, None);
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3150,7 +3104,7 @@ mod tests {
         entry.approved_verdict = Some("failed".to_string());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3190,7 +3144,7 @@ mod tests {
         entry.previewed_envelope_digest = Some("0".repeat(64));
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();

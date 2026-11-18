@@ -195,12 +195,8 @@ async fn stored_admission_artifact(
 ) {
     let transcript = fixture_transcript();
     let source_hash = transcript.session_hash.clone();
-    let redactor = trace_commons_contributor::envelope::build_redactor_with(
-        cfg,
-        transcript.cwd.as_deref(),
-        None,
-    )
-    .expect("deterministic redactor");
+    let redactor = trace_commons_contributor::envelope::build_redactor(transcript.cwd.as_deref())
+        .expect("deterministic redactor");
     let raw = trace_commons_contributor::envelope::build_raw_contribution(
         &transcript,
         cfg,

@@ -672,17 +672,13 @@ pub async fn include_past_sessions(
         .as_ref()
         .map(|c| c.consent_scopes.clone())
         .unwrap_or_default();
-    let (near_ai, attested_bodies, approval_hold_secs) = {
+    let (attested_bodies, approval_hold_secs) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.near_ai.clone(),
-            s.ironwire_attested_bodies,
-            s.approval_hold_secs,
-        )
+        (s.ironwire_attested_bodies, s.approval_hold_secs)
     };
     let inputs = cfg
         .as_ref()
-        .map(|c| super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies));
+        .map(|c| super::preview::input_fingerprint(c, attested_bodies));
     let terms = super::ipc::ApprovalTerms {
         cfg: cfg.as_ref(),
         scopes: &scopes,
