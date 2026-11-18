@@ -25,15 +25,23 @@
 //! and at rest the pile and the rocket on the pad too, are a still layer,
 //! kept as a render node and drawn again only when what it is drawn from
 //! changes (`StillKey`), as the Mac keys its still layer: at rest a tick
-//! redraws only the arcs.
+//! redraws only the arcs and the library's station.
+//!
+//! The library on the Traces map is the NEAR AI space station (`station`),
+//! drawn between the two halves of the still layer on the map's clock: it
+//! turns at 20 frames a second while nothing else moves, and is drawn once
+//! at rest with animations off. The coins carry each tool's logo, or its
+//! initials, in its tint (`tool_art`). Colours are the Mac's own map
+//! tokens in the flat theme (`MapColours`), with the theme's ink where the
+//! Mac uses its ink.
 //!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
 //! - The pile opens at once under the pointer, where the Mac stages it
 //!   (taller, then wider, then the names).
-//! - The library is a disc and the coins carry the tools' initials: the
-//!   station art, the tools' logos and tints are the look slice. Colours
-//!   are the shell's status tokens and the theme's ink.
+//! - The Mac's other map style (the laptop and the library orb, a Settings
+//!   switch) is not drawn: this shell has no such switch.
+//! - A grown coin's glow is a soft radial halo; cairo has no blur filter.
 //! - The Private AI view is drawn empty: its scene is the Private AI slice.
 //! - The legend's memory item and the coins' lock say "this computer"
 //!   (`legend_memory_computer`) where the Mac's say "this Mac".
@@ -53,7 +61,9 @@ use super::map_scene::{
     ScreenState, Size, ToolStack,
 };
 use super::map_transfers;
+use super::station;
 use super::tabs::MapView;
+use super::tool_art::{self, Tint};
 use super::traces_tree::{ProjectMode, SourceKind, TracesTree};
 use super::transfer_card;
 use super::transfers::{self, Action, Feed, MapTransfer, Player, Run};
@@ -125,6 +135,14 @@ impl StillKey {
     }
 }
 
+/// The still layer's two render nodes: the nodes and their names, under
+/// the station; and, at rest, the rocket and the pile, over it.
+#[derive(Clone, Default)]
+pub struct StillLayer {
+    pub under: Option<gtk::gsk::RenderNode>,
+    pub over: Option<gtk::gsk::RenderNode>,
+}
+
 mod imp {
     use super::*;
 
@@ -152,8 +170,9 @@ mod imp {
         /// The clock's last drawn frame and its rate, in seconds.
         pub last_frame: Cell<f64>,
         pub interval: Cell<f64>,
-        /// The still layer and what it was drawn from.
-        pub still: RefCell<Option<(StillKey, gtk::gsk::RenderNode)>>,
+        /// The still layer and what it was drawn from: what lies under the
+        /// station, and, at rest, the rocket and the pile over it.
+        pub still: RefCell<Option<(StillKey, StillLayer)>>,
         /// The pile's coin order and openness the buttons were last
         /// allocated for.
         pub pile_at: RefCell<(Vec<String>, bool)>,
@@ -396,7 +415,19 @@ mod imp {
             // still too, so they join the still layer; during a run they
             // move and are drawn on every frame.
             let resting = motion.is_none().then(|| self.pile_open.get());
-            self.append_still(snapshot, &scene, &fit, &palette, &bounds, resting);
+            let still = self.still_layer(&scene, &fit, &palette, &bounds, resting);
+            if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
+                snapshot.append_node(under);
+            }
+            // The library's station turns on the map's clock, over the
+            // nodes and under the rocket and the pile, as the Mac draws it.
+            if let Some((origin, width, height, lit)) = station_frame(&scene, &fit) {
+                let angle = station::angle(self.now(), reduce);
+                snapshot.append_node(&station::node(origin, width, height, angle, lit));
+            }
+            if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
+                snapshot.append_node(over);
+            }
             if let Some((run, t)) = motion.as_ref() {
                 self.draw_moving(snapshot, &scene, run, *t, &fit, &palette, &bounds);
             }
@@ -582,67 +613,69 @@ mod imp {
         }
 
         /// The still layer: kept while its key holds, drawn again when not.
-        fn append_still(
+        fn still_layer(
             &self,
-            snapshot: &gtk::Snapshot,
             scene: &Scene,
             fit: &MapGeometry,
             palette: &Palette,
             bounds: &gtk::graphene::Rect,
             resting: Option<bool>,
-        ) {
+        ) -> Option<StillLayer> {
             let selection = self.selection();
             let kept = self
                 .still
                 .borrow()
                 .as_ref()
                 .filter(|(key, _)| key.is(scene, fit, selection.as_deref(), palette, resting))
-                .map(|(_, node)| node.clone());
-            let node = kept.or_else(|| {
-                let still = gtk::Snapshot::new();
-                let cr = still.append_cairo(bounds);
-                for node in &scene.nodes {
-                    let selected = selection.as_deref() == Some(node.id.as_str());
-                    draw_node(&cr, scene, node, fit, palette, selected);
+                .map(|(_, layer)| layer.clone());
+            if kept.is_some() {
+                return kept;
+            }
+            let under = gtk::Snapshot::new();
+            let cr = under.append_cairo(bounds);
+            for node in &scene.nodes {
+                let selected = selection.as_deref() == Some(node.id.as_str());
+                draw_node(&cr, scene, node, fit, palette, selected);
+            }
+            drop(cr);
+            self.draw_node_words(&under, scene, fit, palette);
+            let over = resting.map(|open| {
+                // The rocket on the pad, then the pile over it.
+                let over = gtk::Snapshot::new();
+                let cr = over.append_cairo(bounds);
+                map_transfers::resting_rocket(&cr, scene, fit, palette);
+                if let Some(stack) = scene.stack.as_ref() {
+                    draw_pile(
+                        &cr,
+                        scene,
+                        stack,
+                        &stack.tools,
+                        &[],
+                        None,
+                        fit,
+                        palette,
+                        open,
+                    );
                 }
                 drop(cr);
-                self.draw_node_words(&still, scene, fit, palette);
-                if let Some(open) = resting {
-                    // The rocket on the pad, then the pile over it.
-                    let cr = still.append_cairo(bounds);
-                    map_transfers::resting_rocket(&cr, scene, fit, palette);
-                    if let Some(stack) = scene.stack.as_ref() {
-                        draw_pile(
-                            &cr,
-                            scene,
-                            stack,
-                            &stack.tools,
-                            &[],
-                            None,
-                            fit,
-                            palette,
-                            open,
-                        );
-                    }
-                    drop(cr);
-                    if let Some(stack) = scene.stack.as_ref() {
-                        self.draw_pile_words(&still, scene, &stack.tools, open, fit, palette);
-                    }
+                if let Some(stack) = scene.stack.as_ref() {
+                    self.draw_pile_words(&over, scene, &stack.tools, open, fit, palette);
                 }
-                let node = still.to_node()?;
-                let key = StillKey {
-                    scene: scene.clone(),
-                    fit: *fit,
-                    selection: selection.clone(),
-                    palette: palette.clone(),
-                    resting,
-                };
-                self.still.replace(Some((key, node.clone())));
-                Some(node)
+                over.to_node()
             });
-            if let Some(node) = node {
-                snapshot.append_node(&node);
-            }
+            let layer = StillLayer {
+                under: under.to_node(),
+                over: over.flatten(),
+            };
+            let key = StillKey {
+                scene: scene.clone(),
+                fit: *fit,
+                selection: selection.clone(),
+                palette: palette.clone(),
+                resting,
+            };
+            self.still.replace(Some((key, layer.clone())));
+            Some(layer)
         }
 
         /// What moves during a run, over the still layer and frame by frame:
@@ -719,7 +752,7 @@ mod imp {
                     sublabel_size,
                     false,
                     Anchor::Middle,
-                    &palette.ink(0.6),
+                    &palette.map.text_tertiary,
                 );
             }
             if let Some(dock) = dock {
@@ -730,7 +763,7 @@ mod imp {
                     (10.0 * s).max(9.0),
                     true,
                     Anchor::Middle,
-                    &palette.accent,
+                    &palette.map.status_on_text,
                 );
             }
         }
@@ -805,8 +838,9 @@ mod imp {
             }
         }
 
-        /// The pile's heading, its coins' initials and, open, each coin's
-        /// name and what waits from it, in the pile's order.
+        /// The pile's heading and, open, each coin's name and what waits
+        /// from it, in the pile's order. The coins' marks are drawn with
+        /// the coins (`draw_pile`).
         fn draw_pile_words(
             &self,
             snapshot: &gtk::Snapshot,
@@ -826,31 +860,18 @@ mod imp {
             self.text(
                 snapshot,
                 &words.tools_heading.to_uppercase(),
-                Point::new(left.x + 6.0 * s, left.y - height / 2.0 - 12.0 * s),
+                Point::new(left.x + 30.0 * s, left.y - height / 2.0 - 12.0 * s),
                 (10.0 * s).max(9.0),
                 true,
-                Anchor::Start,
-                &palette.ink(0.6),
+                Anchor::Middle,
+                &palette.map.text_tertiary,
             );
             for (index, id) in order.iter().enumerate() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
                     continue;
                 };
                 let centre = fit.point(stack.coin_center(index, open));
-                let shown = if node.dashed { 0.55 } else { node.dim };
-                if let NodeKind::Tool { kind, .. } = node.kind {
-                    let initials = map_scene::initials(kind.display_name());
-                    let colour = palette.ink(shown);
-                    self.text(
-                        snapshot,
-                        &initials,
-                        centre,
-                        12.0 * s,
-                        true,
-                        Anchor::Middle,
-                        &colour,
-                    );
-                }
+                let shown = if node.dashed { 0.55 } else { 1.0 };
                 if !open {
                     continue;
                 }
@@ -867,7 +888,8 @@ mod imp {
                 } else {
                     centre.y
                 };
-                let colour = palette.ink(shown);
+                let primary = palette.map.text_primary;
+                let colour = primary.with_alpha(primary.alpha() * shown as f32);
                 let size = (11.0 * s).max(9.5);
                 self.text(
                     snapshot,
@@ -879,7 +901,8 @@ mod imp {
                     &colour,
                 );
                 if let Some(line) = line {
-                    let colour = palette.ink(0.6 * shown);
+                    let tertiary = palette.map.text_tertiary;
+                    let colour = tertiary.with_alpha(tertiary.alpha() * shown as f32);
                     let at = Point::new(x, centre.y + 7.0 * s);
                     self.text(
                         snapshot,
@@ -968,8 +991,10 @@ impl MapCanvas {
         let reduce = reduce_motion();
         let flows = imp.scene.borrow().flows();
         let healthy = imp.inputs.borrow().gate.state.is_healthy();
-        // This shell's library does not turn yet (the look slice).
-        let resting = transfers::resting_motion(reduce, flows, healthy, false);
+        // The Traces map's station turns at its own rate while nothing
+        // else moves.
+        let library = library_turns(&imp.scene.borrow());
+        let resting = transfers::resting_motion(reduce, flows, healthy, library);
         let running = transfers::drawn_run(imp.run.borrow().as_ref(), reduce).is_some();
         imp.interval.set(if running {
             transfers::RUN_INTERVAL
@@ -1232,6 +1257,124 @@ pub struct Palette {
     pub on: gtk::gdk::RGBA,
     pub ask: gtk::gdk::RGBA,
     pub outside: gtk::gdk::RGBA,
+    /// The Mac's own map colours for the scheme.
+    pub map: MapColours,
+}
+
+/// The Traces map's colours on the Mac, as its flat theme draws them in
+/// one scheme (`brand_tokens::map`, generated from the glass tokens).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapColours {
+    pub orb_shared: gtk::gdk::RGBA,
+    pub orb_kept: gtk::gdk::RGBA,
+    pub purple_soft: gtk::gdk::RGBA,
+    pub blue: gtk::gdk::RGBA,
+    pub status_off: gtk::gdk::RGBA,
+    pub status_on: gtk::gdk::RGBA,
+    pub status_on_text: gtk::gdk::RGBA,
+    pub status_ask: gtk::gdk::RGBA,
+    pub status_outside: gtk::gdk::RGBA,
+    pub node_off: gtk::gdk::RGBA,
+    /// The folder rules' fills: share automatically, ask, never, unset.
+    pub rule_fills: [gtk::gdk::RGBA; 4],
+    pub credential_on: gtk::gdk::RGBA,
+    pub pane_opaque: gtk::gdk::RGBA,
+    pub well_fill: gtk::gdk::RGBA,
+    pub text_primary: gtk::gdk::RGBA,
+    pub text_secondary: gtk::gdk::RGBA,
+    pub text_tertiary: gtk::gdk::RGBA,
+    /// Claude, Codex, Antigravity, OpenCode, Theia.
+    pub tools: [gtk::gdk::RGBA; 5],
+    pub hero_deep: gtk::gdk::RGBA,
+    pub hero_bright: gtk::gdk::RGBA,
+}
+
+impl MapColours {
+    pub fn scheme(dark: bool) -> Self {
+        use crate::ui::style::brand_tokens::map::{Rgba, dark as d, light as l};
+        let c = |(hex, alpha): Rgba| {
+            let rgba = gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
+            rgba.with_alpha(alpha as f32)
+        };
+        let pick = |light: Rgba, dark_value: Rgba| c(if dark { dark_value } else { light });
+        Self {
+            orb_shared: pick(l::MAP_ORB_SHARED, d::MAP_ORB_SHARED),
+            orb_kept: pick(l::MAP_ORB_KEPT, d::MAP_ORB_KEPT),
+            purple_soft: pick(l::PURPLE_SOFT, d::PURPLE_SOFT),
+            blue: pick(l::BLUE, d::BLUE),
+            status_off: pick(l::STATUS_OFF, d::STATUS_OFF),
+            status_on: pick(l::STATUS_ON, d::STATUS_ON),
+            status_on_text: pick(l::STATUS_ON_TEXT, d::STATUS_ON_TEXT),
+            status_ask: pick(l::STATUS_ASK, d::STATUS_ASK),
+            status_outside: pick(l::STATUS_OUTSIDE, d::STATUS_OUTSIDE),
+            node_off: pick(l::MAP_NODE_OFF, d::MAP_NODE_OFF),
+            rule_fills: [
+                pick(l::MAP_RULE_AUTO_FILL, d::MAP_RULE_AUTO_FILL),
+                pick(l::MAP_RULE_ASK_FILL, d::MAP_RULE_ASK_FILL),
+                pick(l::MAP_RULE_IGNORE_FILL, d::MAP_RULE_IGNORE_FILL),
+                pick(l::MAP_RULE_UNSET_FILL, d::MAP_RULE_UNSET_FILL),
+            ],
+            credential_on: pick(l::MAP_CREDENTIAL_ON, d::MAP_CREDENTIAL_ON),
+            pane_opaque: pick(l::PANE_OPAQUE, d::PANE_OPAQUE),
+            well_fill: pick(l::WELL_FILL, d::WELL_FILL),
+            text_primary: pick(l::TEXT_PRIMARY, d::TEXT_PRIMARY),
+            text_secondary: pick(l::TEXT_SECONDARY, d::TEXT_SECONDARY),
+            text_tertiary: pick(l::TEXT_TERTIARY, d::TEXT_TERTIARY),
+            tools: [
+                pick(l::TOOL_CLAUDE, d::TOOL_CLAUDE),
+                pick(l::TOOL_CODEX, d::TOOL_CODEX),
+                pick(l::TOOL_ANTIGRAVITY, d::TOOL_ANTIGRAVITY),
+                pick(l::TOOL_OPEN_CODE, d::TOOL_OPEN_CODE),
+                pick(l::TOOL_THEIA, d::TOOL_THEIA),
+            ],
+            hero_deep: pick(l::HERO_CAMPAIGN_DEEP, d::HERO_CAMPAIGN_DEEP),
+            hero_bright: pick(l::HERO_CAMPAIGN_BRIGHT, d::HERO_CAMPAIGN_BRIGHT),
+        }
+    }
+
+    /// A tool mark's colour (`GlassTool.tint`).
+    pub fn tint(&self, tint: Tint) -> gtk::gdk::RGBA {
+        match tint {
+            Tint::Claude => self.tools[0],
+            Tint::Codex => self.tools[1],
+            Tint::Antigravity => self.tools[2],
+            Tint::OpenCode => self.tools[3],
+            Tint::Theia => self.tools[4],
+            Tint::Primary => self.text_primary,
+        }
+    }
+}
+
+/// Whether the library turns on this map: only the Traces map's station
+/// does (`FlowMapView.libraryOnMap`).
+pub fn library_turns(scene: &Scene) -> bool {
+    library_on_map(scene).is_some()
+}
+
+/// The library node the Traces map draws as the station; none on the
+/// other maps, which draw it as a disc.
+fn library_on_map(scene: &Scene) -> Option<&map_scene::Node> {
+    scene.stack.as_ref()?;
+    scene.nodes.iter().find(|node| node.id == "library")
+}
+
+/// The station's frame on the Traces map: its top-left, width and height,
+/// centred on the library's point at the map's scale, and whether anything
+/// has been contributed. `None` on the other maps.
+pub fn station_frame(scene: &Scene, fit: &MapGeometry) -> Option<((f64, f64), f64, f64, bool)> {
+    let library = library_on_map(scene)?;
+    let NodeKind::Library { active } = library.kind else {
+        return None;
+    };
+    let centre = fit.point(library.at);
+    let width = map_scene::STATION_SIZE.width * fit.scale;
+    let height = map_scene::STATION_SIZE.height * fit.scale;
+    Some((
+        (centre.x - width / 2.0, centre.y - height / 2.0),
+        width,
+        height,
+        active,
+    ))
 }
 
 impl Palette {
@@ -1248,6 +1391,7 @@ impl Palette {
             on: parse(light::STATUS_ON),
             ask: parse(light::STATUS_ASK),
             outside: parse(light::STATUS_OUTSIDE),
+            map: MapColours::scheme(false),
         }
     }
 
@@ -1284,6 +1428,7 @@ impl Palette {
             on: parse(on),
             ask: parse(ask),
             outside: parse(outside),
+            map: MapColours::scheme(dark_scheme),
         }
     }
 
@@ -1291,15 +1436,15 @@ impl Palette {
         self.ink.with_alpha(self.ink.alpha() * alpha as f32)
     }
 
-    /// A folder's dot by rule: its fill and its ring.
+    /// A folder's dot by rule: its fill and its ring (`FlowMapView.rule`).
     fn rule(&self, mode: Option<ProjectMode>) -> (gtk::gdk::RGBA, gtk::gdk::RGBA) {
-        let stroke = match mode {
-            Some(ProjectMode::AutoUpload) => self.on,
-            Some(ProjectMode::Ask) => self.ask,
-            Some(ProjectMode::Ignore) => self.outside,
-            None => self.ink(0.45),
-        };
-        (stroke.with_alpha(stroke.alpha() * 0.25), stroke)
+        let m = &self.map;
+        match mode {
+            Some(ProjectMode::AutoUpload) => (m.rule_fills[0], m.status_on),
+            Some(ProjectMode::Ask) => (m.rule_fills[1], m.status_ask),
+            Some(ProjectMode::Ignore) => (m.rule_fills[2], m.status_outside),
+            None => (m.rule_fills[3], m.status_off),
+        }
     }
 }
 
@@ -1364,11 +1509,12 @@ fn draw_arcs(
                 cr.set_dash(&[5.0 * s, 5.0 * s], 0.0);
                 source(cr, &palette.ink, 0.18 * arc.dim);
             }
-            ArcStyle::Shared => source(cr, &palette.on, 0.35 * arc.dim),
+            ArcStyle::Shared => source(cr, &palette.map.status_on, 0.35 * arc.dim),
             ArcStyle::Unknown => {
                 cr.set_line_cap(gtk::cairo::LineCap::Round);
                 cr.set_dash(&[0.5 * s, 4.0 * s], 0.0);
-                source(cr, &palette.ink, 0.18 * arc.dim);
+                // The core could not say: dotted, in white as on the Mac.
+                source(cr, &gtk::gdk::RGBA::WHITE, 0.18 * arc.dim);
             }
             ArcStyle::Flowing if !healthy => {
                 // Paused, unknown or stale: still and dashed, not live.
@@ -1376,13 +1522,13 @@ fn draw_arcs(
                 source(cr, &palette.ink, 0.25 * arc.dim);
             }
             ArcStyle::Flowing => {
-                source(cr, &palette.on, 0.35 * arc.dim);
+                source(cr, &palette.map.status_on, 0.35 * arc.dim);
                 let _ = cr.stroke_preserve();
                 // The dashes, moving towards the pad on the map's clock.
                 cr.set_line_width(1.4 * s * 1.3);
                 cr.set_line_cap(gtk::cairo::LineCap::Round);
                 cr.set_dash(&[4.0 * s, 8.0 * s], -phase * s);
-                source(cr, &palette.on, arc.dim);
+                source(cr, &palette.map.status_on, arc.dim);
             }
         }
         let _ = cr.stroke();
@@ -1405,12 +1551,56 @@ fn ring(
     let _ = cr.stroke();
 }
 
-fn cross(cr: &gtk::cairo::Context, centre: Point, half: f64, s: f64, palette: &Palette, dim: f64) {
+/// The slash across a tool that is off: from a quarter of its frame to
+/// three quarters, in the primary text colour.
+fn slash(
+    cr: &gtk::cairo::Context,
+    centre: Point,
+    half: f64,
+    s: f64,
+    palette: &Palette,
+    alpha: f64,
+) {
     cr.move_to(centre.x - half, centre.y - half);
     cr.line_to(centre.x + half, centre.y + half);
     cr.set_line_width(2.0 * s);
-    source(cr, &palette.ink, dim);
+    source(cr, &palette.map.text_primary, alpha);
     let _ = cr.stroke();
+}
+
+/// A tool's mark, `side` across, centred on `centre`: its logo in its
+/// tint, or its initials in its tint, bold and monospaced, `size` high
+/// (`FlowMapView.mark`, `MapToolPile.coin`).
+fn draw_mark(
+    cr: &gtk::cairo::Context,
+    kind: SourceKind,
+    centre: Point,
+    side: f64,
+    size: f64,
+    palette: &Palette,
+    alpha: f64,
+) {
+    let art = tool_art::tool_art(kind);
+    source(cr, &palette.map.tint(art.tint), alpha);
+    match art.logo {
+        Some(logo) => logo.fill(cr, (centre.x - side / 2.0, centre.y - side / 2.0), side),
+        None => {
+            cr.select_font_face(
+                "monospace",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Bold,
+            );
+            cr.set_font_size(size);
+            if let Ok(extents) = cr.text_extents(art.initials) {
+                cr.move_to(
+                    centre.x - extents.x_bearing() - extents.width() / 2.0,
+                    centre.y - extents.y_bearing() - extents.height() / 2.0,
+                );
+                let _ = cr.show_text(art.initials);
+            }
+            cr.new_path();
+        }
+    }
 }
 
 fn draw_node(
@@ -1434,31 +1624,37 @@ fn draw_node(
         NodeKind::Hub if traces => draw_pad(cr, centre, s, palette, dim),
         NodeKind::Hub => {
             circle(cr, centre, radius);
-            source(cr, &palette.ink, 0.45 * dim);
+            source(cr, &palette.map.status_off, dim);
             let _ = cr.fill();
             ring(cr, centre, radius, s, &palette.ink, 0.25 * dim);
         }
+        // The station is drawn over the still layer, on the map's clock
+        // (`MapCanvas::snapshot`); it has no name, even under the pointer
+        // (owner, 2026-10-19): its card says it.
+        NodeKind::Library { .. } if traces => return,
         NodeKind::Library { active } => {
             circle(cr, centre, radius);
             if active {
-                source(cr, &palette.accent, dim);
+                source(cr, &palette.map.blue, dim);
             } else {
-                source(cr, &palette.ink, 0.2 * dim);
+                source(cr, &palette.map.node_off, dim);
             }
             let _ = cr.fill();
             if active {
-                ring(cr, centre, radius, s, &palette.accent, 0.35 * dim);
+                ring(cr, centre, radius, s, &palette.map.blue, 0.35 * dim);
             }
         }
-        NodeKind::Tool { off, .. } => {
+        NodeKind::Tool { kind, off } => {
             circle(cr, centre, radius);
             source(cr, &palette.ink, 0.12 * dim);
             let _ = cr.fill();
+            draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim);
             if node.dashed {
+                // The legend's "Not watched": a dashed rim.
                 circle(cr, centre, radius);
                 cr.set_line_width(1.5 * s);
                 cr.set_dash(&[2.0 * s, 2.0 * s], 0.0);
-                source(cr, &palette.ink, 0.45 * dim);
+                source(cr, &palette.map.status_off, dim);
                 let _ = cr.stroke();
                 cr.set_dash(&[], 0.0);
             }
@@ -1466,7 +1662,7 @@ fn draw_node(
                 ring(cr, centre, radius, s, &palette.ink, 0.35 * dim);
             }
             if off {
-                cross(cr, centre, 9.0 * s, s, palette, dim);
+                slash(cr, centre, 9.0 * s, s, palette, dim);
             }
         }
         NodeKind::Folder(mode) => {
@@ -1478,10 +1674,13 @@ fn draw_node(
             source(cr, &stroke, dim);
             let _ = cr.stroke();
         }
-        NodeKind::Harness { .. } => {
+        NodeKind::Harness { tool, .. } => {
             circle(cr, centre, radius);
             source(cr, &palette.ink, 0.12 * dim);
             let _ = cr.fill();
+            if let Some(kind) = tool {
+                draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim);
+            }
         }
         NodeKind::Device => {
             let deck = Point::new(centre.x, centre.y + 4.0 * s);
@@ -1512,20 +1711,21 @@ fn draw_destination(
 ) {
     circle(cr, centre, radius);
     if matches!(lamp, Lamp::Answering | Lamp::Running) {
-        source(cr, &palette.on, dim);
+        source(cr, &palette.map.credential_on, dim);
     } else {
-        source(cr, &palette.ink, 0.2 * dim);
+        source(cr, &palette.map.node_off, dim);
     }
     let _ = cr.fill();
     if lamp == Lamp::Answering {
-        ring(cr, centre, radius, s, &palette.on, 0.35 * dim);
+        ring(cr, centre, radius, s, &palette.map.status_on, 0.35 * dim);
     }
     if lamp == Lamp::Unknown {
+        // Unknown is not off: a dotted rim, in white as on the Mac.
         circle(cr, centre, radius);
         cr.set_line_width(1.5 * s);
         cr.set_line_cap(gtk::cairo::LineCap::Round);
         cr.set_dash(&[0.5 * s, 4.0 * s], 0.0);
-        source(cr, &palette.ink, 0.5 * dim);
+        source(cr, &gtk::gdk::RGBA::WHITE, 0.5 * dim);
         let _ = cr.stroke();
         cr.set_dash(&[], 0.0);
     }
@@ -1537,14 +1737,15 @@ fn draw_destination(
     }
     cr.set_line_width(2.0 * s);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
-    source(cr, &palette.ink, dim);
+    source(cr, &palette.map.text_primary, dim);
     let _ = cr.stroke();
 }
 
 /// This computer as a launch pad: a slab on a base, with a service tower
-/// beside it; the line out lands on its left edge.
+/// beside it; the line out lands on its left edge (`FlowMapView.drawPad`).
 fn draw_pad(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, dim: f64) {
     let half = map_scene::PAD_HALF_WIDTH * s;
+    let steel = palette.map.status_off;
     rounded(
         cr,
         centre.x - half,
@@ -1553,7 +1754,20 @@ fn draw_pad(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, 
         10.0 * s,
         4.0 * s,
     );
-    source(cr, &palette.ink, 0.45 * dim);
+    let slab =
+        gtk::cairo::LinearGradient::new(centre.x, centre.y - 5.0 * s, centre.x, centre.y + 5.0 * s);
+    let stop = |at: f64, alpha: f64| {
+        slab.add_color_stop_rgba(
+            at,
+            f64::from(steel.red()),
+            f64::from(steel.green()),
+            f64::from(steel.blue()),
+            f64::from(steel.alpha()) * alpha * dim,
+        );
+    };
+    stop(0.0, 0.75);
+    stop(1.0, 1.0);
+    let _ = cr.set_source(&slab);
     let _ = cr.fill();
     rounded(
         cr,
@@ -1563,29 +1777,24 @@ fn draw_pad(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, 
         6.0 * s,
         3.0 * s,
     );
-    source(cr, &palette.ink, 0.2 * dim);
+    source(cr, &palette.map.node_off, dim);
     let _ = cr.fill();
-    for (x, y, w, h) in [
-        (28.0, -55.0, 4.0, 50.0),
-        (14.0, -43.0, 16.0, 3.0),
-        (18.0, -27.0, 12.0, 3.0),
+    for (x, y, w, h, r) in [
+        (28.0, -55.0, 4.0, 50.0, 2.0),
+        (14.0, -43.0, 16.0, 3.0, 1.5),
+        (18.0, -27.0, 12.0, 3.0, 1.5),
     ] {
-        rounded(
-            cr,
-            centre.x + x * s,
-            centre.y + y * s,
-            w * s,
-            h * s,
-            1.5 * s,
-        );
-        source(cr, &palette.ink, 0.32 * dim);
+        rounded(cr, centre.x + x * s, centre.y + y * s, w * s, h * s, r * s);
+        source(cr, &steel, 0.7 * dim);
         let _ = cr.fill();
     }
 }
 
-/// A laptop: its deck as wide as the pad, its screen open above it.
+/// A laptop (`FlowMapView.drawLaptop`): its deck as wide as the pad, a
+/// notch, and its screen open above it in the campaign's blues.
 fn draw_laptop(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, dim: f64) {
     let half = map_scene::PAD_HALF_WIDTH * s;
+    let steel = palette.map.status_off;
     rounded(
         cr,
         centre.x - half,
@@ -1594,23 +1803,50 @@ fn draw_laptop(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palett
         6.0 * s,
         3.0 * s,
     );
-    source(cr, &palette.ink, 0.45 * dim);
-    let _ = cr.fill();
-    let top = centre.y - 36.0 * s;
-    rounded(cr, centre.x - 25.0 * s, top, 50.0 * s, 32.0 * s, 3.5 * s);
-    source(cr, &palette.ink, 0.38 * dim);
+    source(cr, &steel, dim);
     let _ = cr.fill();
     rounded(
         cr,
-        centre.x - 22.5 * s,
-        top + 2.5 * s,
-        45.0 * s,
-        27.0 * s,
+        centre.x - 7.0 * s,
+        centre.y - 3.0 * s,
+        14.0 * s,
         2.0 * s,
+        1.0 * s,
     );
-    source(cr, &palette.accent, 0.9 * dim);
+    source(cr, &palette.map.node_off, dim);
+    let _ = cr.fill();
+    let top = centre.y - LAPTOP_SCREEN_TOP * s;
+    let (lid_x, lid_w, lid_h) = (centre.x - 25.0 * s, 50.0 * s, (LAPTOP_SCREEN_TOP - 4.0) * s);
+    rounded(cr, lid_x, top, lid_w, lid_h, 3.5 * s);
+    source(cr, &steel, 0.85 * dim);
+    let _ = cr.fill();
+    let inset = 2.5 * s;
+    let (x, y, w, h) = (
+        lid_x + inset,
+        top + inset,
+        lid_w - 2.0 * inset,
+        lid_h - 2.0 * inset,
+    );
+    rounded(cr, x, y, w, h, 2.0 * s);
+    let display = gtk::cairo::LinearGradient::new(x, y, x + w, y + h);
+    for (at, colour, alpha) in [
+        (0.0, palette.map.hero_bright, 0.9),
+        (1.0, palette.map.hero_deep, 1.0),
+    ] {
+        display.add_color_stop_rgba(
+            at,
+            f64::from(colour.red()),
+            f64::from(colour.green()),
+            f64::from(colour.blue()),
+            f64::from(colour.alpha()) * alpha * dim,
+        );
+    }
+    let _ = cr.set_source(&display);
     let _ = cr.fill();
 }
+
+/// How far above this computer's point the laptop's screen rises.
+const LAPTOP_SCREEN_TOP: f64 = 36.0;
 
 /// The tool group: a card, and the coins on it, the front coin first.
 /// The pile: its card, then its coins in `order`, front first. A coin a
@@ -1631,12 +1867,13 @@ fn draw_pile(
     let s = fit.scale;
     let (x, y, w, h) = stack.card(fit, open, open);
     rounded(cr, x, y, w, h, 26.0 * s);
-    if open {
-        // An open card is opaque: nothing under it shows through.
-        source(cr, &palette.background, 1.0);
+    // An open card is opaque: nothing under it shows through.
+    let card = if open {
+        palette.map.pane_opaque
     } else {
-        source(cr, &palette.ink, 0.06);
-    }
+        palette.map.well_fill
+    };
+    source(cr, &card, 1.0);
     let _ = cr.fill();
     // The back of the pile first, so the front coin is drawn over the rest,
     // and a grown coin over them all.
@@ -1646,50 +1883,72 @@ fn draw_pile(
         let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
             continue;
         };
-        let NodeKind::Tool { off, .. } = node.kind else {
+        let NodeKind::Tool { kind, off } = node.kind else {
             continue;
         };
         let centre = fit.point(stack.coin_center(index, open));
         let is_grown = grown.contains(id);
-        let radius = ToolStack::COIN / 2.0 * s * if is_grown { 1.3 } else { 1.0 };
-        let alpha = if node.dashed { 0.55 } else { node.dim };
+        // A grown coin is the whole coin larger (`scaleEffect`): its rim,
+        // its mark and its lock too.
+        let k = s * if is_grown { 1.3 } else { 1.0 };
+        let side = ToolStack::COIN * k;
+        let radius = side / 2.0;
+        let tint = palette.map.tint(tool_art::tool_art(kind).tint);
         if is_grown && let Some(glow) = glow {
+            // The coin's glow (`shadow(radius: 9)`), as a soft halo.
+            let halo = gtk::cairo::RadialGradient::new(
+                centre.x,
+                centre.y,
+                radius * 0.8,
+                centre.x,
+                centre.y,
+                radius + 9.0 * s,
+            );
+            let (r, g, b) = (
+                f64::from(glow.red()),
+                f64::from(glow.green()),
+                f64::from(glow.blue()),
+            );
+            halo.add_color_stop_rgba(0.0, r, g, b, 0.45);
+            halo.add_color_stop_rgba(1.0, r, g, b, 0.0);
             circle(cr, centre, radius + 9.0 * s);
-            source(cr, glow, 0.3);
+            let _ = cr.set_source(&halo);
             let _ = cr.fill();
         }
+        // The coin is faded as a whole, as the Mac fades its view.
+        cr.push_group();
         // The coin's edge below it, then an opaque face and its rim.
-        circle(cr, Point::new(centre.x, centre.y + 3.0 * s), radius);
-        source(cr, &palette.ink, 0.25 * alpha);
+        circle(cr, Point::new(centre.x, centre.y + 3.0 * k), radius);
+        source(cr, &tint, 0.45);
         let _ = cr.fill();
         circle(cr, centre, radius);
-        source(cr, &palette.background, 1.0);
+        source(cr, &palette.map.pane_opaque, 1.0);
         let _ = cr.fill_preserve();
-        source(cr, &palette.ink, 0.12 * alpha);
+        source(cr, &palette.ink, 0.12);
         let _ = cr.fill();
-        circle(cr, centre, radius - s);
-        cr.set_line_width(2.0 * s);
+        circle(cr, centre, radius - k);
+        cr.set_line_width(2.0 * k);
         if node.dashed {
-            cr.set_dash(&[3.0 * s, 3.0 * s], 0.0);
+            cr.set_dash(&[3.0 * k, 3.0 * k], 0.0);
         }
-        source(cr, &palette.ink, 0.6 * alpha);
+        source(cr, &tint, 1.0);
         let _ = cr.stroke();
         cr.set_dash(&[], 0.0);
-        if node.ringed {
-            ring(cr, centre, radius, s, &palette.ink, 0.35 * alpha);
-        }
+        draw_mark(cr, kind, centre, 20.0 * k, 12.0 * k, palette, 1.0);
         if off {
-            cross(cr, centre, radius * 0.5, s, palette, alpha);
+            slash(cr, centre, side / 4.0, k, palette, 1.0);
         }
         if coin_has_lock(node.dashed, open, index) {
             // The tool's memory stays on this computer: a pip at the coin's
             // right edge, on the pane's ground.
-            let pip = Point::new(centre.x + radius + s, centre.y);
-            circle(cr, pip, 7.5 * s);
-            source(cr, &palette.background, 1.0);
+            let pip = Point::new(centre.x + radius + k, centre.y);
+            circle(cr, pip, 7.5 * k);
+            source(cr, &palette.map.pane_opaque, 1.0);
             let _ = cr.fill();
-            draw_lock(cr, pip, s, &palette.ink, 0.7);
+            draw_lock(cr, pip, k, &palette.map.text_secondary, 1.0);
         }
+        let _ = cr.pop_group_to_source();
+        let _ = cr.paint_with_alpha(if node.dashed { 0.55 } else { node.dim });
     }
 }
 
@@ -2312,6 +2571,202 @@ mod tests {
             .filter(|px| px[3] != 0)
             .count();
         assert!(inked >= 20, "the lock drew {inked} pixels");
+    }
+
+    fn parse(hex: &str) -> gtk::gdk::RGBA {
+        gtk::gdk::RGBA::parse(hex).unwrap()
+    }
+
+    /// The map's colours are the Mac's flat-theme tokens in each scheme.
+    #[test]
+    fn the_map_colours_follow_the_scheme() {
+        let light = MapColours::scheme(false);
+        let dark = MapColours::scheme(true);
+        assert_eq!(light.orb_shared, parse("#056bdc"));
+        assert_eq!(dark.orb_shared, parse("#0091fd"));
+        assert_eq!(dark.orb_kept, parse("#d95926"));
+        assert_eq!(light.tint(Tint::Claude), parse("#c2603e"));
+        assert_eq!(dark.tint(Tint::Claude), parse("#e08a6a"));
+        assert_eq!(dark.tint(Tint::OpenCode), parse("#4fd39a"));
+        assert_eq!(light.tint(Tint::Primary), light.text_primary);
+        assert_eq!(light.well_fill, parse("rgba(138,147,165,0.28)"));
+        assert_eq!(dark.pane_opaque, parse("#0d1124"));
+        assert_eq!(Palette::fixed().map, light);
+    }
+
+    fn traces_scene(entries: &[QueueEntry]) -> Scene {
+        let tree = TracesTree::build(entries, &[], None);
+        Scene::traces(
+            &tree,
+            &CommonsGate::with_state(ScreenState::Ready),
+            &Contributions::unread(),
+            None,
+            &BTreeMap::new(),
+            map_scene::SIZE,
+        )
+    }
+
+    /// The pixels a drawing leaves with any alpha, unpremultiplied.
+    fn painted(width: i32, height: i32, draw: impl Fn(&gtk::cairo::Context)) -> Vec<[u8; 4]> {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height).unwrap();
+        {
+            let cr = gtk::cairo::Context::new(&surface).unwrap();
+            draw(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let mut out = Vec::new();
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let i = y * stride + x * 4;
+                if data[i + 3] > 0 {
+                    // Unpremultiplied RGBA.
+                    let a = f64::from(data[i + 3]) / 255.0;
+                    let channel = |v: u8| (f64::from(v) / a).round().min(255.0) as u8;
+                    out.push([
+                        channel(data[i + 2]),
+                        channel(data[i + 1]),
+                        channel(data[i]),
+                        data[i + 3],
+                    ]);
+                }
+            }
+        }
+        out
+    }
+
+    fn near_colour(pixel: [u8; 4], colour: &gtk::gdk::RGBA) -> bool {
+        let target = [colour.red(), colour.green(), colour.blue()];
+        (0..3).all(|k| (f32::from(pixel[k]) - target[k] * 255.0).abs() <= 12.0) && pixel[3] > 200
+    }
+
+    /// On the Traces map the library is the station, drawn over the still
+    /// layer on the map's clock: the still layer draws no disc for it, and
+    /// the station's frame is centred on the library's point.
+    #[test]
+    fn the_traces_library_is_the_station_not_a_disc() {
+        let scene = traces_scene(&[entry("a", "p", "codex")]);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let library = scene.nodes.iter().find(|n| n.id == "library").unwrap();
+        let pixels = painted(580, 760, |cr| {
+            draw_node(cr, &scene, library, &fit, &palette, false);
+        });
+        assert!(pixels.is_empty(), "the still layer drew the library");
+        let (origin, width, height, lit) = station_frame(&scene, &fit).expect("a station");
+        let centre = fit.point(library.at);
+        assert_eq!(width, map_scene::STATION_SIZE.width * fit.scale);
+        assert_eq!(height, map_scene::STATION_SIZE.height * fit.scale);
+        assert_eq!(origin, (centre.x - width / 2.0, centre.y - height / 2.0));
+        assert_eq!(
+            lit,
+            matches!(library.kind, NodeKind::Library { active: true })
+        );
+        assert!(library_turns(&scene));
+        let elsewhere = Scene::default();
+        assert!(station_frame(&elsewhere, &fit).is_none());
+        assert!(!library_turns(&elsewhere));
+    }
+
+    /// A coin is drawn as `MapToolPile` draws it: its edge and rim in the
+    /// tool's tint and its logo inside, on an opaque face.
+    #[test]
+    fn a_coin_is_drawn_in_its_tools_tint() {
+        let scene = traces_scene(&[entry("a", "p", "claude-code")]);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let stack = scene.stack.as_ref().unwrap();
+        let pixels = painted(580, 760, |cr| {
+            draw_pile(
+                cr,
+                &scene,
+                stack,
+                &stack.tools,
+                &[],
+                None,
+                &fit,
+                &palette,
+                false,
+            );
+        });
+        let tint = palette.map.tint(Tint::Claude);
+        let tinted = pixels.iter().filter(|p| near_colour(**p, &tint)).count();
+        assert!(tinted > 150, "only {tinted} pixels in the Claude tint");
+    }
+
+    /// Renders the Traces map's drawing (no words: they need a widget's
+    /// fonts) in each scheme, for comparison with the Mac's. Writes raw
+    /// premultiplied BGRA into `TC_MAP_RENDER_DIR`.
+    #[test]
+    #[ignore = "writes comparison renders; set TC_MAP_RENDER_DIR"]
+    fn render_traces_map_for_comparison() {
+        let Ok(dir) = std::env::var("TC_MAP_RENDER_DIR") else {
+            return;
+        };
+        let entries: Vec<QueueEntry> = ["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+            .iter()
+            .enumerate()
+            .map(|(i, source)| entry(&format!("e{i}"), &format!("p{}", i % 2), source))
+            .collect();
+        let scene = traces_scene(&entries);
+        let (w, h) = (580, 760);
+        let fit = MapGeometry::new(
+            Size::new(f64::from(w), f64::from(h)),
+            1.0,
+            None,
+            scene.space,
+        );
+        let light = Palette::fixed();
+        let dark = Palette {
+            ink: gtk::gdk::RGBA::WHITE,
+            background: parse("#0d1124"),
+            map: MapColours::scheme(true),
+            ..light.clone()
+        };
+        for (scheme, palette) in [("light", light), ("dark", dark)] {
+            for open in [false, true] {
+                let mut surface =
+                    gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2)
+                        .unwrap();
+                {
+                    let cr = gtk::cairo::Context::new(&surface).unwrap();
+                    let ground = palette.map.pane_opaque;
+                    source(&cr, &ground, 1.0);
+                    let _ = cr.paint();
+                    cr.scale(2.0, 2.0);
+                    draw_arcs(&cr, &scene, &fit, &palette, true, 0.0);
+                    for node in &scene.nodes {
+                        draw_node(&cr, &scene, node, &fit, &palette, false);
+                    }
+                    if let Some((origin, sw, sh, lit)) = station_frame(&scene, &fit) {
+                        station::node(origin, sw, sh, station::REST_ANGLE, lit).draw(&cr);
+                    }
+                    map_transfers::resting_rocket(&cr, &scene, &fit, &palette);
+                    let stack = scene.stack.as_ref().unwrap();
+                    draw_pile(
+                        &cr,
+                        &scene,
+                        stack,
+                        &stack.tools,
+                        &[],
+                        None,
+                        &fit,
+                        &palette,
+                        open,
+                    );
+                }
+                surface.flush();
+                let name = format!(
+                    "{dir}/map-{scheme}-{}-{}x{}.bgra",
+                    if open { "open" } else { "closed" },
+                    w * 2,
+                    h * 2
+                );
+                std::fs::write(name, &*surface.data().unwrap()).unwrap();
+            }
+        }
     }
 
     fn entry(id: &str, project: &str, source: &str) -> QueueEntry {

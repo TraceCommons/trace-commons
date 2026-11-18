@@ -7,10 +7,12 @@
 //! dock's ring, and the light going once round a coin's rim. Drawn under
 //! the pile, as on the Mac, except the rim light, which is drawn over it.
 //!
-//! Deliberate platform differences, until the look slice:
-//! - The orbs' glow is a soft radial halo; cairo has no blur filter.
-//! - The shared and kept colours are the shell's accent and its Ask
-//!   status, where the Mac has its own map-orb tokens (blue and orange).
+//! Colours are the Mac's own map tokens (`Palette::map`): the shared and
+//! kept orbs, the rocket's steel, accent and porthole, the dock's ring.
+//!
+//! Deliberate platform differences:
+//! - The orbs' and the rocket's glow are soft radial halos; cairo has no
+//!   blur filter.
 //! - Only the launch style is drawn (see `transfers`), so a contributed
 //!   trace never rises to an orb here.
 
@@ -23,13 +25,14 @@ use super::map::{Palette, circle, source};
 use super::map_scene::{Arc, ArcStyle, MapGeometry, Point, Scene, ToolStack};
 use super::transfers::{Action, Leg, Run, ease, point_on};
 
-/// A run's colour: the accent for traces being shared, the Ask colour for
-/// traces kept or dismissed.
+/// A run's colour (owner, 2026-10-20): blue for traces being shared,
+/// orange for traces kept on this computer; a dismissed trace is not
+/// shared, so it takes the kept colour (`MapTransferDrawing.glowToken`).
 pub fn glow(action: Option<Action>, palette: &Palette) -> RGBA {
     if action == Some(Action::Contribute) {
-        palette.accent
+        palette.map.orb_shared
     } else {
-        palette.ask
+        palette.map.orb_kept
     }
 }
 
@@ -295,7 +298,7 @@ fn rocket(
     let (glow_colour, glow_radius) = if flight.is_some() {
         (flame_outer(), 8.0 * s)
     } else if charge > 0 {
-        (palette.accent, (5.0 + charge as f64 * 4.0) * s)
+        (palette.map.orb_shared, (5.0 + charge as f64 * 4.0) * s)
     } else {
         (flame_outer().with_alpha(0.5), 5.0 * s)
     };
@@ -356,14 +359,15 @@ fn draw_rocket(
         let _ = cr.fill();
         let _ = cr.restore();
     }
-    let outline = palette.ink(0.6);
+    let outline = palette.map.status_off;
+    let accent = palette.map.purple_soft;
     cr.set_line_width(0.9);
     nozzle_path(cr);
     source(cr, &outline, 1.0);
     let _ = cr.fill_preserve();
     let _ = cr.stroke();
     fins_path(cr);
-    source(cr, &palette.accent, 1.0);
+    source(cr, &accent, 1.0);
     let _ = cr.fill_preserve();
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
@@ -371,14 +375,14 @@ fn draw_rocket(
     source(cr, &RGBA::new(0.95, 0.95, 0.95, 1.0), 1.0);
     let _ = cr.fill();
     nose_path(cr);
-    source(cr, &palette.accent, 1.0);
+    source(cr, &accent, 1.0);
     let _ = cr.fill();
     body_path(cr);
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
     // The porthole.
     circle(cr, Point::new(18.6, 9.0), 2.0);
-    source(cr, &palette.accent, 0.7);
+    source(cr, &palette.map.blue, 1.0);
     let _ = cr.fill_preserve();
     source(cr, &outline, 1.0);
     let _ = cr.stroke();
@@ -480,7 +484,7 @@ fn dock(
         let p = since / 1.1;
         circle(cr, centre, (28.0 + 26.0 * p) * s);
         cr.set_line_width(3.0 * s);
-        source(cr, &palette.accent, 0.75 * (1.0 - p));
+        source(cr, &palette.map.blue, 0.75 * (1.0 - p));
         let _ = cr.stroke();
     }
     (since < Run::LINGER).then(|| DockLabel {
@@ -538,13 +542,18 @@ mod tests {
         assert!(library(&scene).y < rest.y, "the library is above it");
     }
 
-    /// A contribution is drawn in the accent, a keep or a dismissal not.
+    /// A contribution is drawn in the shared orb's blue, a keep or a
+    /// dismissal in the kept orb's orange (`MapTransferDrawing.glowToken`).
     #[test]
     fn a_run_takes_its_actions_colour() {
         let palette = Palette::fixed();
-        assert_eq!(glow(Some(Action::Contribute), &palette), palette.accent);
-        assert_eq!(glow(Some(Action::Keep), &palette), palette.ask);
-        assert_eq!(glow(Some(Action::Dismiss), &palette), palette.ask);
+        assert_eq!(
+            glow(Some(Action::Contribute), &palette),
+            palette.map.orb_shared
+        );
+        assert_eq!(glow(Some(Action::Keep), &palette), palette.map.orb_kept);
+        assert_eq!(glow(Some(Action::Dismiss), &palette), palette.map.orb_kept);
+        assert_eq!(glow(None, &palette), palette.map.orb_kept);
         let run = Run::new(
             vec![MapTransfer::new("1", "p", "codex", Action::Keep)],
             0.0,
