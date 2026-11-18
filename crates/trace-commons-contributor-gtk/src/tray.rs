@@ -11,9 +11,10 @@
 //! Where a watcher *is* real (KDE, Cinnamon, XFCE, GNOME with the
 //! extension), this exports a minimal `org.kde.StatusNotifierItem` object
 //! and registers it, with a `com.canonical.dbusmenu` menu beside it. The
-//! icon does almost one kind of thing: a primary or secondary click raises
-//! the window at its first screen, and a menu press raises it at the screen
-//! that was pressed. `notify.rs`'s rule holds -- nothing reachable from
+//! icon does almost one kind of thing: a primary click opens the menu-bar
+//! panel at the click (`ui::edge_surfaces`, the Mac's popover), a secondary
+//! click raises the window at its first screen, and a menu press raises it
+//! at the screen that was pressed. `notify.rs`'s rule holds -- nothing reachable from
 //! outside the window may approve or send anything.
 //!
 //! ## The one thing that is not navigation
@@ -72,8 +73,10 @@ const MENU_PATH: &str = "/MenuBar";
 
 /// What a press asks the window for.
 ///
-/// Two words and no more. [`Self::Open`] is what this surface has always
-/// done; [`Self::StopAnsweringModelCalls`] is the single exception, and it
+/// Three words and no more. [`Self::Open`] is what this surface has always
+/// done, and [`Self::Panel`] opens the panel the Mac's menu-bar item opens,
+/// which is navigation too: it shows what the window shows and leads into
+/// it. [`Self::StopAnsweringModelCalls`] is the single exception, and it
 /// exists in one direction only -- see the module header. There is
 /// deliberately no variant that starts answering: the type is where that
 /// promise is kept, because a comment can be edited past without anything
@@ -82,6 +85,9 @@ const MENU_PATH: &str = "/MenuBar";
 pub enum TrayRequest {
     /// Raise the window at one screen. Writes nothing.
     Open(&'static str),
+    /// Open or close the menu-bar panel near the click, in screen
+    /// coordinates when the host gave them. Writes nothing.
+    Panel(Option<(i32, i32)>),
     /// Stop answering model calls on this computer.
     StopAnsweringModelCalls,
 }
@@ -171,7 +177,11 @@ fn menu_rows(answering: bool) -> Vec<(&'static str, TrayRequest)> {
     rows.push((
         match request {
             TrayRequest::StopAnsweringModelCalls => crate::copy::PRIVATE_INFERENCE_TRAY_TURN_OFF,
-            TrayRequest::Open(_) => crate::copy::PRIVATE_INFERENCE_TRAY_OPEN_TO_TURN_ON,
+            // `toggle_request` never answers `Panel`; it opens, so it would
+            // take the opening row's words.
+            TrayRequest::Open(_) | TrayRequest::Panel(_) => {
+                crate::copy::PRIVATE_INFERENCE_TRAY_OPEN_TO_TURN_ON
+            }
         },
         request,
     ));
@@ -284,8 +294,11 @@ impl Item {
             .map_err(|_| zbus::fdo::Error::Failed("tray-menu-path".into()))
     }
 
-    fn activate(&self, _x: i32, _y: i32) {
-        let _ = self.tx.send_blocking(TrayRequest::Open(default_screen()));
+    /// The Mac's menu-bar item opens its popover; so does this. (0, 0) is
+    /// what many hosts send for "no position", and the panel's placement
+    /// reads it so (`edge::geometry::panel_anchor`).
+    fn activate(&self, x: i32, y: i32) {
+        let _ = self.tx.send_blocking(TrayRequest::Panel(Some((x, y))));
     }
 
     fn secondary_activate(&self, _x: i32, _y: i32) {
@@ -881,16 +894,21 @@ mod tests {
     /// well.
     #[test]
     fn the_tray_only_opens_the_window_or_stops_answering() {
-        // Exhaustive on purpose: a third variant does not compile until
-        // somebody comes back and argues for it here.
+        // Exhaustive on purpose: a fourth variant does not compile until
+        // somebody comes back and argues for it here. The third, `Panel`,
+        // was argued for on 2026-11-18: it opens the Mac's menu-bar popover,
+        // whose only write is the watcher's pause and resume -- the same
+        // one the window's Settings offers -- and which sends nothing.
         for request in [
             TrayRequest::Open(default_screen()),
+            TrayRequest::Panel(None),
             TrayRequest::StopAnsweringModelCalls,
         ] {
             match request {
                 TrayRequest::Open(screen) => {
                     assert!(crate::ui::screens().iter().any(|(name, _)| *name == screen))
                 }
+                TrayRequest::Panel(_) => {}
                 TrayRequest::StopAnsweringModelCalls => {}
             }
         }

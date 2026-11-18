@@ -1087,6 +1087,7 @@ impl Shell {
         self.map.render(app);
         self.refresh_demand(app);
         self.apply();
+        crate::ui::edge_surfaces::data_changed(app);
     }
 
     /// The selection's tool's source, for the map's ring.
@@ -1130,6 +1131,18 @@ impl Shell {
 
     pub fn render_graph(&self, app: &Rc<App>) {
         let tool = self.selected_tool(app);
+        if tool.is_none() {
+            // Nothing to focus on is not focused.
+            self.state.map_focus.set(false);
+        }
+        self.graph.render(self.graph_data(app, tool));
+        self.graph.set_focused(self.state.map_focus.get());
+    }
+
+    /// The graph's days from the app's reads: History's shared sessions and
+    /// the queue's kept ones, for one tool (`(source, label)`) or all. The
+    /// edge rail's and the menu-bar panel's graphs draw the same, for all.
+    pub fn graph_data(&self, app: &Rc<App>, tool: Option<(String, String)>) -> GraphData {
         let source = tool.as_ref().map(|(source, _)| source.as_str());
         let records = app.history_records.borrow();
         let shared = graph_model::shared_times(
@@ -1150,17 +1163,12 @@ impl Shell {
                 .map(|entry| (entry.source.as_str(), entry.discovered_at)),
             source,
         );
-        if tool.is_none() {
-            // Nothing to focus on is not focused.
-            self.state.map_focus.set(false);
-        }
-        self.graph.render(GraphData {
+        GraphData {
             shared,
             kept,
             history_known: records.is_some(),
             tool: tool.map(|(_, label)| label),
-        });
-        self.graph.set_focused(self.state.map_focus.get());
+        }
     }
 
     /// The Traces tab's text equivalent of its badge, as the Mac's

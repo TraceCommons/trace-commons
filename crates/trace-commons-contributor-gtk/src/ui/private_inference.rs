@@ -103,7 +103,10 @@ pub struct PrivateInferenceView {
     filling: std::cell::Cell<bool>,
     /// The last confirmed requested setting. `None` is "not yet heard from",
     /// which is not an off declaration.
-    confirmed: std::cell::Cell<Option<bool>>,
+    pub(crate) confirmed: std::cell::Cell<Option<bool>>,
+    /// The listener's last reported state label, for the edge rail and the
+    /// menu-bar panel; `None` before the daemon has reported one.
+    pub(crate) reported: std::cell::RefCell<Option<String>>,
     write_pending: std::cell::Cell<bool>,
     /// Whether quitting would stop Private AI
     /// (`private_inference_copy::quit_needs_notice`), from the last settings
@@ -239,6 +242,7 @@ impl PrivateInferenceView {
             status,
             filling: std::cell::Cell::new(false),
             confirmed: std::cell::Cell::new(None),
+            reported: std::cell::RefCell::new(None),
             write_pending: std::cell::Cell::new(false),
             quit_stops: std::cell::Cell::new(false),
         }
@@ -841,6 +845,13 @@ pub fn render(app: &Rc<App>, settings: &crate::model::Settings) {
     };
     // The Inference tab's dot draws the same state from the same table.
     app.shell.render_inference_state(label);
+    view.reported.replace(
+        settings
+            .private_inference_state
+            .as_ref()
+            .map(|state| state.state.clone()),
+    );
+    crate::ui::edge_surfaces::data_changed(app);
     status.append(&tone_row(
         copy::private_inference_state_line(label),
         indicator_tone(copy::private_inference_state_tone(label)),

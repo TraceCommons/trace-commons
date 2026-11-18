@@ -10,6 +10,7 @@ pub mod balance;
 pub mod community_brand;
 pub mod credential;
 mod css_contract;
+pub mod edge_surfaces;
 mod first_run;
 mod first_run_terms;
 pub mod funding;
@@ -151,6 +152,8 @@ pub struct App {
     /// read by nothing that paints: it is the switch's position, not a claim
     /// that a listener is running. It decides which way the tray's one
     /// action row points and nothing else.
+    /// The edge rail and the menu-bar panel (`edge_surfaces`).
+    pub edge: edge_surfaces::Surfaces,
     pub tray: crate::tray::TrayState,
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
@@ -479,6 +482,7 @@ impl App {
         let app = Rc::new(Self {
             worker,
             tray: crate::tray::TrayState::default(),
+            edge: edge_surfaces::Surfaces::default(),
             window,
             toasts,
             shell,
@@ -529,6 +533,7 @@ impl App {
         app.wire_quit();
         app.wire_health_action();
         app.wire_tray();
+        edge_surfaces::wire(&app);
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -785,6 +790,8 @@ impl App {
                 app.render_health(&status);
                 app.render_grant_voids(&status);
                 settings::render_status(app, &status);
+                // Watching's state on the rail and the panel.
+                edge_surfaces::data_changed(app);
                 // The witness lives in the contributor's config rather than
                 // in daemon settings, so nothing in the settings answer
                 // carries it and it is repainted here instead -- including
@@ -1737,6 +1744,11 @@ pub(crate) fn apply_tray_request(app: &Rc<App>, request: crate::tray::TrayReques
         crate::tray::TrayRequest::StopAnsweringModelCalls => {
             app.open_screen(PRIVATE_INFERENCE_SCREEN);
             private_inference::turn_off(app);
+        }
+        // The panel, not the window: it has its own way into the window.
+        crate::tray::TrayRequest::Panel(at) => {
+            edge_surfaces::toggle_panel(app, at);
+            return;
         }
     }
     app.window.present();

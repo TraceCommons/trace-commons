@@ -159,6 +159,7 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_control_hover #dbdee4;
 @define-color tc_glass_row_hover #e8e9ec;
 @define-color tc_glass_tab_ember #056bdc;
+@define-color tc_glass_edge_rail_handle rgba(29, 29, 31, 0.28);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -201,6 +202,7 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_control_hover #353842;
 @define-color tc_glass_row_hover #191d2f;
 @define-color tc_glass_tab_ember #0091fd;
+@define-color tc_glass_edge_rail_handle rgba(255, 255, 255, 0.28);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -264,6 +266,22 @@ pub mod glass {
         pub const MODAL_INSET: i32 = 28;
         pub const EDGE_RAIL_INSET: i32 = 12;
         pub const EDGE_RAIL_GAP: i32 = 16;
+    }
+    pub mod size {
+        pub const EDGE_RAIL_WIDTH: i32 = 56;
+        pub const EDGE_RAIL_TILE: i32 = 44;
+        pub const EDGE_RAIL_RULE_WIDTH: i32 = 28;
+        pub const EDGE_RAIL_PEEK_WIDTH: i32 = 380;
+        pub const EDGE_RAIL_OPEN_HEIGHT: i32 = 680;
+        pub const EDGE_RAIL_ZONE_WIDTH: i32 = 4;
+        pub const EDGE_RAIL_ZONE_HEIGHT: i32 = 240;
+        pub const EDGE_RAIL_HANDLE_WIDTH: i32 = 3;
+        pub const EDGE_RAIL_HANDLE_HEIGHT: i32 = 72;
+        pub const LIST_ROW: i32 = 40;
+    }
+    pub mod motion {
+        /// `motion.slide`, in milliseconds.
+        pub const SLIDE_MS: u32 = 250;
     }
 }
 

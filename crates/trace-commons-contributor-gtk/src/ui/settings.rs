@@ -112,6 +112,8 @@ pub struct SettingsView {
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
+    /// The edge rail's switch (`ui::edge_surfaces`).
+    pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -661,6 +663,10 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
+        // The edge rail's switch, under the same "Desktop" eyebrow the Mac
+        // gives it; shown once the session is known to support a rail.
+        let edge_rail = super::edge_surfaces::rail_switch();
+        sections.body(Section::Startup).append(&edge_rail.card);
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
@@ -695,6 +701,7 @@ impl SettingsView {
             autostart_body,
             autostart_row,
             autostart_switch,
+            edge_rail,
             background_state: RefCell::new(None),
             background_body,
             public,
@@ -939,7 +946,7 @@ fn offer_pause(app: &Rc<App>) {
 /// 9am local time on the next day, expressed as an instant. The daemon
 /// rejects a timestamp already in the past, so this is always at least a
 /// few hours out.
-fn tomorrow_morning() -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn tomorrow_morning() -> chrono::DateTime<chrono::Utc> {
     let local = chrono::Local::now();
     let tomorrow = local.date_naive().succ_opt().unwrap_or(local.date_naive());
     tomorrow

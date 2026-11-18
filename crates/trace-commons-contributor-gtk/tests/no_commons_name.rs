@@ -4,8 +4,8 @@
 //! appear anywhere in the app ... not in any user visible place." The
 //! contributor crate holds the same guard over the shared copy
 //! (`tests/no_commons_name_in_copy.rs`); this one covers what GTK holds
-//! itself: its own `copy.rs` and widgets, the desktop entry, and the
-//! AppStream metainfo that GNOME Software shows.
+//! itself: its own `copy.rs` and widgets, the desktop entry, the AppStream
+//! metainfo that GNOME Software shows, and the GNOME Shell extension.
 //!
 //! Comment lines are skipped, Rust `\`-continued literals are joined, and a
 //! use of `commons_name!` or `COMMONS_NAME` counts, because `concat!` would
@@ -98,6 +98,14 @@ fn nothing_this_shell_shows_names_the_commons() {
     assert!(files.len() > 10, "scanned only {} files", files.len());
     files.push(root.join("flatpak/ai.tracecommons.Contributor.desktop"));
     files.push(root.join("flatpak/ai.tracecommons.Contributor.metainfo.xml"));
+    // The GNOME Shell extension: GNOME's Extensions app shows its name and
+    // description, and its code is shipped beside the app.
+    for name in ["metadata.json", "extension.js", "placement.js"] {
+        files.push(
+            root.join("gnome-shell-extension/edge-surfaces@tracecommons.ai")
+                .join(name),
+        );
+    }
 
     let mut offenders = Vec::new();
     for file in &files {

@@ -25,6 +25,7 @@ pub mod certificate;
 pub mod copy;
 mod dbus;
 pub mod disclosure;
+pub mod edge;
 pub mod eligibility;
 pub mod first_run;
 pub mod home;

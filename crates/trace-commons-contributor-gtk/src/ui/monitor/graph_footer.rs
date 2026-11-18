@@ -55,6 +55,10 @@ pub struct GraphFooter {
     next: gtk::Button,
     jump: gtk::Button,
     pub focus: gtk::ToggleButton,
+    pills: gtk::Box,
+    column: gtk::Box,
+    body: gtk::Box,
+    rule: gtk::Separator,
 }
 
 fn pill(glyph: &str, name: &str) -> gtk::Button {
@@ -133,7 +137,8 @@ impl GraphFooter {
         column.append(&pills);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // The rule above the footer.
-        body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let rule = gtk::Separator::new(gtk::Orientation::Horizontal);
+        body.append(&rule);
         body.append(&column);
         body.set_size_request(-1, HEIGHT);
 
@@ -165,6 +170,10 @@ impl GraphFooter {
             next,
             jump,
             focus,
+            pills,
+            column,
+            body,
+            rule,
         });
 
         let state = footer.state.clone();
@@ -219,6 +228,27 @@ impl GraphFooter {
 
         footer.rebucket();
         footer
+    }
+
+    /// The graph as the edge rail's Traces peek and the menu-bar panel draw
+    /// it: the legend over the bars, `height` high, shown, with no rule,
+    /// margins or controls (the Mac's `GlassBarGraph` there has none).
+    pub fn compact(&self, height: i32) {
+        self.rule.set_visible(false);
+        self.pills.set_visible(false);
+        self.body.set_size_request(-1, -1);
+        for margin in [
+            gtk::Widget::set_margin_top,
+            gtk::Widget::set_margin_bottom,
+            gtk::Widget::set_margin_start,
+            gtk::Widget::set_margin_end,
+        ] {
+            margin(self.column.upcast_ref(), 0);
+        }
+        self.bars.set_size_request(-1, height);
+        self.bars.set_vexpand(false);
+        self.root.set_transition_duration(0);
+        self.root.set_reveal_child(true);
     }
 
     /// Draws the graph from new data. The range and the period stay where

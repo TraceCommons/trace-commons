@@ -1,0 +1,66 @@
+//! The two surfaces as wlr-layer-shell surfaces: the only code that calls
+//! the layer-shell library, kept to the calls themselves so the rules
+//! (`capability`, `geometry`) stay testable on any platform.
+//!
+//! Checked on Hyprland 0.56 (Omarchy 4.5, gtk4-layer-shell 1.3.0) on
+//! 2026-11-18: the closed rail is a 4 x 240 surface at the right edge's
+//! middle, the open one 484 x 680 at (1436, 200) on a 1920 x 1080 output,
+//! and the panel's top margin starts below Waybar's exclusive zone. The
+//! binary loads `libgtk4-layer-shell.so.0` ahead of `libgtk-4.so.1` and so
+//! ahead of `libwayland-client`, which the library requires.
+
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+
+use super::geometry::PanelAnchor;
+
+/// Whether the compositor advertises `zwlr_layer_shell_v1`. Only asked on
+/// a Wayland display.
+pub fn supported() -> bool {
+    gtk4_layer_shell::is_supported()
+}
+
+/// The rail: on the overlay layer, over full-screen windows as the Mac's
+/// `.statusBar` panel is, anchored to the right edge alone so the
+/// compositor centres it vertically, reserving no space, and taking the
+/// keyboard only while open.
+pub fn make_rail(window: &gtk::Window) {
+    window.init_layer_shell();
+    window.set_namespace(Some("edge-rail"));
+    window.set_layer(Layer::Overlay);
+    window.set_anchor(Edge::Right, true);
+    window.set_exclusive_zone(-1);
+    window.set_keyboard_mode(KeyboardMode::None);
+}
+
+/// An open rail may take the keyboard when clicked (a peek's controls are
+/// reachable by keyboard then); a closed one never does.
+pub fn set_rail_keyboard(window: &gtk::Window, open: bool) {
+    window.set_keyboard_mode(if open {
+        KeyboardMode::OnDemand
+    } else {
+        KeyboardMode::None
+    });
+}
+
+/// The panel: on the top layer, over windows and under full-screen ones
+/// as a popover from a menu bar is, taking the keyboard as it opens so
+/// Escape and the arrow keys reach it.
+pub fn make_panel(window: &gtk::Window) {
+    window.init_layer_shell();
+    window.set_namespace(Some("menu-panel"));
+    window.set_layer(Layer::Top);
+    window.set_exclusive_zone(0);
+    window.set_keyboard_mode(KeyboardMode::OnDemand);
+}
+
+/// Anchors the panel as `geometry::panel_anchor` decided.
+pub fn place_panel(window: &gtk::Window, anchor: PanelAnchor) {
+    window.set_anchor(Edge::Top, anchor.top);
+    window.set_anchor(Edge::Bottom, !anchor.top);
+    window.set_anchor(Edge::Left, anchor.left);
+    window.set_anchor(Edge::Right, !anchor.left);
+    let vertical = if anchor.top { Edge::Top } else { Edge::Bottom };
+    let horizontal = if anchor.left { Edge::Left } else { Edge::Right };
+    window.set_margin(vertical, anchor.vertical);
+    window.set_margin(horizontal, anchor.horizontal);
+}
