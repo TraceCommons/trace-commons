@@ -98,6 +98,12 @@ pub struct SettingsView {
     pub(crate) sharing: super::consent_settings::SharingCard,
     /// The Uses section, as on the Mac.
     pub(crate) uses: super::consent_settings::UsesCard,
+    /// The bulk change over the project list, as the Mac's Projects
+    /// manager offers it.
+    pub(crate) bulk: super::projects_bulk::BulkState,
+    /// The projects the list last drew, so a selection change can redraw
+    /// it without a daemon read.
+    last_projects: std::cell::RefCell<Vec<Project>>,
     /// The two `set_settings` knobs, built once and only ever refilled.
     ///
     /// Everything else on this screen is torn down and rebuilt on each
@@ -676,6 +682,8 @@ impl SettingsView {
             projects,
             sharing,
             uses,
+            bulk: Default::default(),
+            last_projects: Default::default(),
             quiescence_minutes,
             digest_hours,
             filling_knobs: std::cell::Cell::new(false),
@@ -1976,6 +1984,7 @@ pub fn refresh(app: &Rc<App>) {
     }
     super::terminal_choice::refresh(app);
     super::consent_settings::refresh(app);
+    super::projects_bulk::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let read: Option<Vec<Project>> = result
             .ok()
@@ -2093,7 +2102,14 @@ fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)>
         .collect()
 }
 
+/// Redraw the project list from what it last drew (a selection change).
+pub(crate) fn rerender_projects(app: &Rc<App>) {
+    let projects = app.settings.last_projects.borrow().clone();
+    render_projects(app, &projects);
+}
+
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
+    *app.settings.last_projects.borrow_mut() = projects.to_vec();
     let view = &app.settings.projects;
     while let Some(child) = view.first_child() {
         view.remove(&child);
@@ -2133,6 +2149,10 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     armed_summary.append(&armed_line);
     view.append(&armed_summary);
 
+    // The Mac's bulk bar: Select all, how many, and Set to.
+    let shown: Vec<String> = projects.iter().map(|p| p.project_id.clone()).collect();
+    view.append(&super::projects_bulk::bar(app, &shown));
+
     for project in projects {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         // Name over note, so the row reads as one thing with a property.
@@ -2140,6 +2160,16 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         // single label it was.
         let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
         column.set_hexpand(true);
+        let title_for_check = if project.is_unresolved_bucket {
+            copy::ONBOARD_WATCH_UNKNOWN_LABEL
+        } else {
+            project.project_label.as_str()
+        };
+        row.append(&super::projects_bulk::row_check(
+            app,
+            &project.project_id,
+            title_for_check,
+        ));
         // The wire label for the unresolvable bucket is the slug
         // `unknown-project`, which is an identifier and not a name. Screen 5
         // says the same thing about the same bucket, so it says it in the

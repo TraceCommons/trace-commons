@@ -27,6 +27,7 @@ mod onboarding_nearai;
 mod onboarding_wallet;
 pub mod preview;
 pub mod private_inference;
+pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
 pub mod settings;
