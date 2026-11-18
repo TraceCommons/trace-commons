@@ -22,9 +22,9 @@
 // Keyboard focus (owner, 2026-11-18, "Keyboard only while open"): the open
 // rail keeps it once given it, so Escape and Tab work; a closed rail never
 // keeps it (the Mac's is a non-activating panel). Focus goes back only to
-// a window on the active workspace and not minimised, or else to nothing,
-// so it never switches workspaces or brings a window back (placement.js,
-// focusAfter). Both windows are placed again when the monitors or work
+// a window on the active workspace and not hidden (minimised, or a dialog
+// of a minimised window), or else to nothing, so it never switches
+// workspaces or brings a window back (placement.js, focusAfter). Both windows are placed again when the monitors or work
 // areas change. Everything this does to a window is undone by Release, by the
 // caller leaving the bus, and by disable() -- which GNOME Shell calls on
 // every screen lock; the app asks again when the name returns
@@ -34,8 +34,8 @@
 // extension API that 45 introduced, which 47-51 keep. Every Meta call here
 // (get_pid, get_gtk_unique_bus_name, get_gtk_window_object_path and their
 // notify signals, get_frame_rect, move_frame, make_above, stick,
-// get_work_area_for_monitor, get_monitor, located_on_workspace, focus, the
-// minimized property, the unmanaging, size-changed and shown signals, and
+// get_work_area_for_monitor, get_monitor, located_on_workspace, focus,
+// showing_on_its_workspace, the unmanaging, size-changed and shown signals, and
 // the display's unset_input_focus, get_current_time_roundtrip and
 // window-created) is in mutter's public API in each of those versions.
 
@@ -47,7 +47,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {
-    FocusKeeper, ROLE_PANEL, ROLE_RAIL, couldBeCallers, frameFor, isMarked, markerFor, monitorFor,
+    FocusKeeper, ROLE_PANEL, couldBeCallers, frameFor, isMarked, markerFor, monitorFor, mutterShell,
 } from './placement.js';
 
 const BUS_NAME = 'ai.tracecommons.Contributor.EdgeSurfaces';
@@ -115,13 +115,9 @@ export default class EdgeSurfacesExtension extends Extension {
         // window -> signal ids, for a caller's window whose path or bus
         // name GTK has not told Mutter yet.
         this._waiting = new Map();
-        this._focus = new FocusKeeper(global.display, {
-            isRail: w => this._placementOf(w)?.role === ROLE_RAIL,
-            isOpen: w => Boolean(this._placementOf(w)?.open),
-            onActiveWorkspace: w => w.located_on_workspace(
-                global.workspace_manager.get_active_workspace()),
-            isMinimized: w => w.minimized,
-        });
+        this._focus = new FocusKeeper(global.display, mutterShell(
+            w => this._placementOf(w),
+            () => global.workspace_manager.get_active_workspace()));
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._nameId = Gio.bus_own_name_on_connection(

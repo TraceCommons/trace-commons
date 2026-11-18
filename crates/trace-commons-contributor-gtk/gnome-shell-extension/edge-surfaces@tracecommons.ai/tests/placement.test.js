@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
     FOCUS_LEAVE, FOCUS_RESTORE, FOCUS_UNSET, FocusKeeper, MARGIN, MARKER_PANEL, MARKER_RAIL, ROLE_PANEL,
-    ROLE_RAIL, couldBeCallers, focusAfter, frameFor, isMarked, markerFor, monitorFor,
+    ROLE_RAIL, couldBeCallers, focusAfter, frameFor, isMarked, markerFor, monitorFor, mutterShell,
 } from '../placement.js';
 
 const AREA = {x: 0, y: 32, width: 1920, height: 1048};
@@ -59,7 +59,7 @@ function shell(...windows) {
         isOpen: w => Boolean(w.open),
         isManaged: w => w.managed !== false,
         onActiveWorkspace: w => w.workspace === 'active',
-        isMinimized: w => Boolean(w.minimized),
+        isHidden: w => Boolean(w.minimized),
         windows,
     };
 }
@@ -100,6 +100,54 @@ test('with no window to go back to, focus is unset rather than left on the rail'
     assert.deepEqual(focusAfter(rail, null, shell(rail)), {action: FOCUS_UNSET, window: null});
     assert.deepEqual(focusAfter(rail, rail, shell(rail)), {action: FOCUS_UNSET, window: null});
     assert.deepEqual(focusAfter(rail, other, shell(rail, other)), {action: FOCUS_UNSET, window: null});
+});
+
+// A Meta.Window as mutterShell reads it: its minimized property, whether
+// it is showing on its workspace, and whether it is on the given one.
+function shownWindow(props) {
+    return {
+        minimized: false,
+        showing: true,
+        workspace: 'active',
+        ...props,
+        showing_on_its_workspace() {
+            return this.showing;
+        },
+        located_on_workspace(workspace) {
+            return this.workspace === workspace;
+        },
+    };
+}
+
+test('a dialog hidden with its minimised window is never given focus', () => {
+    // GNOME 46, 2026-11-18: with the main window minimised, its first-run
+    // dialog was hidden with it but its own minimized stayed false. Focus
+    // given back to it was refused and stayed on the closed rail.
+    const rail = shownWindow({});
+    const dialog = shownWindow({showing: false});
+    const placements = new Map([[rail, {role: ROLE_RAIL, open: false}]]);
+    const shell = mutterShell(w => placements.get(w) ?? null, () => 'active');
+    assert.deepEqual(
+        focusAfter(rail, dialog, {...shell, isManaged: () => true}),
+        {action: FOCUS_UNSET, window: null});
+});
+
+test('mutterShell answers the rule from Mutter', () => {
+    const rail = shownWindow({});
+    const editor = shownWindow({});
+    const elsewhere = shownWindow({workspace: 'other'});
+    const minimised = shownWindow({minimized: true, showing: false});
+    const placements = new Map([[rail, {role: ROLE_RAIL, open: true}]]);
+    const shell = {
+        ...mutterShell(w => placements.get(w) ?? null, () => 'active'),
+        isManaged: () => true,
+    };
+    assert.ok(shell.isRail(rail) && shell.isOpen(rail));
+    assert.ok(!shell.isRail(editor) && !shell.isOpen(editor));
+    placements.get(rail).open = false;
+    assert.deepEqual(focusAfter(rail, editor, shell), {action: FOCUS_RESTORE, window: editor});
+    assert.deepEqual(focusAfter(rail, elsewhere, shell), {action: FOCUS_UNSET, window: null});
+    assert.deepEqual(focusAfter(rail, minimised, shell), {action: FOCUS_UNSET, window: null});
 });
 
 test('focus on any other window is left alone', () => {
@@ -227,7 +275,7 @@ function keeper(display, rail) {
         isRail: w => w === rail,
         isOpen: w => w === rail && Boolean(rail.open),
         onActiveWorkspace: w => w.workspace !== 'other',
-        isMinimized: w => Boolean(w.minimized),
+        isHidden: w => Boolean(w.minimized),
     });
 }
 

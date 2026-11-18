@@ -82,11 +82,11 @@ export const FOCUS_UNSET = 'unset';
  * Escape and Tab reach it; a closed rail never does -- the Mac's rail is a
  * non-activating panel that "never takes focus from the app in front".
  * Focus goes back only to a window still managed, on the active workspace
- * and not minimised, so giving it back can never switch workspaces or
- * bring a minimised window back; otherwise nothing has focus.
+ * and not hidden, so giving it back can never switch workspaces or bring a
+ * minimised window back; otherwise nothing has focus.
  *
  * `shell` answers isRail, isOpen, isManaged, onActiveWorkspace and
- * isMinimized for a window. Returns {action, window}, window set only for
+ * isHidden for a window. Returns {action, window}, window set only for
  * FOCUS_RESTORE.
  */
 export function focusAfter(focused, previous, shell) {
@@ -95,16 +95,35 @@ export function focusAfter(focused, previous, shell) {
         return leave;
     const usable = previous && previous !== focused && !shell.isRail(previous) &&
         shell.isManaged(previous) && shell.onActiveWorkspace(previous) &&
-        !shell.isMinimized(previous);
+        !shell.isHidden(previous);
     return usable
         ? {action: FOCUS_RESTORE, window: previous}
         : {action: FOCUS_UNSET, window: null};
 }
 
 /**
+ * focusAfter's questions about a window, answered from Mutter.
+ * `placementOf` gives a window's placement ({role, open}) or null;
+ * `activeWorkspace` gives the active Meta.Workspace.
+ *
+ * Hidden is not showing on its workspace, not merely minimised: a dialog
+ * attached to a minimised window is hidden with it while its own minimized
+ * stays false, and Mutter refuses it focus (GNOME 46, 2026-11-18: focus
+ * then stayed on the closed rail).
+ */
+export function mutterShell(placementOf, activeWorkspace) {
+    return {
+        isRail: w => placementOf(w)?.role === ROLE_RAIL,
+        isOpen: w => Boolean(placementOf(w)?.open),
+        onActiveWorkspace: w => w.located_on_workspace(activeWorkspace()),
+        isHidden: w => !w.showing_on_its_workspace(),
+    };
+}
+
+/**
  * Applies focusAfter as focus moves. `display` is global.display (or a
  * stand-in): focus_window, get_current_time_roundtrip, unset_input_focus.
- * `shell` answers isRail, isOpen, onActiveWorkspace and isMinimized; this
+ * `shell` answers isRail, isOpen, onActiveWorkspace and isHidden; this
  * keeper answers isManaged itself: the window noted last is managed until
  * it sends unmanaging (not unmanaged: focus moves on while a window is
  * going, before unmanaged is sent), and is then let go of.
