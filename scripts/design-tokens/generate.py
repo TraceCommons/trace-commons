@@ -500,7 +500,9 @@ BRAND_MARK = REPO / "macos" / "Sources" / "TCDesign" / "Logos" / "GlassBrandMark
 # tints. The Linux map reads them from `brand_tokens::map`.
 MAP_COLOURS = [
     "mapOrbShared", "mapOrbKept", "purpleSoft", "blue", "statusOff", "statusOn",
-    "statusOnText", "mapNodeOff", "mapCredentialOn", "paneOpaque", "wellFill",
+    "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapCredentialOn",
+    "mapRuleAutoFill", "mapRuleAskFill", "mapRuleIgnoreFill", "mapRuleUnsetFill",
+    "paneOpaque", "wellFill",
     "textPrimary", "textSecondary", "textTertiary",
     "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode", "toolTheia",
 ]
