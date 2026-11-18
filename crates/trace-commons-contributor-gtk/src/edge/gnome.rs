@@ -403,7 +403,6 @@ mod live_tests {
         height: i32,
         above: bool,
         sticky: bool,
-        focused: bool,
     }
 
     #[derive(Debug, serde::Deserialize)]
@@ -438,13 +437,12 @@ mod live_tests {
         let js = format!(
             "(() => {{ const m = global.display.get_primary_monitor(); \
              const wa = global.workspace_manager.get_active_workspace().get_work_area_for_monitor(m); \
-             const f = global.display.focus_window; \
              return JSON.stringify({{ work_area: [wa.x, wa.y, wa.width, wa.height], \
                windows: global.get_window_actors().map(a => a.meta_window) \
                  .filter(w => w.get_pid() === {pid}) \
                  .map(w => {{ const r = w.get_frame_rect(); return {{ \
                    title: w.get_title() || '', x: r.x, y: r.y, width: r.width, height: r.height, \
-                   above: w.is_above(), sticky: w.is_on_all_workspaces(), focused: w === f }}; }}) }}); }})()",
+                   above: w.is_above(), sticky: w.is_on_all_workspaces() }}; }}) }}); }})()",
             pid = std::process::id(),
         );
         // Eval answers with the value JSON-encoded, and the value is itself a
@@ -515,7 +513,10 @@ mod live_tests {
         let text = eval(
             connection,
             &format!(
-                "(() => {{ const w = t => global.get_window_actors().map(a => a.meta_window)                  .find(x => x.get_pid() === {pid} && x.get_title() === t);                  const now = global.display.get_current_time_roundtrip();                  return String((() => {{ {body} }})()); }})()",
+                "(() => {{ const w = t => global.get_window_actors().map(a => a.meta_window) \
+                 .find(x => x.get_pid() === {pid} && x.get_title() === t); \
+                 const now = global.display.get_current_time_roundtrip(); \
+                 return String((() => {{ {body} }})()); }})()",
                 pid = std::process::id(),
             ),
         )
@@ -531,7 +532,10 @@ mod live_tests {
         let text = with_windows(
             connection,
             &format!(
-                "const f = global.display.focus_window;                  return JSON.stringify([f ? (f.get_title() || '') : '',                    w('{OTHER}').minimized,                    global.workspace_manager.get_active_workspace_index()]);"
+                "const f = global.display.focus_window; \
+                 return JSON.stringify([f ? (f.get_title() || '') : '', \
+                 w('{OTHER}').minimized, \
+                 global.workspace_manager.get_active_workspace_index()]);"
             ),
         )
         .await?;
