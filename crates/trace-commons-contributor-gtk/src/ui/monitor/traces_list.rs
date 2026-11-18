@@ -557,27 +557,30 @@ fn chevron(open: bool, name: &str, on_toggle: impl Fn() + 'static) -> gtk::Widge
 fn tile(kind: TileKind) -> gtk::Widget {
     let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     frame.set_size_request(size::TILE, size::TILE);
+    // A fixed square: never a share of the row's spare width.
+    frame.set_hexpand(false);
+    frame.set_homogeneous(true);
     frame.set_accessible_role(gtk::AccessibleRole::Presentation);
     match kind {
         TileKind::Folder => {
             frame.add_css_class("tc-tree-tile-folder");
             let image = gtk::Image::from_icon_name("folder-symbolic");
             image.set_pixel_size(11);
-            image.set_hexpand(true);
+            image.set_halign(gtk::Align::Center);
             frame.append(&image);
         }
         TileKind::Tool(kind) => {
             frame.add_css_class("tc-tree-tile");
             let label = gtk::Label::new(Some(initials(kind)));
             label.add_css_class("tc-tree-tile-initials");
-            label.set_hexpand(true);
+            label.set_halign(gtk::Align::Center);
             frame.append(&label);
         }
         TileKind::Session => {
             frame.add_css_class("tc-tree-tile");
             let label = gtk::Label::new(Some(SESSION_MARK));
             label.add_css_class("tc-tree-tile-initials");
-            label.set_hexpand(true);
+            label.set_halign(gtk::Align::Center);
             frame.append(&label);
         }
     }
