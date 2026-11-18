@@ -282,15 +282,15 @@ be saved" line.
 A document portal below interface version 5 (GNOME 46's) has no
 `GetHostPaths`, so no chooser folder outside the grants can be mapped (owner,
 2026-11-17: "Explain + CLI fallback"). The folder is still refused with the
-existing line. Under it, once the owner approves its words
-(`managed::copy::host_folder`, DRAFT, NEEDS APPROVAL), the Tools screen
-adds a line and a fixed command (`daemon::service::host_folder_command`,
+existing line. Under it the Tools screen adds the owner's approved line
+(2026-11-17, `managed::copy::host_folder`: "To add this folder anyway, open
+a terminal in it and run:") and a fixed command (`daemon::service::host_folder_command`,
 `daemon settings --set "claude_root=$PWD"` or `codex_root`) to run in a
 terminal opened in that folder, with "Copy command" only; the window never
 runs it and does not know the host path to put in it. Only Claude Code and
 Codex take a bare path there, and only one refused folder at a time gets
-the command. Until approval nothing extra is shown and the portal's version
-is not read.
+the command. Any other refusal (a portal new enough to map, or one whose
+version is unknown) shows the failure line alone.
 
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the

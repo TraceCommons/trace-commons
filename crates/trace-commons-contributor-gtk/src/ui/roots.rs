@@ -358,15 +358,18 @@ pub(super) fn declare_to_daemon(
         return;
     }
     // One bounded D-Bus round trip per folder, off the GTK thread. When
-    // the mapping fails, and only while the old-portal line is approved,
-    // one more: whether the portal is too old to map anything.
+    // the mapping fails for one folder a terminal can declare, one more:
+    // whether the portal is too old to map anything.
     let weak = Rc::downgrade(app);
     super::service_dialog::off_thread(
         move || {
             let refused = params.clone();
             crate::document_portal::host_declarations(params).ok_or_else(|| {
-                host_folder::add_on_host_line()
-                    .and_then(|_| crate::document_portal::old_portal_refusal(&refused))
+                old_portal_hint(
+                    &refused,
+                    crate::document_portal::doc_root().as_deref(),
+                    crate::document_portal::portal_version,
+                )
             })
         },
         move |mapped| {
@@ -378,7 +381,7 @@ pub(super) fn declare_to_daemon(
                     send_declaration(&app, params, move |app, declared| done(app, declared, None))
                 }
                 Ok(_) => done(&app, None, None),
-                Err(key) => done(&app, None, key.as_deref().and_then(host_folder_hint)),
+                Err(hint) => done(&app, None, hint),
             }
         },
     );
@@ -394,18 +397,29 @@ pub(super) struct HostFolderHint {
     pub command: String,
 }
 
-/// [`HostFolderHint`] for the tool whose settings key is `settings_key`;
-/// `None` while its line is a draft (`host_folder::APPROVED`), and for a
-/// tool the command cannot declare. The failure line then shows alone.
+/// [`HostFolderHint`] for the tool whose settings key is `settings_key`:
+/// the owner's line (`host_folder::add_on_host_line`) and the command;
+/// `None` for a tool the command cannot declare, and the failure line then
+/// shows alone.
 pub(super) fn host_folder_hint(settings_key: &str) -> Option<HostFolderHint> {
-    host_folder_hint_with(host_folder::add_on_host_line(), settings_key)
-}
-
-fn host_folder_hint_with(line: Option<&'static str>, settings_key: &str) -> Option<HostFolderHint> {
     Some(HostFolderHint {
-        line: line?,
+        line: host_folder::add_on_host_line()?,
         command: trace_commons_contributor::daemon::service::host_folder_command(settings_key)?,
     })
+}
+
+/// What a refused `params` adds under the failure line: the hint for its
+/// one portal folder when the portal mounted at `doc_root` is too old to
+/// map any folder (`document_portal::lacks_host_paths`); `None` for every
+/// other refusal. `version` is read last, only when there is a hint to give.
+fn old_portal_hint(
+    params: &serde_json::Value,
+    doc_root: Option<&std::path::Path>,
+    version: impl FnOnce() -> Option<u32>,
+) -> Option<HostFolderHint> {
+    let key = crate::document_portal::sole_portal_declaration_in(params, doc_root)?;
+    let hint = host_folder_hint(&key)?;
+    crate::document_portal::lacks_host_paths(version()).then_some(hint)
 }
 
 fn send_declaration(
@@ -457,25 +471,48 @@ pub(super) fn source_title(source: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    /// While the old-portal line is a draft, a refused folder shows the
-    /// failure line alone; once approved, the line and the fixed command
-    /// for a tool the command can declare, and nothing for one it cannot.
+    /// A folder refused because the document portal is too old to map it
+    /// (interface version 4, GNOME 46) shows the owner's approved line
+    /// (2026-11-17) and the fixed, copy-only command; nothing else does.
     #[test]
-    fn the_host_folder_hint_waits_for_its_approved_line() {
-        assert_eq!(host_folder_hint("claude_source"), None);
-        assert_eq!(host_folder_hint_with(None, "claude_source"), None);
-        let line = host_folder::ADD_ON_HOST;
+    fn the_host_folder_line_shows_with_its_command_only_on_an_old_portal() {
+        let root = std::path::Path::new("/run/user/1000/doc");
+        let portal = |id: &str| format!("/run/user/1000/doc/{id}/projects");
+        let one = |key: &str| serde_json::json!({ key: {"mode": "watch", "path": portal("a1")} });
+        let hint = |params: &serde_json::Value, version: Option<u32>| {
+            old_portal_hint(params, Some(root), move || version)
+        };
         assert_eq!(
-            host_folder_hint_with(Some(line), "codex_source"),
+            hint(&one("claude_source"), Some(4)),
             Some(HostFolderHint {
-                line,
-                command: trace_commons_contributor::daemon::service::host_folder_command(
-                    "codex_source"
-                )
-                .unwrap(),
+                line: "To add this folder anyway, open a terminal in it and run:",
+                command: format!(
+                    "{} daemon settings --set \"claude_root=$PWD\"",
+                    trace_commons_contributor::channel::HOST_CLI
+                ),
             })
         );
-        assert_eq!(host_folder_hint_with(Some(line), "gemini_source"), None);
+        assert_eq!(
+            hint(&one("codex_source"), Some(4)).map(|h| h.command),
+            trace_commons_contributor::daemon::service::host_folder_command("codex_source")
+        );
+        // A portal new enough to map (a mapping that failed some other
+        // way), or one whose version is unknown: the failure line alone.
+        assert_eq!(hint(&one("claude_source"), Some(5)), None);
+        assert_eq!(hint(&one("claude_source"), Some(6)), None);
+        assert_eq!(hint(&one("claude_source"), None), None);
+        // A tool the command cannot declare.
+        assert_eq!(hint(&one("gemini_source"), Some(4)), None);
+        // Two portal folders: one terminal declares one.
+        let two = serde_json::json!({
+            "claude_source": {"mode": "watch", "path": portal("a1")},
+            "codex_source": {"mode": "watch", "path": portal("b2")},
+        });
+        assert_eq!(hint(&two, Some(4)), None);
+        // A folder outside the portal, or no portal mount.
+        let host = serde_json::json!({"claude_source": {"mode": "watch", "path": "/home/u/x"}});
+        assert_eq!(hint(&host, Some(4)), None);
+        assert_eq!(old_portal_hint(&one("claude_source"), None, || Some(4)), None);
     }
 
     fn tools(watch_claude: bool) -> Tools {

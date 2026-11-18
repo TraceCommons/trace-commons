@@ -212,19 +212,15 @@ pub fn sole_portal_declaration_in(
     inside.next().is_none().then_some(key)
 }
 
-/// The settings key of the one portal folder in `params` that this
-/// system's portal cannot map because it predates `GetHostPaths`; `None`
-/// for any other refusal. Blocking: one bounded D-Bus property read, so
-/// callers run it off the GTK thread.
-pub fn old_portal_refusal(params: &serde_json::Value) -> Option<String> {
-    let root = doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
-    let key = sole_portal_declaration_in(params, root.as_deref())?;
-    lacks_host_paths(portal_version()).then_some(key)
+/// The document portal's mount for this session (`$XDG_RUNTIME_DIR/doc`).
+pub fn doc_root() -> Option<PathBuf> {
+    doc_root_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
 }
 
 /// The document portal's interface version, or `None` when it does not
-/// answer in [`PORTAL_TIMEOUT`].
-fn portal_version() -> Option<u32> {
+/// answer in [`PORTAL_TIMEOUT`]. Blocking: one bounded D-Bus property read,
+/// so callers run it off the GTK thread.
+pub fn portal_version() -> Option<u32> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(get_portal_version().ok());
