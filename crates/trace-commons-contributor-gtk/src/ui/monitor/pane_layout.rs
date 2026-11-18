@@ -245,6 +245,13 @@ mod tests {
     }
 
     #[test]
+    fn the_gap_and_padding_are_the_generated_tokens() {
+        use crate::ui::style::brand_tokens::glass::space;
+        assert_eq!(PANE_GAP, f64::from(space::PANE_GAP));
+        assert_eq!(WINDOW_PADDING, f64::from(space::WINDOW_PADDING));
+    }
+
+    #[test]
     fn every_composition_at_its_default_width_is_its_panes() {
         for v in COMPOSITIONS {
             let width = default_width(v);

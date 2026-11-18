@@ -137,3 +137,155 @@ pub const INSIGHTS_DARK_CSS: &str = r#"
 .tc-insights .heading { font-size: 1em; font-weight: 600; }
 .tc-insights .caption { font-size: 0.846154em; font-weight: 400; }
 "#;
+
+/// The painted Monitor window's tiers, type roles and inks, light scheme.
+pub const GLASS_LIGHT_CSS: &str = r#"
+@define-color tc_glass_pane #f2f3f6;
+@define-color tc_glass_card #fafafb;
+@define-color tc_glass_card_quiet #f8f9fa;
+@define-color tc_glass_well #dbdde3;
+@define-color tc_glass_control #fbfbfc;
+@define-color tc_glass_control_selected #0558b6;
+@define-color tc_glass_popover #f6f6f9;
+@define-color tc_glass_menu #f6f6f8;
+@define-color tc_glass_node_card #fdfdfe;
+@define-color tc_glass_scene #e6eaf1;
+@define-color tc_glass_ink #1d1d1f;
+@define-color tc_glass_ink_secondary #3c3c43;
+@define-color tc_glass_selected_ink #ffffff;
+@define-color tc_glass_toolbar_glyph #1d1d1f;
+@define-color tc_glass_toolbar_glyph_hidden #8a8a90;
+@define-color tc_glass_toolbar_expanded #0558b6;
+@define-color tc_glass_control_hover #dbdee4;
+@define-color tc_glass_row_hover #e8e9ec;
+@define-color tc_glass_tab_ember #056bdc;
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+/// The painted Monitor window's tiers, type roles and inks, dark scheme.
+pub const GLASS_DARK_CSS: &str = r#"
+@define-color tc_glass_pane #0d1124;
+@define-color tc_glass_card #0d1124;
+@define-color tc_glass_card_quiet #0d1124;
+@define-color tc_glass_well #090c19;
+@define-color tc_glass_control #090c19;
+@define-color tc_glass_control_selected #7ebcff;
+@define-color tc_glass_popover #0b0f22;
+@define-color tc_glass_menu #0b0f22;
+@define-color tc_glass_node_card #0b0f22;
+@define-color tc_glass_scene #070a1a;
+@define-color tc_glass_ink #f2f3f8;
+@define-color tc_glass_ink_secondary #d7d8df;
+@define-color tc_glass_selected_ink #071a2e;
+@define-color tc_glass_toolbar_glyph #e6e6ec;
+@define-color tc_glass_toolbar_glyph_hidden #83838c;
+@define-color tc_glass_toolbar_expanded #7ebcff;
+@define-color tc_glass_control_hover #353842;
+@define-color tc_glass_row_hover #191d2f;
+@define-color tc_glass_tab_ember #0091fd;
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+
+/// Radii, spacing and sizes of the glass system, as the flat theme draws them.
+pub mod glass {
+    pub mod radius {
+        pub const PANE: i32 = 20;
+        pub const CARD: i32 = 16;
+        pub const CARD_QUIET: i32 = 14;
+        pub const CONTROL: i32 = 11;
+        pub const TILE: i32 = 6;
+        pub const CHECKBOX: i32 = 5;
+        pub const PILL: i32 = 999;
+        pub const MENU_PANEL: i32 = 16;
+        pub const MENU_STATE_PILL: i32 = 22;
+    }
+    pub mod space {
+        pub const S1: i32 = 2;
+        pub const S2: i32 = 4;
+        pub const S3: i32 = 6;
+        pub const S4: i32 = 8;
+        pub const S5: i32 = 10;
+        pub const S6: i32 = 12;
+        pub const S7: i32 = 14;
+        pub const S8: i32 = 16;
+        pub const S9: i32 = 20;
+        pub const S10: i32 = 24;
+        pub const PANE_GAP: i32 = 10;
+        pub const WINDOW_PADDING: i32 = 0;
+        pub const WINDOW_CONTROLS_INSET: i32 = 30;
+        pub const WINDOW_CONTROLS_WIDTH: i32 = 78;
+        pub const PANE_PADDING: i32 = 12;
+        pub const INSPECTOR_PADDING_HORIZONTAL: i32 = 16;
+        pub const INSPECTOR_PADDING_VERTICAL: i32 = 18;
+        pub const TREE_INSET: i32 = 8;
+        pub const MAP_OVERLAY_INSET: i32 = 14;
+        pub const CARD_PADDING_VERTICAL: i32 = 12;
+        pub const CARD_PADDING_HORIZONTAL: i32 = 14;
+        pub const CARD_GAP: i32 = 10;
+        pub const INLINE_GAP: i32 = 6;
+        pub const MODAL_INSET_TOP: i32 = 52;
+        pub const MODAL_INSET: i32 = 28;
+        pub const EDGE_RAIL_INSET: i32 = 12;
+        pub const EDGE_RAIL_GAP: i32 = 16;
+    }
+}
+
+/// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.
+pub mod glyph {
+    pub const VIEW_MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M1,2h12M1,6h12M1,10h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
+    pub const GRAPH: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM0.5,7.5h13M4,7.5v4M8,7.5v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const MAP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M0.5,2.5l4-2,5,2,4-2v9l-4,2-5-2-4,2zM4.5,0.5v9M9.5,2.5v9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const INSPECTOR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM9,0.5v11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const GEAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15"><path d="M19.47,10.14L21.9,10.59L21.9,13.41L19.47,13.86L18.6,15.97L20,18L18,20L15.97,18.6L13.86,19.47L13.41,21.9L10.59,21.9L10.14,19.47L8.03,18.6L6,20L4,18L5.4,15.97L4.53,13.86L2.1,13.41L2.1,10.59L4.53,10.14L5.4,8.03L4,6L6,4L8.03,5.4L10.14,4.53L10.59,2.1L13.41,2.1L13.86,4.53L15.97,5.4L18,4L20,6L18.6,8.03ZM15.2,12A3.2,3.2,0,1,1,8.8,12A3.2,3.2,0,1,1,15.2,12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>"#;
+    pub const CHEVRON_DOWN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="10" height="10"><path d="M4,6.5l4,4,4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13"><path d="M3,7a2,2,0,0,1,2-2h4l2,2h8a2,2,0,0,1,2,2v9a2,2,0,0,1-2,2H5a2,2,0,0,1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const KEBAB: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 14" width="4" height="14"><path d="M3.6,2A1.6,1.6,0,1,1,0.4,2A1.6,1.6,0,1,1,3.6,2ZM3.6,7A1.6,1.6,0,1,1,0.4,7A1.6,1.6,0,1,1,3.6,7ZM3.6,12A1.6,1.6,0,1,1,0.4,12A1.6,1.6,0,1,1,3.6,12Z" fill="currentColor"/></svg>"#;
+    /// Every glyph by its name in `GlassGlyph`.
+    pub const ALL: &[(&str, &str)] = &[
+        ("viewMenu", VIEW_MENU),
+        ("graph", GRAPH),
+        ("map", MAP),
+        ("inspector", INSPECTOR),
+        ("gear", GEAR),
+        ("chevronDown", CHEVRON_DOWN),
+        ("folder", FOLDER),
+        ("kebab", KEBAB),
+    ];
+}

@@ -97,7 +97,7 @@ pub fn current_scheme() -> Scheme {
 pub fn framed(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_framed(cr, current_scheme(), width as f64, height as f64);
+        draw_framed(cr, &super::style::inks(), width as f64, height as f64);
     });
     follow_scheme(&area);
     area
@@ -111,8 +111,8 @@ pub fn framed(size: i32) -> gtk::DrawingArea {
 pub fn template(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        let scheme = current_scheme();
-        draw_template(cr, scheme.ink(), width as f64, height as f64);
+        let inks = super::style::inks();
+        draw_template(cr, &inks.mark_template, width as f64, height as f64);
     });
     follow_scheme(&area);
     area
@@ -156,7 +156,10 @@ fn follow_scheme(area: &gtk::DrawingArea) {
 }
 
 /// The framed variant: `tc_surface` card, `tc_line` hairline, two brackets.
-fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
+///
+/// The inks are `style::Inks`: the mark's own scheme colours in the
+/// standard look, the Omarchy palette's in the skin.
+fn draw_framed(cr: &cairo::Context, inks: &super::style::Inks, width: f64, height: f64) {
     let unit = width.min(height) / VIEW;
     if unit <= 0.0 {
         return;
@@ -170,18 +173,18 @@ fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
     // 64x64 boundary exactly.
     let (fx, fy, fw, fh) = trace_commons_mark::FRAME_RECT;
     cr.rectangle(f64::from(fx), f64::from(fy), f64::from(fw), f64::from(fh));
-    set_source(cr, scheme.surface());
+    set_source(cr, &inks.mark_surface);
     let _ = cr.fill_preserve();
-    set_source(cr, scheme.line());
+    set_source(cr, &inks.mark_line);
     cr.set_line_width(STROKE_FRAME);
     let _ = cr.stroke();
 
     cr.set_line_width(STROKE_FRAMED);
-    set_source(cr, super::style::mark_accent(scheme == Scheme::Dark));
+    set_source(cr, &inks.mark_open);
     bracket_top_left(cr);
     let _ = cr.stroke();
 
-    set_source(cr, scheme.bracket_close());
+    set_source(cr, &inks.mark_close);
     bracket_bottom_right(cr);
     let _ = cr.stroke();
 
@@ -300,6 +303,34 @@ mod tests {
             // The coordinate space never moves with the rendered size.
             assert!(doc.contains(r##"viewBox="0 0 64 64""##));
         }
+    }
+
+    /// The framed mark is painted in the inks it is given. Drawn onto an
+    /// image and read back: the frame's fill, the open bracket and the
+    /// close bracket each carry the palette's colour.
+    #[test]
+    fn the_framed_mark_paints_with_the_inks_it_is_given() {
+        use crate::ui::omarchy::{self, fixtures::TOKYO};
+        let palette = omarchy::parse(TOKYO, false).unwrap();
+        let inks = crate::ui::style::Inks::omarchy(&palette);
+        let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 64, 64).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            draw_framed(&cr, &inks, 64.0, 64.0);
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        // Rgb24 is native-endian xRGB: B, G, R, x on little-endian.
+        let pixel = |x: usize, y: usize| {
+            let i = y * stride + x * 4;
+            omarchy::Rgb(data[i + 2], data[i + 1], data[i])
+        };
+        // Inside the frame, clear of both brackets.
+        assert_eq!(pixel(32, 32), palette.surface);
+        // On the open bracket's vertical stroke (M11 28V11, 7 wide).
+        assert_eq!(pixel(11, 20), palette.accent_line);
+        // On the close bracket's vertical stroke (M53 36v17).
+        assert_eq!(pixel(53, 44), palette.ink);
     }
 
     #[test]

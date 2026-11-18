@@ -491,6 +491,244 @@ def render_insights_css(tokens: dict, scheme: str) -> str:
     return "\n".join(out)
 
 
+GLYPHS = REPO / "macos" / "Sources" / "TCDesign" / "Components" / "Glyphs.swift"
+
+# Glass tiers as the Linux shell paints them: every fill opaque, flattened
+# over the surface the tier sits on, as the Mac does under Reduce
+# Transparency. (tier, CSS name, radius token, edge shadow token, ground)
+# A well is dug into a card, so it is flattened over the card; every other
+# tier sits on the pane's opaque ground.
+GLASS_TIERS = [
+    ("pane", "pane", "pane", "paneEdge", "pane"),
+    ("card", "card", "card", "cardEdge", "pane"),
+    ("cardQuiet", "card-quiet", "cardQuiet", "cardEdgeQuiet", "pane"),
+    ("well", "well", "pill", "wellEdge", "card"),
+    ("control", "control", "pill", "controlEdge", "pane"),
+    ("controlSelected", "control-selected", "pill", "controlSelectedEdge", "pane"),
+    ("popover", "popover", "card", "popoverEdge", "pane"),
+    ("menu", "menu", "cardQuiet", "menuEdge", "pane"),
+    ("nodeCard", "node-card", "card", "nodeCardEdge", "pane"),
+]
+# Tier fills that hold text the shell draws in the glass ink. A tier named
+# here is checked for 4.5:1 against primary and secondary text.
+GLASS_TEXT_TIERS = ["pane", "card", "cardQuiet", "control", "popover", "menu", "nodeCard"]
+# The type roles, as classes on a leaf label.
+GLASS_WEIGHTS = {"regular": 400, "medium": 500, "semibold": 600, "bold": 700, "heavy": 800}
+
+
+def resolve_scheme(entry: dict, scheme: str) -> dict:
+    """A colour entry's value in one scheme: its `light` side, or itself."""
+    if scheme == "light" and "light" in entry:
+        return dict(entry["light"])
+    return {k: v for k, v in entry.items() if k != "light"}
+
+
+def flat_value(tokens: dict, section: str, name: str, scheme: str):
+    """A token as the flat theme draws it in one scheme (what Linux shows)."""
+    override = tokens["themes"]["flat" + scheme.title()].get(section, {}).get(name)
+    return override if override is not None else tokens[section][name]
+
+
+def flat_color(tokens: dict, name: str, scheme: str) -> dict:
+    return resolve_scheme(flat_value(tokens, "color", name, scheme), scheme)
+
+
+def flat_fill(tokens: dict, name: str, scheme: str) -> dict:
+    """A gradient token's one colour. The flat theme's fills are uniform."""
+    stops = flat_value(tokens, "gradient", name, scheme)["stops"]
+    colours = [resolve_scheme(stop, scheme) for stop in stops]
+    if any((c["hex"], c.get("alpha", 1)) != (colours[0]["hex"], colours[0].get("alpha", 1)) for c in colours):
+        raise TokenError(f"glass {name}: expected a uniform flat fill")
+    return colours[0]
+
+
+def flat_layers(tokens: dict, name: str, scheme: str) -> list[dict]:
+    layers = flat_value(tokens, "shadow", name, scheme)
+    out = []
+    for layer in layers:
+        value = resolve_scheme(layer, scheme)
+        for key in ("x", "y", "blur", "inset"):
+            if key in layer:
+                value[key] = layer[key]
+        out.append(value)
+    return out
+
+
+def css_rgba(entry: dict, where: str) -> str:
+    rgb(entry["hex"], where)
+    channels = ", ".join(str(int(entry["hex"][i : i + 2], 16)) for i in (1, 3, 5))
+    return f"rgba({channels}, {number(entry.get('alpha', 1), where)})"
+
+
+def css_shadow(layers: list[dict], where: str) -> str:
+    if not layers:
+        return "none"
+    parts = []
+    for layer in layers:
+        parts.append(
+            ("inset " if layer.get("inset") else "")
+            + f"{number(layer.get('x', 0), where)}px {number(layer.get('y', 0), where)}px "
+            + f"{number(layer.get('blur', 0), where)}px {css_rgba(layer, where)}"
+        )
+    return ", ".join(parts)
+
+
+def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    """Every opaque colour the painted window uses, in one scheme."""
+    ground = flat_color(tokens, "paneOpaque", scheme)["hex"]
+    over = lambda entry, under: opaque_over(entry, under)
+    fills = {"pane": ground}
+    fills["card"] = over(flat_fill(tokens, "cardFill", scheme), ground)
+    fills["cardQuiet"] = over(flat_fill(tokens, "cardFillQuiet", scheme), ground)
+    fills["well"] = over(flat_color(tokens, "wellFill", scheme), fills["card"])
+    fills["control"] = over(flat_fill(tokens, "controlFill", scheme), ground)
+    fills["controlSelected"] = over(flat_color(tokens, "controlSelected", scheme), ground)
+    fills["popover"] = over(flat_color(tokens, "popoverFill", scheme), ground)
+    fills["menu"] = over(flat_color(tokens, "menuFill", scheme), ground)
+    fills["nodeCard"] = over(flat_color(tokens, "nodeCardFill", scheme), ground)
+    palette = dict(fills)
+    palette["scene"] = flat_color(tokens, "sceneBase", scheme)["hex"]
+    palette["ink"] = over(flat_color(tokens, "textPrimary", scheme), ground)
+    palette["inkSecondary"] = over(flat_color(tokens, "textSecondary", scheme), ground)
+    palette["selectedInk"] = over(flat_color(tokens, "textOnSelected", scheme), ground)
+    palette["toolbarGlyph"] = over(flat_color(tokens, "toolbarGlyph", scheme), ground)
+    palette["toolbarGlyphHidden"] = over(flat_color(tokens, "toolbarGlyphHidden", scheme), ground)
+    palette["toolbarExpanded"] = over(flat_color(tokens, "toolbarExpanded", scheme), ground)
+    # As the Insights palette does: a white hover is invisible on Linux's
+    # white control in light, and dark's own hover is a black that vanishes
+    # on its dark control, so each takes the raised swatch that shows.
+    hover = "controlOnCardHover" if scheme == "light" else "controlOnMenuHover"
+    palette["controlHover"] = over(flat_color(tokens, hover, scheme), fills["control"])
+    if contrast(palette["controlHover"], fills["control"]) < 1.1:
+        raise TokenError(f"glass {scheme}: control hover is invisible on the control")
+    palette["rowHover"] = over(flat_color(tokens, "rowHover", scheme), ground)
+    palette["tabEmber"] = over(flat_color(tokens, "tabEmber", scheme), ground)
+    for tier in GLASS_TEXT_TIERS:
+        for ink in ("ink", "inkSecondary"):
+            ratio = contrast(palette[ink], fills[tier])
+            if ratio < 4.5:
+                raise TokenError(f"glass {scheme}: {ink} on {tier} is {ratio:.2f}:1, under 4.5:1")
+    ratio = contrast(palette["selectedInk"], palette["controlSelected"])
+    if ratio < 4.5:
+        raise TokenError(f"glass {scheme}: selection text on controlSelected is {ratio:.2f}:1, under 4.5:1")
+    return palette
+
+
+GLASS_COLOURS = [
+    ("scene", "scene"),
+    ("ink", "ink"),
+    ("inkSecondary", "ink_secondary"),
+    ("selectedInk", "selected_ink"),
+    ("toolbarGlyph", "toolbar_glyph"),
+    ("toolbarGlyphHidden", "toolbar_glyph_hidden"),
+    ("toolbarExpanded", "toolbar_expanded"),
+    ("controlHover", "control_hover"),
+    ("rowHover", "row_hover"),
+    ("tabEmber", "tab_ember"),
+]
+
+
+def render_glass_css(tokens: dict, scheme: str) -> str:
+    palette = glass_palette(tokens, scheme)
+    theme = tokens["themes"]["flat" + scheme.title()]
+    radius = {**tokens["radius"], **theme.get("radius", {})}
+    out = []
+    for tier, css, _, _, _ in GLASS_TIERS:
+        out.append(f"@define-color tc_glass_{snake(tier)} {palette[tier]};")
+    for key, name in GLASS_COLOURS:
+        out.append(f"@define-color tc_glass_{name} {palette[key]};")
+    for tier, css, radius_token, edge, _ in GLASS_TIERS:
+        where = f"glass tier {tier}"
+        out.append(
+            f".tc-glass-{css} {{ background-color: @tc_glass_{snake(tier)}; "
+            f"border-radius: {number(radius[radius_token], where)}px; "
+            f"box-shadow: {css_shadow(flat_layers(tokens, edge, scheme), where)}; }}"
+        )
+    for role, entry in tokens["type"].items():
+        body = tokens["type"]["body"]
+        size = entry["size"] / body["size"]
+        rule = [f"font-size: {size:.6g}em", f"font-weight: {GLASS_WEIGHTS[entry.get('weight', 'regular')]}"]
+        rule.append(f"line-height: {entry['lineHeight'] / entry['size']:.6g}")
+        if entry.get("tracking"):
+            rule.append(f"letter-spacing: {number(entry['tracking'], role)}px")
+        if entry.get("tabular"):
+            rule.append('font-feature-settings: "tnum"')
+        if entry.get("design") == "monospaced":
+            rule.append("font-family: monospace")
+        out.append(f".tc-type-{snake(role).replace('_', '-')} {{ {'; '.join(rule)}; }}")
+    return "\n".join(out)
+
+
+def render_glass_rust(tokens: dict) -> list[str]:
+    out = ["/// Radii, spacing and sizes of the glass system, as the flat theme draws them.", "pub mod glass {"]
+    theme = tokens["themes"]["flatLight"]
+    radius = {**tokens["radius"], **theme.get("radius", {})}
+    for mod, values in (("radius", radius), ("space", tokens["space"])):
+        out.append(f"    pub mod {mod} {{")
+        for key, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TokenError(f"{mod}.{key}: {value!r} is not a whole number of px")
+            out.append(f"        pub const {snake(key).upper()}: i32 = {value};")
+        out.append("    }")
+    out.append("}")
+    return out
+
+
+def swift_string_literals(text: str) -> str:
+    return "".join(re.findall(r'"([^"\n]*)"', text))
+
+
+def parse_glyphs(source: str) -> list[dict]:
+    """The toolbar glyphs from Glyphs.swift: the one copy of their path data."""
+    frame = re.search(r"static let frame =\s*((?:\"[^\"\n]*\"\s*\+?\s*)+)", source)
+    if frame is None:
+        raise TokenError("Glyphs.swift: no shared frame")
+    frame_data = swift_string_literals(frame.group(1))
+    toolbar = re.search(r"let toolbar = CGRect\(x: 0, y: 0, width: (\d+), height: (\d+)\)", source)
+    start = source.index("var artwork: Artwork")
+    body = source[start:]
+    out = []
+    for match in re.finditer(r"case \.(\w+):\s*return Artwork\((.*?)\)\n(?=\s*(?:case \.|\}))", body, re.S):
+        name, args = match.group(1), match.group(2)
+        data_text = re.search(r"data:\s*(.*?),\s*viewBox:", args, re.S).group(1)
+        data = swift_string_literals(data_text)
+        if "Self.frame" in data_text:
+            data = frame_data + data
+        box = re.search(r"viewBox: (?:CGRect\(x: 0, y: 0, width: (\d+), height: (\d+)\)|toolbar)", args)
+        if box.group(1):
+            width, height = int(box.group(1)), int(box.group(2))
+        else:
+            width, height = int(toolbar.group(1)), int(toolbar.group(2))
+        stroke = re.search(r"stroke: (nil|[\d.]+)", args).group(1)
+        size = re.search(r"size: (?:CGSize\(width: (\d+), height: (\d+)\)|toolbar\.size)", args)
+        drawn = (int(size.group(1)), int(size.group(2))) if size.group(1) else (width, height)
+        out.append({"name": name, "data": data, "width": width, "height": height,
+                    "stroke": None if stroke == "nil" else float(stroke), "size": drawn})
+    return out
+
+
+def glyph_svg(glyph: dict) -> str:
+    """The glyph as an SVG: stroked in currentColor, or filled when it has no stroke."""
+    paint = ('fill="none" stroke="currentColor" stroke-width="' + number(glyph["stroke"], glyph["name"])
+             + '" stroke-linejoin="round"') if glyph["stroke"] is not None else 'fill="currentColor"'
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {glyph["width"]} {glyph["height"]}" '
+            f'width="{glyph["size"][0]}" height="{glyph["size"][1]}"><path d="{glyph["data"]}" {paint}/></svg>')
+
+
+def render_glyphs_rust(glyphs: list[dict]) -> list[str]:
+    out = ["/// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.", "pub mod glyph {"]
+    for glyph in glyphs:
+        const = snake(glyph["name"]).upper()
+        out.append(f"    pub const {const}: &str = r#\"{glyph_svg(glyph)}\"#;")
+    out.append("    /// Every glyph by its name in `GlassGlyph`.")
+    out.append("    pub const ALL: &[(&str, &str)] = &[")
+    for glyph in glyphs:
+        out.append(f'        ("{glyph["name"]}", {snake(glyph["name"]).upper()}),')
+    out.append("    ];")
+    out.append("}")
+    return out
+
+
 def render_gtk(tokens: dict) -> str:
     values = role_values(tokens)
     out = [
@@ -531,6 +769,16 @@ def render_gtk(tokens: dict) -> str:
         out.append(f'pub const INSIGHTS_{scheme.upper()}_CSS: &str = r#"')
         out.append(render_insights_css(tokens, scheme))
         out.append('"#;')
+    out.append("")
+    for scheme in SCHEMES:
+        out.append(f"/// The painted Monitor window's tiers, type roles and inks, {scheme} scheme.")
+        out.append(f'pub const GLASS_{scheme.upper()}_CSS: &str = r#"')
+        out.append(render_glass_css(tokens, scheme))
+        out.append('"#;')
+    out.append("")
+    out.extend(render_glass_rust(tokens))
+    out.append("")
+    out.extend(render_glyphs_rust(parse_glyphs(GLYPHS.read_text())))
     out.append("")
     return "\n".join(out)
 

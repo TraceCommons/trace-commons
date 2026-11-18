@@ -30,8 +30,11 @@
 //!   panes reallocate inside the width the window has.
 //! - The first launch seeds the panes from the display's first monitor: a
 //!   Wayland client does not know which monitor its window will open on.
-//! - The toolbar toggles and the gear carry themed symbolic icons until the
-//!   look slice exports the Mac's glyphs.
+//! - The toolbar toggles and the gear carry the Mac's own glyphs
+//!   (`glyph`), exported from its path data, and every pane, the tab strip
+//!   and the toolbar capsule are painted with the glass tiers
+//!   (`brand_tokens::GLASS_*_CSS`): opaque, as the Mac draws them under
+//!   Reduce Transparency.
 //! - Settings' own dialogs and toasts still belong to the main window.
 
 use std::cell::{Cell, RefCell};
@@ -49,7 +52,8 @@ use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
 use super::tabs::{self, Back, Location, MapView, Route, Tab, TracesPage};
 use super::three_pane::ThreePane;
-use super::{demand, graph_model};
+use super::{demand, glyph, graph_model};
+use crate::ui::style::brand_tokens;
 use crate::ui::{App, style};
 
 /// The existing screens the window hosts, and the notices laid over them.
@@ -82,6 +86,10 @@ struct State {
     last_demand: RefCell<BTreeSet<String>>,
     /// The opened History row's submission id; empty for none.
     opened_history: RefCell<String>,
+    /// The opened record's contribution details, read once per opening
+    /// and kept across redraws, so a queue or History refresh does not
+    /// read the server again or flash its reading line.
+    history_detail_slot: RefCell<Option<(String, gtk::Box)>>,
     /// The notices closed with their X until the window is opened again.
     closed: Rc<RefCell<notices::Closed>>,
     missions: bool,
@@ -286,10 +294,11 @@ pub struct Shell {
 
 /// One toolbar toggle. Its name and tip say what pressing it does, so they
 /// are set with its state (`Shell::apply`), not here.
-fn toolbar_toggle(icon: &str) -> gtk::ToggleButton {
+fn toolbar_toggle(glyph_svg: &str) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::new();
-    button.set_icon_name(icon);
+    button.set_child(Some(&glyph::icon(glyph_svg)));
     button.add_css_class("tc-tab");
+    button.add_css_class("tc-toolbar-toggle");
     button.add_css_class("flat");
     button
 }
@@ -307,6 +316,8 @@ fn monitor_width() -> Option<f64> {
 impl Shell {
     pub fn new(window: &adw::ApplicationWindow, pages: Pages<'_>, missions: bool) -> Self {
         let words = monitor_screens_copy();
+        // The ground the panes sit on, seen in the gaps between them.
+        window.add_css_class("tc-glass-window");
 
         // --- The toolbar row, which is the title bar --------------------
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, style::space::S);
@@ -335,16 +346,20 @@ impl Shell {
                 toolbar.append(&controls);
             }
         }
-        let graph_toggle = toolbar_toggle("view-statistics-symbolic");
-        let map_toggle = toolbar_toggle("mark-location-symbolic");
-        let inspector_toggle = toolbar_toggle("sidebar-show-right-symbolic");
+        let graph_toggle = toolbar_toggle(brand_tokens::glyph::GRAPH);
+        let map_toggle = toolbar_toggle(brand_tokens::glyph::MAP);
+        let inspector_toggle = toolbar_toggle(brand_tokens::glyph::INSPECTOR);
         let capsule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        capsule.add_css_class("tc-switcher");
+        capsule.add_css_class("tc-glass-control");
+        capsule.add_css_class("tc-toolbar-capsule");
         capsule.set_valign(gtk::Align::Center);
         for toggle in [&graph_toggle, &map_toggle, &inspector_toggle] {
             capsule.append(toggle);
         }
-        let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
+        let settings_button = gtk::Button::new();
+        settings_button.set_child(Some(&glyph::icon(brand_tokens::glyph::GEAR)));
+        settings_button.add_css_class("tc-toolbar-toggle");
+        settings_button.add_css_class("tc-toolbar-gear");
         settings_button.add_css_class("flat");
         settings_button.add_css_class("circular");
         settings_button.set_valign(gtk::Align::Center);
@@ -364,7 +379,7 @@ impl Shell {
         let inference_dot = gtk::Label::builder().visible(false).build();
         inference_dot.set_valign(gtk::Align::Center);
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        strip.add_css_class("tc-switcher");
+        strip.add_css_class("tc-glass-tabs");
         strip.set_halign(gtk::Align::Start);
         strip.set_margin_start(style::space::M);
         strip.set_margin_end(style::space::M);
@@ -373,7 +388,9 @@ impl Shell {
         let mut tab_buttons: Vec<(Tab, gtk::ToggleButton)> = Vec::new();
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
             let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
-            content.append(&gtk::Label::new(Some(tab.title())));
+            let title = gtk::Label::new(Some(tab.title()));
+            title.add_css_class("tc-type-label");
+            content.append(&title);
             match tab {
                 Tab::Traces => content.append(&traces_badge),
                 Tab::Inference => content.append(&inference_dot),
@@ -647,7 +664,9 @@ impl Shell {
         let graph = GraphFooter::new();
 
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        main.add_css_class("tc-root");
+        main.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        main.set_overflow(gtk::Overflow::Hidden);
         main.append(&handle);
         main.append(&strip);
         main.append(&breadcrumb);
@@ -658,7 +677,9 @@ impl Shell {
         let map = TraceMap::new();
         map.root.set_vexpand(true);
         let map_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        map_pane.add_css_class("tc-root");
+        map_pane.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        map_pane.set_overflow(gtk::Overflow::Hidden);
         map_pane.append(&map.root);
 
         // --- The inspector pane ----------------------------------------
@@ -681,7 +702,9 @@ impl Shell {
         inspector_stack.add_named(&inspector.root, Some("traces"));
         inspector_stack.add_named(&history_scroller, Some("history"));
         let inspector_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        inspector_pane.add_css_class("tc-root");
+        inspector_pane.add_css_class("tc-glass-pane");
+        // The rounded corners clip what the pane holds.
+        inspector_pane.set_overflow(gtk::Overflow::Hidden);
         inspector_pane.append(&inspector_stack);
 
         let root = ThreePane::new(&main, &map_pane, &inspector_pane);
@@ -711,6 +734,7 @@ impl Shell {
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
                 opened_history: RefCell::new(String::new()),
+                history_detail_slot: RefCell::new(None),
                 closed,
                 missions,
             },
@@ -985,6 +1009,8 @@ impl Shell {
     /// inspector opens. Clearing it closes nothing.
     pub fn open_history_row(&self, app: &Rc<App>, submission_id: &str) {
         self.state.opened_history.replace(submission_id.to_string());
+        // Opening a row reads its details afresh.
+        self.state.history_detail_slot.replace(None);
         if !submission_id.is_empty() {
             self.update_prefs(|prefs| prefs.shows_inspector = true);
         }
@@ -1005,9 +1031,39 @@ impl Shell {
             .as_ref()
             .and_then(|records| records.iter().find(|r| r.submission_id == opened))
         {
-            Some(record) => self
-                .history_detail
-                .append(&crate::ui::history::record_detail(record)),
+            Some(record) => {
+                self.history_detail
+                    .append(&crate::ui::history::record_detail(record));
+                // The contribution's details, read from the daemon, as the
+                // Mac's `SessionDetailView` shows them beside the record.
+                if !record.submission_id.is_empty() {
+                    let kept = self
+                        .state
+                        .history_detail_slot
+                        .borrow()
+                        .clone()
+                        .filter(|(id, _)| *id == record.submission_id);
+                    let slot = match kept {
+                        Some((_, slot)) => slot,
+                        None => {
+                            let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                            let id = record.submission_id.clone();
+                            crate::ui::history_detail::load(
+                                app,
+                                &slot,
+                                &record.submission_id,
+                                &record.status,
+                                move |app| *app.shell.state.opened_history.borrow() == id,
+                            );
+                            self.state
+                                .history_detail_slot
+                                .replace(Some((record.submission_id.clone(), slot.clone())));
+                            slot
+                        }
+                    };
+                    self.history_detail.append(&slot);
+                }
+            }
             // A row that has gone is the Traces selection again, never a
             // stale card.
             None if records.is_some() => self.state.opened_history.borrow_mut().clear(),
@@ -1018,11 +1074,15 @@ impl Shell {
     /// What is asking for the inspector right now, from what this window
     /// holds (`demand::asking`): the approval it holds open for undoing (a
     /// trace's Submit, or a folder's Submit all), the folder whose Submit
-    /// all is in flight, and a selected session. The Mac's `kept` key has
-    /// no state behind it in this shell yet: it has no keep action.
+    /// all is in flight, the trace it last kept (`App::last_kept`, the
+    /// Mac's `TracesStore.lastKept`), and a selected session. This shell has
+    /// no keep action yet, so nothing sets `last_kept` and the `kept` key
+    /// never asks; it is wired so a keep opens the inspector once one
+    /// exists.
     fn demand_keys(&self, app: &Rc<App>) -> BTreeSet<String> {
         let undo = app.undo.borrow();
         let submitting = app.submitting_folder.borrow();
+        let kept = app.last_kept.borrow();
         let selection = self.inspector.selection();
         demand::keys(&demand::asking(
             undo.as_ref().map(|undo| demand::Approval {
@@ -1031,7 +1091,7 @@ impl Shell {
                 folder: undo.folder.as_deref(),
             }),
             submitting.as_deref(),
-            None,
+            kept.as_deref(),
             match &selection {
                 Selection::Session(id) => Some(id.as_str()),
                 Selection::Folder(_) | Selection::None => None,
@@ -1284,6 +1344,7 @@ impl Shell {
             words.shell.show_graph,
         );
         self.graph.root.set_reveal_child(graph_shown);
+        self.map.set_cards_shown(tabs::transfer_cards_shown(at.tab));
         self.set_toggle(
             &self.map_toggle,
             prefs.shows_map,
@@ -2480,6 +2541,34 @@ mod tests {
         assert!(
             !css.contains(".tc-notice-closable .tc-card"),
             "every card nested in a closable notice gets the X's room"
+        );
+    }
+
+    /// In the glass window the screens' `.tc-root` is transparent and the
+    /// ground under the tab is the pane's own fill (`@tc_glass_pane`), not
+    /// the shell's `@tc_bg`: with `@tc_bg` the stack was a warm band over
+    /// the cool pane in light (#F6F7F4 on #f2f3f6) and an olive one over
+    /// navy in dark (#23251D on #0d1124), on the Ubuntu 24.04 and 26.04
+    /// captures. The stack in a glass pane takes the pane's fill.
+    #[test]
+    fn the_notice_stacks_ground_in_the_glass_pane_is_the_panes_fill() {
+        let css = include_str!("../style.css");
+        let rule = |sheet: &str, selector: &str| {
+            sheet
+                .split(&format!("{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        for sheet in [brand_tokens::GLASS_LIGHT_CSS, brand_tokens::GLASS_DARK_CSS] {
+            assert!(rule(sheet, ".tc-glass-pane").contains("background-color: @tc_glass_pane;"));
+        }
+        assert!(rule(css, ".tc-glass-pane .tc-root").contains("background-color: transparent;"));
+        assert!(
+            rule(css, &format!(".tc-glass-pane .{NOTICE_BACKDROP_CLASS}"))
+                .contains("background-color: @tc_glass_pane;"),
+            "the stack's ground in a glass pane is not the pane's fill"
         );
     }
 }

@@ -15,11 +15,20 @@
 //! `list_projects`, `get_settings`, `status`, `tool_destinations` and
 //! `list_history`, through the window's worker.
 //!
+//! What moves (the transfers slice): the flowing arcs' dashes, and the
+//! traces the window's transfer player plays (`transfers`,
+//! `map_transfers`), on the widget's frame clock. The clock runs only
+//! while something moves: at 30 frames a second for the dashes, 60 while a
+//! run plays, and not at all under reduced motion (`gtk-enable-animations`
+//! off), where the map draws no run and no moving dash and only the cards
+//! at its foot say what is happening. The nodes, their names and the pad,
+//! and at rest the pile and the rocket on the pad too, are a still layer,
+//! kept as a render node and drawn again only when what it is drawn from
+//! changes (`StillKey`), as the Mac keys its still layer: at rest a tick
+//! redraws only the arcs.
+//!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
-//! - Nothing moves yet. A flowing arc is drawn lit and still, as the Mac
-//!   draws it under Reduce Motion; the moving dashes, the transfers and the
-//!   frame clock are the transfers slice.
 //! - The pile opens at once under the pointer, where the Mac stages it
 //!   (taller, then wider, then the names).
 //! - The library is a disc and the coins carry the tools' initials: the
@@ -43,8 +52,11 @@ use super::map_scene::{
     self, ArcStyle, CommonsGate, Contributions, Lamp, MapGeometry, NodeKind, Point, Scene,
     ScreenState, Size, ToolStack,
 };
+use super::map_transfers;
 use super::tabs::MapView;
 use super::traces_tree::{ProjectMode, SourceKind, TracesTree};
+use super::transfer_card;
+use super::transfers::{self, Action, Feed, MapTransfer, Player, Run};
 use crate::model::{GateStatus, HistoryRecord, Project, QueueEntry, Settings, ToolDestinations};
 use crate::ui::App;
 
@@ -75,6 +87,44 @@ impl Default for SceneInputs {
 type FolderCallback = Box<dyn Fn(String)>;
 type Card = (gtk::Box, gtk::Label, gtk::Label);
 
+/// Whether the desktop asks for reduced motion: animations switched off.
+pub fn reduce_motion() -> bool {
+    gtk::Settings::default().is_some_and(|settings| !settings.is_gtk_enable_animations())
+}
+
+/// What the still layer is drawn from: the nodes, their names and the
+/// pad. Equal keys draw the same picture, so a tick of the clock that
+/// changes none of them draws none of it again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StillKey {
+    pub scene: Scene,
+    pub fit: MapGeometry,
+    pub selection: Option<String>,
+    pub palette: Palette,
+    /// At rest, whether the pile is open: the pile, its words and the
+    /// rocket on the pad are then part of the layer. `None` during a run,
+    /// when they move and are drawn frame by frame.
+    pub resting: Option<bool>,
+}
+
+impl StillKey {
+    /// Whether this key is the one for these, without building another.
+    pub fn is(
+        &self,
+        scene: &Scene,
+        fit: &MapGeometry,
+        selection: Option<&str>,
+        palette: &Palette,
+        resting: Option<bool>,
+    ) -> bool {
+        self.scene == *scene
+            && self.fit == *fit
+            && self.selection.as_deref() == selection
+            && self.palette == *palette
+            && self.resting == resting
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -95,6 +145,18 @@ mod imp {
         pub pill: RefCell<Option<gtk::Button>>,
         pub card: RefCell<Option<Card>>,
         pub on_select_folder: RefCell<Option<FolderCallback>>,
+        /// The run the window's player is playing, if any.
+        pub run: RefCell<Option<Run>>,
+        /// The frame clock's callback, while something moves.
+        pub tick: RefCell<Option<gtk::TickCallbackId>>,
+        /// The clock's last drawn frame and its rate, in seconds.
+        pub last_frame: Cell<f64>,
+        pub interval: Cell<f64>,
+        /// The still layer and what it was drawn from.
+        pub still: RefCell<Option<(StillKey, gtk::gsk::RenderNode)>>,
+        /// The pile's coin order and openness the buttons were last
+        /// allocated for.
+        pub pile_at: RefCell<(Vec<String>, bool)>,
         /// The legend's memory item, shown while the tool group is drawn.
         pub memory_legend: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     }
@@ -121,6 +183,7 @@ mod imp {
 
             let pill = gtk::Button::new();
             pill.add_css_class("tc-map-pill");
+            pill.add_css_class("tc-glass-control");
             pill.set_visible(false);
             pill.set_parent(&*obj);
             let weak = obj.downgrade();
@@ -139,6 +202,7 @@ mod imp {
                 .visible(false)
                 .build();
             card.add_css_class("tc-map-card");
+            card.add_css_class("tc-glass-node-card");
             let title = gtk::Label::new(None);
             title.add_css_class("heading");
             title.set_xalign(0.0);
@@ -173,9 +237,24 @@ mod imp {
                     obj.queue_draw();
                 }
             });
+
+            // Reduced motion stops the clock at once, and lets it run again.
+            if let Some(settings) = gtk::Settings::default() {
+                let weak = obj.downgrade();
+                settings.connect_gtk_enable_animations_notify(move |_| {
+                    if let Some(obj) = weak.upgrade() {
+                        obj.update_clock();
+                        obj.queue_allocate();
+                        obj.queue_draw();
+                    }
+                });
+            }
         }
 
         fn dispose(&self) {
+            if let Some(tick) = self.tick.take() {
+                tick.remove();
+            }
             for (_, button) in self.nodes.take() {
                 button.unparent();
             }
@@ -213,14 +292,17 @@ mod imp {
             }
             let fit = self.geometry();
             let scene = self.scene.borrow();
-            let open = self.pile_open.get();
+            let (order, open) = self.pile(&scene);
+            self.pile_at.replace((order.clone(), open));
             for (id, button) in self.nodes.borrow().iter() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
                     button.set_child_visible(false);
                     continue;
                 };
                 button.set_child_visible(true);
-                let at = coin_index(&scene, id)
+                let at = order
+                    .iter()
+                    .position(|tool| tool == id)
                     .and_then(|i| Some(scene.stack.as_ref()?.coin_center(i, open)))
                     .unwrap_or(node.at);
                 let centre = fit.point(at);
@@ -300,19 +382,24 @@ mod imp {
             let scene = self.scene.borrow();
             let palette = Palette::current(&*obj);
             let bounds = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+            let reduce = reduce_motion();
+            // The arcs, redrawn on every tick: their dashes move.
             let cr = snapshot.append_cairo(&bounds);
             let healthy = self.inputs.borrow().gate.state.is_healthy();
-            draw_arcs(&cr, &scene, &fit, &palette, healthy);
-            let selection = self.selection();
-            for node in &scene.nodes {
-                let selected = selection.as_deref() == Some(node.id.as_str());
-                draw_node(&cr, &scene, node, &fit, &palette, selected);
-            }
-            if let Some(stack) = scene.stack.as_ref() {
-                draw_pile(&cr, &scene, stack, &fit, &palette, self.pile_open.get());
-            }
+            let phase = transfers::dash_phase(self.now(), reduce);
+            draw_arcs(&cr, &scene, &fit, &palette, healthy, phase);
             drop(cr);
-            self.draw_words(snapshot, &scene, &fit, &palette);
+            // The nodes, their names and the pad: drawn again only when
+            // what they are drawn from changes.
+            let motion = self.motion();
+            // At rest the pile, its words and the rocket on the pad are
+            // still too, so they join the still layer; during a run they
+            // move and are drawn on every frame.
+            let resting = motion.is_none().then(|| self.pile_open.get());
+            self.append_still(snapshot, &scene, &fit, &palette, &bounds, resting);
+            if let Some((run, t)) = motion.as_ref() {
+                self.draw_moving(snapshot, &scene, run, *t, &fit, &palette, &bounds);
+            }
             for child in self.children() {
                 obj.snapshot_child(&child, snapshot);
             }
@@ -401,7 +488,9 @@ mod imp {
                 let Some(stack) = scene.stack.as_ref() else {
                     return;
                 };
-                let (x, y, w, h) = stack.card(&self.geometry(), open, open);
+                // The card as drawn: while a trace moves it keeps its size.
+                let drawn = self.pile(&scene).1;
+                let (x, y, w, h) = stack.card(&self.geometry(), drawn, drawn);
                 pointer.is_some_and(|(px, py)| px >= x && px <= x + w && py >= y && py <= y + h)
             };
             if inside != open {
@@ -453,14 +542,206 @@ mod imp {
             snapshot.restore();
         }
 
-        fn draw_words(
+        /// The seconds on the map's clock: the frame clock's, so a run and
+        /// the dashes move with the frames drawn.
+        pub fn now(&self) -> f64 {
+            self.obj().frame_clock().map_or_else(
+                || glib::monotonic_time() as f64 / 1e6,
+                |clock| clock.frame_time() as f64 / 1e6,
+            )
+        }
+
+        /// The run the map draws and the seconds into it: none under
+        /// reduced motion.
+        pub fn motion(&self) -> Option<(Run, f64)> {
+            let run = self.run.borrow();
+            let run = transfers::drawn_run(run.as_ref(), reduce_motion())?;
+            Some((run.clone(), self.now() - run.start))
+        }
+
+        /// The pile's coin order, front first, and whether it is open:
+        /// while a trace moves the pile keeps its size, and each trace's
+        /// tool comes to the front as it sets off.
+        pub fn pile(&self, scene: &Scene) -> (Vec<String>, bool) {
+            let Some(stack) = scene.stack.as_ref() else {
+                return (Vec::new(), false);
+            };
+            match self.motion() {
+                Some((run, t)) => (
+                    run.order(&stack.tools, t),
+                    self.pile_open.get() && !run.moving(t),
+                ),
+                None => (stack.tools.clone(), self.pile_open.get()),
+            }
+        }
+
+        /// Whether the pile has moved since its buttons were allocated.
+        pub fn pile_moved(&self) -> bool {
+            let scene = self.scene.borrow();
+            *self.pile_at.borrow() != self.pile(&scene)
+        }
+
+        /// The still layer: kept while its key holds, drawn again when not.
+        fn append_still(
+            &self,
+            snapshot: &gtk::Snapshot,
+            scene: &Scene,
+            fit: &MapGeometry,
+            palette: &Palette,
+            bounds: &gtk::graphene::Rect,
+            resting: Option<bool>,
+        ) {
+            let selection = self.selection();
+            let kept = self
+                .still
+                .borrow()
+                .as_ref()
+                .filter(|(key, _)| key.is(scene, fit, selection.as_deref(), palette, resting))
+                .map(|(_, node)| node.clone());
+            let node = kept.or_else(|| {
+                let still = gtk::Snapshot::new();
+                let cr = still.append_cairo(bounds);
+                for node in &scene.nodes {
+                    let selected = selection.as_deref() == Some(node.id.as_str());
+                    draw_node(&cr, scene, node, fit, palette, selected);
+                }
+                drop(cr);
+                self.draw_node_words(&still, scene, fit, palette);
+                if let Some(open) = resting {
+                    // The rocket on the pad, then the pile over it.
+                    let cr = still.append_cairo(bounds);
+                    map_transfers::resting_rocket(&cr, scene, fit, palette);
+                    if let Some(stack) = scene.stack.as_ref() {
+                        draw_pile(
+                            &cr,
+                            scene,
+                            stack,
+                            &stack.tools,
+                            &[],
+                            None,
+                            fit,
+                            palette,
+                            open,
+                        );
+                    }
+                    drop(cr);
+                    if let Some(stack) = scene.stack.as_ref() {
+                        self.draw_pile_words(&still, scene, &stack.tools, open, fit, palette);
+                    }
+                }
+                let node = still.to_node()?;
+                let key = StillKey {
+                    scene: scene.clone(),
+                    fit: *fit,
+                    selection: selection.clone(),
+                    palette: palette.clone(),
+                    resting,
+                };
+                self.still.replace(Some((key, node.clone())));
+                Some(node)
+            });
+            if let Some(node) = node {
+                snapshot.append_node(&node);
+            }
+        }
+
+        /// What moves during a run, over the still layer and frame by frame:
+        /// the traces, the rocket, the pile in the run's order with its
+        /// grown coin, the rim light, and the run's words.
+        #[allow(clippy::too_many_arguments)]
+        fn draw_moving(
+            &self,
+            snapshot: &gtk::Snapshot,
+            scene: &Scene,
+            run: &Run,
+            t: f64,
+            fit: &MapGeometry,
+            palette: &Palette,
+            bounds: &gtk::graphene::Rect,
+        ) {
+            let (order, open) = self.pile(scene);
+            let cr = snapshot.append_cairo(bounds);
+            let dock = map_transfers::draw(&cr, scene, run, t, fit, palette);
+            // Between contributions the rocket stands on the pad.
+            if run.action() != Action::Contribute {
+                map_transfers::resting_rocket(&cr, scene, fit, palette);
+            }
+            if let Some(stack) = scene.stack.as_ref() {
+                let grown: Vec<String> = run.orbits(t).into_iter().map(|(id, _)| id).collect();
+                let glow = map_transfers::glow(Some(run.action()), palette);
+                draw_pile(
+                    &cr,
+                    scene,
+                    stack,
+                    &order,
+                    &grown,
+                    Some(&glow),
+                    fit,
+                    palette,
+                    open,
+                );
+            }
+            drop(cr);
+            self.draw_pile_words(snapshot, scene, &order, open, fit, palette);
+            // The light round a coin's rim, over the coins.
+            if let Some(stack) = scene.stack.as_ref() {
+                let cr = snapshot.append_cairo(bounds);
+                map_transfers::rim_lights(&cr, stack, run, t, fit, palette);
+                drop(cr);
+            }
+            self.draw_run_words(snapshot, scene, run, t, dock, fit, palette);
+        }
+
+        /// The run's words: the line under the pad while a contribution's
+        /// traces gather, and the library's "+N" as the rocket docks.
+        #[allow(clippy::too_many_arguments)]
+        fn draw_run_words(
+            &self,
+            snapshot: &gtk::Snapshot,
+            scene: &Scene,
+            run: &Run,
+            t: f64,
+            dock: Option<map_transfers::DockLabel>,
+            fit: &MapGeometry,
+            palette: &Palette,
+        ) {
+            let words = map_scene::words();
+            let s = fit.scale;
+            if let Some(line) = transfers::line_under_pad(run, t, &words)
+                && let Some(hub) = scene.nodes.iter().find(|n| n.id == "hub")
+            {
+                let (_, sublabel_size, _, sublabel_offset) = map_scene::label_type(s);
+                let centre = fit.point(hub.at);
+                self.text(
+                    snapshot,
+                    &line,
+                    Point::new(centre.x, centre.y + 16.0 * s + sublabel_offset),
+                    sublabel_size,
+                    false,
+                    Anchor::Middle,
+                    &palette.secondary(1.0),
+                );
+            }
+            if let Some(dock) = dock {
+                self.text(
+                    snapshot,
+                    &dock.text,
+                    dock.at,
+                    (10.0 * s).max(9.0),
+                    true,
+                    Anchor::Middle,
+                    &palette.accent,
+                );
+            }
+        }
+
+        fn draw_node_words(
             &self,
             snapshot: &gtk::Snapshot,
             scene: &Scene,
             fit: &MapGeometry,
             palette: &Palette,
         ) {
-            let words = map_scene::words();
             let (label_size, sublabel_size, label_offset, sublabel_offset) =
                 map_scene::label_type(fit.scale);
             let traces = scene.stack.is_some();
@@ -497,7 +778,7 @@ mod imp {
                 }
                 if let Some(sublabel) = node.sublabel.as_deref() {
                     let at = Point::new(centre.x, centre.y + radius + sublabel_offset);
-                    let colour = palette.ink(0.6 * node.dim);
+                    let colour = palette.secondary(node.dim);
                     self.text(
                         snapshot,
                         sublabel,
@@ -511,7 +792,7 @@ mod imp {
             }
             for overflow in &scene.overflows {
                 let text = format!("+{}", overflow.count);
-                let colour = palette.ink(0.6);
+                let colour = palette.secondary(1.0);
                 self.text(
                     snapshot,
                     &text,
@@ -522,11 +803,24 @@ mod imp {
                     &colour,
                 );
             }
+        }
+
+        /// The pile's heading, its coins' initials and, open, each coin's
+        /// name and what waits from it, in the pile's order.
+        fn draw_pile_words(
+            &self,
+            snapshot: &gtk::Snapshot,
+            scene: &Scene,
+            order: &[String],
+            open: bool,
+            fit: &MapGeometry,
+            palette: &Palette,
+        ) {
+            let words = map_scene::words();
             let Some(stack) = scene.stack.as_ref() else {
                 return;
             };
             let s = fit.scale;
-            let open = self.pile_open.get();
             let left = fit.point(stack.port_left());
             let height = stack.height(open) * s;
             self.text(
@@ -536,9 +830,9 @@ mod imp {
                 (10.0 * s).max(9.0),
                 true,
                 Anchor::Start,
-                &palette.ink(0.6),
+                &palette.secondary(1.0),
             );
-            for (index, id) in stack.tools.iter().enumerate() {
+            for (index, id) in order.iter().enumerate() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
                     continue;
                 };
@@ -585,7 +879,7 @@ mod imp {
                     &colour,
                 );
                 if let Some(line) = line {
-                    let colour = palette.ink(0.6 * shown);
+                    let colour = palette.secondary(shown);
                     let at = Point::new(x, centre.y + 7.0 * s);
                     self.text(
                         snapshot,
@@ -640,8 +934,73 @@ impl MapCanvas {
     fn relayout(&self) {
         self.imp().layout_scene();
         self.sync_children();
+        self.update_clock();
         self.queue_allocate();
         self.queue_draw();
+    }
+
+    /// The run the window's player is playing, or none.
+    pub fn set_run(&self, run: Option<Run>) {
+        let imp = self.imp();
+        if *imp.run.borrow() == run {
+            return;
+        }
+        imp.run.replace(run);
+        self.update_clock();
+        self.queue_allocate();
+        self.queue_draw();
+    }
+
+    pub fn run(&self) -> Option<Run> {
+        self.imp().run.borrow().clone()
+    }
+
+    /// Whether the map's clock is running: only while something moves.
+    pub fn is_ticking(&self) -> bool {
+        self.imp().tick.borrow().is_some()
+    }
+
+    /// Runs the frame clock while something moves and stops it when
+    /// nothing does: the dashes at 30 frames a second, a run at 60, and
+    /// nothing at all under reduced motion (`FlowMapView.restingMotion`).
+    fn update_clock(&self) {
+        let imp = self.imp();
+        let reduce = reduce_motion();
+        let flows = imp.scene.borrow().flows();
+        let healthy = imp.inputs.borrow().gate.state.is_healthy();
+        // This shell's library does not turn yet (the look slice).
+        let resting = transfers::resting_motion(reduce, flows, healthy, false);
+        let running = transfers::drawn_run(imp.run.borrow().as_ref(), reduce).is_some();
+        imp.interval.set(if running {
+            transfers::RUN_INTERVAL
+        } else {
+            resting.interval
+        });
+        let needed = running || !resting.paused;
+        if !needed {
+            if let Some(tick) = imp.tick.take() {
+                tick.remove();
+            }
+            return;
+        }
+        if imp.tick.borrow().is_some() {
+            return;
+        }
+        let tick = self.add_tick_callback(|canvas, clock| {
+            let imp = canvas.imp();
+            let now = clock.frame_time() as f64 / 1e6;
+            // A little under the interval, so a frame that lands just early
+            // is not skipped.
+            if now - imp.last_frame.get() >= imp.interval.get() * 0.9 {
+                imp.last_frame.set(now);
+                if imp.pile_moved() {
+                    canvas.queue_allocate();
+                }
+                canvas.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+        imp.tick.replace(Some(tick));
     }
 
     pub fn scene(&self) -> Scene {
@@ -861,68 +1220,84 @@ impl MapCanvas {
     }
 }
 
-/// The index of a tool's coin in the pile, for a tool node's id.
-fn coin_index(scene: &Scene, id: &str) -> Option<usize> {
-    scene
-        .stack
-        .as_ref()?
-        .tools
-        .iter()
-        .position(|tool| tool == id)
-}
-
 // --- Drawing -----------------------------------------------------------------
 
 /// The colours the map draws with: the theme's ink and background, and the
 /// shell's accent and status tokens for the current scheme.
-struct Palette {
-    ink: gtk::gdk::RGBA,
-    background: gtk::gdk::RGBA,
-    accent: gtk::gdk::RGBA,
-    on: gtk::gdk::RGBA,
-    ask: gtk::gdk::RGBA,
-    outside: gtk::gdk::RGBA,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Palette {
+    pub ink: gtk::gdk::RGBA,
+    /// Secondary labels: opaque, and clear of 4.5:1 on the map's ground.
+    pub secondary: gtk::gdk::RGBA,
+    pub background: gtk::gdk::RGBA,
+    pub accent: gtk::gdk::RGBA,
+    pub on: gtk::gdk::RGBA,
+    pub ask: gtk::gdk::RGBA,
+    pub outside: gtk::gdk::RGBA,
 }
 
 impl Palette {
-    #[allow(deprecated)]
-    fn current(widget: &impl IsA<gtk::Widget>) -> Self {
-        use crate::ui::style::brand_tokens::{dark, light};
+    /// A palette that needs no widget, for tests of what is drawn in
+    /// which colour.
+    #[cfg(test)]
+    pub fn fixed() -> Self {
+        use crate::ui::style::brand_tokens::light;
         let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
+        Self {
+            ink: gtk::gdk::RGBA::BLACK,
+            secondary: parse(&crate::ui::style::Inks::standard(false).muted),
+            background: gtk::gdk::RGBA::WHITE,
+            accent: parse(light::ACCENT),
+            on: parse(light::STATUS_ON),
+            ask: parse(light::STATUS_ASK),
+            outside: parse(light::STATUS_OUTSIDE),
+        }
+    }
+
+    #[allow(deprecated)]
+    pub fn current(widget: &impl IsA<gtk::Widget>) -> Self {
         let dark_scheme = adw::StyleManager::default().is_dark();
-        let (accent, on, ask, outside) = if dark_scheme {
-            (
-                dark::ACCENT,
-                dark::STATUS_ON,
-                dark::STATUS_ASK,
-                dark::STATUS_OUTSIDE,
-            )
-        } else {
-            (
-                light::ACCENT,
-                light::STATUS_ON,
-                light::STATUS_ASK,
-                light::STATUS_OUTSIDE,
-            )
-        };
         let context = widget.as_ref().style_context();
         let fallback = if dark_scheme {
             gtk::gdk::RGBA::BLACK
         } else {
             gtk::gdk::RGBA::WHITE
         };
+        Self::with_inks(
+            context.color(),
+            context.lookup_color("window_bg_color").unwrap_or(fallback),
+            &crate::ui::style::inks(),
+        )
+    }
+
+    /// The theme's ink and ground, with the accent and status fills from
+    /// `inks`: the generated tokens in the standard look, the Omarchy
+    /// palette's in the skin.
+    pub fn with_inks(
+        ink: gtk::gdk::RGBA,
+        background: gtk::gdk::RGBA,
+        inks: &crate::ui::style::Inks,
+    ) -> Self {
+        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         Self {
-            ink: context.color(),
-            background: context.lookup_color("window_bg_color").unwrap_or(fallback),
-            accent: parse(accent),
-            on: parse(on),
-            ask: parse(ask),
-            outside: parse(outside),
+            ink,
+            secondary: parse(&inks.muted),
+            background,
+            accent: parse(&inks.accent),
+            on: parse(&inks.status_on),
+            ask: parse(&inks.status_ask),
+            outside: parse(&inks.status_outside),
         }
     }
 
-    fn ink(&self, alpha: f64) -> gtk::gdk::RGBA {
+    pub fn ink(&self, alpha: f64) -> gtk::gdk::RGBA {
         self.ink.with_alpha(self.ink.alpha() * alpha as f32)
+    }
+
+    /// The secondary ink, faded by `alpha` only where a node is dimmed.
+    pub fn secondary(&self, alpha: f64) -> gtk::gdk::RGBA {
+        self.secondary
+            .with_alpha(self.secondary.alpha() * alpha as f32)
     }
 
     /// A folder's dot by rule: its fill and its ring.
@@ -937,7 +1312,7 @@ impl Palette {
     }
 }
 
-fn source(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
+pub fn source(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
     cr.set_source_rgba(
         f64::from(colour.red()),
         f64::from(colour.green()),
@@ -946,7 +1321,7 @@ fn source(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
     );
 }
 
-fn circle(cr: &gtk::cairo::Context, centre: Point, radius: f64) {
+pub fn circle(cr: &gtk::cairo::Context, centre: Point, radius: f64) {
     cr.new_sub_path();
     cr.arc(
         centre.x,
@@ -970,12 +1345,15 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 
 /// The arcs, under everything else. `healthy`: only a current screen draws
 /// a flowing arc lit; otherwise it is still and dashed, never live.
+/// `phase` is how far a flowing arc's dashes have moved, in design units:
+/// 0 under reduced motion, where they stand still.
 fn draw_arcs(
     cr: &gtk::cairo::Context,
     scene: &Scene,
     fit: &MapGeometry,
     palette: &Palette,
     healthy: bool,
+    phase: f64,
 ) {
     let s = fit.scale;
     for arc in &scene.arcs {
@@ -1009,10 +1387,10 @@ fn draw_arcs(
             ArcStyle::Flowing => {
                 source(cr, &palette.on, 0.35 * arc.dim);
                 let _ = cr.stroke_preserve();
-                // The dashes, still: they move in the transfers slice.
+                // The dashes, moving towards the pad on the map's clock.
                 cr.set_line_width(1.4 * s * 1.3);
                 cr.set_line_cap(gtk::cairo::LineCap::Round);
-                cr.set_dash(&[4.0 * s, 8.0 * s], 0.0);
+                cr.set_dash(&[4.0 * s, 8.0 * s], -phase * s);
                 source(cr, &palette.on, arc.dim);
             }
         }
@@ -1244,10 +1622,17 @@ fn draw_laptop(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palett
 }
 
 /// The tool group: a card, and the coins on it, the front coin first.
+/// The pile: its card, then its coins in `order`, front first. A coin a
+/// trace is in (`grown`) is drawn larger, over the rest, in the run's
+/// `glow`.
+#[allow(clippy::too_many_arguments)]
 fn draw_pile(
     cr: &gtk::cairo::Context,
     scene: &Scene,
     stack: &ToolStack,
+    order: &[String],
+    grown: &[String],
+    glow: Option<&gtk::gdk::RGBA>,
     fit: &MapGeometry,
     palette: &Palette,
     open: bool,
@@ -1262,8 +1647,11 @@ fn draw_pile(
         source(cr, &palette.ink, 0.06);
     }
     let _ = cr.fill();
-    // The back of the pile first, so the front coin is drawn over the rest.
-    for (index, id) in stack.tools.iter().enumerate().rev() {
+    // The back of the pile first, so the front coin is drawn over the rest,
+    // and a grown coin over them all.
+    let mut drawn: Vec<(usize, &String)> = order.iter().enumerate().rev().collect();
+    drawn.sort_by_key(|(_, id)| grown.contains(id));
+    for (index, id) in drawn {
         let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
             continue;
         };
@@ -1271,8 +1659,14 @@ fn draw_pile(
             continue;
         };
         let centre = fit.point(stack.coin_center(index, open));
-        let radius = ToolStack::COIN / 2.0 * s;
+        let is_grown = grown.contains(id);
+        let radius = ToolStack::COIN / 2.0 * s * if is_grown { 1.3 } else { 1.0 };
         let alpha = if node.dashed { 0.55 } else { node.dim };
+        if is_grown && let Some(glow) = glow {
+            circle(cr, centre, radius + 9.0 * s);
+            source(cr, glow, 0.3);
+            let _ = cr.fill();
+        }
         // The coin's edge below it, then an opaque face and its rim.
         circle(cr, Point::new(centre.x, centre.y + 3.0 * s), radius);
         source(cr, &palette.ink, 0.25 * alpha);
@@ -1341,9 +1735,9 @@ fn memory_legend_word() -> &'static str {
     monitor_screens_copy().flow_map.legend_memory_computer
 }
 
-/// The legend's memory item: the coins' lock, and its word.
-fn memory_legend_item() -> gtk::Box {
-    let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+/// The coins' lock as a small widget, for the legend's memory item and the
+/// transfer card's memory well (the Mac's `Image(systemName: "lock")`).
+pub(super) fn lock_icon() -> gtk::DrawingArea {
     let lock = gtk::DrawingArea::new();
     lock.set_content_width(10);
     lock.set_content_height(10);
@@ -1353,6 +1747,13 @@ fn memory_legend_item() -> gtk::Box {
         let centre = Point::new(f64::from(w) / 2.0, f64::from(h) / 2.0);
         draw_lock(cr, centre, 1.0, &palette.ink, 0.6);
     });
+    lock
+}
+
+/// The legend's memory item: the coins' lock, and its word.
+fn memory_legend_item() -> gtk::Box {
+    let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let lock = lock_icon();
     let label = gtk::Label::new(Some(memory_legend_word()));
     label.add_css_class("caption");
     label.add_css_class("dim-label");
@@ -1379,6 +1780,137 @@ struct Reads {
     projects: Option<bool>,
 }
 
+/// The window's transfer player, its feed, and the cards at the map's
+/// foot (`MapTransferPlayer` and `MapTransferFeed` on the Mac). The player
+/// is the window's, so it keeps time whether or not the map is drawn: a
+/// timer wakes it at its next deadline, a run's end or a card's expiry.
+pub struct Transfers {
+    player: RefCell<Player>,
+    feed: RefCell<Feed>,
+    timer: RefCell<Option<glib::SourceId>>,
+    canvas: MapCanvas,
+    /// The cards' column, above the legend and the zoom.
+    pub cards: gtk::Box,
+    /// Whether a tab other than Traces is shown: only then are the cards
+    /// at the map's foot (Traces shows its traces itself).
+    shown: Cell<bool>,
+    /// The ids of the cards drawn now, front first.
+    drawn: RefCell<Vec<String>>,
+}
+
+impl Transfers {
+    fn new(canvas: &MapCanvas) -> Rc<Self> {
+        let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        cards.set_visible(false);
+        Rc::new(Self {
+            player: RefCell::new(Player::default()),
+            feed: RefCell::new(Feed::default()),
+            timer: RefCell::new(None),
+            canvas: canvas.clone(),
+            cards,
+            shown: Cell::new(false),
+            drawn: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// The player's clock: monotonic seconds, the frame clock's own base.
+    fn now() -> f64 {
+        glib::monotonic_time() as f64 / 1e6
+    }
+
+    /// Hands the player what the reads reported, then shows where it is.
+    fn observe(
+        self: &Rc<Self>,
+        entries: &[QueueEntry],
+        history: Option<&[HistoryRecord]>,
+        last_kept: Option<&str>,
+        last_dismissed: Option<&str>,
+    ) {
+        let now = Self::now();
+        self.feed.borrow_mut().observe(
+            &mut self.player.borrow_mut(),
+            entries,
+            history,
+            last_kept,
+            last_dismissed,
+            now,
+        );
+        self.sync();
+    }
+
+    /// Advances the player to now, hands the map its run, draws the cards,
+    /// and wakes again at the next deadline.
+    fn sync(self: &Rc<Self>) {
+        let now = Self::now();
+        self.player.borrow_mut().tick(now);
+        self.canvas.set_run(self.player.borrow().run().cloned());
+        self.draw_cards();
+        if let Some(timer) = self.timer.take() {
+            timer.remove();
+        }
+        let Some(at) = self.player.borrow().next_deadline() else {
+            return;
+        };
+        let delay = std::time::Duration::from_secs_f64((at - now).max(0.0) + 0.001);
+        let weak = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(delay, move || {
+            if let Some(transfers) = weak.upgrade() {
+                // This timer has fired: forget it rather than remove it.
+                transfers.timer.take();
+                transfers.sync();
+            }
+        });
+        self.timer.replace(Some(timer));
+    }
+
+    fn set_shown(self: &Rc<Self>, shown: bool) {
+        if self.shown.replace(shown) != shown {
+            self.draw_cards();
+        }
+    }
+
+    /// The cards drawn: the newest few, newest nearest the legend; none
+    /// while Traces is shown.
+    fn draw_cards(self: &Rc<Self>) {
+        let visible: Vec<MapTransfer> = if self.shown.get() {
+            self.player
+                .borrow()
+                .visible()
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let ids: Vec<String> = visible.iter().map(|card| card.id.clone()).collect();
+        if *self.drawn.borrow() == ids {
+            return;
+        }
+        self.drawn.replace(ids);
+        while let Some(child) = self.cards.first_child() {
+            self.cards.remove(&child);
+        }
+        let scene = self.canvas.scene();
+        for transfer in visible.iter().rev() {
+            let from_map = scene
+                .nodes
+                .iter()
+                .find(|node| node.id == format!("folder:{}", transfer.folder))
+                .map(|node| node.label.clone());
+            let weak = Rc::downgrade(self);
+            let id = transfer.id.clone();
+            let card = transfer_card::card(transfer, from_map.as_deref(), move || {
+                if let Some(transfers) = weak.upgrade() {
+                    transfers.player.borrow_mut().close(&id);
+                    transfers.sync();
+                }
+            });
+            self.cards.append(&card);
+        }
+        self.cards.set_visible(!visible.is_empty());
+    }
+}
+
 pub struct TraceMap {
     pub root: gtk::Box,
     pub canvas: MapCanvas,
@@ -1391,6 +1923,7 @@ pub struct TraceMap {
     foot: gtk::Box,
     spinner: gtk::Spinner,
     reads: RefCell<Reads>,
+    pub transfers: Rc<Transfers>,
 }
 
 impl Default for TraceMap {
@@ -1449,14 +1982,22 @@ impl TraceMap {
         switch.append(&private_view);
         overlay.add_overlay(&switch);
 
-        // The map's foot, fixed whatever its zoom or focus: the legend,
-        // then the zoom, on one row; the legend wraps before it would run
-        // under the zoom.
-        let foot = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        // The map's foot, fixed whatever its zoom or focus: the trace's
+        // cards above, then the legend and the zoom on one row; the legend
+        // wraps before it would run under the zoom.
+        let transfers = Transfers::new(&canvas);
+        let foot = gtk::Box::new(gtk::Orientation::Vertical, 8);
         foot.set_valign(gtk::Align::End);
         foot.set_margin_start(14);
         foot.set_margin_end(14);
         foot.set_margin_bottom(14);
+        let clamp = adw::Clamp::builder()
+            .maximum_size(TRANSFER_CARD_WIDTH)
+            .child(&transfers.cards)
+            .build();
+        foot.append(&clamp);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        foot.append(&row);
         // The legend's items flow onto further lines as the pane narrows,
         // as the Mac's `HistoryFilterFlow` does (`style::wrap_row`).
         let legend = crate::ui::style::wrap_row(10);
@@ -1478,7 +2019,7 @@ impl TraceMap {
             .imp()
             .memory_legend
             .replace(Some(memory.clone().upcast::<gtk::Widget>().downgrade()));
-        foot.append(&legend);
+        row.append(&legend);
         let zoom = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         zoom.add_css_class("linked");
         zoom.set_valign(gtk::Align::End);
@@ -1492,7 +2033,7 @@ impl TraceMap {
         zoom_in.update_property(&[gtk::accessible::Property::Label(words.enlarge)]);
         zoom.append(&zoom_out);
         zoom.append(&zoom_in);
-        foot.append(&zoom);
+        row.append(&zoom);
         overlay.add_overlay(&foot);
         // The foot along the pane's bottom, as tall as its legend is at the
         // pane's width: measured for the width it is given, so a legend that
@@ -1531,6 +2072,7 @@ impl TraceMap {
             foot,
             spinner,
             reads: RefCell::new(Reads::default()),
+            transfers,
         };
         map.connect_zoom();
         map
@@ -1656,8 +2198,42 @@ impl TraceMap {
             });
         }
         self.canvas.set_inputs(inputs);
+        self.observe_transfers(
+            &app.entries.borrow(),
+            app.history_records.borrow().as_deref(),
+            app.last_kept.borrow().as_deref(),
+            app.last_dismissed.borrow().as_deref(),
+        );
+    }
+
+    /// Hands the window's transfer player what the reads now say: a row
+    /// History gained plays as a contribution, the last keep as a keep, the
+    /// last dismissal shows its card.
+    pub fn observe_transfers(
+        &self,
+        entries: &[QueueEntry],
+        history: Option<&[HistoryRecord]>,
+        last_kept: Option<&str>,
+        last_dismissed: Option<&str>,
+    ) {
+        self.transfers
+            .observe(entries, history, last_kept, last_dismissed);
+    }
+
+    /// Whether the transfer cards are at the map's foot: while a tab other
+    /// than Traces is shown (`tabs::transfer_cards_shown`).
+    pub fn set_cards_shown(&self, shown: bool) {
+        self.transfers.set_shown(shown);
+    }
+
+    /// The cards drawn now, front first, by their trace's id.
+    pub fn card_ids(&self) -> Vec<String> {
+        self.transfers.drawn.borrow().clone()
     }
 }
+
+/// The transfer cards' widest, as the Mac's.
+pub const TRANSFER_CARD_WIDTH: i32 = 460;
 
 /// One legend item: a rule's dot, or the dashed ring of a tool that is not
 /// watched, and its word.
@@ -1696,6 +2272,80 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
+    /// The map's dots take their fills from the inks: the standard tokens,
+    /// exactly as `Palette::fixed` pins them, or the Omarchy palette's.
+    #[test]
+    fn the_map_palette_takes_its_fills_from_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::GRUVBOX};
+        use crate::ui::style::Inks;
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        assert_eq!(
+            super::Palette::with_inks(ink, ground, &Inks::standard(false)),
+            super::Palette::fixed()
+        );
+        let p = omarchy::parse(GRUVBOX, false).unwrap();
+        let skin = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p));
+        let rgba = |c: omarchy::Rgb| gtk::gdk::RGBA::parse(c.hex()).unwrap();
+        assert_eq!(skin.accent, rgba(p.accent));
+        assert_eq!(skin.on, rgba(p.status_on));
+        assert_eq!(skin.ask, rgba(p.status_ask));
+        assert_eq!(skin.outside, rgba(p.status_outside));
+    }
+
+    /// The map's secondary labels (the line under the pad, the overflow
+    /// count, the pile's heading, sublabels) are an opaque ink that clears
+    /// 4.5:1 on the grounds the map is drawn on: the glass scene and pane in
+    /// the standard look, and every ground of every vendored Omarchy
+    /// palette. The theme ink at 60% fell to about 2.5:1 on light skins and
+    /// 4.3:1 in Standard light.
+    #[test]
+    fn the_map_secondary_labels_clear_the_text_floor() {
+        use crate::ui::omarchy::{self, Rgb, TEXT, contrast, fixtures::FIXTURES};
+        use crate::ui::style::{Inks, brand_tokens};
+        let rgb = |c: &gtk::gdk::RGBA| {
+            let ch = |v: f32| (f64::from(v) * 255.0).round() as u8;
+            Rgb(ch(c.red()), ch(c.green()), ch(c.blue()))
+        };
+        let define = |css: &str, name: &str| {
+            let prefix = format!("@define-color {name} ");
+            css.lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .and_then(|rest| Rgb::parse(rest.trim_end_matches(';')))
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let (ink, ground) = (gtk::gdk::RGBA::BLACK, gtk::gdk::RGBA::WHITE);
+        let mut failures = Vec::new();
+        for (dark, css) in [
+            (false, brand_tokens::GLASS_LIGHT_CSS),
+            (true, brand_tokens::GLASS_DARK_CSS),
+        ] {
+            let palette = super::Palette::with_inks(ink, ground, &Inks::standard(dark));
+            if palette.secondary.alpha() < 1.0 {
+                failures.push(format!("standard dark={dark}: translucent"));
+            }
+            for name in ["tc_glass_scene", "tc_glass_pane"] {
+                let ratio = contrast(rgb(&palette.secondary), define(css, name));
+                if ratio < TEXT {
+                    failures.push(format!("standard dark={dark} on {name}: {ratio:.2}:1"));
+                }
+            }
+        }
+        for (name, text) in FIXTURES {
+            let p = omarchy::parse(text, false).unwrap();
+            let palette = super::Palette::with_inks(ink, ground, &Inks::omarchy(&p));
+            if palette.secondary.alpha() < 1.0 {
+                failures.push(format!("{name}: translucent"));
+            }
+            for (i, g) in p.grounds().into_iter().enumerate() {
+                let ratio = contrast(rgb(&palette.secondary), g);
+                if ratio < TEXT {
+                    failures.push(format!("{name} on ground {i}: {ratio:.2}:1"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     use super::*;
 
     /// The legend's memory item is the shared copy's word for this
@@ -1723,6 +2373,28 @@ mod tests {
         assert!(coin_has_lock(false, true, 3));
         assert!(!coin_has_lock(true, true, 0));
         assert!(!coin_has_lock(true, false, 0));
+    }
+
+    /// The lock the legend and the transfer card share draws ink in its
+    /// 10 by 10 box.
+    #[test]
+    fn the_lock_draws_ink_in_its_box() {
+        let surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 10, 10).expect("surface");
+        {
+            let cr = gtk::cairo::Context::new(&surface).expect("context");
+            let ink = gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
+            draw_lock(&cr, Point::new(5.0, 5.0), 1.0, &ink, 1.0);
+        }
+        surface.flush();
+        let mut surface = surface;
+        let inked = surface
+            .data()
+            .expect("pixels")
+            .chunks(4)
+            .filter(|px| px[3] != 0)
+            .count();
+        assert!(inked >= 20, "the lock drew {inked} pixels");
     }
 
     fn entry(id: &str, project: &str, source: &str) -> QueueEntry {
@@ -1979,5 +2651,173 @@ mod tests {
                 .any(|n| n.id == "tool:codex" && n.ringed)
         );
         window.close();
+    }
+
+    /// The still layer compares by what it is drawn from: the same scene,
+    /// geometry, selection and colours are the same picture; a zoom, a
+    /// resize, a new selection or a new scheme draws it again.
+    #[test]
+    fn the_still_layer_is_keyed_by_what_it_draws() {
+        let entries = vec![entry("a", "p", "codex")];
+        let tree = TracesTree::build(&entries, &[], None);
+        let scene = Scene::traces(
+            &tree,
+            &CommonsGate::with_state(ScreenState::Ready),
+            &Contributions::unread(),
+            None,
+            &BTreeMap::new(),
+            map_scene::SIZE,
+        );
+        let size = Size::new(580.0, 760.0);
+        let fit = MapGeometry::new(size, 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let key = StillKey {
+            scene: scene.clone(),
+            fit,
+            selection: None,
+            palette: palette.clone(),
+            resting: Some(false),
+        };
+        assert!(key.is(&scene, &fit, None, &palette, Some(false)));
+        assert!(
+            !key.is(&scene, &fit, None, &palette, Some(true)),
+            "the pile opened"
+        );
+        assert!(
+            !key.is(&scene, &fit, None, &palette, None),
+            "a run began: the pile moves"
+        );
+        assert_eq!(
+            MapGeometry::new(size, 1.0, None, scene.space),
+            fit,
+            "the same field is the same geometry"
+        );
+        let zoomed = MapGeometry::new(size, 1.25, None, scene.space);
+        assert_ne!(zoomed, fit);
+        assert!(
+            !key.is(&scene, &zoomed, None, &palette, Some(false)),
+            "a zoom"
+        );
+        let wider = MapGeometry::new(Size::new(600.0, 760.0), 1.0, None, scene.space);
+        assert!(
+            !key.is(&scene, &wider, None, &palette, Some(false)),
+            "a resize"
+        );
+        assert!(
+            !key.is(&scene, &fit, Some("hub"), &palette, Some(false)),
+            "a selection"
+        );
+        let mut dark = palette.clone();
+        dark.ink = gtk::gdk::RGBA::WHITE;
+        assert!(!key.is(&scene, &fit, None, &dark, Some(false)), "a scheme");
+        let other = Scene::traces(
+            &TracesTree::build(&[], &[], None),
+            &CommonsGate::with_state(ScreenState::Ready),
+            &Contributions::unread(),
+            None,
+            &BTreeMap::new(),
+            map_scene::SIZE,
+        );
+        assert!(
+            !key.is(&other, &fit, None, &palette, Some(false)),
+            "a new scene"
+        );
+    }
+
+    /// A dismissal's card sits at the map's foot while another tab than
+    /// Traces is shown, and its X closes it; under reduced motion the map's
+    /// clock stops, no run is drawn, and the card still shows.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_map_shows_transfer_cards_and_stops_under_reduced_motion() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "codex")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+
+        // On Traces the map's foot shows no card.
+        map.set_cards_shown(false);
+        map.observe_transfers(&listed, None, None, None);
+        let left = vec![entry("b", "p", "codex")];
+        map.observe_transfers(&left, None, None, Some("a"));
+        assert!(map.card_ids().is_empty(), "Traces shows its own");
+        // Elsewhere it does, with the shared words, and nothing moves.
+        map.set_cards_shown(true);
+        settle();
+        assert_eq!(map.card_ids(), ["a"]);
+        assert!(map.transfers.cards.is_visible());
+        assert!(map.canvas.run().is_none(), "a dismissal moves nothing");
+        let card = map.transfers.cards.first_child().expect("the card");
+        let close = find_button(&card, monitor_screens_copy().close).expect("its X");
+        close.emit_clicked();
+        settle();
+        assert!(map.card_ids().is_empty(), "its X closes it");
+        assert!(!map.transfers.cards.is_visible());
+
+        // A contribution plays on the map, and the clock runs while it does.
+        let first = vec![history_row("s1", "p", "codex", 100)];
+        let second = vec![
+            history_row("s2", "p", "codex", 200),
+            history_row("s1", "p", "codex", 100),
+        ];
+        map.observe_transfers(&left, Some(&first[..]), None, Some("a"));
+        map.observe_transfers(&left, Some(&second[..]), None, Some("a"));
+        assert!(map.canvas.run().is_some(), "the new row plays");
+        assert!(map.canvas.is_ticking());
+        assert_eq!(map.card_ids(), ["s2"]);
+
+        // Reduced motion: the clock stops and no run is drawn; the card
+        // stays.
+        settings.set_gtk_enable_animations(false);
+        settle();
+        assert!(!map.canvas.is_ticking(), "the clock stops");
+        assert!(map.canvas.imp().motion().is_none(), "no run is drawn");
+        assert_eq!(map.card_ids(), ["s2"], "the card still shows");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    fn history_row(id: &str, project: &str, source: &str, at: i64) -> HistoryRecord {
+        HistoryRecord {
+            submission_id: id.into(),
+            project_id: project.into(),
+            project_label: project.into(),
+            source: Some(source.into()),
+            submitted_at: chrono::DateTime::from_timestamp(at, 0),
+            ..Default::default()
+        }
+    }
+
+    /// The first button under `root` whose accessible name or tooltip is
+    /// `name`.
+    fn find_button(root: &gtk::Widget, name: &str) -> Option<gtk::Button> {
+        let mut stack = vec![root.clone()];
+        while let Some(widget) = stack.pop() {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                && button.tooltip_text().as_deref() == Some(name)
+            {
+                return Some(button.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                stack.push(c);
+            }
+        }
+        None
     }
 }
