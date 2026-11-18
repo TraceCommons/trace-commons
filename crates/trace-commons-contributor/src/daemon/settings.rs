@@ -1681,21 +1681,21 @@ impl DaemonSettings {
         if self.claude_source.is_none()
             && let Some(path) = self.legacy_claude_root.take()
         {
-            self.claude_source = read_at_store(
-                crate::source::SOURCE_CLAUDE_CODE,
-                Some(SourceDeclaration::Watch { path }),
-            );
+            self.claude_source = Some(SourceDeclaration::Watch { path });
         }
         if self.codex_source.is_none()
             && let Some(path) = self.legacy_codex_root.take()
         {
-            self.codex_source = read_at_store(
-                crate::source::SOURCE_CODEX,
-                Some(SourceDeclaration::Watch { path }),
-            );
+            self.codex_source = Some(SourceDeclaration::Watch { path });
         }
         self.legacy_claude_root = None;
         self.legacy_codex_root = None;
+        // A home declared by any spelling is read at its store, as
+        // `apply_settings_object` reads it: a file saved before the store
+        // existed, or by an older build, loads at the store now there.
+        self.claude_source =
+            read_at_store(crate::source::SOURCE_CLAUDE_CODE, self.claude_source.take());
+        self.codex_source = read_at_store(crate::source::SOURCE_CODEX, self.codex_source.take());
     }
 
     /// What the contributor declared, in the shape `crate::source::all_sources`
@@ -1732,11 +1732,19 @@ impl DaemonSettings {
     pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
         let mut roots = crate::source::SourceRoots::new()
             .with_managed_opencode(store.dir().join(crate::managed::opencode::STAGING))
+            // A home is read at its store on every pass, so a store made
+            // after the home was declared is read once it is there.
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
-                self.claude_source.clone(),
+                read_at_store(
+                    crate::source::SOURCE_CLAUDE_CODE,
+                    self.claude_source.clone(),
+                ),
             )
-            .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
+            .declare(
+                crate::source::SOURCE_CODEX,
+                read_at_store(crate::source::SOURCE_CODEX, self.codex_source.clone()),
+            )
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
             .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
             .declare(crate::source::SOURCE_OPENCODE, self.opencode_source.clone())
@@ -5677,6 +5685,59 @@ mod tests {
             assert_eq!(loaded.claude_source, watched(&claude_at));
             assert_eq!(loaded.codex_source, watched(&codex_at));
         }
+    }
+
+    /// A settings file declaring a tool's home in `claude_source` /
+    /// `codex_source`, not only in a legacy root, loads at the store. A
+    /// home declared before it had a store is read at the store once the
+    /// store is made, and a session written there is then found
+    /// (#2171 review 2, finding 3).
+    #[test]
+    fn a_declared_home_is_read_at_its_store_on_load_and_once_the_store_appears() {
+        let (_dir, claude, codex, _unrelated) = declared_folders();
+        let (_d, store) = temp_store();
+        let mut file = serde_json::to_value(DaemonSettings::default()).unwrap();
+        file["claude_source"] = json!({"mode":"watch","path":claude});
+        file["codex_source"] = json!({"mode":"watch","path":codex});
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&file).unwrap())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.claude_source, watched(&claude.join("projects")));
+        assert_eq!(loaded.codex_source, watched(&codex.join("sessions")));
+
+        let fresh = tempfile::tempdir().unwrap();
+        let home = fresh.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut settings = DaemonSettings::default();
+        apply_settings_object(
+            &mut settings,
+            &json!({"claude_source": {"mode":"watch","path":home}}),
+        )
+        .unwrap();
+        assert_eq!(settings.claude_source, watched(&home));
+        let claude_sessions = |settings: &DaemonSettings| {
+            let roots = settings.source_roots(&store);
+            let root = roots.source_identities()[crate::source::SOURCE_CLAUDE_CODE].clone();
+            let found = crate::source::all_sources(&roots)
+                .into_iter()
+                .filter(|source| source.name() == crate::source::SOURCE_CLAUDE_CODE)
+                .flat_map(|source| source.discover().unwrap())
+                .count();
+            (root, found)
+        };
+        assert_eq!(claude_sessions(&settings), (home.display().to_string(), 0));
+        let project = home.join("projects/-home-tc-code-app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            claude_sessions(&settings),
+            (home.join("projects").display().to_string(), 1)
+        );
     }
 
     #[test]

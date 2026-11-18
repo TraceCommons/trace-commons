@@ -325,31 +325,50 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     .collect()
 }
 
-/// The store inside `path` when `path` is `source`'s home: `projects` for
-/// Claude Code, `sessions` for Codex, a real folder (never followed
-/// through a symlink) holding at least one session. `None` for any other
-/// tool or folder. The one rule both the chooser ([`describe_folder`]) and
-/// the daemon's declarations ([`declared_store`]) apply.
-fn store_in_home(source: &str, path: &Path) -> Option<(PathBuf, Tally)> {
-    let (store, layout): (&str, fn(&Path) -> Tally) = match source {
-        SOURCE_CLAUDE_CODE => ("projects", claude_code_layout),
-        SOURCE_CODEX => ("sessions", codex_layout),
+/// The store folder inside `path` when `path` has `source`'s home layout:
+/// `projects` for Claude Code, `sessions` for Codex, a real folder (never
+/// followed through a symlink), whatever it holds. `None` for any other
+/// tool or folder, and for a relative path, which would be read against
+/// the process's working directory.
+fn home_store(source: &str, path: &Path) -> Option<PathBuf> {
+    let store = match source {
+        SOURCE_CLAUDE_CODE => "projects",
+        SOURCE_CODEX => "sessions",
         _ => return None,
     };
-    let at = path.join(store);
-    if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+    if !path.is_absolute() {
         return None;
     }
+    let at = path.join(store);
+    std::fs::symlink_metadata(&at)
+        .is_ok_and(|m| m.is_dir())
+        .then_some(at)
+}
+
+/// The store inside `path` when `path` is `source`'s home ([`home_store`])
+/// holding at least one session: what the chooser ([`describe_folder`])
+/// offers as a home.
+fn store_in_home(source: &str, path: &Path) -> Option<(PathBuf, Tally)> {
+    let layout: fn(&Path) -> Tally = match source {
+        SOURCE_CLAUDE_CODE => claude_code_layout,
+        SOURCE_CODEX => codex_layout,
+        _ => return None,
+    };
+    let at = home_store(source, path)?;
     let tally = layout(&at);
     (tally.count > 0).then_some((at, tally))
 }
 
 /// Where a folder declared for `source` is read: a Claude Code or Codex
-/// home at the store inside it, as the chooser offers a home
-/// ([`describe_folder`]); any other folder as it is. A terminal opened in
-/// the folder a person picked declares the home, not the store.
+/// home at the store inside it ([`home_store`]), any other folder as it
+/// is. A terminal opened in the folder a person picked declares the home,
+/// not the store. Unlike the chooser, an empty store counts: a session
+/// written there later is then found. A store never holds a folder of its
+/// own store's name (Claude Code names a project folder after its path,
+/// `-home-...`; Codex dates its folders), so a store stays as it is. Cheap
+/// enough to read on every pass: one `lstat`.
 pub fn declared_store(source: &str, path: &Path) -> PathBuf {
-    store_in_home(source, path).map_or_else(|| path.to_path_buf(), |(at, _)| at)
+    home_store(source, path).unwrap_or_else(|| path.to_path_buf())
 }
 
 /// The config files a coding tool keeps beside its store: never an export,
@@ -1193,6 +1212,47 @@ mod tests {
             declared_store(SOURCE_GEMINI_CLI, claude_home.path()),
             claude_home.path()
         );
+    }
+
+    /// A declared home whose store is empty is still a home: read at its
+    /// store whatever the store holds, so a session written there later is
+    /// found. A home with no store yet is read as it is until the store
+    /// folder is made. A symlinked store is not followed, and the chooser
+    /// still offers no empty home (#2171 review 2, finding 3).
+    #[test]
+    fn a_declared_home_is_read_at_its_store_before_the_store_holds_a_session() {
+        let home = Scratch::new("declared-empty-claude-home");
+        std::fs::write(home.path().join("settings.json"), b"{}").unwrap();
+        assert_eq!(declared_store(SOURCE_CLAUDE_CODE, home.path()), home.path());
+        std::fs::create_dir(home.path().join("projects")).unwrap();
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, home.path()),
+            home.path().join("projects")
+        );
+        assert!(describe_folder(home.path()).is_empty());
+        let codex = Scratch::new("declared-empty-codex-home");
+        std::fs::create_dir(codex.path().join("sessions")).unwrap();
+        assert_eq!(
+            declared_store(SOURCE_CODEX, codex.path()),
+            codex.path().join("sessions")
+        );
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, codex.path()),
+            codex.path()
+        );
+        #[cfg(unix)]
+        {
+            let linked = Scratch::new("declared-linked-claude-home");
+            std::os::unix::fs::symlink(
+                home.path().join("projects"),
+                linked.path().join("projects"),
+            )
+            .unwrap();
+            assert_eq!(
+                declared_store(SOURCE_CLAUDE_CODE, linked.path()),
+                linked.path()
+            );
+        }
     }
 
     /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is
