@@ -4,7 +4,7 @@
 #
 #   gnome-shell-extension-verify.sh
 #
-# Needs gnome-shell (49 or later for --headless/--virtual-monitor as used
+# Needs gnome-shell (46 or later for --headless/--virtual-monitor as used
 # here), dbus-run-session, gsettings, unzip and zip, and a cargo that can
 # build this crate (without the layer-shell feature, which GNOME has no use
 # for, so the box needs no gtk4-layer-shell library). Everything it writes is under a temporary directory it

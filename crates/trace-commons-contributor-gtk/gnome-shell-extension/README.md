@@ -72,7 +72,7 @@ the owner's call.
 
     crates/trace-commons-contributor-gtk/scripts/gnome-shell-extension-verify.sh
 
-starts a headless GNOME Shell (49 or later) on a private bus, with its own
+starts a headless GNOME Shell (46 or later) on a private bus, with its own
 runtime, data and settings directories, enables this extension and a
 throwaway one that turns on unsafe mode so `org.gnome.Shell.Eval` can read
 Mutter's answer back, and runs the ignored
@@ -80,6 +80,7 @@ Mutter's answer back, and runs the ignored
 with the app's real client: the rail closed, open, and taller than the work
 area; the panel near a press; focus given back from the rail; disable
 undoing everything; re-enable and the client's replay; `Release`. Run on
-GNOME Shell 51.1 (Arch). Shell 46 to 50 are listed in `metadata.json` on
-the strength of the APIs used, all present since 45; 46 still needs a run
-on Ubuntu 24.04.
+GNOME Shell 51.1 (Arch), and on GNOME Shell 46.0 (Ubuntu 24.04), where it
+failed until the extension placed a window again once shown. Shell 47 to
+50 are listed in `metadata.json` on the strength of the APIs used, all
+present since 45.
