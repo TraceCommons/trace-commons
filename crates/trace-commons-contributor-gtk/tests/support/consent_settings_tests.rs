@@ -213,48 +213,74 @@ fn enrolled_status(override_mode: Option<&str>) -> crate::model::Status {
     .unwrap()
 }
 
-/// An override in force: the radios show nothing picked (never "Ask each
-/// time" while every folder sends), the card says what is in force, and
-/// its clear is the Mac's: at once under Automatic, after the core's
-/// confirmation under Ask or Never with a folder that would resume
-/// sending (F3).
+/// An override in force: the radios show nothing picked and cannot be
+/// pressed (never "Ask each time" while every folder sends), the card says
+/// what is in force, offers no clear (the Mac has none), and drops the line
+/// that folders set to Ask or Never keep their own setting, which is untrue
+/// while the override decides (F-1).
 #[test]
 #[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
-fn mounted_an_override_shows_on_the_sharing_card_and_clears_as_the_mac_does() {
-    let fixture = Fixture::new(
-        "Override",
-        &["automatic_grant", "clear_contribution_override"],
-    );
+fn mounted_an_override_shows_on_the_sharing_card_with_no_clear() {
+    let fixture = Fixture::new("Override", &["automatic_grant"]);
     grant_answered(&fixture, serde_json::json!({"granted": false}));
     let card = &fixture.app.settings.sharing;
+    let note = card.sharing_note.as_ref().expect("the core has the note");
+    let modes = trace_commons_contributor::project_copy::contribution_mode_copy();
+    let shown_texts = |root: &gtk::Widget| -> Vec<String> {
+        descendants(root)
+            .into_iter()
+            .filter(|w| {
+                // Shown as far as the card goes: the Settings page itself
+                // need not be on screen.
+                let mut at = Some(w.clone());
+                while let Some(widget) = at {
+                    if !widget.is_visible() {
+                        return false;
+                    }
+                    if &widget == root {
+                        return true;
+                    }
+                    at = widget.parent();
+                }
+                false
+            })
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .map(|l| l.text().to_string())
+            .collect()
+    };
+    let buttons = |root: &gtk::Widget| -> Vec<String> {
+        descendants(root)
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Button>().ok())
+            .filter_map(|b| b.label().map(|l| l.to_string()))
+            .collect()
+    };
     assert!(card.ask.is_active(), "no override: Ask each time");
+    assert!(note.is_visible(), "no override: the note is said");
+
     crate::ui::consent_settings::note_status(&fixture.app, &enrolled_status(Some("auto_upload")));
+    fixture.settle();
     assert!(!card.ask.is_active() && !card.automatic.is_active());
     assert!(!card.ask.is_sensitive() && !card.automatic.is_sensitive());
-    assert!(card.clear_override.is_sensitive());
-    card.clear_override.emit_clicked();
-    fixture.drive_until(|| !fixture.calls_to("clear_contribution_override").is_empty());
-    assert!(dialogs().is_empty(), "an Automatic override clears at once");
-    fixture.answer("clear_contribution_override", Err("unavailable".into()));
-    assert!(card.refusal.is_visible());
-    assert_eq!(
-        card.refusal.text(),
-        trace_commons_contributor::project_copy::contribution_override_refusal_line("unavailable")
+    assert!(
+        !note.is_visible(),
+        "an Automatic override sends Ask folders"
+    );
+    let shown = shown_texts(card.root.upcast_ref());
+    assert!(shown.iter().any(|t| t == modes.title));
+    assert!(shown.iter().any(|t| t == modes.override_active));
+    assert!(
+        !buttons(card.root.upcast_ref())
+            .iter()
+            .any(|b| b == modes.clear),
+        "the Mac offers no clear"
     );
 
-    // Under Never, with the folders unread, clearing asks first; Cancel
-    // clears nothing.
-    crate::ui::consent_settings::note_projects(&fixture.app, None);
     crate::ui::consent_settings::note_status(&fixture.app, &enrolled_status(Some("ignore")));
-    card.clear_override.emit_clicked();
-    fixture.drive_until(|| !dialogs().is_empty());
-    let confirm =
-        trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
-    let dialog = dialogs().remove(0);
-    assert_eq!(dialog.heading().as_deref(), Some(confirm.title));
-    dialog.response("cancel");
-    fixture.settle();
-    assert_eq!(fixture.calls_to("clear_contribution_override").len(), 1);
+    assert!(!note.is_visible());
+    crate::ui::consent_settings::note_status(&fixture.app, &enrolled_status(None));
+    assert!(note.is_visible(), "the override gone, the note is back");
+    assert!(card.ask.is_sensitive());
 }
 
 /// The bulk change asks the daemon first, asks the person in the daemon's

@@ -167,28 +167,10 @@ pub(crate) fn shown_path(
     }
 }
 
-/// Whether clearing the override confirms first
-/// (`MenuPanelData.clearNeedsConfirmation`): not under an Automatic
-/// override, which already sends everything; otherwise when the folders
-/// were not read, or one's own setting is Automatic or unreported.
-pub(crate) fn clear_needs_confirmation(projects: Option<&[Project]>, mode: Option<&str>) -> bool {
-    if mode == Some("auto_upload") {
-        return false;
-    }
-    let Some(projects) = projects else {
-        return true;
-    };
-    projects
-        .iter()
-        .any(|p| p.folder_mode.is_none() || p.folder_mode.as_deref() == Some("auto_upload"))
-}
-
-/// `clear_contribution_override` answered as the Mac decodes it
-/// (`ContributionOverrideClearResult { cleared: Bool }`).
-pub(crate) fn clear_confirmed(reply: &Result<Value, String>) -> bool {
-    reply
-        .as_ref()
-        .is_ok_and(|v| v.get("cleared").is_some_and(Value::is_boolean))
+/// Whether the card says folders set to Ask or Never keep their own
+/// setting (`uses.settings_sharing_note`).
+pub(crate) fn sharing_note_shown(override_mode: Option<&str>) -> bool {
+    override_mode.is_none()
 }
 
 /// The list `set_consent_scopes` is sent (`ConsentScopeRows.nextScopes`):
@@ -292,17 +274,16 @@ pub(crate) struct SharingCard {
     pub(crate) owner: RefCell<GrantOwner>,
     /// The override in force, from the last status read; `None` for none.
     pub(crate) override_mode: RefCell<Option<String>>,
-    /// Whether a status has been read, so the override is known.
-    pub(crate) status_read: Cell<bool>,
     /// `status.contribution_mode_partial`.
     pub(crate) partial: Cell<bool>,
-    /// What an override in force shows, and its clear.
+    /// What an override in force shows. The Mac offers no way to clear one
+    /// (owner, 2026-11-18: match the Mac), so neither does this card.
     override_box: gtk::Box,
     override_value: gtk::Label,
     override_partial: gtk::Label,
-    pub(crate) clear_override: gtk::Button,
-    /// The clear confirmation is open.
-    confirming: Cell<bool>,
+    /// "Folders set to Ask or Never keep their own setting.", hidden while
+    /// an override is in force (`sharing_note_shown`).
+    pub(crate) sharing_note: Option<gtk::Label>,
 }
 
 impl SharingCard {
@@ -327,7 +308,7 @@ impl SharingCard {
         }
         // An override in force decides for every folder, so the radios
         // show nothing picked and this says what is in force, in the
-        // contribution-mode table's words, with its clear.
+        // contribution-mode table's words.
         let override_box = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         override_box.set_visible(false);
         let override_head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -341,13 +322,12 @@ impl SharingCard {
         override_partial.set_visible(false);
         override_box.append(&override_partial);
         style::append_caveat(&override_box, modes.override_active);
-        let clear_override = gtk::Button::with_label(modes.clear);
-        clear_override.set_halign(gtk::Align::Start);
-        override_box.append(&clear_override);
         root.append(&override_box);
-        if !uses.settings_sharing_note.is_empty() {
-            style::append_caveat(&root, uses.settings_sharing_note);
-        }
+        let sharing_note = (!uses.settings_sharing_note.is_empty()).then(|| {
+            let note = style::caveat(uses.settings_sharing_note);
+            root.append(&note);
+            note
+        });
         let refusal = gtk::Label::builder()
             .wrap(true)
             .xalign(0.0)
@@ -366,13 +346,11 @@ impl SharingCard {
             filling: Cell::new(false),
             owner: RefCell::new(GrantOwner::default()),
             override_mode: RefCell::new(None),
-            status_read: Cell::new(false),
             partial: Cell::new(false),
             override_box,
             override_value,
             override_partial,
-            clear_override,
-            confirming: Cell::new(false),
+            sharing_note,
         };
         card.render();
         card
@@ -410,12 +388,9 @@ impl SharingCard {
             }
             None => self.override_box.set_visible(false),
         }
-        self.clear_override.set_sensitive(
-            mode.is_some()
-                && self.status_read.get()
-                && !self.working.get()
-                && !self.confirming.get(),
-        );
+        if let Some(note) = &self.sharing_note {
+            note.set_visible(sharing_note_shown(mode.as_deref()));
+        }
         self.filling.set(false);
     }
 
@@ -444,12 +419,6 @@ pub(crate) fn wire(app: &Rc<App>) {
         });
     }
     let weak = Rc::downgrade(app);
-    card.clear_override.connect_clicked(move |_| {
-        if let Some(app) = weak.upgrade() {
-            choose_clear(&app);
-        }
-    });
-    let weak = Rc::downgrade(app);
     app.settings.uses.refresh.connect_clicked(move |_| {
         if let Some(app) = weak.upgrade() {
             app.refresh();
@@ -474,8 +443,8 @@ pub(crate) fn refresh(app: &Rc<App>) {
     });
 }
 
-/// `list_projects` answered: the folders the Ask count and the override's
-/// clear read. `None` when it did not answer.
+/// `list_projects` answered: the folders the Ask count reads. `None` when
+/// it did not answer.
 pub(crate) fn note_projects(app: &Rc<App>, projects: Option<&[Project]>) {
     *app.settings.sharing.projects.borrow_mut() = projects.map(<[Project]>::to_vec);
 }
@@ -541,70 +510,6 @@ fn settle_owner(app: &Rc<App>, then: impl FnOnce(&Rc<App>, Option<u64>) + 'stati
         drop(owner);
         then(app, pressed);
     });
-}
-
-/// "Use each folder's setting" (`MenuPanelStore.chooseMixed`): only on a
-/// read status with an override in force and nothing else in flight. It
-/// confirms first, in the core's words, when clearing would resume
-/// unattended sending somewhere; without the core's confirmation nothing
-/// is cleared.
-fn choose_clear(app: &Rc<App>) {
-    let card = &app.settings.sharing;
-    let mode = card.override_mode.borrow().clone();
-    if mode.is_none() || !card.status_read.get() || card.working.get() || card.confirming.get() {
-        return;
-    }
-    card.refusal.set_visible(false);
-    let needs = clear_needs_confirmation(card.projects.borrow().as_deref(), mode.as_deref());
-    if !needs {
-        write_clear(app);
-        return;
-    }
-    let copy = trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
-    if copy.mode != trace_commons_contributor::project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE {
-        card.refuse(
-            trace_commons_contributor::project_copy::contribution_override_refusal_line(""),
-        );
-        return;
-    }
-    card.confirming.set(true);
-    card.render();
-    let dialog = adw::MessageDialog::new(Some(&app.window), Some(copy.title), Some(copy.body));
-    dialog.add_responses(&[("cancel", copy.cancel), ("confirm", copy.confirm)]);
-    dialog.set_close_response("cancel");
-    dialog.set_default_response(Some("cancel"));
-    let app = Rc::clone(app);
-    dialog.connect_response(None, move |dialog, response| {
-        dialog.close();
-        app.settings.sharing.confirming.set(false);
-        app.settings.sharing.render();
-        if response == "confirm" {
-            write_clear(&app);
-        }
-    });
-    dialog.present();
-}
-
-/// Sends `clear_contribution_override`, then re-reads: the card shows what
-/// the daemon says, never a guess. A refusal says the core's line.
-fn write_clear(app: &Rc<App>) {
-    set_working(app, true);
-    app.call(
-        "clear_contribution_override",
-        serde_json::json!({}),
-        |app, result| {
-            if !clear_confirmed(&result) {
-                let label = result.as_ref().err().cloned().unwrap_or_default();
-                app.settings.sharing.refuse(
-                    trace_commons_contributor::project_copy::contribution_override_refusal_line(
-                        &label,
-                    ),
-                );
-            }
-            set_working(app, false);
-            app.refresh();
-        },
-    );
 }
 
 fn set_working(app: &Rc<App>, working: bool) {
@@ -864,7 +769,6 @@ pub(crate) fn note_status(app: &Rc<App>, status: &crate::model::Status) {
         .and_then(override_mode);
     card.partial
         .set(status.contribution_mode_partial == Some(true));
-    card.status_read.set(true);
     card.render();
     let shown = cards_shown(Some(super::onboarding::requires_onboarding(status)));
     card.root.set_visible(shown);
@@ -872,13 +776,10 @@ pub(crate) fn note_status(app: &Rc<App>, status: &crate::model::Status) {
     render_uses(app);
 }
 
-/// A later `status` read failed: the Uses rows go back to unavailable, and
-/// the override is no longer known, so nothing is pressable on it.
+/// A later `status` read failed: the Uses rows go back to unavailable.
 pub(crate) fn note_status_failed(app: &Rc<App>) {
     *app.settings.uses.reported.borrow_mut() = None;
-    let card = &app.settings.sharing;
-    card.status_read.set(false);
-    card.render();
+    app.settings.sharing.render();
     render_uses(app);
 }
 
@@ -1075,6 +976,17 @@ mod tests {
         );
     }
 
+    /// Under an override no folder keeps its own setting (an Automatic
+    /// override sends what is set to Ask), so the card does not say they
+    /// do while one is in force.
+    #[test]
+    fn the_sharing_note_is_hidden_while_an_override_is_in_force() {
+        assert!(sharing_note_shown(None));
+        assert!(!sharing_note_shown(Some("auto_upload")));
+        assert!(!sharing_note_shown(Some("notify_only")));
+        assert!(!sharing_note_shown(Some("ignore")));
+    }
+
     /// The override read from status: its mode, or none.
     #[test]
     fn the_override_is_read_from_status() {
@@ -1084,45 +996,6 @@ mod tests {
         );
         assert_eq!(override_mode(&json!(null)), None);
         assert_eq!(override_mode(&json!({"mode": 3})), None);
-    }
-
-    /// Clearing confirms first unless the override is Automatic, and an
-    /// unread folder list or a folder with no reported own setting needs
-    /// the confirmation (`MenuPanelData.clearNeedsConfirmation`).
-    #[test]
-    fn clearing_the_override_confirms_as_the_mac_does() {
-        let ask = project("notify_only", Some("notify_only"), true, false);
-        let auto = project("auto_upload", Some("auto_upload"), true, false);
-        let unknown = project("notify_only", None, true, false);
-        assert!(!clear_needs_confirmation(None, Some("auto_upload")));
-        assert!(clear_needs_confirmation(None, Some("notify_only")));
-        assert!(!clear_needs_confirmation(
-            Some(std::slice::from_ref(&ask)),
-            Some("ignore")
-        ));
-        assert!(clear_needs_confirmation(
-            Some(&[ask.clone(), auto]),
-            Some("ignore")
-        ));
-        assert!(clear_needs_confirmation(
-            Some(&[ask, unknown]),
-            Some("notify_only")
-        ));
-    }
-
-    /// The clear reply as the Mac decodes it
-    /// (`ContributionOverrideClearResult { cleared: Bool }`).
-    #[test]
-    fn a_clear_reply_is_checked_as_the_mac_checks_it() {
-        assert!(clear_confirmed(&Ok(
-            json!({"cleared": true, "returned": 2})
-        )));
-        assert!(clear_confirmed(&Ok(
-            json!({"cleared": false, "returned": 0})
-        )));
-        assert!(!clear_confirmed(&Ok(json!({"cleared": "yes"}))));
-        assert!(!clear_confirmed(&Ok(json!({}))));
-        assert!(!clear_confirmed(&Err("x".into())));
     }
 
     #[test]
