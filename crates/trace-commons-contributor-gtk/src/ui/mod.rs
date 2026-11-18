@@ -133,10 +133,10 @@ type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 /// response. Nothing here is computed from a duration this process picked --
 /// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
 pub struct PendingUndo {
-    /// Every entry this approval covers. A row's Submit holds exactly one; a
-    /// project group's Submit all holds every entry `approve` reported
-    /// approved, which is why Undo must cancel each of them rather than
-    /// assuming there is only ever one.
+    /// The entries this approval is shown to cover: one for a row's Submit,
+    /// the sendable rows this window saw for a folder's Submit all. The
+    /// inspector lists them; Undo does not read them for a folder, which it
+    /// cancels by `project_id` (`queue::undo_cancel_params`).
     pub entry_ids: Vec<String>,
     pub project_label: String,
     /// The folder whose Submit all this is; `None` for one trace's Submit.
@@ -1594,9 +1594,9 @@ impl App {
     ///
     /// This is the single place both the queue row's Submit and the project
     /// group's Submit all reach the toast, so the two controls cannot drift
-    /// in how they read the same response. `entry_ids` is the set the undo
-    /// bar's `Undo` must cancel: one id for a row, every entry a project
-    /// call approved for a group.
+    /// in how they read the same response. `entry_ids` is what the undo
+    /// card lists: one id for a row, the sendable rows seen for a group.
+    /// Undo cancels a row by its id and a group by its `project_id`.
     ///
     /// `offer_undo` is only called when the daemon returned a `hold_until`:
     /// `approve > 0` with no `hold_until` means the hold is configured off,
