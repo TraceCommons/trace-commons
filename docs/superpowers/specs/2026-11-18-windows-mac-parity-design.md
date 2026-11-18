@@ -220,7 +220,7 @@ Bucket (a) items found:
   Feeds W15-D1.
 - **S5. The arming gate.** Windows arms through `set_project_mode`
   `auto_upload` (`MainWindow.xaml.cs:896-908`). The daemon records the grant
-  terms in force, which may be none (`ipc.rs:6040-6042`, `.flatten()`).
+  terms in force, which may be none (`ipc.rs:6040-6044`, `.flatten()`).
   Whether the automatic pass then sends without an account-level grant is
   not traced. This must be settled before W9-D2 is asked, and before W9
   ships.
@@ -306,10 +306,11 @@ No decoration items.
   - (a) A new `net8.0-windows` render-test project run in the `windows contributor app` job
   - (b) Render tests on the test box only; CI keeps the pure-logic tests
   - Note: Linux precedent: its pixel tests run in the GTK suite and the weston job, so closer to (a).
+- Also applies: G-5 (how the test box is driven).
 
 ### W2. Window shell
 
-The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs.
+The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs. Mac notices with no Windows card found in the survey (unverified card by card; each is a new notice on Windows and needs its own yes under W2-D4): a daemon that refused to start, onboarding owed, the attached-daemon limits, first run's last word, a failed or finished action, the traces moving now, the undos, arming rewordings, a consent gate hold, the backlog and idle suggestions, the idle notifications offer, the first-contribution note, Resume while uploads are paused, History's verdict news and verdict notifications offer, and the NEAR AI sign-in card (`Views/Monitor/MonitorNotices.swift:6-25`). Windows today has the update InfoBar, the health banner, the switch-on and grant-void notices, the legacy migration card, the private inference offer, the arming offer and the witness capacity banner.
 
 **Mac sources:**
 
@@ -351,12 +352,12 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 | Item | Mac source | Windows today | Status | Weight | Numbers to pin | Decision |
 |---|---|---|---|---|---|---|
 | NEAR AI N mark (app mark). Moved from W12: the title bar draws the mark first. W3, W6, W8 and W12 reuse the path. | TCDesign/Logos/GlassBrandMark.swift:10 (path); drawn by the map marks (Indicators.swift:759, 849), the stage (FirstRunStage.swift:261), the strip (MenuBarPanel.swift:316) | Windows draws the Turn instead: Controls/BrandMark.xaml:32-58 (two bracket paths, "no gradients"), used in the title bar (MainWindow.xaml:92) and the empty queue (MainWindow.xaml:1876); MSIX tiles in windows/packaging/Assets are the green Turn (Square150x150Logo.png inspected) | missing | high, M |  | G-3 |
-| Toolbar row in the title bar | TCDesign/Components/ThreePane.swift (GlassThreePane); MonitorWindowView.swift:979 GlassRuleTabs, :1146 GlassSegmentedTabs | custom title bar exists (MainWindow.xaml.cs:129-130 ExtendsContentIntoTitleBar/SetTitleBar; AppTitleBar MainWindow.xaml:88-100) but holds only the Turn and the literal "Near.ai", no toolbar row | partial | high, M |  |  |
+| Toolbar row in the title bar | TCDesign/Components/ThreePane.swift (GlassThreePane); MonitorWindowView.swift:979 GlassRuleTabs, :1146 GlassSegmentedTabs | custom title bar exists (MainWindow.xaml.cs:129-130 ExtendsContentIntoTitleBar/SetTitleBar; AppTitleBar MainWindow.xaml:86) but holds only the Turn and the literal "Near.ai", no toolbar row | partial | high, M |  |  |
 | Pane open and close (map, inspector) | TCDesign/Components/ThreePane.swift:358-376 (map and inspector fade), :538-550 (window frame change on the standard curve) | No map control. | missing | medium, S | Motion.standard 0.22 s on the token curve (ThreePane.swift:547, GlassTokens.swift:694); none under reduce motion (:540) |  |
 | Traces graph footer: bars, period slide, open and close. Moved from W5: the footer is part of the shell, as in the Linux spec. | TCDesign/Components/Indicators.swift:358 GlassBarGraph (Canvas :433, hover :460), :414-416 and :537 GlassBarSlide; TraceCommonsApp/Views/Monitor/MonitorShell.swift:233-290 (period steps slide, zoom swaps in place), :292-293; MonitorWindowView.swift:410-418 (footer rises from the bottom), :943, :1034 | no graph footer; Insights draws static Rectangle bars (Controls/InsightsView.xaml:57-58, 119-120, 136, 189, 282-283), a different chart; animation greps 0 (Z1) | missing | medium, M | period slide 0.45 s on (0.4, 0, 0.2, 1) (MonitorShell.swift:293); zoom on GlassMotion.fast (:284); footer opens over 0.25 s (MonitorWindowView.swift:943, :1034) |  |
-| Notice stack: peeking plates and arrival | TCDesign/Components/PopoverNotice.swift:182 GlassPopoverStack, :201-202, :225 arrival, :238 spring, :258-260 | no notice overlay; the one InfoBar is the update notice (MainWindow.xaml:389-397); animation greps 0 (Z1) | missing | high, M | peek 8, 3 drawn (PopoverNotice.swift:201-202); plates narrow 4% a level, opacity 0.9/0.7 (:258-260); spring 0.36/0.86 (:238) | W2-D4 |
+| Notice stack: peeking plates and arrival | TCDesign/Components/PopoverNotice.swift:182 GlassPopoverStack, :201-202, :225 arrival, :238 spring, :258-260 | no notice overlay; the one InfoBar is the update notice (MainWindow.xaml:397-411); animation greps 0 (Z1) | missing | high, M | peek 8, 3 drawn (PopoverNotice.swift:201-202); plates narrow 4% a level, opacity 0.9/0.7 (:258-260); spring 0.36/0.86 (:238) | W2-D4 |
 | Notice mark and its symbol swap | TCDesign/Components/PopoverNotice.swift:116 GlassNoticeMark (side 30 :143), :154 contentTransition symbolEffect replace; MonitorNotices.swift:844, :882 bounce | animation greps 0 (Z1) | missing | medium, S | mark side 30 (PopoverNotice.swift:143) |  |
-| Arming offer: bolt to check, spreading ring, hold and exit | TraceCommonsApp/Views/Monitor/ArmingOfferMotion.swift:18, 37, 42, 66, 72; AppModel.swift:2197, 2221; MonitorNotices.swift:882-884 | the offer is a text card (MainWindow.xaml:753-766, ViewModel.HasArmingOffer) with no mark and no motion; animation greps 0 (Z1) | missing | medium, S | hold 900 ms (:18); exit spring 0.42/0.9 (:37); mark spring 0.32/0.7 (:42); ring 1 to 1.9, easeOut 0.7 s (:66, :72) |  |
+| Arming offer: bolt to check, spreading ring, hold and exit | TraceCommonsApp/Views/Monitor/ArmingOfferMotion.swift:18, 37, 42, 66, 72; AppModel.swift:2197, 2221; MonitorNotices.swift:882-884 | the offer is a text card (MainWindow.xaml:753, ViewModel.HasArmingOffer) with no mark and no motion; animation greps 0 (Z1) | missing | medium, S | hold 900 ms (:18); exit spring 0.42/0.9 (:37); mark spring 0.32/0.7 (:42); ring 1 to 1.9, easeOut 0.7 s (:66, :72) |  |
 | Tree search field reveal | TraceCommonsApp/Views/Monitor/NudgeViews.swift:150 (opacity + move trailing), :153/:161 fast | animation greps 0 (Z1) | missing | low, S |  |  |
 
 **Owner decisions:**
@@ -373,10 +374,11 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 - **W2-D4. Notices and inspector demand.** Windows stacks inline cards above the pane with no X. The Mac lays a peeking stack over the tab and opens the inspector on demand.
   - (a) Both as on the Mac: the overlay stack with its X rules, and the inspector opening itself on the Mac's demand keys (Linux precedent: decision 1, "all three approved")
   - (b) Re-house the existing cards only; the inspector opens on selection only
-  - Note: Either way, a card the Mac shows that Windows lacks today is a new notice on Windows and is asked card by card (copy guide rule 9).
+  - Note: Either way, a card the Mac shows that Windows lacks today is a new notice on Windows (copy guide rule 9). The spec lists those cards under W2; each needs its own yes.
 - **W2-D5. Keyboard map.** Windows has Ctrl+1 to Ctrl+5 in rail order (`MainWindow.xaml:44-48`). The Mac has Cmd-1 to Cmd-4 by tab position and Cmd-, for Settings.
-  - (a) Ctrl+1 to Ctrl+4 by tab position, Home first, and Ctrl+, for Settings (Linux precedent)
+  - (a) Ctrl+1 to Ctrl+4 by tab position, Home first, and Ctrl+, for Settings (Linux precedent: `<Control>comma` at `crates/trace-commons-contributor-gtk/src/ui/shortcuts.rs:44`)
   - (b) Keep the rail-order keys
+- Also applies: G-3 (the mark in the title bar).
 
 ### W3. Traces map and tree
 
@@ -462,7 +464,7 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 
 - **W4-D1. Transfer cards at the map foot.** How transfer cards stack while another tab is showing.
   - (a) The Mac's peeking stack
-  - (b) A short column, newest nearest the legend (Linux precedent on main: `transfer_card.rs:16-17`; the inventory reports #2187 moves it to (a), unverified)
+  - (b) A short column, newest nearest the legend (Linux precedent on main: `crates/trace-commons-contributor-gtk/src/ui/monitor/transfer_card.rs:16-17`, after #2187 merged)
 
 ### W5. Look and motion foundations
 
@@ -612,9 +614,9 @@ Replaces the legacy `OnboardingWindow` with the Mac's steps: welcome, tools, use
 
 **Owner decisions:**
 
-- **W7-D1. Wallet sign-in in first run.** The Mac's join step offers wallet sign-in.
-  - (a) Drop it (Linux precedent, #2177)
-  - (b) Keep it
+- **W7-D1. Wallet sign-in in first run.** The guide says Linux dropped the Mac's wallet sign-in from first run. At 19b42d0d2 the Mac's first run signs in to NEAR AI through the browser, where a wallet can be the method (`TCShellCore/FirstRun/FirstRunPlan.swift:41`); no separate wallet step was found under `Views/FirstRun/`. Which part Linux dropped is unverified here.
+  - (a) Drop the wallet path from first run (Linux precedent, #2177)
+  - (b) Keep whatever the Mac's sign-in offers
 - **W7-D2. Device words for first run and projects.** First-run and project words exist only as "this Mac" (`first_run_copy.rs:618`, `:634`, `:672`, `:731`; `project_copy.rs:173`).
   - (a) Reuse the "this computer" variants #2177 adds, after it lands (Linux precedent)
   - (b) New "this PC" variants (new words, each needing approval)
@@ -661,7 +663,7 @@ The Mac forces the stage dark (`TraceCommonsAppMain.swift:141`). WinUI can scope
 
 **Owner decisions:**
 
-None.
+- Also applies: G-3 (the mark the stage draws).
 
 ### W9. Consent
 
@@ -707,9 +709,9 @@ No decoration items.
   - (a) Match the Mac's grant flow before W9 ships (Linux precedent: "match the mac", #2179)
   - (b) Keep per-project arming as it is
   - Note: Spike S5 traces what the daemon then sends; it runs before this is asked.
-- **W9-D3. Clear-override control.** The Mac shows an override with no clear control.
-  - (a) None, as on the Mac (Linux precedent: "match the mac")
-  - (b) Add one
+- **W9-D3. Where an override is cleared.** The Mac clears a contribution override from its menu-bar panel (`TraceCommonsApp/Views/Monitor/MenuPanelStore.swift:177`, `:199`), after a confirmation. Windows sends neither `set_contribution_override` nor `clear_contribution_override`. Whether the Mac offers a clear anywhere else was not checked.
+  - (a) Clear only where the Mac clears, so it arrives with the tray flyout (W13-D1) (Linux precedent: "match the mac", #2179)
+  - (b) Also add a clear control in Settings
 
 ### W10. Brand
 
@@ -833,6 +835,7 @@ No decoration items.
 - **W12-D3. Tray news ring and idle halo.**
   - (a) Port them with the Mac's conditions (Linux precedent, #2186)
   - (b) Badge only
+- Also applies: G-3 (the mark in the tray).
 
 ### W13. Tray flyout and edge rail
 
@@ -870,6 +873,7 @@ No decoration items.
   - (a) Both (Linux precedent: "approve both", #2188 open)
   - (b) The flyout only
   - (c) Neither; keep the native popup menu
+- Also applies: W9-D3 (the override clear lives in the Mac's menu-bar panel).
 
 ### W14. Terminals and launch
 
@@ -1074,7 +1078,7 @@ All pending decisions, by slice. Each slice above repeats its own.
 - W7-D2 (W7): Device words for first run and projects
 - W9-D1 (W9): Undo-window setting
 - W9-D2 (W9): Arming without an account grant
-- W9-D3 (W9): Clear-override control
+- W9-D3 (W9): Where an override is cleared
 - W10-D1 (W10): Internal ids
 - W11-D1 (W11): Art where the Mac samples an SF Symbol
 - W11-D2 (W11): Walkthrough card
