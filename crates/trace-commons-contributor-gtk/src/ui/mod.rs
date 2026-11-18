@@ -15,6 +15,7 @@ mod first_run;
 mod first_run_terms;
 pub mod funding;
 pub mod history;
+pub(crate) mod history_detail;
 pub mod home;
 pub mod insights;
 pub mod legacy_move;

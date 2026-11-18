@@ -1021,9 +1021,24 @@ impl Shell {
             .as_ref()
             .and_then(|records| records.iter().find(|r| r.submission_id == opened))
         {
-            Some(record) => self
-                .history_detail
-                .append(&crate::ui::history::record_detail(record)),
+            Some(record) => {
+                self.history_detail
+                    .append(&crate::ui::history::record_detail(record));
+                // The contribution's details, read from the daemon, as the
+                // Mac's `SessionDetailView` shows them beside the record.
+                if !record.submission_id.is_empty() {
+                    let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                    self.history_detail.append(&slot);
+                    let id = record.submission_id.clone();
+                    crate::ui::history_detail::load(
+                        app,
+                        &slot,
+                        &record.submission_id,
+                        &record.status,
+                        move |app| *app.shell.state.opened_history.borrow() == id,
+                    );
+                }
+            }
             // A row that has gone is the Traces selection again, never a
             // stale card.
             None if records.is_some() => self.state.opened_history.borrow_mut().clear(),
