@@ -240,8 +240,8 @@ pub enum Disclosure {
 ///
 /// From configuration alone, always [`Disclosure::PatternsOnly`]. A
 /// configured witness or filter is not evidence that a classifier ran: the
-/// witness has a `deterministic-only` mode, and a `pii_filter` of `None` can
-/// still pick up one from the environment. Configuration presence never
+/// witness has a `deterministic-only` mode, and the environment can attach a
+/// filter without any configuration naming it. Configuration presence never
 /// earns the model-scrub wording; only [`folder_disclosure`] over the
 /// sessions' certificates does.
 pub fn disclosure(_cfg: Option<&ContributorConfig>) -> Disclosure {
@@ -379,7 +379,7 @@ mod tests {
         super::session_redaction(response, witness, dir.path())
     }
 
-    fn cfg(tenant: &str, scopes: &[&str], witness: bool, pii: Option<&str>) -> ContributorConfig {
+    fn cfg(tenant: &str, scopes: &[&str], witness: bool) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(false),
@@ -395,7 +395,6 @@ mod tests {
             user_subject: "alice".to_string(),
             device_key_id: "sha256:aa".to_string(),
             consent_scopes: scopes.iter().map(|s| s.to_string()).collect(),
-            pii_filter: pii.map(str::to_string),
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -419,9 +418,9 @@ mod tests {
     /// with or without a prose pass. What they are told is decided apart.
     #[test]
     fn an_invitee_with_a_scope_passes_whatever_their_prose_pass() {
-        for (witness, pii) in [(false, None), (true, None), (false, Some("near-ai"))] {
+        for witness in [false, true] {
             let v = evaluate(
-                Some(&cfg("tenant-1", &["debugging_evaluation"], witness, pii)),
+                Some(&cfg("tenant-1", &["debugging_evaluation"], witness)),
                 true,
             );
             assert!(v.unmet.is_empty(), "{:?}", reasons(&v));
@@ -434,14 +433,9 @@ mod tests {
     #[test]
     fn no_configuration_earns_the_model_scrub_disclosure() {
         assert_eq!(disclosure(None), Disclosure::PatternsOnly);
-        for (witness, pii) in [(false, None), (true, None), (true, Some("near-ai"))] {
+        for witness in [false, true] {
             assert_eq!(
-                disclosure(Some(&cfg(
-                    "tenant-1",
-                    &["debugging_evaluation"],
-                    witness,
-                    pii
-                ))),
+                disclosure(Some(&cfg("tenant-1", &["debugging_evaluation"], witness))),
                 Disclosure::PatternsOnly
             );
         }
@@ -458,13 +452,8 @@ mod tests {
         };
         let configs = [
             None,
-            Some(cfg("tenant-1", &["debugging_evaluation"], false, None)),
-            Some(cfg(
-                "tenant-1",
-                &["debugging_evaluation"],
-                true,
-                Some("near-ai"),
-            )),
+            Some(cfg("tenant-1", &["debugging_evaluation"], false)),
+            Some(cfg("tenant-1", &["debugging_evaluation"], true)),
         ];
         for config in &configs {
             let copy = automatic_contribution_copy(config.as_ref());
@@ -754,10 +743,7 @@ mod tests {
         let near = format!("near-{}", "a".repeat(64));
         let nearai = format!("nearai-{}", "b".repeat(64));
         for tenant in [near.as_str(), nearai.as_str()] {
-            let v = evaluate(
-                Some(&cfg(tenant, &["debugging_evaluation"], true, None)),
-                true,
-            );
+            let v = evaluate(Some(&cfg(tenant, &["debugging_evaluation"], true)), true);
             assert!(
                 reasons(&v).contains(&REASON_ADMISSION_PER_SESSION),
                 "{tenant}"
@@ -766,10 +752,7 @@ mod tests {
         // Neither an invited tenant nor a namespace prefix without a hash
         // after it: the server never admission-checks either.
         for tenant in ["tenant-1", "nearai-abc", "near-abc"] {
-            let v = evaluate(
-                Some(&cfg(tenant, &["debugging_evaluation"], true, None)),
-                true,
-            );
+            let v = evaluate(Some(&cfg(tenant, &["debugging_evaluation"], true)), true);
             assert!(
                 !reasons(&v).contains(&REASON_ADMISSION_PER_SESSION),
                 "{tenant}"
@@ -783,7 +766,7 @@ mod tests {
     #[test]
     fn r3_follows_what_ingest_says_at_runtime() {
         let nearai = format!("nearai-{}", "b".repeat(64));
-        let cfg = cfg(&nearai, &["debugging_evaluation"], false, None);
+        let cfg = cfg(&nearai, &["debugging_evaluation"], false);
         let with = |a| reasons(&evaluate_with(Some(&cfg), true, a));
         assert!(with(AccountAdmission::NotAdvertised).contains(&REASON_ADMISSION_PER_SESSION));
         assert!(with(AccountAdmission::Advertised).is_empty());
@@ -823,7 +806,7 @@ mod tests {
             AccountAdmission::AllowanceSpent
         );
         let nearai = format!("nearai-{}", "b".repeat(64));
-        let anchored = cfg(&nearai, &["debugging_evaluation"], false, None);
+        let anchored = cfg(&nearai, &["debugging_evaluation"], false);
         let v = evaluate_with(Some(&anchored), true, AccountAdmission::AllowanceSpent);
         assert_eq!(
             v.unmet,
@@ -834,7 +817,7 @@ mod tests {
         );
         assert!(v.blocks(), "fails closed, as before");
         // Outside the anchored namespaces admission never applies.
-        let invited = cfg("tenant-1", &["debugging_evaluation"], false, None);
+        let invited = cfg("tenant-1", &["debugging_evaluation"], false);
         assert!(
             evaluate_with(Some(&invited), true, AccountAdmission::AllowanceSpent)
                 .unmet
@@ -844,17 +827,17 @@ mod tests {
 
     #[test]
     fn a_contributor_with_no_scope_chosen_does_not_pass() {
-        let v = evaluate(Some(&cfg("tenant-1", &[], true, None)), true);
+        let v = evaluate(Some(&cfg("tenant-1", &[], true)), true);
         assert!(reasons(&v).contains(&REASON_NO_SCOPE));
     }
 
     /// Report-only: the same unmet requirements, and nothing blocked.
     #[test]
     fn an_unenforced_gate_reports_and_does_not_block() {
-        let v = evaluate(Some(&cfg("tenant-1", &[], false, None)), false);
+        let v = evaluate(Some(&cfg("tenant-1", &[], false)), false);
         assert!(v.would_refuse());
         assert!(!v.blocks());
-        let enforced = evaluate(Some(&cfg("tenant-1", &[], false, None)), true);
+        let enforced = evaluate(Some(&cfg("tenant-1", &[], false)), true);
         assert!(enforced.blocks());
     }
 

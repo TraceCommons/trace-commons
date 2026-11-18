@@ -1479,7 +1479,6 @@ fn persist(
         user_subject: identity.device_key_id.clone(),
         device_key_id: identity.device_key_id.clone(),
         consent_scopes: Vec::new(),
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,

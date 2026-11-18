@@ -49,18 +49,6 @@ pub(crate) async fn set_consent_scopes(
     .await
 }
 
-#[tauri::command]
-pub(crate) async fn acknowledge_near_ai_notice(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    call_daemon(
-        shared_state(&state)?,
-        "acknowledge_near_ai_notice",
-        serde_json::json!({}),
-    )
-    .await
-}
-
 /// The notice for one element of `status.grant_voids`: the words, and the
 /// choice between the project and the automatic-grant wording, both from the
 /// contributor core, which also words an element it cannot place. `null`

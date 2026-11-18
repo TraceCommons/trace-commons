@@ -1251,23 +1251,6 @@ fn render_connection_checks(app: &Rc<App>, settings: &Settings) {
     for (label, satisfied) in source_check_rows(settings) {
         view.append(&check_row(&label, satisfied, None));
     }
-    // The scan's row keeps the sentence this shell already had under it.
-    // "Configured" is not the fact a contributor needs -- that message text
-    // leaves the machine is, and it is the kind of consequence this
-    // product states rather than implies.
-    view.append(&check_row(
-        if settings.near_ai_configured {
-            copy::CHECK_SCAN_SET
-        } else {
-            copy::CHECK_SCAN_UNSET
-        },
-        settings.near_ai_configured,
-        Some(if settings.near_ai_configured {
-            "Message text is scanned by a third party before anything is sent."
-        } else {
-            "Local scrubbing only."
-        }),
-    ));
 }
 
 /// One check row: a tone glyph, the fact in words, and optionally the
@@ -3934,7 +3917,6 @@ mod witness_tests {
                 user_subject: "subject".into(),
                 device_key_id: "device".into(),
                 consent_scopes: vec![],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,

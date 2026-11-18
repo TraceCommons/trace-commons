@@ -25,6 +25,7 @@ mod daemon_nondeterministic_filter;
 mod daemon_preview_body_over_socket;
 mod daemon_preview_cli;
 mod daemon_reads_staged_imports;
+mod daemon_retired_second_scan;
 mod daemon_upload_pass_guards;
 mod daemon_wallet_signup_without_env;
 mod evidence_import_cli;

@@ -257,8 +257,6 @@ pub const NEAR_AI_INFERENCE_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 /// registry). Also the base IronWire is given, so the key sent here is the
 /// key IronWire already sends here.
 pub const NEAR_AI_ATTESTATION_GATEWAY: &str = values::NEAR_AI_INFERENCE_BASE;
-/// The client-side NEAR AI privacy filter's default base.
-pub const NEAR_AI_PRIVACY_FILTER_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 /// NEAR AI's console: the billing dashboard.
 pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
@@ -333,7 +331,6 @@ pub const HOST_VALUES: &[&str] = &[
     NEAR_AI_API_ORIGIN,
     NEAR_AI_INFERENCE_BASE,
     NEAR_AI_ATTESTATION_GATEWAY,
-    NEAR_AI_PRIVACY_FILTER_BASE,
     NEAR_AI_DASHBOARD_ORIGIN,
     NEAR_AI_WALLET_RECIPIENT,
     #[cfg(feature = "near-ai-staging")]
