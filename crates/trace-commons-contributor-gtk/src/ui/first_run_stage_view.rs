@@ -66,6 +66,8 @@ struct Inner {
     moves: Moves,
     opened_at: f64,
     welcome_at: f64,
+    /// When Welcome's lines were last all set in place.
+    welcome_risen_at: Option<f64>,
     scan_started: Option<f64>,
     scanned: bool,
     sharing: Sharing,
@@ -132,6 +134,7 @@ impl Stage {
                 moves: Moves::default(),
                 opened_at: at,
                 welcome_at: at,
+                welcome_risen_at: None,
                 scan_started: None,
                 scanned: false,
                 sharing: Sharing::Ask,
@@ -275,12 +278,16 @@ impl Stage {
         }
     }
 
-    /// Whether Welcome's lines are still rising.
+    /// Whether Welcome's lines still have to be raised: until a frame
+    /// past the last one's rise has set every line in place, however late
+    /// that frame comes.
     fn lines_rising(&self) -> bool {
         let inner = self.inner.borrow();
         inner.step == Step::Welcome
             && !inner.agent
-            && now() - inner.welcome_at <= stage::welcome::RISEN_BY + 0.1
+            && inner
+                .welcome_risen_at
+                .is_none_or(|at| at < inner.welcome_at)
             && !self.rises.borrow().is_empty()
     }
 
@@ -312,6 +319,11 @@ impl Stage {
             if due {
                 if stage.lines_rising() {
                     stage.raise_lines();
+                    let mut inner = stage.inner.borrow_mut();
+                    let at = now();
+                    if at - inner.welcome_at > stage::welcome::RISEN_BY {
+                        inner.welcome_risen_at = Some(at);
+                    }
                 }
                 area.queue_draw();
             }

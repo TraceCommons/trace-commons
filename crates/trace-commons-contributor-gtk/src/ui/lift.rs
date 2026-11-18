@@ -21,8 +21,10 @@ use super::first_run_stage as stage;
 struct Slide {
     ancestor: glib::WeakRef<gtk::Widget>,
     from_y: f64,
-    /// The drawn offset at the start, known after the first allocation.
+    /// The drawn offset at the start, known once a layout has run.
     dy: Option<f64>,
+    /// Frames ticked while waiting for that layout.
+    frames: u32,
     started: f64,
     tick: Option<gtk::TickCallbackId>,
 }
@@ -59,11 +61,6 @@ mod imp {
     }
 
     impl WidgetImpl for Lift {
-        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            self.parent_size_allocate(width, height, baseline);
-            self.obj().begin_slide();
-        }
-
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let widget = self.obj();
             let Some(child) = widget.first_child() else {
@@ -135,39 +132,13 @@ impl Lift {
             ancestor: ancestor.upcast_ref::<gtk::Widget>().downgrade(),
             from_y,
             dy: None,
+            frames: 0,
             started: now(),
             tick: None,
         });
         self.set_opacity(0.0);
-        self.queue_allocate();
-    }
-
-    /// Whether a slide is under way.
-    pub fn sliding(&self) -> bool {
-        self.imp().slide.borrow().is_some()
-    }
-
-    /// The first allocation after [`Self::slide_from`]: the offset that
-    /// keeps the child where it was, and the tick that brings it home.
-    fn begin_slide(&self) {
-        let mut slot = self.imp().slide.borrow_mut();
-        let Some(slide) = slot.as_mut().filter(|s| s.dy.is_none()) else {
-            return;
-        };
-        let Some(ancestor) = slide.ancestor.upgrade() else {
-            drop(slot);
-            self.settle();
-            return;
-        };
-        let Some(here) = self.compute_point(&ancestor, &gtk::graphene::Point::new(0.0, 0.0)) else {
-            return;
-        };
-        let dy = slide.from_y - f64::from(here.y());
-        slide.dy = Some(dy);
-        slide.started = now();
-        self.imp().offset.set(dy);
         let weak = self.downgrade();
-        slide.tick = Some(self.add_tick_callback(move |_, _| {
+        let tick = self.add_tick_callback(move |_, _| {
             let Some(lift) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
@@ -176,11 +147,52 @@ impl Lift {
             } else {
                 glib::ControlFlow::Break
             }
-        }));
+        });
+        if let Some(slide) = self.imp().slide.borrow_mut().as_mut() {
+            slide.tick = Some(tick);
+        }
+    }
+
+    /// Whether a slide is under way.
+    pub fn sliding(&self) -> bool {
+        self.imp().slide.borrow().is_some()
+    }
+
+    /// The second frame after [`Self::slide_from`], whose tick comes after
+    /// the first frame's layout has put the child in its new place: the
+    /// offset that keeps it drawn where it was. (The first frame's tick runs
+    /// before that layout, and the child is drawn there at no opacity.)
+    /// False while it is not laid out yet.
+    fn begin_slide(&self) -> bool {
+        let mut slot = self.imp().slide.borrow_mut();
+        let Some(slide) = slot.as_mut() else {
+            return false;
+        };
+        if slide.dy.is_some() {
+            return true;
+        }
+        let Some(ancestor) = slide.ancestor.upgrade() else {
+            return false;
+        };
+        slide.frames += 1;
+        if slide.frames < 2 || !self.is_mapped() || self.width() == 0 {
+            return false;
+        }
+        let Some(here) = self.compute_point(&ancestor, &gtk::graphene::Point::new(0.0, 0.0)) else {
+            return false;
+        };
+        let dy = slide.from_y - f64::from(here.y());
+        slide.dy = Some(dy);
+        slide.started = now();
+        true
     }
 
     /// One frame of the slide; false once it has settled.
     fn step_slide(&self) -> bool {
+        if !self.begin_slide() {
+            // Not laid out yet: keep waiting, unless the slide is gone.
+            return self.sliding();
+        }
         let (dy, started) = match self.imp().slide.borrow().as_ref() {
             Some(Slide {
                 dy: Some(dy),

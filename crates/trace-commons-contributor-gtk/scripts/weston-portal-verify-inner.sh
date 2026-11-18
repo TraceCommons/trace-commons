@@ -177,7 +177,13 @@ else
     ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
     ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
     ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps \
-    ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown; do
+    ui::first_run_screens::mounted_tests::the_uses_captions_sit_under_their_nodes \
+    ui::first_run_screens::mounted_tests::the_marker_check_ticks_only_while_its_stroke_moves \
+    ui::first_run_screens::mounted_tests::the_customize_card_rises_to_its_place \
+    ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
+    ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
+    ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
+    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

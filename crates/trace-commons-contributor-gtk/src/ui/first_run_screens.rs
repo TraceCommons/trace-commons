@@ -601,7 +601,12 @@ mod mounted_tests {
         // The card was 200 points lower; what was above it gives way.
         above.set_visible(false);
         lift.slide_from(&page, 200.0);
-        settle(&context, 30);
+        // The first frames lay it out, then it is drawn where it was: wait
+        // for that frame, however slowly the compositor paints.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while lift.offset() == 0.0 && std::time::Instant::now() < end {
+            settle(&context, 2);
+        }
         assert!(
             lift.offset() > 100.0,
             "starts where it was: {}",
