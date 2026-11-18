@@ -3067,24 +3067,46 @@ mod tests {
         });
         assert!(inputs.gate.state.is_healthy());
         let scene = inputs.scene(&BTreeMap::new(), map_scene::SIZE);
-        let expected = Scene::private_ai(
-            Some(&private_rows()),
-            Some("running"),
-            map_scene::row_sentence,
-            |row| map_scene::harness_state(&row.state),
-            Some(&destinations),
-            map_scene::SIZE,
-        )
-        .adding_managed_routes(Some(&destinations));
-        assert_eq!(scene, expected);
+        // `PrivateAIFlowMap`: no pile, the credential lit and answering,
+        // each tool in `harness_list` beside it by its own name, joined by
+        // a flowing arc (its calls are answered), and the managed route
+        // after them.
         assert!(scene.stack.is_none() && scene.flows());
         assert_eq!(scene.nodes[0].kind, NodeKind::Destination(Lamp::Answering));
+        let harnesses: Vec<(&str, &str)> = scene
+            .nodes
+            .iter()
+            .filter(|n| n.id.starts_with("harness:"))
+            .map(|n| (n.id.as_str(), n.label.as_str()))
+            .collect();
+        assert_eq!(
+            harnesses,
+            [
+                ("harness:claude", "Claude Code"),
+                ("harness:cursor", "Cursor")
+            ]
+        );
+        let flowing = scene
+            .arcs
+            .iter()
+            .filter(|arc| arc.style == ArcStyle::Flowing)
+            .count();
+        assert_eq!(flowing, 2, "one flowing arc a tool");
         assert!(
             scene
                 .nodes
                 .iter()
                 .any(|n| n.id == "managed:opencode:openai")
         );
+        // Without the managed routes there is no managed node: they come
+        // from `tool_destinations`.
+        let unmanaged = SceneInputs::private_ai(PrivateAiInputs {
+            harnesses: Some(private_rows()),
+            private_ai: Some("running".into()),
+            destinations: None,
+        })
+        .scene(&BTreeMap::new(), map_scene::SIZE);
+        assert!(!unmanaged.nodes.iter().any(|n| n.id.starts_with("managed:")));
         // Unread, nothing is drawn.
         let unread = SceneInputs::private_ai(PrivateAiInputs::default());
         assert!(!unread.scene(&BTreeMap::new(), map_scene::SIZE).draws_map());
