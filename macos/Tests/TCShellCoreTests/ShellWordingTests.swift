@@ -60,7 +60,7 @@ final class ShellWordingTests: XCTestCase {
         // unchanged, and its buttons are the core's; the counts' fallback
         // for a daemon that sends no text is what is left.
         "TraceCommonsApp/Notifier.swift": 1,
-        "TraceCommonsApp/SelfTest.swift": 14,
+        "TraceCommonsApp/SelfTest.swift": 13,
 
         // The SwiftUI views, which carry their own labels and help text.
         // R15 deleted ActionMessageBanner.swift (2: its dismiss word moved to

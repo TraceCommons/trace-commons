@@ -1510,16 +1510,15 @@ mod tests {
     /// a button that goes nowhere.
     #[test]
     fn every_actionable_health_label_has_a_screen() {
-        for label in ["not-logged-in"] {
-            assert!(
-                copy::health_action(label).is_some(),
-                "{label} should offer an action"
-            );
-            assert!(
-                health_step(label).is_some(),
-                "{label} offers an action but has no screen to open"
-            );
-        }
+        let label = "not-logged-in";
+        assert!(
+            copy::health_action(label).is_some(),
+            "{label} should offer an action"
+        );
+        assert!(
+            health_step(label).is_some(),
+            "{label} offers an action but has no screen to open"
+        );
     }
 
     #[test]
