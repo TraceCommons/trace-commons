@@ -6,14 +6,17 @@
 //! application tells a contributor to install a shell extension.
 
 pub(crate) mod account_change;
+pub mod appearance;
 pub mod balance;
 pub mod community_brand;
+pub(crate) mod consent_settings;
 pub mod credential;
 mod css_contract;
 mod first_run;
 mod first_run_terms;
 pub mod funding;
 pub mod history;
+pub(crate) mod history_detail;
 pub mod home;
 pub mod insights;
 pub mod legacy_move;
@@ -21,19 +24,27 @@ mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod monitor;
+pub mod omarchy;
 pub mod onboarding;
 mod onboarding_nearai;
 mod onboarding_wallet;
 pub mod preview;
 pub mod private_inference;
+pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
+pub(crate) mod sent_training;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
 mod terminal_choice;
+pub(crate) mod terms_hold;
 pub mod update;
 pub mod wrap_row;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_fixture.rs"]
+pub(crate) mod consent_fixture;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -127,16 +138,16 @@ type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 /// response. Nothing here is computed from a duration this process picked --
 /// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
 pub struct PendingUndo {
-    /// Every entry this approval covers. A row's Submit holds exactly one; a
-    /// project group's Submit all holds every entry `approve` reported
-    /// approved, which is why Undo must cancel each of them rather than
-    /// assuming there is only ever one.
+    /// The entries this approval is shown to cover: one for a row's Submit,
+    /// the sendable rows this window saw for a folder's Submit all. The
+    /// inspector lists them; Undo does not read them for a folder, which it
+    /// cancels by `project_id` (`queue::undo_cancel_params`).
     pub entry_ids: Vec<String>,
     pub project_label: String,
     /// The folder whose Submit all this is; `None` for one trace's Submit.
     /// The inspector's demand tells the two apart (`monitor::demand`).
     pub folder: Option<String>,
-    /// When this window offered the undo, which is what the bar's "held 41s"
+    /// When this window offered the undo, which is what the bar's "Approved 41s ago"
     /// counts up from. It counts *up* on purpose: the app cannot see the
     /// watcher's sweep, so a countdown would be a promise it cannot keep.
     pub approved_at: chrono::DateTime<chrono::Utc>,
@@ -227,12 +238,21 @@ pub struct App {
     /// History row's details. `None` while unread or after a failed read,
     /// which the graph draws as a dash, never as nothing shared.
     pub history_records: RefCell<Option<Vec<crate::model::HistoryRecord>>>,
+    /// The entry this window last kept, and the one it last dismissed, for
+    /// the Traces map's transfer cards (`monitor::transfers::Feed`), as the
+    /// Mac's `TracesStore.lastKept` and `lastDismissed`. Set only after the
+    /// daemon answered. This shell has no keep action yet, so `last_kept`
+    /// stays `None` until one sets it.
+    pub last_kept: RefCell<Option<String>>,
+    pub last_dismissed: RefCell<Option<String>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
     pub rollup: RefCell<HistoryRollup>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
+    pub undo_writing: RefCell<std::collections::HashSet<queue::UndoIdentity>>,
     /// The folder whose Submit all is waiting on the daemon's answer, as
     /// the Mac's `TracesStore.submittingFolder`: a demand on the inspector.
     pub submitting_folder: RefCell<Option<String>>,
@@ -494,9 +514,12 @@ impl App {
             projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
             history_records: RefCell::new(None),
+            last_kept: RefCell::new(None),
+            last_dismissed: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
+            undo_writing: RefCell::new(Default::default()),
             submitting_folder: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
@@ -765,6 +788,10 @@ impl App {
     /// to any event.
     pub fn refresh(self: &Rc<Self>) {
         self.call("status", serde_json::json!({}), |app, result| {
+            // The Traces map's gate reads its own fields of the same reply,
+            // each unread one closed rather than defaulted.
+            app.shell.map.set_status(result.as_ref().ok());
+            app.shell.map.render(app);
             let result = result.map(serde_json::from_value::<Status>);
             app.home
                 .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
@@ -788,6 +815,8 @@ impl App {
                 onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
+            } else {
+                consent_settings::note_status_failed(app);
             }
         });
         // Asked alongside the queue, not with `list_projects`, because this
@@ -806,8 +835,13 @@ impl App {
         // re-ask on the next launch, which is the nagging the marker exists
         // to prevent.
         self.call("get_settings", serde_json::json!({}), |app, result| {
-            let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>)
-            else {
+            let read = result.map(serde_json::from_value::<crate::model::Settings>);
+            // The map's tools are unknown, never unset, without this read.
+            app.shell
+                .map
+                .set_settings(read.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned());
+            let Ok(Ok(settings)) = read else {
+                app.shell.map.render(app);
                 return;
             };
             // The certificate-held section's reading, from the same read.
@@ -822,7 +856,11 @@ impl App {
         // Only `contributable_count` is read from here: the folder's total
         // stays the rows on screen.
         self.call("list_projects", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_projects_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let projects: Vec<crate::model::Project> =
                 serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
                     .unwrap_or_default();
@@ -830,13 +868,24 @@ impl App {
             queue::render(app);
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_pending_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
+        });
+        // Where each tool's sessions go, for the Traces map's commons gate:
+        // only a route the core names, for a tool it says is watched, ever
+        // draws a flow.
+        self.call("tool_destinations", serde_json::json!({}), |app, result| {
+            app.shell.map.set_destinations(result.as_ref().ok());
+            app.shell.map.render(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -1104,16 +1153,23 @@ impl App {
         // reworded (K5), and armed folders the gate is holding.
         let rewordings = status.arming_rewording_notices();
         let held = status.gate_held_notice();
+        let terms = terms_hold::notice_words(status.terms_hold);
         // The legacy invite migration notice is the account's: it changes
         // what the contributor's sessions go under, and they are told on
         // whichever screen they are reading (the consent spec requires it in
         // every shell).
         let migration = status.legacy_migration_notice();
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(!notices.is_empty() || !rewordings.is_empty() || held.is_some());
+            column.set_visible(
+                terms.is_some() || !notices.is_empty() || !rewordings.is_empty() || held.is_some(),
+            );
         }
         if let Some(column) = self.account_notices.parent() {
             column.set_visible(migration.is_some() || offer_shown);
+        }
+        // First: until the terms are accepted again, nothing uploads.
+        if let Some(words) = &terms {
+            self.void_notices.append(&terms_hold::card(self, words));
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
@@ -1548,9 +1604,9 @@ impl App {
     ///
     /// This is the single place both the queue row's Submit and the project
     /// group's Submit all reach the toast, so the two controls cannot drift
-    /// in how they read the same response. `entry_ids` is the set the undo
-    /// bar's `Undo` must cancel: one id for a row, every entry a project
-    /// call approved for a group.
+    /// in how they read the same response. `entry_ids` is what the undo
+    /// card lists: one id for a row, the sendable rows seen for a group.
+    /// Undo cancels a row by its id and a group by its `project_id`.
     ///
     /// `offer_undo` is only called when the daemon returned a `hold_until`:
     /// `approve > 0` with no `hold_until` means the hold is configured off,
@@ -1667,6 +1723,14 @@ impl App {
         if let Some(source) = self.undo_tick.borrow_mut().take() {
             source.remove();
         }
+    }
+
+    /// The daemon dismissed `entry_id`: the Traces map shows its card. The
+    /// map looks it up now, while the entries still list it.
+    pub fn note_dismissed(self: &Rc<Self>, entry_id: &str) {
+        *self.last_kept.borrow_mut() = None;
+        *self.last_dismissed.borrow_mut() = Some(entry_id.to_string());
+        self.shell.map.render(self);
     }
 
     /// Withdraw the undo bar without cancelling: the hold simply runs out.

@@ -246,6 +246,14 @@ pub fn graph_available(tab: Tab) -> bool {
     tab == Tab::Traces
 }
 
+/// Whether the transfer cards sit at the Traces map's foot: while any tab
+/// but Traces is shown (owner-approved, 2026-11-16), as on the Mac, where
+/// Traces shows its moving trace itself. Traces' History page is still
+/// Traces.
+pub fn transfer_cards_shown(tab: Tab) -> bool {
+    tab != Tab::Traces
+}
+
 /// The map view a tab picks; `None` keeps the current one.
 pub fn map_view_for(picked: Tab) -> Option<MapView> {
     match picked {
@@ -571,5 +579,13 @@ mod tests {
         let mut home_history = at(Tab::Home);
         home_history.home_page = HomePage::History;
         assert_eq!(place(home_history), Place::HomeHistory);
+    }
+
+    #[test]
+    fn transfer_cards_sit_at_the_maps_foot_on_every_tab_but_traces() {
+        assert!(!transfer_cards_shown(Tab::Traces));
+        for tab in [Tab::Home, Tab::Inference, Tab::Insights] {
+            assert!(transfer_cards_shown(tab), "{tab:?}");
+        }
     }
 }

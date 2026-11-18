@@ -407,6 +407,11 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertEqual(words.memoryFiles("gemini-cli"), "GEMINI.md")
         XCTAssertNil(words.memoryFiles("something-new"))
         XCTAssertEqual(words.legendMemory, "Memory stays on this Mac")
+        XCTAssertEqual(words.memoryStays, "Memory files stay on this Mac.")
+        // The Linux shell's words for the same lines decode beside them;
+        // this shell keeps drawing its own.
+        XCTAssertEqual(words.legendMemoryComputer, "Memory stays on this computer")
+        XCTAssertEqual(words.keptHereComputer, "{count} kept on this computer")
         XCTAssertEqual(words.styleTitle, "Traces map")
         XCTAssertEqual(words.styleToggle, "Rocket mode")
         XCTAssertEqual(words.styleCaption, "Changes only how the map looks.")
