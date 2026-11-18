@@ -858,7 +858,7 @@ mod imp {
                 }
                 let centre = fit.point(node.at);
                 let radius = node.radius * fit.scale;
-                let ink = palette.ink(node.dim);
+                let (ink, sublabel_colour) = node_word_colours(node, palette);
                 if node.label_beside() {
                     // A folder's name sits left of its dot, on its line, so
                     // a long list stays one line a folder.
@@ -883,7 +883,6 @@ mod imp {
                 }
                 if let Some(sublabel) = node.sublabel.as_deref() {
                     let at = Point::new(centre.x, centre.y + radius + sublabel_offset);
-                    let colour = palette.ink(0.6 * node.dim);
                     self.text(
                         snapshot,
                         sublabel,
@@ -891,21 +890,21 @@ mod imp {
                         sublabel_size,
                         false,
                         Anchor::Middle,
-                        &colour,
+                        &sublabel_colour,
                     );
                 }
             }
+            // The micro type: 10 bold, not scaled with the map.
             for overflow in &scene.overflows {
                 let text = format!("+{}", overflow.count);
-                let colour = palette.ink(0.6);
                 self.text(
                     snapshot,
                     &text,
                     fit.point(overflow.at),
-                    10.0,
-                    false,
+                    MarkFont::MICRO.size,
+                    true,
                     Anchor::Middle,
-                    &colour,
+                    &overflow_colour(palette),
                 );
             }
         }
@@ -1355,9 +1354,14 @@ pub struct MapColours {
     pub credential_on: gtk::gdk::RGBA,
     pub pane_opaque: gtk::gdk::RGBA,
     pub well_fill: gtk::gdk::RGBA,
+    /// The map field's veil, at its centre and toward its edges.
+    pub field_inner: gtk::gdk::RGBA,
+    pub field_outer: gtk::gdk::RGBA,
     pub text_primary: gtk::gdk::RGBA,
     pub text_secondary: gtk::gdk::RGBA,
     pub text_tertiary: gtk::gdk::RGBA,
+    /// `GlassColor.accentText`: the purpleText token.
+    pub accent_text: gtk::gdk::RGBA,
     /// Claude, Codex, Antigravity, OpenCode, Theia.
     pub tools: [gtk::gdk::RGBA; 5],
     pub hero_deep: gtk::gdk::RGBA,
@@ -1405,9 +1409,12 @@ impl MapColours {
             credential_on: pick(l::MAP_CREDENTIAL_ON, d::MAP_CREDENTIAL_ON),
             pane_opaque: pick(l::PANE_OPAQUE, d::PANE_OPAQUE),
             well_fill: pick(l::WELL_FILL, d::WELL_FILL),
+            field_inner: pick(l::MAP_FIELD_INNER, d::MAP_FIELD_INNER),
+            field_outer: pick(l::MAP_FIELD_OUTER, d::MAP_FIELD_OUTER),
             text_primary: pick(l::TEXT_PRIMARY, d::TEXT_PRIMARY),
             text_secondary: pick(l::TEXT_SECONDARY, d::TEXT_SECONDARY),
             text_tertiary: pick(l::TEXT_TERTIARY, d::TEXT_TERTIARY),
+            accent_text: pick(l::PURPLE_TEXT, d::PURPLE_TEXT),
             tools: [
                 pick(l::TOOL_CLAUDE, d::TOOL_CLAUDE),
                 pick(l::TOOL_CODEX, d::TOOL_CODEX),
@@ -1629,6 +1636,22 @@ impl Palette {
             None => (m.rule_fills[3], m.status_off),
         }
     }
+}
+
+/// The colours a node's name and sublabel are drawn in
+/// (`FlowMapView.drawNode`): the primary text colour and statusOff, both
+/// faded with the node.
+pub fn node_word_colours(
+    node: &map_scene::Node,
+    palette: &Palette,
+) -> (gtk::gdk::RGBA, gtk::gdk::RGBA) {
+    let fade = |c: gtk::gdk::RGBA| c.with_alpha(c.alpha() * node.dim as f32);
+    (fade(palette.map.text_primary), fade(palette.map.status_off))
+}
+
+/// A "+N"'s colour: the tertiary text colour (`drawStill`).
+pub fn overflow_colour(palette: &Palette) -> gtk::gdk::RGBA {
+    palette.map.text_tertiary
 }
 
 pub fn source(cr: &gtk::cairo::Context, colour: &gtk::gdk::RGBA, alpha: f64) {
@@ -1921,7 +1944,7 @@ fn draw_node(
     if selected && !drawn_elsewhere {
         circle(cr, centre, radius);
         cr.set_line_width(2.0 * s);
-        source(cr, &palette.accent, 1.0);
+        source(cr, &palette.map.accent_text, dim);
         let _ = cr.stroke();
     }
 }
@@ -3121,6 +3144,69 @@ mod tests {
         assert!(traces.stack.is_some());
     }
 
+    /// A node's words are in the Mac's text colours, not the theme's ink
+    /// (`FlowMapView.drawNode`): its name in the primary text colour, its
+    /// sublabel in statusOff, both faded with the node; a "+N" in the
+    /// tertiary text colour.
+    #[test]
+    fn a_nodes_words_are_in_the_macs_text_colours() {
+        let palette = Palette {
+            ink: gtk::gdk::RGBA::new(1.0, 0.0, 0.0, 1.0),
+            ..Palette::fixed()
+        };
+        let mut node = map_scene::Node::new(
+            "folder:p",
+            NodeKind::Folder(None),
+            Point::new(0.0, 0.0),
+            8.0,
+            "p",
+            "",
+        );
+        node.dim = 0.5;
+        let (label, sublabel) = node_word_colours(&node, &palette);
+        assert_eq!(label, parse("#1d1d1f").with_alpha(0.5));
+        assert_eq!(sublabel, parse("#8a8a90").with_alpha(0.5));
+        assert_eq!(overflow_colour(&palette), parse("#3d3d43"));
+        let dark = Palette {
+            map: MapColours::scheme(true),
+            ..palette
+        };
+        assert_eq!(overflow_colour(&dark), dark.map.text_tertiary);
+    }
+
+    /// The ring round the node under the pointer is in the accent text
+    /// colour (`GlassColor.accentText`, the flat theme's purpleText,
+    /// #023e83 in light), faded with the node.
+    #[test]
+    fn the_selection_ring_is_the_accent_text_colour() {
+        let palette = Palette {
+            ink: gtk::gdk::RGBA::new(1.0, 0.0, 0.0, 1.0),
+            ..Palette::fixed()
+        };
+        let node = map_scene::Node::new(
+            "harness:x",
+            NodeKind::Harness {
+                tool: None,
+                installed: true,
+            },
+            Point::new(100.0, 100.0),
+            16.0,
+            "",
+            "",
+        );
+        let space = Size::new(200.0, 200.0);
+        let fit = MapGeometry::new(space, 2.0, None, space);
+        let pixels = painted(200, 200, |cr| {
+            draw_node(cr, &Scene::default(), &node, &fit, &palette, true);
+        });
+        let accent = parse("#023e83");
+        let ring = pixels.iter().filter(|p| near_colour(**p, &accent)).count();
+        assert!(
+            ring > 100,
+            "only {ring} pixels of the ring in the accent text colour"
+        );
+    }
+
     /// The pixels of a tool's initials on a node drawn at `zoom`, as
     /// offsets from the node's centre: those in `colour`, apart from the
     /// disc (drawn in an ink no letter uses).
@@ -3323,7 +3409,7 @@ mod tests {
                     for node in &scene.nodes {
                         let centre = fit.point(node.at);
                         let radius = node.radius * fit.scale;
-                        let ink = palette.ink(node.dim);
+                        let (ink, sublabel_colour) = node_word_colours(node, &palette);
                         if node.label_beside() {
                             let gap = 6.0 * fit.scale.max(map_scene::LABEL_FLOOR);
                             text(
@@ -3351,7 +3437,7 @@ mod tests {
                                 sublabel,
                                 false,
                                 0.5,
-                                palette.ink(0.6 * node.dim),
+                                sublabel_colour,
                             );
                         }
                     }
@@ -3359,10 +3445,10 @@ mod tests {
                         text(
                             &format!("+{}", overflow.count),
                             fit.point(overflow.at),
-                            10.0,
-                            false,
+                            MarkFont::MICRO.size,
+                            true,
                             0.5,
-                            palette.ink(0.6),
+                            overflow_colour(&palette),
                         );
                     }
                 }

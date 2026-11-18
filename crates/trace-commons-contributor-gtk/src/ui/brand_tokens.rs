@@ -342,9 +342,12 @@ pub mod map {
         pub const MAP_RULE_UNSET_FILL: Rgba = ("#ededf0", 1.0);
         pub const PANE_OPAQUE: Rgba = ("#f2f3f6", 1.0);
         pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const MAP_FIELD_INNER: Rgba = ("#ffffff", 0.1);
+        pub const MAP_FIELD_OUTER: Rgba = ("#ffffff", 0.22);
         pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
         pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
         pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const PURPLE_TEXT: Rgba = ("#023e83", 1.0);
         pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
         pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
         pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
@@ -373,9 +376,12 @@ pub mod map {
         pub const MAP_RULE_UNSET_FILL: Rgba = ("#2a2a2c", 1.0);
         pub const PANE_OPAQUE: Rgba = ("#0d1124", 1.0);
         pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const MAP_FIELD_INNER: Rgba = ("#070a1a", 0.15);
+        pub const MAP_FIELD_OUTER: Rgba = ("#070a1a", 0.32);
         pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
         pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
         pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const PURPLE_TEXT: Rgba = ("#c6e1ff", 1.0);
         pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
         pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
         pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);

@@ -502,8 +502,8 @@ MAP_COLOURS = [
     "mapOrbShared", "mapOrbKept", "purpleSoft", "blue", "statusOff", "statusOn",
     "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapCredentialOn",
     "mapRuleAutoFill", "mapRuleAskFill", "mapRuleIgnoreFill", "mapRuleUnsetFill",
-    "paneOpaque", "wellFill",
-    "textPrimary", "textSecondary", "textTertiary",
+    "paneOpaque", "wellFill", "mapFieldInner", "mapFieldOuter",
+    "textPrimary", "textSecondary", "textTertiary", "purpleText",
     "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode", "toolTheia",
 ]
 
