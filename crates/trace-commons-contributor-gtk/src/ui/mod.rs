@@ -35,6 +35,10 @@ mod terminal_choice;
 pub mod update;
 pub mod wrap_row;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_fixture.rs"]
+pub(crate) mod consent_fixture;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -23,7 +23,6 @@
 //! contributor sees and `project_id` is what goes back to the daemon; the
 //! path does not cross the socket at all, so there is nothing to leak.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -367,63 +366,33 @@ pub fn wire(app: &Rc<App>) {
 
     let app_for_undo = Rc::clone(app);
     view.undo_undo.connect_clicked(move |_| {
-        // Read the ids out and let the borrow end before anything else
-        // touches the cell: `dismiss_undo` takes it mutably.
-        let entry_ids = {
+        // The Mac's `undoFolder` / `undoContribute`: one `cancel`, by the
+        // folder's `project_id` for a Submit all (so the daemon cancels
+        // every entry that approval covered, including one that arrived
+        // after this window last listed the folder) or by the trace's
+        // `entry_id`. The card is cleared only once the daemon confirms;
+        // a refusal keeps it and says the shared line.
+        let params = {
             let held = app_for_undo.undo.borrow();
             match held.as_ref() {
-                Some(undo) => undo.entry_ids.clone(),
+                Some(undo) => undo_cancel_params(undo),
                 None => return,
             }
         };
-        app_for_undo.dismiss_undo();
-        if entry_ids.is_empty() {
-            return;
-        }
-        // A row's Undo cancels one entry; a project group's Undo cancels
-        // every entry that call approved. `cancel` takes one id at a time --
-        // there is no bulk form on this socket -- so a group's Undo fires
-        // one call per id and waits for all of them before it says anything,
-        // rather than reporting the first reply as though it spoke for the
-        // rest.
-        let total = entry_ids.len();
-        let outcome = Rc::new(RefCell::new((0usize, 0usize)));
-        for entry_id in entry_ids {
-            let outcome = Rc::clone(&outcome);
-            app_for_undo.call(
-                "cancel",
-                serde_json::json!({ "entry_id": entry_id }),
-                move |app, result| {
-                    let (completed, failed) = {
-                        let mut o = outcome.borrow_mut();
-                        o.0 += 1;
-                        if result.is_err() {
-                            o.1 += 1;
-                        }
-                        *o
-                    };
-                    if completed != total {
-                        return;
-                    }
-                    app.toast(match failed {
-                        0 if total == 1 => "Not sent. It's back in the queue.",
-                        0 => "Not sent. They're back in the queue.",
-                        // `cancel` is guaranteed to succeed for the whole
-                        // hold, so this is the rare late press -- and it
-                        // says so rather than pretending the press worked.
-                        f if f == total && total == 1 => {
-                            "Too late to take that one back -- it has already gone."
-                        }
-                        f if f == total => "Too late to take those back -- they have already gone.",
-                        _ => {
-                            "Some of those were already too late to take back; \
-                              the rest are in the queue again."
-                        }
-                    });
-                    app.refresh();
-                },
-            );
-        }
+        app_for_undo.call("cancel", params, move |app, result| {
+            let confirmed = app
+                .undo
+                .borrow()
+                .as_ref()
+                .is_some_and(|undo| undo_reply_confirmed(undo, &result));
+            if confirmed {
+                app.dismiss_undo();
+            } else {
+                let label = result.err().unwrap_or_default();
+                app.toast(undo_refusal_line(&label));
+            }
+            app.refresh();
+        });
     });
 
     let app_for_send = Rc::clone(app);
@@ -1376,7 +1345,9 @@ fn manifest_block(
     block
 }
 
-/// The entries a group-level submit is expected to send, for the undo bar.
+/// The entries a group-level submit is expected to send, which the
+/// inspector's demand lists while the undo bar is up. Undo itself does not
+/// read them: it cancels by `project_id` (`undo_cancel_params`).
 ///
 /// Read fresh at click time, never off what `render` captured: the queue can
 /// change between a render and a click.
@@ -1416,8 +1387,8 @@ fn submit_group(
     project_label: &str,
     verdict: Option<&'static str>,
 ) {
-    // The candidate set for the undo bar, and only that -- `project_id`
-    // alone tells the daemon what to approve. Read fresh at click time
+    // The candidate set the inspector lists, and only that -- `project_id`
+    // alone tells the daemon what to approve, and Undo cancels by it too. Read fresh at click time
     // because the queue can change between a render and a click, and
     // narrowed to the sendable rows so the bar does not offer to undo an
     // entry that was never sent.
@@ -1923,6 +1894,44 @@ fn clear(container: &gtk::Box) {
     }
 }
 
+/// The one `cancel` an Undo sends, as the Mac's `cancelFolder(projectId:)`
+/// and `cancel(entryId:)` send it. A folder's Submit all is taken back by
+/// its `project_id`; a trace's by its `entry_id`.
+pub(crate) fn undo_cancel_params(undo: &super::PendingUndo) -> serde_json::Value {
+    match (&undo.folder, undo.entry_ids.first()) {
+        (Some(project_id), _) => serde_json::json!({ "project_id": project_id }),
+        (None, Some(entry_id)) => serde_json::json!({ "entry_id": entry_id }),
+        (None, None) => serde_json::json!({ "entry_id": "" }),
+    }
+}
+
+/// Whether the daemon took the Undo, read as the Mac decodes the reply: a
+/// folder's carries a non-negative integer `canceled`
+/// (`CancelFolderResult`), a trace's is an object whose `ok`, if present,
+/// is a bool (`OkReply`).
+pub(crate) fn undo_reply_confirmed(
+    undo: &super::PendingUndo,
+    reply: &Result<serde_json::Value, String>,
+) -> bool {
+    let Ok(value) = reply else { return false };
+    if undo.folder.is_some() {
+        value.get("canceled").and_then(serde_json::Value::as_u64).is_some()
+    } else {
+        value.as_object().is_some_and(|object| {
+            object
+                .get("ok")
+                .is_none_or(|ok| ok.is_boolean() || ok.is_null())
+        })
+    }
+}
+
+/// What a refused Undo says: the Traces tab's shared line for that label,
+/// else its shared "That didn't go through."
+pub(crate) fn undo_refusal_line(label: &str) -> &'static str {
+    trace_commons_contributor::preview_copy::monitor_failure_line(label)
+        .unwrap_or(trace_commons_contributor::preview_copy::MONITOR_REQUEST_FAILED)
+}
+
 /// What an `approve` call selects: one row's `Submit`, a project group's
 /// `Submit all`, or (not yet wired to any call site here) everything.
 pub(crate) enum ApproveTarget {
@@ -1970,6 +1979,10 @@ pub(crate) fn approve_params(
     }
     params
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_queue_tests.rs"]
+mod consent_mounted_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2077,6 +2090,72 @@ mod tests {
             Some("  it stopped halfway  "),
         );
         assert_eq!(params["correction"], "it stopped halfway");
+    }
+
+    fn pending_undo(entry_ids: &[&str], folder: Option<&str>) -> super::super::PendingUndo {
+        let now = chrono::Utc::now();
+        super::super::PendingUndo {
+            entry_ids: entry_ids.iter().map(|id| id.to_string()).collect(),
+            project_label: "proj".into(),
+            folder: folder.map(str::to_string),
+            approved_at: now,
+            hold_until: now,
+        }
+    }
+
+    /// A folder's Undo is the Mac's `cancelFolder`: one `cancel` with the
+    /// folder's `project_id`, so the daemon cancels every entry that call
+    /// approved, including one this window never listed.
+    #[test]
+    fn a_folder_undo_is_one_cancel_by_project_id() {
+        let undo = pending_undo(&["a", "b"], Some("proj-1"));
+        assert_eq!(
+            undo_cancel_params(&undo),
+            serde_json::json!({"project_id": "proj-1"})
+        );
+    }
+
+    /// One trace's Undo is the Mac's `cancel(entryId:)`.
+    #[test]
+    fn a_trace_undo_is_one_cancel_by_entry_id() {
+        let undo = pending_undo(&["a"], None);
+        assert_eq!(
+            undo_cancel_params(&undo),
+            serde_json::json!({"entry_id": "a"})
+        );
+    }
+
+    /// The reply is read as the Mac reads it: a folder's must carry an
+    /// integer `canceled` (`CancelFolderResult`), one trace's must be an
+    /// object (`OkReply`). Anything else is a refusal, and the undo card
+    /// stays.
+    #[test]
+    fn an_undo_reply_is_checked_as_the_mac_checks_it() {
+        use serde_json::json;
+        let folder = pending_undo(&["a"], Some("p"));
+        let trace = pending_undo(&["a"], None);
+        assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 2}))));
+        assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 0}))));
+        for bad in [json!({}), json!({"canceled": "2"}), json!({"canceled": -1}), json!(null)] {
+            assert!(!undo_reply_confirmed(&folder, &Ok(bad.clone())), "{bad}");
+        }
+        assert!(!undo_reply_confirmed(&folder, &Err("not-cancelable".into())));
+        assert!(undo_reply_confirmed(&trace, &Ok(json!({"ok": true}))));
+        assert!(undo_reply_confirmed(&trace, &Ok(json!({}))));
+        assert!(!undo_reply_confirmed(&trace, &Ok(json!(null))));
+        assert!(!undo_reply_confirmed(&trace, &Ok(json!({"ok": "yes"}))));
+        assert!(!undo_reply_confirmed(&trace, &Err("not-cancelable".into())));
+    }
+
+    /// A refused Undo says the shared Traces line, never a GTK sentence.
+    #[test]
+    fn a_refused_undo_says_the_shared_line() {
+        use trace_commons_contributor::preview_copy as words;
+        assert_eq!(undo_refusal_line("not-cancelable"), words::MONITOR_REQUEST_FAILED);
+        assert_eq!(
+            undo_refusal_line("witness-review-required"),
+            words::MONITOR_NEEDS_PRIVACY_CHECK
+        );
     }
 
     /// Plain `Submit all` stays a one-click, unanswered submit.
