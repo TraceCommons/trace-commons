@@ -92,6 +92,23 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(missing.proposedTerminal, "kitty")
     }
 
+    /// Owner, 2026-11-03: the launch line names herdr while sessions are
+    /// grouped there, whatever terminal the dialog has picked; ungrouped it
+    /// follows the pick.
+    func testTheLaunchLineNamesHerdrWhileGroupedWhateverIsPicked() throws {
+        func snapshot(_ fields: String) throws -> ManagedSnapshot {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_chosen":true,"terminal_current":"ghostty",\#(fields)"terminal_choices":[{"id":"terminal","name":"Terminal"},{"id":"ghostty","name":"Ghostty"}]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        }
+        let grouped = try snapshot(#""terminal_destination":"Ghostty","launch_destination":"herdr","herdr_grouping":true,"#)
+        XCTAssertEqual(grouped.launchDestination(picked: "terminal"), "herdr")
+        XCTAssertEqual(grouped.launchDestination(picked: "ghostty"), "herdr")
+        XCTAssertEqual(grouped.launchDestination(picked: nil), "herdr")
+        let ungrouped = try snapshot(#""terminal_destination":"Ghostty","launch_destination":"Ghostty","herdr_grouping":false,"#)
+        XCTAssertEqual(ungrouped.launchDestination(picked: "terminal"), "Terminal")
+        XCTAssertEqual(ungrouped.launchDestination(picked: nil), "Ghostty")
+    }
+
     func testAnOlderSnapshotOffersNoTerminalChoice() throws {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
         XCTAssertNil(snapshot.capabilities.terminalCurrent)

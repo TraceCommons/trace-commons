@@ -403,7 +403,8 @@ enum GlassSurfaceBacking: Equatable {
     /// under it `NSVisualEffectView` draws opaque by itself, so floating
     /// text never shows the map through (R14).
     static func choose(floating: Bool) -> GlassSurfaceBacking {
-        floating ? .blur : .painted
+        if GlassMaterial.paintsForCapture { return .painted }
+        return floating ? .blur : .painted
     }
 }
 

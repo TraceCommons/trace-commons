@@ -95,3 +95,45 @@ before the daemon's shared state is shared; no IPC method sets or clears it.
 `macos/scripts/check-dev-dry-run-release.sh` checks the release Rust dylib
 and the release app binary for the variable's name, the same method C1 used
 for `SampleDaemonClient`.
+
+## The Linux shell reads the same sets, and what they lack (spike S3)
+
+Debug builds of the GTK shell answer from these files too
+(`crates/trace-commons-contributor-gtk/src/sample.rs`), under the same
+`TRACE_COMMONS_SAMPLE` names and fallback: a method is answered from its
+set's file or from `shared/`, and anything else is refused with the fixed
+label `sample-unrecorded`. The Swift hand-written replies above are not
+ported, so on Linux those methods are refused.
+
+What each set holds (read from the files on 2026-11-16):
+
+| Set | Waiting | Held (reason) | Kept | History | Folder modes | Unknown counts |
+|---|---|---|---|---|---|---|
+| `empty` | 0 | 0 | 0 | none | none | no |
+| `normalDay` | 3 | 0 | 1 | 1 submitted, 2 accepted, 1 quarantined, 1 withdrawn | 2 Ask | no |
+| `busyQueue` | 14 | 0 | 1 | as `normalDay` | 3 Ask | no |
+| `heldSessions` | 4 | 4 (2 `second-look-review-required`, 2 `scrub-check-manual`) | 1 | as `normalDay` | 2 Automatic (armed) | no |
+| `armedFolder` | 3 | 0 | 0 | as `normalDay` | 1 Automatic (armed) | no |
+| `unknownCounts` | 3 | 0 | 0 | as `normalDay` | 2 Ask | `decisions_owed` absent |
+
+So every state the window draws has a set: empty, populated, unknown, held,
+armed, kept and withdrawn. Withdrawn is only ever one history row, and no
+set has a Never folder.
+
+Reads the map, tree, graph and inspector need that no set records:
+
+- `account_devices_list`: the Traces map's other computers. The macOS
+  window reads it through the live client even on sample data, and the
+  recorder cannot capture it, because it answers from the account service
+  and the recorder's temp store has none. Recording it means a hand-written
+  override in the recorder, like `inference_calls`; not done here.
+- The Private AI map view's network reads (`private_ai`,
+  `inference_summary`, `model_spend`, `inference_call_proof`): hand-written
+  in Swift, so a Linux sample has none until they are emitted as files.
+- `preview` and `preview_body`: no transcript is recorded, by design.
+- Reads only the GTK shell makes today (`hello`, `get_setup_status`,
+  `consent_options`, `managed_snapshot`, `subscription_usage`,
+  `queue_outcome_counts`, `list_past_sessions`, `insights_week` and the
+  rest). They are refused on sample data. Slice 2 moves the GTK window onto
+  the macOS window's read set, after which the recorder should cover
+  whichever of these remain.

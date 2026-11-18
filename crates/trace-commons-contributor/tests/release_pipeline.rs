@@ -1096,6 +1096,22 @@ fn flatpak_repo_is_gpg_signed_before_publication() {
     );
 }
 
+/// GNOME Software shows the `.flatpakref`'s `Title=` when the app is
+/// installed from it, so it is the app's name, the one its windows use.
+#[test]
+fn flatpakref_title_is_the_app_name() {
+    let publish = read("scripts/flatpak/publish-repo.sh");
+    let titles: Vec<&str> = publish
+        .lines()
+        .filter_map(|l| l.strip_prefix("Title="))
+        .collect();
+    assert_eq!(
+        titles,
+        [trace_commons_contributor::brand::APP_NAME],
+        "the .flatpakref Title= must be the app's name"
+    );
+}
+
 /// summary.sig is not a bare detached OpenPGP signature -- it is an OSTree
 /// GVariant whose `ostree.gpgsigs` key holds the detached signatures. A
 /// `gpg --verify summary.sig summary` call always fails with "no valid

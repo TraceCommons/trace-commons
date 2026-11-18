@@ -18,7 +18,7 @@
 <component type="desktop-application">
   <id>ai.tracecommons.Contributor</id>
 
-  <name>Near.ai</name>
+  <name>Near AI Gateway</name>
   <summary>Review and contribute your coding traces</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -26,8 +26,8 @@
 
   <description>
     <p>
-      Near.ai contributes the traces you have with coding agents to Trace
-      Commons, an open corpus, with your explicit consent for each one. Nothing leaves your
+      Near AI Gateway contributes the traces you have with coding agents
+      to an open corpus, with your explicit consent for each one. Nothing leaves your
       machine until you have seen exactly what it contains.
     </p>
     <p>
@@ -48,7 +48,7 @@
   <url type="bugtracker">https://github.com/TraceCommons/trace-commons/issues</url>
 
   <developer id="ai.tracecommons">
-    <name>Trace Commons</name>
+    <name>NEAR AI</name>
   </developer>
 
   <content_rating type="oars-1.1"/>
@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.10" date="2026-11-18">
+      <description>
+        <p>Fixed a launch error when opening a managed Codex session without choosing a folder.</p>
+      </description>
+    </release>
     <release version="1.0.9" date="2026-11-17">
       <description>
         <p>Private AI now accepts images when the selected model supports them, while keeping text-only models from receiving images.</p>
@@ -314,7 +319,7 @@
     </release>
     <release version="0.13.0" date="2026-10-11">
       <description>
-        <p>The app is now called Near.ai. Trace Commons remains the name of the commons your traces are contributed to. Folder modes have one set of names in every app: Ask me, Automatic and Never. Traces waiting on a busy privacy check show as waiting, the app shows where its inference requests are routed, and uploads the server rate-limits stay queued and are retried at a steady pace.</p>
+        <p>The app is now called Near.ai. Folder modes have one set of names in every app: Ask me, Automatic and Never. Traces waiting on a busy privacy check show as waiting, the app shows where its inference requests are routed, and uploads the server rate-limits stay queued and are retried at a steady pace.</p>
       </description>
     </release>
     <release version="0.12.6" date="2026-09-15">
