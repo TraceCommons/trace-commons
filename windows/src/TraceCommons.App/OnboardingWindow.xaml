@@ -237,34 +237,7 @@
             <Button Grid.Row="3" Content="Continue" HorizontalAlignment="Right" Click="OnConsent" />
         </Grid>
 
-        <!-- 4. Extra privacy scan, only when the operator offers it -->
-        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsScan, Mode=OneWay}">
-            <!--
-                Never headline "PII filter" or "NEAR AI": those are internal
-                names. The heading says what actually happens.
-            -->
-            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}"
-                       Text="Extra scrub before sending? (optional)" TextWrapping="Wrap" />
-            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="Local scrubbing removes secrets, keys, tokens and credentials by pattern before anything leaves this machine. It runs either way." />
-            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="You can additionally send the message text of each trace, not tool output, not file contents, through a second scanner run by NEAR AI, a third party, to catch personal information the patterns miss: names, addresses, that kind of thing." />
-            <!--
-                Both halves of the disclosure must stay. The cost (message
-                text really does leave this machine to a third party) and
-                the reassurance (an unreachable scanner holds traces rather
-                than sending them unscanned). Cutting either half makes the
-                screen dishonest in one direction.
-            -->
-            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="This means your message text is transmitted to NEAR AI before it reaches the server that receives your traces. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
-            <RadioButton x:Name="ScanLocalOnly" GroupName="Scan" Content="Local scrubbing only" IsChecked="True" />
-            <RadioButton x:Name="ScanWithNearAi" GroupName="Scan" Content="Local scrubbing + NEAR AI scan"
-                         IsChecked="{x:Bind ViewModel.UseNearAiScan, Mode=TwoWay}" />
-            <Button Content="Continue" HorizontalAlignment="Right" Click="OnScan" />
-        </StackPanel>
-
-        <!-- 5. What to watch -->
+        <!-- 4. What to watch -->
         <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" RowSpacing="12"
               Visibility="{x:Bind ViewModel.IsWatch, Mode=OneWay}">
             <TextBlock Grid.Row="0" Style="{StaticResource TcTitleScreenTextStyle}" Text="What to watch" />
@@ -343,7 +316,7 @@
             <Button Grid.Row="4" Content="Continue" HorizontalAlignment="Right" Click="OnWatch" />
         </Grid>
 
-        <!-- 6. Done -->
+        <!-- 5. Done -->
         <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsDone, Mode=OneWay}">
             <TextBlock Style="{StaticResource TcTitleScreenTextStyle}"
                        Text="You're set up. Nothing has been sent." TextWrapping="Wrap" />

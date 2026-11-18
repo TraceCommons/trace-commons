@@ -2,7 +2,7 @@
 //! Only configured source adapters read disk; each load retains their byte and
 //! SQLite instruction limits. No transcript text or native ID crosses IPC.
 use super::*;
-use crate::insights::skill_usage::{SKILL_USAGE_VERSION, SkillUsageEvidence, opencode_skill_usage};
+use crate::insights::skill_usage::{SkillUsageEvidence, evidence_is_current, opencode_skill_usage};
 use crate::source::{SOURCE_OPENCODE, SessionRef, all_sources};
 
 const MAX_READS: usize = 16;
@@ -233,7 +233,7 @@ fn scan_with_sources(
             }
             seen.insert(reference.path.clone());
             if files.get(&reference.path).is_some_and(|old| {
-                old.fingerprint == stamp && old.row.evidence.schema_version == SKILL_USAGE_VERSION
+                old.fingerprint == stamp && evidence_is_current(&old.row.evidence)
             }) {
                 continue;
             }

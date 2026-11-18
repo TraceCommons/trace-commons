@@ -904,8 +904,6 @@ pub struct Settings {
     pub approval_hold_secs: u64,
     #[serde(default)]
     pub local_notifications: bool,
-    #[serde(default)]
-    pub near_ai_configured: bool,
     /// `watch`, `off` or `unset`, per source.
     ///
     /// `get_settings` also sends `claude_root_configured` /

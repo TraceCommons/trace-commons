@@ -6,7 +6,6 @@ public enum HealthNavigationTarget
     None,
     Connect,
     Waiting,
-    ExistingOnboarding,
 }
 
 public static class HealthNavigation
@@ -15,9 +14,6 @@ public static class HealthNavigation
     {
         "not-logged-in" => HealthNavigationTarget.Connect,
         "queue-full" => HealthNavigationTarget.Waiting,
-        // Keep the established disclosure flow until its shared consent
-        // contract is revised. Navigation must not acknowledge it implicitly.
-        "near-ai-notice-not-acknowledged" => HealthNavigationTarget.ExistingOnboarding,
         _ => HealthNavigationTarget.None,
     };
 }

@@ -296,7 +296,6 @@ fn test_config(device_key_id: String) -> trace_commons_contributor::config::Cont
         user_subject: "alice".into(),
         device_key_id,
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,

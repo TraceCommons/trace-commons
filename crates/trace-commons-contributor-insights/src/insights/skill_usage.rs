@@ -10,7 +10,9 @@ use trace_commons_contributor_sources::source::{SessionEvent, SessionEventKind};
 
 use super::SourceFormat;
 
-pub const SKILL_USAGE_VERSION: u32 = 2;
+/// 3: a Claude transcript with no assistant record is complete, with no
+/// uses, rather than partial (see [`evidence_is_current`]).
+pub const SKILL_USAGE_VERSION: u32 = 3;
 const MAX_SKILLS: usize = 128;
 const MAX_CALLS: usize = 4096;
 
@@ -49,12 +51,26 @@ pub struct SkillUsageEvidence {
     pub skills: Vec<SkillUsageCount>,
 }
 
+/// Whether evidence an earlier scanner kept is what this one would write,
+/// so its transcript need not be read again. Version 2 differs only in a
+/// Claude transcript with no assistant record, which it called partial with
+/// no uses: only evidence of that shape is read again, not every session.
+pub fn evidence_is_current(evidence: &SkillUsageEvidence) -> bool {
+    evidence.schema_version == SKILL_USAGE_VERSION
+        || (evidence.schema_version == 2 && !(evidence.partial && evidence.skills.is_empty()))
+}
+
 pub struct SkillUsageScan {
     format: SourceFormat,
     seen: BTreeSet<String>,
     counts: BTreeMap<String, SkillUsageCount>,
     partial: bool,
     recognized: bool,
+    /// Claude: a record naming its session was seen, so this is a
+    /// transcript and not some other file.
+    claude_session: bool,
+    /// Claude: any record typed `assistant` was seen, readable or not.
+    claude_assistant: bool,
     pending: BTreeMap<String, (String, Option<DateTime<Utc>>)>,
 }
 
@@ -66,6 +82,8 @@ impl SkillUsageScan {
             counts: BTreeMap::new(),
             partial: format != SourceFormat::ClaudeCode,
             recognized: false,
+            claude_session: false,
+            claude_assistant: false,
             pending: BTreeMap::new(),
         }
     }
@@ -79,6 +97,12 @@ impl SkillUsageScan {
             .as_str()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.with_timezone(&Utc));
+        if self.format == SourceFormat::ClaudeCode {
+            self.claude_session |= record["sessionId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty());
+            self.claude_assistant |= record["type"] == "assistant";
+        }
         match self.format {
             SourceFormat::ClaudeCode if record["type"] == "assistant" => {
                 // Top-level assistant records are the Claude transcript's
@@ -238,9 +262,98 @@ impl SkillUsageScan {
                 SourceFormat::Codex => SkillUsageCoverage::LoadsOnly,
                 SourceFormat::Trajectory => SkillUsageCoverage::Unsupported,
             },
-            partial: self.partial || !self.recognized || !self.pending.is_empty(),
+            // A Claude transcript with no assistant record had no model
+            // turn, so no tool call: complete, with no uses. One whose
+            // assistant records could not be read stays partial.
+            partial: self.partial
+                || !(self.recognized
+                    || (self.format == SourceFormat::ClaudeCode
+                        && self.claude_session
+                        && !self.claude_assistant))
+                || !self.pending.is_empty(),
             skills: self.counts.into_values().collect(),
         }
+    }
+}
+
+/// How far back partial history is placed by day: the daily history's own
+/// horizon. A gap older than this is older than any day a story counts.
+pub const PARTIAL_DAYS_HORIZON: i64 = 90;
+
+/// One agent's incomplete skill history: the local days a partial
+/// session's span touches within the horizon, and how many partial
+/// sessions could not be placed at all (to be read as inside every day).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PartialAgent {
+    pub agent: &'static str,
+    /// Local `YYYY-MM-DD`, as daily usage rows name their day; oldest first.
+    pub days: Vec<String>,
+    pub undated: usize,
+}
+
+/// Where usage history is incomplete, by agent and local day, so a story
+/// counting one agent over some days is held back only by a gap there.
+#[derive(Debug, Default)]
+pub struct PartialScope {
+    agents: BTreeMap<&'static str, (BTreeSet<chrono::NaiveDate>, usize)>,
+}
+
+impl PartialScope {
+    /// A partial session of `agent` whose evidence lies between `start`
+    /// and `end`. With no `start` the session recorded no time, so its
+    /// uses can be anywhere up to `end` (the last write); with no `end`
+    /// it cannot be placed at all and counts as undated.
+    pub fn mark<Tz: chrono::TimeZone>(
+        &mut self,
+        agent: &'static str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+        tz: &Tz,
+    ) {
+        let Some(end) = end else {
+            self.mark_undated(agent);
+            return;
+        };
+        let horizon = now - chrono::Duration::days(PARTIAL_DAYS_HORIZON);
+        let (first, last) = match start {
+            Some(start) => (start.min(end), start.max(end)),
+            None => (horizon, end),
+        };
+        let (first, last) = (first.max(horizon), last.min(now));
+        if last < first {
+            return;
+        }
+        let last = last.with_timezone(tz).date_naive();
+        let mut day = first.with_timezone(tz).date_naive();
+        let days = &mut self.agents.entry(agent).or_default().0;
+        while day <= last {
+            days.insert(day);
+            let Some(next) = day.succ_opt() else { break };
+            day = next;
+        }
+    }
+
+    /// A partial session of `agent` with no time to place it by.
+    pub fn mark_undated(&mut self, agent: &'static str) {
+        let undated = &mut self.agents.entry(agent).or_default().1;
+        *undated = undated.saturating_add(1);
+    }
+
+    /// Agents with a gap, by name; an agent left out has none.
+    pub fn agents(&self) -> Vec<PartialAgent> {
+        self.agents
+            .iter()
+            .filter(|(_, (days, undated))| !days.is_empty() || *undated > 0)
+            .map(|(agent, (days, undated))| PartialAgent {
+                agent,
+                days: days
+                    .iter()
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .collect(),
+                undated: *undated,
+            })
+            .collect()
     }
 }
 
@@ -423,6 +536,94 @@ mod tests {
         assert_eq!(evidence.skills[0].loads, 0);
     }
 
+    /// A transcript whose request never got a reply: records of the
+    /// session, a prompt, retries, but no assistant record.
+    fn turnless_claude_records() -> Vec<Value> {
+        vec![
+            json!({"type":"permission-mode","sessionId":"s"}),
+            json!({"type":"user","sessionId":"s","message":{"role":"user","content":"hello"}}),
+            json!({"type":"api-request","sessionId":"s","params":{"tools":[{"name":"Skill"}]}}),
+            json!({"type":"system","sessionId":"s","subtype":"api_error"}),
+        ]
+    }
+
+    #[test]
+    fn claude_transcript_with_no_assistant_turn_is_complete_with_no_uses() {
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        for record in turnless_claude_records() {
+            scan.observe(&record);
+        }
+        let evidence = scan.finish();
+        assert!(
+            !evidence.partial,
+            "no assistant turn means no tool call could have been made"
+        );
+        assert!(evidence.skills.is_empty());
+    }
+
+    #[test]
+    fn claude_assistant_record_of_unknown_shape_stays_partial() {
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        for record in turnless_claude_records() {
+            scan.observe(&record);
+        }
+        scan.observe(
+            &json!({"type":"assistant","sessionId":"s","message":{"content":"a new shape"}}),
+        );
+        assert!(scan.finish().partial);
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        scan.observe(
+            &json!({"type":"assistant","sessionId":"s","message":{"role":"user","content":[]}}),
+        );
+        assert!(scan.finish().partial, "a contradictory role is not read");
+    }
+
+    #[test]
+    fn records_that_name_no_claude_session_stay_partial() {
+        assert!(
+            SkillUsageScan::new(SourceFormat::ClaudeCode)
+                .finish()
+                .partial
+        );
+        let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
+        scan.observe(&json!({"type":"user","message":{"content":"hello"}}));
+        scan.observe(&json!({"type":"system","sessionId":""}));
+        assert!(scan.finish().partial);
+        let mut scan = SkillUsageScan::new(SourceFormat::Codex);
+        for record in turnless_claude_records() {
+            scan.observe(&record);
+        }
+        assert!(scan.finish().partial, "only Claude transcripts qualify");
+    }
+
+    #[test]
+    fn older_evidence_is_current_unless_it_could_be_a_turnless_transcript() {
+        let evidence = |schema_version, partial, skills: usize| SkillUsageEvidence {
+            schema_version,
+            coverage: SkillUsageCoverage::ExplicitInvocations,
+            partial,
+            skills: (0..skills)
+                .map(|i| SkillUsageCount {
+                    name: format!("s{i}"),
+                    invocations: 1,
+                    loads: 0,
+                    last_seen: None,
+                    events: Vec::new(),
+                })
+                .collect(),
+        };
+        assert!(evidence_is_current(&evidence(SKILL_USAGE_VERSION, true, 0)));
+        assert!(evidence_is_current(&evidence(2, false, 0)));
+        assert!(evidence_is_current(&evidence(2, true, 1)));
+        assert!(!evidence_is_current(&evidence(2, true, 0)));
+        assert!(!evidence_is_current(&evidence(1, false, 1)));
+        assert!(!evidence_is_current(&evidence(
+            SKILL_USAGE_VERSION + 1,
+            false,
+            1
+        )));
+    }
+
     #[test]
     fn malformed_calls_do_not_persist_arguments_or_paths() {
         let mut scan = SkillUsageScan::new(SourceFormat::ClaudeCode);
@@ -524,6 +725,123 @@ mod tests {
         let evidence = scan.finish();
         assert!(evidence.partial);
         assert!(evidence.skills.len() <= 128);
+    }
+
+    fn at(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn partial_scope_names_only_the_agent_with_the_gap() {
+        let tz = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "codex",
+            Some(at("2026-11-12T15:00:00Z")),
+            Some(at("2026-11-12T16:00:00Z")),
+            now,
+            &tz,
+        );
+        let agents = scope.agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent, "codex");
+        assert_eq!(agents[0].days, ["2026-11-12"]);
+        assert_eq!(agents[0].undated, 0);
+        assert!(!agents.iter().any(|a| a.agent == "claude_code"));
+    }
+
+    #[test]
+    fn partial_scope_places_a_span_on_every_local_day_it_touches() {
+        // UTC-5: 2026-11-10T03:00Z is still the 9th locally.
+        let tz = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-10T03:00:00Z")),
+            Some(at("2026-11-11T12:00:00Z")),
+            now,
+            &tz,
+        );
+        let agents = scope.agents();
+        assert_eq!(agents[0].agent, "claude_code");
+        assert_eq!(agents[0].days, ["2026-11-09", "2026-11-10", "2026-11-11"]);
+    }
+
+    #[test]
+    fn partial_scope_counts_unplaceable_sessions_as_undated() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-10T03:00:00Z")),
+            None,
+            now,
+            &tz,
+        );
+        scope.mark_undated("opencode");
+        let agents = scope.agents();
+        let claude = agents.iter().find(|a| a.agent == "claude_code").unwrap();
+        assert_eq!(claude.undated, 1);
+        assert!(claude.days.is_empty());
+        assert_eq!(
+            agents
+                .iter()
+                .find(|a| a.agent == "opencode")
+                .unwrap()
+                .undated,
+            1
+        );
+    }
+
+    #[test]
+    fn partial_scope_without_a_start_reaches_back_to_the_horizon() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            None,
+            Some(at("2026-11-02T10:00:00Z")),
+            now,
+            &tz,
+        );
+        let days = &scope.agents()[0].days;
+        assert_eq!(days.first().map(String::as_str), Some("2026-08-18"));
+        assert_eq!(days.last().map(String::as_str), Some("2026-11-02"));
+        assert_eq!(days.len(), 77);
+    }
+
+    #[test]
+    fn partial_scope_leaves_out_gaps_older_than_the_horizon_and_clips_the_future() {
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = at("2026-11-16T17:00:00Z");
+        let mut scope = PartialScope::default();
+        scope.mark(
+            "claude_code",
+            Some(at("2026-07-01T10:00:00Z")),
+            Some(at("2026-07-02T10:00:00Z")),
+            now,
+            &tz,
+        );
+        assert!(scope.agents().is_empty(), "older than the horizon");
+        scope.mark(
+            "claude_code",
+            Some(at("2026-10-20T10:00:00Z")),
+            Some(at("2026-10-20T11:00:00Z")),
+            now,
+            &tz,
+        );
+        scope.mark(
+            "claude_code",
+            Some(at("2026-11-16T10:00:00Z")),
+            Some(at("2026-11-19T10:00:00Z")),
+            now,
+            &tz,
+        );
+        assert_eq!(scope.agents()[0].days, ["2026-10-20", "2026-11-16"]);
     }
 
     fn opencode_call(id: &str, tool: &str, input: Value) -> SessionEvent {

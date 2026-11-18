@@ -18,15 +18,41 @@ final class InsightsSkillsHomeTests: XCTestCase {
             "daily":[["day":"2026-10-30","invocations":1,"loads":0,"sessions":1], ["day":"2026-11-03","invocations":previous,"loads":0,"sessions":1], ["day":"2026-11-10","invocations":current,"loads":0,"sessions":1]]]
         return try JSONDecoder().decode(DaemonData.SkillsUsageRow.self, from: JSONSerialization.data(withJSONObject: value))
     }
-    private func snapshot(rows: [DaemonData.SkillsUsageRow] = [], partial: Bool = false, followed: [String] = ["maker"], feed: [DaemonData.SkillsFeedEvent] = [], updates: [DaemonData.SkillsUpdate] = [], skills: [DaemonData.InstalledSkill]? = nil, status: String = "current", enabled: Bool = true, analysis: Bool = true) -> DaemonData.SkillsSnapshot {
+    private func snapshot(rows: [DaemonData.SkillsUsageRow] = [], partial: Bool = false, followed: [String] = ["maker"], feed: [DaemonData.SkillsFeedEvent] = [], updates: [DaemonData.SkillsUpdate] = [], skills: [DaemonData.InstalledSkill]? = nil, status: String = "current", enabled: Bool = true, analysis: Bool = true, partialAgents: [DaemonData.SkillsPartialAgent]? = nil) -> DaemonData.SkillsSnapshot {
         .init(enabled: enabled, inventory: .init(skills: skills ?? [installed()], partial: false),
               catalog: .init(publishers: [publisher], skills: [catalog], checkedAt: "2026-11-15T11:00:00Z", publisherStates: [.init(publisherID:"maker",status:status,checkedAt:"2026-11-15T11:00:00Z")]),
               followedPublishers: followed, updates: updates, feed: feed,
-              usage: .init(enabled: analysis, lastAnalysisAt:"2026-11-15T11:00:00Z",earliestEvidence:"2026-10-30T00:00:00Z",partial:partial,skills:rows,coverage:[.init(agent:"claude_code",status:"explicit_invocations")]))
+              usage: .init(enabled: analysis, lastAnalysisAt:"2026-11-15T11:00:00Z",earliestEvidence:"2026-10-30T00:00:00Z",partial:partial,skills:rows,coverage:[.init(agent:"claude_code",status:"explicit_invocations")],partialAgents:partialAgents))
     }
     private func project(_ s: DaemonData.SkillsSnapshot) -> InsightsSkillsHome.Snapshot {
         InsightsSkillsHome.make(s, model: InsightsSkillsModel(), now: now, calendar: calendar)
     }
+    func testRankingContextUsesCatalogSourceIdentityAndExplicitUsage() throws {
+        let home = project(snapshot(rows: [try row()]))
+        XCTAssertEqual(home.context.installedSkillIDs, ["upstream"])
+        XCTAssertEqual(home.context.usedSkillIDs, ["upstream"])
+        XCTAssertEqual(home.context.followedPublisherIDs, ["maker"])
+        XCTAssertEqual(home.context.catalogIDsByUsageID["claude_code\u{0}review"], ["upstream"])
+        XCTAssertTrue(project(snapshot(rows: [try row()], analysis: false)).context.usedSkillIDs.isEmpty)
+        let unrelated = DaemonData.InstalledSkill(id: "elsewhere", name: "review", description: "", agent: "claude_code", scope: "global", location: "/other", sha256: contentHash,
+            source: .init(repository: "other/skills", path: "skills/review/SKILL.md"))
+        let other = project(snapshot(rows: [try row()], skills: [unrelated]))
+        XCTAssertTrue(other.context.installedSkillIDs.isEmpty, "Same names never establish catalog identity")
+        XCTAssertTrue(other.context.usedSkillIDs.isEmpty)
+    }
+
+    func testWeakHighVolumeRowsDoNotHideMeaningfulTrendBeforeRanking() throws {
+        func namedRow(_ name: String, previous: Int, current: Int) throws -> DaemonData.SkillsUsageRow {
+            var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(try row(previous: previous, current: current))) as? [String: Any])
+            raw["name"] = name
+            return try JSONDecoder().decode(DaemonData.SkillsUsageRow.self, from: JSONSerialization.data(withJSONObject: raw))
+        }
+        let weak = try (0..<12).map { try namedRow("weak-\($0)", previous: 1000, current: 1010) }
+        let meaningful = try namedRow("meaningful", previous: 2, current: 5)
+        let stories = project(snapshot(rows: weak + [meaningful])).rankedStories(now: now, calendar: calendar)
+        XCTAssertTrue(stories.contains { $0.id == "trend:claude_code\u{0}meaningful" })
+    }
+
     func testUsedUpdatesRequireVerifiedSourceAndCurrentPublisher() throws {
         let update = DaemonData.SkillsUpdate(installedID:"local",status:"update_available",catalogSkillID:"upstream")
         XCTAssertEqual(project(snapshot(rows:[try row()],updates:[update])).updates.map(\.installedID), ["local"])
@@ -378,6 +404,75 @@ final class InsightsSkillsHomeTests: XCTestCase {
         XCTAssertNotNil(moving.expand)
         XCTAssertNotNil(moving.hover)
         XCTAssertNotNil(moving.grow)
+    }
+
+    // MARK: Partial history, by agent and day
+
+    /// row(): uses on 11-03 and 11-10, so it is both a usage story and the
+    /// week, today being 11-15. Partial history comes from the daemon.
+    private func stories(_ gaps: [DaemonData.SkillsPartialAgent]?, partial: Bool = true) throws -> (week: Bool, trend: Bool) {
+        let feed = project(snapshot(rows: [try row()], partial: partial, partialAgents: gaps))
+        return (!feed.week.isEmpty, !feed.trends.isEmpty)
+    }
+
+    func testAnotherAgentsGapDoesNotHoldBackClaudeCodeStories() throws {
+        let only = try stories([.init(agent: "codex", days: ["2026-11-10"], undated: 3), .init(agent: "opencode", days: [], undated: 1)])
+        XCTAssertTrue(only.week)
+        XCTAssertTrue(only.trend)
+        let none = try stories([])
+        XCTAssertTrue(none.week)
+        XCTAssertTrue(none.trend)
+    }
+
+    func testAClaudeCodeGapInsideAStorysDaysHoldsItBack() throws {
+        // Inside both: the last seven completed days.
+        let recent = try stories([.init(agent: "claude_code", days: ["2026-11-10"], undated: 0)])
+        XCTAssertFalse(recent.week)
+        XCTAssertFalse(recent.trend)
+        // Inside the fourteen a usage story compares, before the week.
+        let earlier = try stories([.init(agent: "claude_code", days: ["2026-11-02"], undated: 0)])
+        XCTAssertTrue(earlier.week)
+        XCTAssertFalse(earlier.trend)
+        // A session that cannot be dated is inside every story's days.
+        let undated = try stories([.init(agent: "claude_code", days: [], undated: 1)])
+        XCTAssertFalse(undated.week)
+        XCTAssertFalse(undated.trend)
+        // A day that cannot be read is not taken to be outside.
+        let unreadable = try stories([.init(agent: "claude_code", days: ["11/10/2026"], undated: 0)])
+        XCTAssertFalse(unreadable.week)
+        XCTAssertFalse(unreadable.trend)
+        // An agent is named only for a gap: named with no place, it is
+        // taken to be everywhere.
+        let unplaced = try stories([.init(agent: "claude_code", days: [], undated: 0)])
+        XCTAssertFalse(unplaced.week)
+        XCTAssertFalse(unplaced.trend)
+    }
+
+    func testAClaudeCodeGapOutsideAStorysDaysLeavesItAlone() throws {
+        // Older than both windows, and today, which neither counts.
+        let outside = try stories([.init(agent: "claude_code", days: ["2026-10-20", "2026-11-15"], undated: 0)])
+        XCTAssertTrue(outside.week)
+        XCTAssertTrue(outside.trend)
+    }
+
+    func testWithoutPerAgentGapsAnyPartialHistoryHoldsStoriesBack() throws {
+        let older = try stories(nil)
+        XCTAssertFalse(older.week)
+        XCTAssertFalse(older.trend)
+        let complete = try stories(nil, partial: false)
+        XCTAssertTrue(complete.week)
+        XCTAssertTrue(complete.trend)
+    }
+
+    func testPerAgentGapsDecodeAndAreOptional() throws {
+        let with = try JSONDecoder().decode(DaemonData.SkillsUsage.self, from: Data(#"{"partial":true,"partial_agents":[{"agent":"codex","days":["2026-11-10"],"undated":2}]}"#.utf8))
+        XCTAssertEqual(with.partialAgents, [.init(agent: "codex", days: ["2026-11-10"], undated: 2)])
+        let without = try JSONDecoder().decode(DaemonData.SkillsUsage.self, from: Data(#"{"partial":true}"#.utf8))
+        XCTAssertNil(without.partialAgents)
+        let sparse = try JSONDecoder().decode(DaemonData.SkillsUsage.self, from: Data(#"{"partial_agents":[{"agent":"codex"}]}"#.utf8))
+        XCTAssertEqual(sparse.partialAgents, [.init(agent: "codex", days: [], undated: 0)])
+        let again = try JSONDecoder().decode(DaemonData.SkillsUsage.self, from: JSONEncoder().encode(with))
+        XCTAssertEqual(again, with)
     }
 
     func testYesterdayAnalysisCannotTreatTheUnfinishedDayAsComplete() throws {

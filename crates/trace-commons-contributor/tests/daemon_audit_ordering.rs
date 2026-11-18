@@ -10,7 +10,7 @@
 //! standing on disk with no record of it. The daemon reads all three back
 //! from disk on restart, so the guarantee did not survive a reboot.
 //!
-//! `acknowledge_near_ai_notice` already had the right shape: record, then
+//! `acknowledge_grant_voids` already has the right shape: record, then
 //! act, so there is nothing to roll back. These tests hold the other three
 //! to it.
 //!
@@ -56,7 +56,6 @@ fn cfg(device_key_id: String) -> ContributorConfig {
         user_subject: "alice".into(),
         device_key_id,
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
