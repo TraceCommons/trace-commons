@@ -158,6 +158,11 @@ pub struct Candidate {
     /// [`Capabilities::context_tokens`], the backend's default. Empty for a
     /// backend whose provider states none.
     pub context_windows: Vec<(String, u32)>,
+    /// Image-input support stated for exact provider model identifiers.
+    ///
+    /// An entry applies only when the provider supplied the model catalogue
+    /// and lists that exact model. Other models retain the backend default.
+    pub image_support: Vec<(String, bool)>,
 }
 
 /// The router's answer.
@@ -1053,7 +1058,7 @@ impl Policy {
         if inherit_affinity
             && let Some(affinity) = affinity.clone()
             && let Some(candidate) = candidates.iter().find(|c| c.id == affinity.backend)
-            && incumbent_is_usable(candidate, turn)
+            && incumbent_is_usable(candidate, &affinity, turn)
         {
             let pressured = candidate.quota.is_pressured(now);
             let entry = self.affinities.get_mut(&key).expect("just found above");
@@ -1602,13 +1607,16 @@ impl Refusal {
             ),
             Self::Unhealthy => "unhealthy: recent requests to it failed".to_string(),
             Self::NoCapacity => "no capacity: rate limited or out of window".to_string(),
-            // The variant name stays in the sentence, as it does for every
-            // other ineligibility, so the two read alike in a log.
+            // Keep the account-binding reason identifiable in diagnostic logs.
             Self::Ineligible(Ineligible::ReasoningBoundToAccount) => {
                 "cannot preserve this request (ReasoningBoundToAccount): its encrypted \
                  reasoning requires the original ChatGPT account or API credential. Its \
                  origin is unknown or another account was selected; start a new session, \
                  restore the original login, or use another family at a turn boundary"
+                    .to_string()
+            }
+            Self::Ineligible(Ineligible::ImagesUnsupported) => {
+                "images are unavailable for the selected model; choose a model that supports images"
                     .to_string()
             }
             Self::Ineligible(why) => format!("cannot preserve this request ({why:?})"),
@@ -1677,19 +1685,26 @@ fn was_passed_over(result: Result<(), Unusable>) -> bool {
 /// through to a fresh selection, which dragged it back to the native family —
 /// mid tool loop, which is the exact move the rule exists to prevent.
 ///
-/// The account lock is not tolerated, and needs no tolerance: it already lets
-/// the account the reasoning came from serve. Tolerating it trusted the
-/// affinity to be that account, and every session of one Codex version shares
+/// Only the switch requirement is suppressed before running the full gate;
+/// accepting an early `MidToolLoop` error would skip all later capabilities.
+/// The account lock still applies: it already lets the account the reasoning
+/// came from serve. Tolerating it trusted the affinity to be that account,
+/// and every session of one Codex version shares
 /// a conversation key, so a session that moved to a sibling took the others'
 /// affinity, and their reasoning, with it.
-fn incumbent_is_usable(candidate: &Candidate, turn: Turn<'_>) -> bool {
-    matches!(
-        usable(candidate, turn),
-        Ok(()) | Err(Unusable::Ineligible(Ineligible::MidToolLoop))
-    )
+fn incumbent_is_usable(candidate: &Candidate, affinity: &Affinity, turn: Turn<'_>) -> bool {
+    usable_with_affinity(candidate, turn, Some(affinity)).is_ok()
 }
 
 fn usable(candidate: &Candidate, turn: Turn<'_>) -> Result<(), Unusable> {
+    usable_with_affinity(candidate, turn, None)
+}
+
+fn usable_with_affinity(
+    candidate: &Candidate,
+    turn: Turn<'_>,
+    incumbent: Option<&Affinity>,
+) -> Result<(), Unusable> {
     let Turn {
         inbound,
         peek,
@@ -1729,8 +1744,27 @@ fn usable(candidate: &Candidate, turn: Turn<'_>) -> Result<(), Unusable> {
     // the target genuinely cannot express still refuses the route, but that is
     // decided by the emitter, on the body, in `pipeline::translate_request`.
     let cross = !candidate.caps.wires.speaks(inbound);
-    let requirements = requirements_for(candidate, peek, accounts.origin);
-    let served = served_model(candidate, None, peek, tier);
+    let mut requirements = requirements_for(candidate, peek, accounts.origin);
+    let served = match incumbent {
+        Some(affinity) => {
+            // This turn stays on the loop's backend. Suppress only the family
+            // switch rule, then run every other eligibility check below.
+            requirements.mid_tool_loop = false;
+            // `keep_listed_model` replaces a sticky model only for an exact
+            // provider-listed request. Otherwise the stored affinity wins,
+            // even when today's catalogue would pick a different fallback.
+            peek.requested_model
+                .as_deref()
+                .filter(|requested| {
+                    candidate.catalogue_from_provider
+                        && candidate.models.iter().any(|(model, _)| model == requested)
+                })
+                .or(affinity.model.as_deref())
+                .or(peek.requested_model.as_deref())
+                .map(Cow::Borrowed)
+        }
+        None => served_model(candidate, None, peek, tier),
+    };
     let sized = sized_for(candidate, served.as_deref());
     eligible(
         &requirements,
@@ -1748,32 +1782,42 @@ fn usable(candidate: &Candidate, turn: Turn<'_>) -> Result<(), Unusable> {
     .map_err(Unusable::Ineligible)
 }
 
-/// `candidate`'s capabilities, with the context window of `model` when the
-/// provider listed that model and stated a window for it.
+/// `candidate`'s capabilities, with provider-stated values for the exact
+/// model [`served_model`] says will be served.
 ///
-/// `model` is the one [`served_model`] says will be served. Its window is
-/// believed only when the provider listed it; anything else is sized by the
-/// backend's default, which is what every request was sized by before
-/// providers' windows were read.
+/// A sibling model's image support or context window says nothing about this
+/// one. Values are believed only when the provider listed this exact model;
+/// anything the provider did not state retains the backend's default.
 fn sized_for<'a>(candidate: &'a Candidate, model: Option<&str>) -> Cow<'a, Capabilities> {
-    let window = model
+    let listed = model
         .filter(|_| candidate.catalogue_from_provider)
-        .filter(|model| candidate.models.iter().any(|(listed, _)| listed == model))
-        .and_then(|model| {
-            candidate
-                .context_windows
-                .iter()
-                .find(|(listed, _)| listed == model)
-        })
-        .map(|(_, window)| *window);
-    match window {
-        Some(window) => Cow::Owned(Capabilities {
-            context_tokens: window,
-            context_from_provider: true,
-            ..candidate.caps.clone()
-        }),
-        None => Cow::Borrowed(&candidate.caps),
+        .filter(|model| candidate.models.iter().any(|(listed, _)| listed == model));
+    let window = listed.and_then(|model| {
+        candidate
+            .context_windows
+            .iter()
+            .find(|(listed, _)| listed == model)
+            .map(|(_, window)| *window)
+    });
+    let images = listed.and_then(|model| {
+        candidate
+            .image_support
+            .iter()
+            .find(|(listed, _)| listed == model)
+            .map(|(_, supported)| *supported)
+    });
+    if window.is_none() && images.is_none() {
+        return Cow::Borrowed(&candidate.caps);
     }
+    let mut caps = candidate.caps.clone();
+    if let Some(window) = window {
+        caps.context_tokens = window;
+        caps.context_from_provider = true;
+    }
+    if let Some(images) = images {
+        caps.images = images;
+    }
+    Cow::Owned(caps)
 }
 
 /// The model `candidate` will serve this request: a pinned model; else the
@@ -2028,6 +2072,7 @@ mod tests {
             catalogue_from_provider: true,
             trusted: true,
             context_windows: Vec::new(),
+            image_support: Vec::new(),
         }
     }
 
@@ -5278,6 +5323,422 @@ mod tests {
         near
     }
 
+    mod image_capabilities {
+        use super::*;
+
+        fn mixed_catalogue() -> Candidate {
+            let mut near = candidate("nearai", BackendKind::Credits, Protocol::OpenAiChat);
+            near.caps.images = false;
+            near.models = ["vendor/text", "vendor/vision", "vendor/unknown"]
+                .into_iter()
+                .map(|model| (model.to_string(), ModelTier::Frontier))
+                .collect();
+            near.image_support = vec![
+                ("vendor/text".to_string(), false),
+                ("vendor/vision".to_string(), true),
+                ("vendor/unknown".to_string(), false),
+            ];
+            near
+        }
+
+        fn image_turn(model: &str) -> RequestPeek {
+            let mut turn = peek(model);
+            turn.requirements.images = true;
+            turn
+        }
+
+        fn assert_images_refused(result: Result<RouteDecision, NoRoute>) {
+            assert_eq!(
+                result,
+                Err(NoRoute::NoneUsable {
+                    refusals: vec![(
+                        BackendId::from("nearai"),
+                        Refusal::Ineligible(Ineligible::ImagesUnsupported),
+                    )],
+                }),
+            );
+        }
+
+        #[test]
+        fn a_listed_vision_model_accepts_images_despite_a_text_only_default() {
+            let decision = Policy::new()
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/vision"),
+                    &[mixed_catalogue()],
+                    t(0),
+                )
+                .expect("the provider states this exact model accepts images");
+            assert_eq!(decision.model, None);
+        }
+
+        #[test]
+        fn a_translated_image_turn_keeps_its_selected_vision_model() {
+            let decision = Policy::new()
+                .decide(
+                    key(),
+                    Protocol::AnthropicMessages,
+                    &image_turn("vendor/vision"),
+                    &[mixed_catalogue()],
+                    t(0),
+                )
+                .expect("the selected model can preserve the image");
+            assert_eq!(decision.model.as_deref(), Some("vendor/vision"));
+            assert!(decision.translated);
+        }
+
+        #[test]
+        fn a_selected_text_only_model_cannot_borrow_a_siblings_image_support() {
+            let mut near = mixed_catalogue();
+            near.caps.images = true;
+            assert_images_refused(Policy::new().decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/text"),
+                &[near],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn unknown_image_support_refuses_instead_of_selecting_a_vision_sibling() {
+            assert_images_refused(Policy::new().decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/unknown"),
+                &[mixed_catalogue()],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn a_backend_pin_uses_the_selected_models_image_support() {
+            let mut policy = Policy::new();
+            policy.set_pin(Some(BackendId::from("nearai")), None);
+            let decision = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/vision"),
+                    &[mixed_catalogue()],
+                    t(0),
+                )
+                .expect("a backend pin preserves a listed vision choice");
+            assert_eq!(decision.model, None);
+        }
+
+        #[test]
+        fn a_model_pin_uses_its_own_image_support() {
+            let mut policy = Policy::new();
+            policy.set_pin(
+                Some(BackendId::from("nearai")),
+                Some("vendor/vision".to_string()),
+            );
+            let decision = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/text"),
+                    &[mixed_catalogue()],
+                    t(0),
+                )
+                .expect("the pinned model accepts images");
+            assert_eq!(decision.model.as_deref(), Some("vendor/vision"));
+        }
+
+        #[test]
+        fn a_text_only_model_pin_cannot_borrow_the_requested_models_image_support() {
+            let mut near = mixed_catalogue();
+            near.caps.images = true;
+            let mut policy = Policy::new();
+            policy.set_pin(
+                Some(BackendId::from("nearai")),
+                Some("vendor/text".to_string()),
+            );
+            assert_images_refused(policy.decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/vision"),
+                &[near],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn an_unlisted_request_checks_the_fallback_models_image_support() {
+            let mut near = mixed_catalogue();
+            near.models.swap(0, 1);
+            let decision = Policy::new()
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/unlisted-frontier"),
+                    &[near],
+                    t(0),
+                )
+                .expect("the actual fallback is a listed vision model");
+            assert_eq!(decision.model.as_deref(), Some("vendor/vision"));
+        }
+
+        #[test]
+        fn a_text_only_fallback_cannot_borrow_an_unused_vision_models_support() {
+            let mut near = mixed_catalogue();
+            near.caps.images = true;
+            assert_images_refused(Policy::new().decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/unlisted-frontier"),
+                &[near],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn a_sticky_vision_route_accepts_images_on_a_later_turn() {
+            let near = mixed_catalogue();
+            let mut policy = Policy::new();
+            policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &peek("vendor/vision"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                )
+                .expect("the initial text turn establishes affinity");
+            let decision = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/vision"),
+                    &[near],
+                    t(5),
+                )
+                .expect("the same selected model accepts the new image");
+            assert_eq!(decision.reason, "sticky affinity");
+            assert_eq!(decision.model, None);
+        }
+
+        #[test]
+        fn a_model_change_cannot_reuse_a_sticky_vision_models_image_support() {
+            let mut near = mixed_catalogue();
+            near.caps.images = true;
+            let mut policy = Policy::new();
+            policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("vendor/vision"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                )
+                .expect("the initial vision turn establishes affinity");
+            assert_images_refused(policy.decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/text"),
+                &[near],
+                t(5),
+            ));
+        }
+
+        fn sticky_catalogue() -> Candidate {
+            let mut near = mixed_catalogue();
+            near.models = ["openai/gpt-5.5", "qwen/qwen3.7-max"]
+                .into_iter()
+                .map(|model| (model.to_string(), ModelTier::Frontier))
+                .collect();
+            near.image_support = vec![
+                ("openai/gpt-5.5".to_string(), true),
+                ("qwen/qwen3.7-max".to_string(), false),
+            ];
+            near
+        }
+
+        #[test]
+        fn a_one_turn_text_model_override_cannot_borrow_a_later_vision_fallbacks_support() {
+            let near = sticky_catalogue();
+            let mut policy = Policy::new();
+            let first = policy
+                .decide_with_override(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &peek("anthropic/claude-opus-9"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                    Some((
+                        BackendId::from("nearai"),
+                        Some("qwen/qwen3.7-max".to_string()),
+                    )),
+                )
+                .expect("the explicit text-only model can serve a text turn");
+            assert_eq!(first.model.as_deref(), Some("qwen/qwen3.7-max"));
+
+            let image = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("anthropic/claude-opus-9"),
+                    &[near],
+                    t(5),
+                )
+                .expect("a newly selected vision fallback can serve the image");
+            assert_eq!(image.model.as_deref(), Some("openai/gpt-5.5"));
+        }
+
+        #[test]
+        fn a_reordered_catalogue_cannot_lend_vision_support_to_a_sticky_text_fallback() {
+            let mut near = sticky_catalogue();
+            near.models.swap(0, 1);
+            let mut policy = Policy::new();
+            let first = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &peek("anthropic/claude-opus-9"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                )
+                .expect("the first catalogue chooses its text-only fallback");
+            assert_eq!(first.model.as_deref(), Some("qwen/qwen3.7-max"));
+            near.models.swap(0, 1);
+
+            let image = policy
+                .decide(
+                    key(),
+                    Protocol::OpenAiChat,
+                    &image_turn("anthropic/claude-opus-9"),
+                    &[near],
+                    t(5),
+                )
+                .expect("a fresh fallback selection can use the vision model");
+            assert_eq!(image.model.as_deref(), Some("openai/gpt-5.5"));
+        }
+
+        #[test]
+        fn a_translated_tool_loop_cannot_bypass_revoked_image_support() {
+            let mut near = sticky_catalogue();
+            let mut policy = Policy::new();
+            let first = policy
+                .decide(
+                    key(),
+                    Protocol::AnthropicMessages,
+                    &image_turn("openai/gpt-5.5"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                )
+                .expect("the initial vision turn establishes translated affinity");
+            assert!(first.translated);
+            near.image_support[0].1 = false;
+            let mut continuation = image_turn("openai/gpt-5.5");
+            continuation.requirements.mid_tool_loop = true;
+
+            policy
+                .decide(
+                    key(),
+                    Protocol::AnthropicMessages,
+                    &continuation,
+                    &[near],
+                    t(5),
+                )
+                .expect_err("continuing a tool loop cannot bypass image eligibility");
+        }
+
+        #[test]
+        fn a_translated_tool_loop_cannot_switch_images_to_a_text_only_model() {
+            let near = sticky_catalogue();
+            let mut policy = Policy::new();
+            policy
+                .decide(
+                    key(),
+                    Protocol::AnthropicMessages,
+                    &image_turn("openai/gpt-5.5"),
+                    std::slice::from_ref(&near),
+                    t(0),
+                )
+                .expect("the initial vision turn establishes translated affinity");
+            let mut continuation = image_turn("qwen/qwen3.7-max");
+            continuation.requirements.mid_tool_loop = true;
+
+            policy
+                .decide(
+                    key(),
+                    Protocol::AnthropicMessages,
+                    &continuation,
+                    &[near],
+                    t(5),
+                )
+                .expect_err("a listed text-only selection still cannot see images mid-loop");
+        }
+
+        #[test]
+        fn a_guessed_catalogue_cannot_grant_model_specific_image_support() {
+            let mut near = mixed_catalogue();
+            near.catalogue_from_provider = false;
+            assert_images_refused(Policy::new().decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/vision"),
+                &[near],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn image_metadata_for_an_unlisted_model_is_not_believed() {
+            let mut near = mixed_catalogue();
+            near.models.retain(|(model, _)| model != "vendor/vision");
+            let mut policy = Policy::new();
+            policy.set_pin(
+                Some(BackendId::from("nearai")),
+                Some("vendor/vision".to_string()),
+            );
+            assert_images_refused(policy.decide(
+                key(),
+                Protocol::OpenAiChat,
+                &image_turn("vendor/text"),
+                &[near],
+                t(0),
+            ));
+        }
+
+        #[test]
+        fn native_backends_keep_their_existing_image_capability_without_metadata() {
+            for protocol in [Protocol::AnthropicMessages, Protocol::OpenAiResponses] {
+                let backend = candidate("native", BackendKind::ApiKey, protocol);
+                Policy::new()
+                    .decide(
+                        key(),
+                        protocol,
+                        &image_turn("claude-opus-4-6"),
+                        &[backend],
+                        t(0),
+                    )
+                    .expect("native capability defaults still apply");
+            }
+        }
+
+        #[test]
+        fn a_models_image_support_and_context_window_are_applied_together() {
+            let mut near = mixed_catalogue();
+            near.context_windows = vec![("vendor/vision".to_string(), 1_000_000)];
+            let mut turn = image_turn("vendor/vision");
+            turn.requirements.min_context_tokens = 300_000;
+            Policy::new()
+                .decide(key(), Protocol::OpenAiChat, &turn, &[near], t(0))
+                .expect("both capabilities belong to the selected model");
+        }
+
+        #[test]
+        fn an_image_refusal_explains_the_problem_and_recovery() {
+            assert_eq!(
+                Refusal::Ineligible(Ineligible::ImagesUnsupported).describe(),
+                "images are unavailable for the selected model; choose a model that supports images",
+            );
+        }
+    }
+
     /// NEAR AI as it answers `/v1/models` today: GLM 5.3 with a 1M-token
     /// window, a model with a 32K one, one that states none, and the 128K
     /// default the backend falls back to.
@@ -5888,6 +6349,7 @@ mod compaction_tests {
             catalogue_from_provider: true,
             trusted: true,
             context_windows: Vec::new(),
+            image_support: Vec::new(),
         }
     }
 
