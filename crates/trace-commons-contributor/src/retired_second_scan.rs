@@ -61,6 +61,33 @@ pub fn configured(store: &ConfigStore) -> bool {
     config.as_ref().is_some_and(config_names_it) || settings.as_ref().is_some_and(settings_names_it)
 }
 
+/// Drop the retired plaintext `near_ai` credential from
+/// `daemon-settings.json`, so it does not sit on disk until some unrelated
+/// save. Only that one key is removed from the raw document, written back
+/// through the store's atomic daemon-file write: every other key, known or
+/// not, is kept as it was, and the credential value is never read into a
+/// log or an error. Returns whether the file was rewritten. A missing or
+/// unparseable file, or one without the key, is left alone.
+pub fn drop_retired_credential(store: &ConfigStore) -> bool {
+    let Ok(Some(bytes)) = store.read_daemon_file(DAEMON_SETTINGS_FILE) else {
+        return false;
+    };
+    let Ok(mut raw) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    if !settings_names_it(&raw) {
+        return false;
+    }
+    let Some(object) = raw.as_object_mut() else {
+        return false;
+    };
+    object.remove("near_ai");
+    let Ok(body) = serde_json::to_vec_pretty(&raw) else {
+        return false;
+    };
+    store.write_daemon_file(DAEMON_SETTINGS_FILE, &body).is_ok()
+}
+
 /// Emits the log line at most once over its lifetime.
 pub struct OnceLog {
     fired: AtomicBool,
@@ -176,5 +203,30 @@ mod tests {
             .write_daemon_file(DAEMON_SETTINGS_FILE, br#"{"near_ai":{"api_key":"k"}}"#)
             .unwrap();
         assert!(configured(&store));
+    }
+
+    #[test]
+    fn the_retired_credential_is_dropped_from_disk_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("state")).unwrap();
+        assert!(!drop_retired_credential(&store), "no file, nothing to do");
+
+        store
+            .write_daemon_file(
+                DAEMON_SETTINGS_FILE,
+                br#"{"near_ai":{"api_key":"k"},"canary_interval_secs":7,"near_ai_inference":null}"#,
+            )
+            .unwrap();
+        assert!(drop_retired_credential(&store));
+        let body = store
+            .read_daemon_file(DAEMON_SETTINGS_FILE)
+            .unwrap()
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(raw.get("near_ai").is_none(), "the credential is gone");
+        assert!(!String::from_utf8_lossy(&body).contains("\"k\""));
+        assert_eq!(raw["canary_interval_secs"], 7, "other keys are kept");
+        assert!(!configured(&store));
+        assert!(!drop_retired_credential(&store), "second call is a no-op");
     }
 }

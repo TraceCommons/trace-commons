@@ -391,10 +391,8 @@ for the native API and remaining work.
   and changes nothing. No message text is sent to a NEAR AI classifier from
   this client. The server-side privacy filter is separate and unaffected.
 - Once per batch, a synthetic privacy-filter canary is run through the
-  active redactor before any real session is uploaded — including, when one
-  is attached, the NEAR AI (or other) privacy-filter backend itself, not
-  just the deterministic pass. If the canary values survive redaction
-  through either stage, the whole batch aborts — this catches a broken,
+  active redactor before any real session is uploaded. If the canary
+  values survive redaction, the whole batch aborts — this catches a broken,
   disabled, or no-op filter before it can leak anything.
 - The server applies its own rescrub pass on top of whatever the client
   sends; that rescrub is deterministic (the same class of secret/path

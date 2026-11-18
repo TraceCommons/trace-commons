@@ -208,7 +208,7 @@ enum Command {
         dry_run: bool,
         /// Retired with the client-side NEAR AI second scan. Accepted so an
         /// older script still runs, and ignored: uploads are scrubbed locally
-        /// only, and the daemon log notes it once.
+        /// only.
         #[arg(long, hide = true)]
         pii_filter: Option<String>,
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path

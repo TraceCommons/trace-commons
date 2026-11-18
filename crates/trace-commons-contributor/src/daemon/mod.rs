@@ -439,6 +439,9 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // still serving the socket.
         return Err(anyhow::Error::new(StartFailure::AlreadyRunning));
     }
+    // Holding the lock, drop the retired plaintext credential from disk
+    // rather than leave it until some unrelated settings save.
+    crate::retired_second_scan::drop_retired_credential(&store);
 
     // A verified update parked by an earlier check is applied here, at the
     // daemon's natural start, rather than swapped underneath a running
