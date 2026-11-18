@@ -94,6 +94,10 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
+    /// The sharing choice at the top of Projects, as on the Mac.
+    pub(crate) sharing: super::consent_settings::SharingCard,
+    /// The Uses section, as on the Mac.
+    pub(crate) uses: super::consent_settings::UsesCard,
     /// The two `set_settings` knobs, built once and only ever refilled.
     ///
     /// Everything else on this screen is torn down and rebuilt on each
@@ -583,8 +587,12 @@ impl SettingsView {
 
         sections.body(Section::Witness).append(&witness_card);
 
+        let sharing = super::consent_settings::SharingCard::new();
+        sections.body(Section::Projects).append(&sharing.root);
         let projects = style::card(gtk::Orientation::Vertical, space::M);
         sections.body(Section::Projects).append(&projects);
+        let uses = super::consent_settings::UsesCard::new();
+        sections.body(Section::Uses).append(&uses.root);
 
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
         // Ranges, not free numbers. The daemon accepts any `u64` for all
@@ -666,6 +674,8 @@ impl SettingsView {
             connection_checks,
             pause_button,
             projects,
+            sharing,
+            uses,
             quiescence_minutes,
             digest_hours,
             filling_knobs: std::cell::Cell::new(false),
@@ -733,6 +743,7 @@ impl SettingsView {
 }
 
 pub fn wire(app: &Rc<App>) {
+    super::consent_settings::wire(app);
     let a = Rc::clone(app);
     app.settings
         .contribution_refresh
@@ -961,6 +972,7 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
+    super::consent_settings::note_status(app, status);
     let scope = status.account_scope.clone();
     if *app.settings.contribution_scope.borrow() != scope {
         *app.settings.contribution_scope.borrow_mut() = scope;
@@ -1963,11 +1975,13 @@ pub fn refresh(app: &Rc<App>) {
         discover_routing(app);
     }
     super::terminal_choice::refresh(app);
+    super::consent_settings::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let projects: Vec<Project> = result
             .ok()
             .and_then(|v| serde_json::from_value(v.get("projects").cloned()?).ok())
             .unwrap_or_default();
+        super::consent_settings::note_projects(app, &projects);
         render_projects(app, &projects);
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {

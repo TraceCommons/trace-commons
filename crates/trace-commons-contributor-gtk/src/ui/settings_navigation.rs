@@ -9,6 +9,7 @@ pub(super) enum Section {
     Watching,
     Tools,
     Projects,
+    Uses,
     Profile,
     Changes,
     PrivateAI,
@@ -17,11 +18,12 @@ pub(super) enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Account,
         Self::Watching,
         Self::Tools,
         Self::Projects,
+        Self::Uses,
         Self::Profile,
         Self::Changes,
         Self::PrivateAI,
@@ -36,6 +38,7 @@ impl Section {
             Self::Watching => nav.watching,
             Self::Tools => nav.tools,
             Self::Projects => nav.projects,
+            Self::Uses => nav.uses,
             Self::Profile => nav.profile,
             Self::Changes => nav.log,
             Self::PrivateAI => nav.private_ai,
@@ -288,6 +291,7 @@ mod tests {
                 nav.watching,
                 nav.tools,
                 nav.projects,
+                nav.uses,
                 nav.profile,
                 nav.log,
                 nav.private_ai,
@@ -297,7 +301,7 @@ mod tests {
         );
         assert_eq!(
             Section::ALL.map(Section::starts_group),
-            [false, true, false, true, false, false, true, true, true]
+            [false, true, false, true, false, false, false, true, true, true]
         );
     }
 

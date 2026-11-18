@@ -754,9 +754,16 @@ impl Coordinator {
         }
     }
     fn disclose_scrub(self: &Rc<Self>) {
-        // Before a grant there is no certificate evidence of model scrubbing.
-        // The core's configuration-only selector deliberately says patterns.
-        let grant = consent_copy::automatic_contribution_copy(None);
+        // The core's words for this contributor's configuration, as the
+        // Mac reads them; an unreadable configuration discloses nothing.
+        let Some(grant) = self
+            .app
+            .upgrade()
+            .and_then(|app| super::consent_settings::automatic_copy_for(&app.worker.dir))
+        else {
+            self.fail(first_run_copy().uses.sharing_unavailable);
+            return;
+        };
         let body = page(first_run_copy().uses.sharing);
         for line in [
             grant.summary,

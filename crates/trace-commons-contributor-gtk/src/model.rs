@@ -785,6 +785,10 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// The folder's own rule (`folder_mode`), when it has one; `mode` is
+    /// what the daemon applies after any override.
+    #[serde(default)]
+    pub folder_mode: Option<String>,
     /// How many of this project's sessions are waiting. Always present.
     #[serde(default)]
     pub pending_count: u64,
