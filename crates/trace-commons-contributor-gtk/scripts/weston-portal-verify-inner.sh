@@ -209,6 +209,7 @@ else
     ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
     ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
     ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
     ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_and_clears_as_the_mac_does \
     ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
     ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces; do

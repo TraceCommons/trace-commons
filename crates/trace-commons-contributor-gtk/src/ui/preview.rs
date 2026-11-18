@@ -231,6 +231,9 @@ const TABS: [Tab; 4] = [
 /// The stack child that shows the redacted body itself.
 const TRANSCRIPT_TAB: &str = "would-be-sent";
 
+/// The sheet's width as it opens, and the narrowest it goes.
+const SHEET_WIDTH: i32 = 900;
+
 impl Sheet {
     fn present(
         app: &Rc<App>,
@@ -242,7 +245,7 @@ impl Sheet {
         let window = adw::Window::builder()
             .transient_for(&app.window)
             .modal(true)
-            .default_width(900)
+            .default_width(SHEET_WIDTH)
             .default_height(720)
             .build();
 
@@ -692,6 +695,12 @@ impl Sheet {
         content.append(&stack);
         content.append(&footer_rule);
         content.append(&footer);
+        // libadwaita 1.5 (Ubuntu 24.04) lays the content out as tall as it
+        // is at its narrowest, inside a window sized for its real width: at
+        // the window's minimum height the footer's buttons ended below the
+        // sheet (GNOME box, 2026-11-18). The sheet is no narrower than it
+        // opens, so the two heights agree.
+        content.set_width_request(SHEET_WIDTH);
         window.set_content(Some(&content));
 
         let sheet = Rc::new(Sheet {

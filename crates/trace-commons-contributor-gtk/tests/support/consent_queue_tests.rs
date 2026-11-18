@@ -247,3 +247,61 @@ fn mounted_preview_sheet_says_why_held_and_sends_nothing() {
     fixture.settle();
     assert!(fixture.calls_to("approve").is_empty());
 }
+
+/// The sheet's own buttons end inside it when it opens at its minimum
+/// height, here pushed past its default by three held reasons. On the
+/// GNOME box (libadwaita 1.5, 2026-11-18) the content was laid out as tall
+/// as it is at its narrowest, 24 px taller than the sheet, and Dismiss
+/// trace, Close and Contribute were cut by the sheet's bottom edge.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_the_sheet_buttons_end_inside_the_sheet() {
+    let fixture = Fixture::new("PreviewSheetFit", &[]);
+    let lines = [
+        "No personal details matched, only file paths or nothing at all; that is why this one waits.",
+        "Something here looks like an email, phone number or key that was not matched; that is why this one waits.",
+        "Trimmed to fit the upload limit, so part of this trace is not in what would be sent. That is why this one waits.",
+    ];
+    let mut entry = held_entry();
+    entry.second_look = Some(vec![
+        "nothing-matched".into(),
+        "looks-unsure".into(),
+        "trimmed-to-fit".into(),
+    ]);
+    entry.second_look_lines = Some(lines.iter().map(|line| line.to_string()).collect());
+    *fixture.app.entries.borrow_mut() = vec![entry];
+    crate::ui::preview::open(&fixture.app, 0);
+    fixture.settle();
+    let sheet = gtk::Window::list_toplevels()
+        .into_iter()
+        .filter(|w| w.is_visible())
+        .find(|w| {
+            texts(w).iter().any(|t| t == lines[0])
+                && w != fixture.app.window.upcast_ref::<gtk::Widget>()
+        })
+        .expect("the sheet says the held reasons");
+    let content = sheet
+        .downcast_ref::<adw::Window>()
+        .and_then(|window| window.content())
+        .expect("the sheet's content");
+    fixture.drive_until(|| content.height() > 0);
+    // Let the compositor answer any resize the first layout asked for.
+    let quiet = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    fixture.drive_until(|| std::time::Instant::now() > quiet);
+    for label in [
+        crate::copy::CONTRIBUTE,
+        crate::copy::CLOSE,
+        crate::copy::not_this_one(),
+    ] {
+        let button = button_labelled(&sheet, label).expect("the sheet's button");
+        let bounds = button
+            .compute_bounds(&sheet)
+            .expect("the button is laid out in the sheet");
+        assert!(
+            bounds.y() + bounds.height() <= sheet.height() as f32,
+            "{label} ends at {} in a sheet {} tall",
+            bounds.y() + bounds.height(),
+            sheet.height()
+        );
+    }
+}
