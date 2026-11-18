@@ -3013,9 +3013,13 @@ mod tests {
             map.x() - (main.x() + main.width()) >= 4.0,
             "a gap between the panes: {main:?} {map:?}"
         );
+        // Near the inspector's foot, where nothing but the pane draws: the
+        // map pane's foot holds the map's own drawing (its transfer plates
+        // and art), which lies over the pane's fill.
+        let inspector = &panes[2];
         let pane = (
-            (map.x() + 30.0) as i32,
-            (map.y() + map.height() - 30.0) as i32,
+            (inspector.x() + 30.0) as i32,
+            (inspector.y() + inspector.height() - 30.0) as i32,
         );
         ((gap_x, middle), pane)
     }
