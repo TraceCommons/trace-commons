@@ -208,6 +208,7 @@ enum DebugScreenshot {
     #if DEBUG
     /// The sample set `TRACE_COMMONS_SAMPLE` names, with the window's own
     /// fallback (`MonitorWindowView.sampleChoice`); nil when it is unset.
+    @MainActor
     static var sampleChoice: SampleDaemonClient.SampleSet? {
         guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
         return MonitorWindowView.sampleChoice(name).set
@@ -240,6 +241,7 @@ enum DebugScreenshot {
     /// and with the inspector too wherever the tab's first page has one
     /// (`MonitorWindowView.inspectorAvailable`): only Traces. A combination
     /// that would draw the same window as another is not captured twice.
+    @MainActor
     static func windowShots() -> [WindowShot] {
         MonitorWindowView.Tab.ordered("").flatMap { tab in
             let inspector = MonitorWindowView.inspectorAvailable(tab, homePage: .overview)
