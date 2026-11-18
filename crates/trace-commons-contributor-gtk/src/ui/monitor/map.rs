@@ -1725,15 +1725,41 @@ fn slash(
     let _ = cr.stroke();
 }
 
+/// The face and size a tool's initials are set in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarkFont {
+    pub family: &'static str,
+    pub size: f64,
+}
+
+impl MarkFont {
+    /// On the map's nodes, the micro type: the system face, 10 bold, not
+    /// scaled with the map (`FlowMapView.mark`, `TypeScale.micro`).
+    pub const MICRO: Self = Self {
+        family: "sans-serif",
+        size: 10.0,
+    };
+
+    /// On a coin, bold and monospaced, 12 at the coin's scale `k`
+    /// (`MapToolPile.coin`).
+    pub fn coin(k: f64) -> Self {
+        Self {
+            family: "monospace",
+            size: 12.0 * k,
+        }
+    }
+}
+
 /// A tool's mark, `side` across, centred on `centre`: its logo in its
-/// tint, or its initials in its tint, bold and monospaced, `size` high
-/// (`FlowMapView.mark`, `MapToolPile.coin`).
+/// tint, or its initials in its tint, in `font` (`FlowMapView.mark`,
+/// `MapToolPile.coin`).
+#[allow(clippy::too_many_arguments)]
 fn draw_mark(
     cr: &gtk::cairo::Context,
     kind: SourceKind,
     centre: Point,
     side: f64,
-    size: f64,
+    font: MarkFont,
     palette: &Palette,
     alpha: f64,
 ) {
@@ -1741,7 +1767,7 @@ fn draw_mark(
     source(cr, &palette.map.tint(art.tint), alpha);
     match art.logo {
         Some(logo) => logo.fill(cr, (centre.x - side / 2.0, centre.y - side / 2.0), side),
-        None => centred_text(cr, art.initials, centre, size, "monospace"),
+        None => centred_text(cr, art.initials, centre, font.size, font.family),
     }
 }
 
@@ -1808,7 +1834,7 @@ fn draw_node(
             circle(cr, centre, radius);
             source(cr, &palette.ink, 0.12 * dim);
             let _ = cr.fill();
-            draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim);
+            draw_mark(cr, kind, centre, 16.0 * s, MarkFont::MICRO, palette, dim);
             if node.dashed {
                 // The legend's "Not watched": a dashed rim.
                 circle(cr, centre, radius);
@@ -1839,13 +1865,16 @@ fn draw_node(
             source(cr, &palette.ink, 0.12 * dim);
             let _ = cr.fill();
             match (tool, map_scene::harness_initials(node)) {
-                (Some(kind), _) => draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim),
+                (Some(kind), _) => {
+                    draw_mark(cr, kind, centre, 16.0 * s, MarkFont::MICRO, palette, dim)
+                }
                 // A tool with no artwork carries two letters of its name in
                 // the primary ink (`GlassTool.other`), at the map's micro
                 // type.
                 (None, Some(letters)) => {
                     source(cr, &palette.map.text_primary, dim);
-                    centred_text(cr, &letters, centre, 10.0 * s, "sans-serif");
+                    let font = MarkFont::MICRO;
+                    centred_text(cr, &letters, centre, font.size, font.family);
                 }
                 (None, None) => {}
             }
@@ -2102,7 +2131,7 @@ fn draw_pile(
         source(cr, &tint, 1.0);
         let _ = cr.stroke();
         cr.set_dash(&[], 0.0);
-        draw_mark(cr, kind, centre, 20.0 * k, 12.0 * k, palette, 1.0);
+        draw_mark(cr, kind, centre, 20.0 * k, MarkFont::coin(k), palette, 1.0);
         if off {
             slash(cr, centre, side / 4.0, k, palette, 1.0);
         }
@@ -3036,6 +3065,96 @@ mod tests {
         // The Traces inputs are untouched by it.
         let traces = SceneInputs::default().scene(&BTreeMap::new(), map_scene::SIZE);
         assert!(traces.stack.is_some());
+    }
+
+    /// The pixels of a tool's initials on a node drawn at `zoom`, as
+    /// offsets from the node's centre: those in `colour`, apart from the
+    /// disc (drawn in an ink no letter uses).
+    fn initials_mask(
+        kind: NodeKind,
+        label: &str,
+        zoom: f64,
+        colour: impl Fn(&Palette) -> gtk::gdk::RGBA,
+    ) -> Vec<(i32, i32)> {
+        let palette = Palette {
+            ink: gtk::gdk::RGBA::new(1.0, 0.0, 0.0, 1.0),
+            ..Palette::fixed()
+        };
+        let colour = colour(&palette);
+        let space = Size::new(200.0, 200.0);
+        let fit = MapGeometry::new(space, zoom, None, space);
+        let node =
+            map_scene::Node::new("harness:x", kind, Point::new(100.0, 100.0), 16.0, label, "");
+        let centre = fit.point(node.at);
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 200, 200).unwrap();
+        {
+            let cr = gtk::cairo::Context::new(&surface).unwrap();
+            draw_node(&cr, &Scene::default(), &node, &fit, &palette, false);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let mut mask = Vec::new();
+        for y in 0..200usize {
+            for x in 0..200usize {
+                let i = y * stride + x * 4;
+                let a = f64::from(data[i + 3]) / 255.0;
+                if a < 0.6 {
+                    continue;
+                }
+                let px = [data[i + 2], data[i + 1], data[i]].map(|v| f64::from(v) / a / 255.0);
+                let target = [colour.red(), colour.green(), colour.blue()].map(f64::from);
+                if (0..3).all(|k| (px[k] - target[k]).abs() < 0.2) {
+                    mask.push((
+                        x as i32 - centre.x.round() as i32,
+                        y as i32 - centre.y.round() as i32,
+                    ));
+                }
+            }
+        }
+        mask
+    }
+
+    /// On the map's nodes the Mac sets a tool's initials in the micro type
+    /// (`FlowMapView.mark`: `TypeScale.micro`, the system face, 10 bold,
+    /// not scaled with the map), the same for a tool with art of its own
+    /// (Gemini CLI's "Gm") and one without (a harness named "Gmx", whose
+    /// initials are also "Gm"): the two marks are the same letters in the
+    /// same face, only their colour differs, and zooming does not grow them.
+    #[test]
+    fn a_map_nodes_initials_are_the_micro_type_whatever_the_tool() {
+        let gemini = |zoom| {
+            initials_mask(
+                NodeKind::Harness {
+                    tool: Some(SourceKind::GeminiCli),
+                    installed: true,
+                },
+                "Gemini CLI",
+                zoom,
+                |p| p.map.tint(Tint::Antigravity),
+            )
+        };
+        let other = initials_mask(
+            NodeKind::Harness {
+                tool: None,
+                installed: true,
+            },
+            "Gmx",
+            1.0,
+            |p| p.map.text_primary,
+        );
+        let at_one = gemini(1.0);
+        assert!(
+            at_one.len() > 20,
+            "Gemini's initials drew {} pixels",
+            at_one.len()
+        );
+        assert_eq!(
+            at_one, other,
+            "Gemini CLI's initials are not set as another tool's"
+        );
+        assert_eq!(gemini(2.0), at_one, "the initials grew with the map");
     }
 
     /// A Private AI tool with no artwork is drawn with two letters of its
