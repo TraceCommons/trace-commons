@@ -1115,7 +1115,7 @@ impl Panel {
     fn show(&self, app: &Rc<App>, at: Option<(i32, i32)>) {
         #[cfg(all(target_os = "linux", feature = "layer-shell"))]
         if self.mode == PanelMode::LayerShell {
-            let monitor = monitor_size(&app.window);
+            let monitor = monitor_size(app.window.upcast_ref());
             crate::edge::layer::place_panel(&self.window, geometry::panel_anchor(at, monitor));
         }
         app.refresh();
