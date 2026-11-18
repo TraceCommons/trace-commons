@@ -600,6 +600,12 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_control_hover" => hex(p.control_hover),
         "tc_glass_row_hover" => hex(p.row_hover),
         "tc_glass_tab_ember" => hex(p.accent_line),
+        // The closed edge rail's handle: the ink at the token's 0.28, as
+        // the standard sheet draws it (dark ink on light, white on dark).
+        "tc_glass_edge_rail_handle" => {
+            let omarchy::Rgb(r, g, b) = p.ink;
+            Some(format!("rgba({r}, {g}, {b}, 0.28)"))
+        }
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),
@@ -1361,7 +1367,15 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            assert_eq!(glass, 19, "{name}");
+            // 19, and the edge rail's handle.
+            assert_eq!(glass, 20, "{name}");
+            let omarchy::Rgb(r, g, b) = palette.ink;
+            assert!(
+                css.contains(&format!(
+                    "@define-color tc_glass_edge_rail_handle rgba({r}, {g}, {b}, 0.28);"
+                )),
+                "{name}: the rail's handle in the skin's ink"
+            );
         }
     }
 
