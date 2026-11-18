@@ -18,7 +18,7 @@
 <component type="desktop-application">
   <id>ai.tracecommons.Contributor</id>
 
-  <name>Near.ai</name>
+  <name>Near AI Gateway</name>
   <summary>Review and contribute your coding traces</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -26,7 +26,7 @@
 
   <description>
     <p>
-      Near.ai contributes the traces you have with coding agents to Trace
+      Near AI Gateway contributes the traces you have with coding agents to Trace
       Commons, an open corpus, with your explicit consent for each one. Nothing leaves your
       machine until you have seen exactly what it contains.
     </p>
