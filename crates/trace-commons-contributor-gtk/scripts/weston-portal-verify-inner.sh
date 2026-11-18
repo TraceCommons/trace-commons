@@ -196,6 +196,7 @@ else
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::queue::consent_mounted_tests::mounted_held_trace_shows_its_reasons_and_no_row_submit \
     ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
     ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
     ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \

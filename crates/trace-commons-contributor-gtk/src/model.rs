@@ -357,6 +357,16 @@ pub struct QueueEntry {
     pub state: String,
     #[serde(default)]
     pub reason_label: Option<String>,
+    /// The second look's fixed reasons (`nothing-matched`, `looks-unsure`,
+    /// `trimmed-to-fit`); absent until scrubbed.
+    #[serde(default)]
+    pub second_look: Option<Vec<String>>,
+    /// The core's sentence for each `second_look` reason, index for index.
+    #[serde(default)]
+    pub second_look_lines: Option<Vec<String>>,
+    /// Spans the scrubber was unsure about; absent until scrubbed, never 0.
+    #[serde(default)]
+    pub unsure_spans: Option<u64>,
     /// How many delegated subagent transcripts this entry's session covers,
     /// and how many were left out because the conversation exceeded the
     /// source's raw byte budget.

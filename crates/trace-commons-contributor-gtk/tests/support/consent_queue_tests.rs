@@ -68,3 +68,51 @@ fn mounted_trace_undo_cancels_by_entry_id() {
     fixture.answer("cancel", Ok(json!({"ok": true})));
     assert!(fixture.app.undo.borrow().is_none());
 }
+
+fn texts(root: &gtk::Widget) -> Vec<String> {
+    use adw::prelude::*;
+    let mut out = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(widget) = pending.pop() {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            out.push(label.text().to_string());
+        }
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            out.push(format!("button:{}", button.label().unwrap_or_default()));
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            pending.push(current);
+        }
+    }
+    out
+}
+
+/// A trace held for a second look says so in the core's words, says why,
+/// and offers no Submit on its row, as on the Mac; Look inside stays.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_held_trace_shows_its_reasons_and_no_row_submit() {
+    let fixture = Fixture::new("HeldRow", &[]);
+    let held: crate::model::QueueEntry = serde_json::from_value(json!({
+        "entry_id": "e1", "session_hash": "h", "source": "claude-code",
+        "project_label": "proj", "state": "pending",
+        "reason_label": "second-look-review-required",
+        "second_look": ["looks-unsure"],
+        "second_look_lines": ["The scrubber was unsure about some of it."],
+        "unsure_spans": 2,
+    }))
+    .unwrap();
+    let shown = texts(&super::row(&fixture.app, &held, 0));
+    let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
+    assert!(shown.iter().any(|t| t == traces.held));
+    assert!(
+        shown
+            .iter()
+            .any(|t| t == "The scrubber was unsure about some of it.")
+    );
+    assert!(shown.iter().any(|t| t == &format!("{}: 2", traces.unsure)));
+    assert!(!shown.contains(&format!("button:{}", crate::copy::SUBMIT)));
+    assert!(shown.contains(&format!("button:{}", crate::copy::LOOK_INSIDE)));
+}

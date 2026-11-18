@@ -1273,6 +1273,26 @@ fn manifest_block(
             facts.append(&reason);
         }
     }
+    // Held for a person (the Mac's amber flag, said in words): the core's
+    // word for it, why, and how much the scrubber was unsure of. Such a
+    // trace is looked at first; its row offers no Submit
+    // (`eligibility::offers_send`).
+    {
+        let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
+        if crate::eligibility::is_held(entry) || crate::eligibility::held_for_review(entry) {
+            let held = style::caveat(traces.held);
+            held.add_css_class(Tone::Attention.css());
+            facts.append(&held);
+        }
+        for line in crate::eligibility::held_reason_lines(entry) {
+            facts.append(&style::caveat(line));
+        }
+        if let Some(unsure) = entry.unsure_spans {
+            let line = style::caveat(format!("{}: {unsure}", traces.unsure));
+            line.add_css_class("tc-tertiary");
+            facts.append(&line);
+        }
+    }
     block.append(&facts);
 
     let actions = style::wrap_row(space::S);
@@ -1313,7 +1333,7 @@ fn manifest_block(
     // own session. `Submit` is the control the daemon's answer governs, and
     // it is the only one -- an ineligible row is present and unoffered, not
     // hidden and not made inert everywhere.
-    if crate::eligibility::offers_send(entry) {
+    if crate::eligibility::offers_row_send(entry) {
         style::wrap_append(&actions, &submit);
     }
     block.append(&actions);
