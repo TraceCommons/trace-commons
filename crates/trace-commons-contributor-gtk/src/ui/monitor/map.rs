@@ -2274,6 +2274,8 @@ impl TraceMap {
             trace_commons_contributor::private_inference_copy::private_inference_copy().destination;
         let private_canvas = MapCanvas::new();
         private_canvas.update_property(&[gtk::accessible::Property::Label(destination)]);
+        // Never a Traces map, even before the first read lands.
+        private_canvas.set_inputs(SceneInputs::private_ai(PrivateAiInputs::default()));
         stage.add_named(&private_canvas, Some("private-ai"));
         overlay.set_child(Some(&stage));
 
@@ -3307,6 +3309,10 @@ mod tests {
         map.show_view(MapView::PrivateAi);
         assert!(map.private_view.is_active());
         assert!(!map.foot.is_visible());
+        // Before any read it is the Private AI map, drawing nothing.
+        settle();
+        assert!(map.private_canvas.scene().stack.is_none());
+        assert!(!map.private_canvas.scene().draws_map());
         map.private_canvas.set_inputs(map.private_inputs());
         settle();
         assert!(map.private_canvas.node_buttons().is_empty());
