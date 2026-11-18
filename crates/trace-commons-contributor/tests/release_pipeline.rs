@@ -2275,25 +2275,31 @@ fn cargo_deny_jobs_pin_their_graphs_and_enforce_bans_and_audit() {
     );
 }
 
-/// The Flatpak is built on GNOME runtime 48 (owner, 2026-11-17: "Move to
-/// GNOME 48"), and the release job installs exactly the runtime and SDK
-/// branch the manifest names: a job that installs another branch fails at
-/// `flatpak-builder` after the tag exists.
+/// The Flatpak is built on the newest GNOME runtime Flathub supports, 51
+/// (owner, 2026-11-18: "Newest supported"; 48 is end-of-life on Flathub
+/// since 2026-03-24), and the release job installs exactly the runtime and
+/// SDK branch the manifest names: a job that installs another branch fails
+/// at `flatpak-builder` after the tag exists.
 #[test]
-fn flatpak_manifest_and_release_job_agree_on_gnome_48() {
+fn flatpak_manifest_and_release_job_agree_on_gnome_51() {
     let manifest =
         read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
     assert!(
         manifest
-            .contains("\nruntime: org.gnome.Platform\nruntime-version: '48'\nsdk: org.gnome.Sdk\n"),
-        "the manifest must build on org.gnome.Platform and org.gnome.Sdk 48"
+            .contains("\nruntime: org.gnome.Platform\nruntime-version: '51'\nsdk: org.gnome.Sdk\n"),
+        "the manifest must build on org.gnome.Platform and org.gnome.Sdk 51"
     );
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
-        workflow.contains("org.gnome.Platform//48 org.gnome.Sdk//48"),
+        workflow.contains("org.gnome.Platform//51 org.gnome.Sdk//51"),
         "the linux-flatpak job must install the runtime and SDK the manifest names"
     );
-    for stale in ["org.gnome.Platform//46", "org.gnome.Sdk//46"] {
+    for stale in [
+        "org.gnome.Platform//46",
+        "org.gnome.Sdk//46",
+        "org.gnome.Platform//48",
+        "org.gnome.Sdk//48",
+    ] {
         assert!(
             !workflow.contains(stale),
             "release-apps.yml still names {stale}"

@@ -103,7 +103,7 @@ and no `flatpak` command; the macOS host cannot build Flatpaks at all. What
 would actually validate it, on a real Linux machine:
 
 ```
-flatpak install org.gnome.Platform//48 org.gnome.Sdk//48
+flatpak install org.gnome.Platform//51 org.gnome.Sdk//51
 pip install aiohttp toml
 python3 flatpak-cargo-generator.py \
   crates/trace-commons-contributor-gtk/Cargo.lock \

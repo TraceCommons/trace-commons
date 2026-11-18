@@ -1135,7 +1135,7 @@ jobs:
           # ai.tracecommons.Contributor.yml), so this job no longer needs
           # the extension at all.
           sudo flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//48 org.gnome.Sdk//48
+            org.gnome.Platform//51 org.gnome.Sdk//51
 
       - name: Check the manifest's pinned rust against the crate's requirement
         run: |
