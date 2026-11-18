@@ -112,6 +112,9 @@ pub const INSIGHTS_LIGHT_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #dbdee4; }
 .tc-insights stackswitcher button:checked { background: #0558b6; color: #ffffff; }
 .tc-insights .caption, .tc-insights .dim-label { color: #3c3c43; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #e8e9ec; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #f6f6f7; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #f8f8f9; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
@@ -131,6 +134,9 @@ pub const INSIGHTS_DARK_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #3b3d47; }
 .tc-insights stackswitcher button:checked { background: #7ebcff; color: #071a2e; }
 .tc-insights .caption, .tc-insights .dim-label { color: #d8d9e0; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #15192a; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #121628; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #0f121d; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
@@ -149,6 +155,15 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_popover #f6f6f9;
 @define-color tc_glass_menu #f6f6f8;
 @define-color tc_glass_node_card #fdfdfe;
+@define-color tc_glass_pane_inactive #e8e9ec;
+@define-color tc_glass_card_inactive #f6f6f7;
+@define-color tc_glass_card_quiet_inactive #f4f4f6;
+@define-color tc_glass_well_inactive #d8dae0;
+@define-color tc_glass_control_inactive #f8f8f9;
+@define-color tc_glass_control_selected_inactive #0558b6;
+@define-color tc_glass_popover_inactive #f5f5f7;
+@define-color tc_glass_menu_inactive #f4f4f6;
+@define-color tc_glass_node_card_inactive #fbfbfc;
 @define-color tc_glass_scene #e6eaf1;
 @define-color tc_glass_ink #1d1d1f;
 @define-color tc_glass_ink_secondary #3c3c43;
@@ -159,6 +174,21 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_control_hover #dbdee4;
 @define-color tc_glass_row_hover #e8e9ec;
 @define-color tc_glass_tab_ember #056bdc;
+@define-color tc_glass_rule #d5d6d8;
+@define-color tc_glass_tab_ember_halo rgba(5, 107, 220, 0.28);
+@define-color tc_glass_rule_inactive #cccdd0;
+@define-color tc_glass_edge_high_contrast rgba(29, 29, 31, 0.55);
+@define-color tc_glass_graph_focus_on #1f6fd1;
+@define-color tc_glass_graph_focus_idle #3c3c42;
+@define-color tc_glass_graph_focus_off #a1a1a6;
+@define-color tc_glass_range_fill rgba(0, 0, 0, 0.07);
+@define-color tc_glass_status_on_text #0b4628;
+@define-color tc_glass_status_ask_text #573403;
+@define-color tc_glass_ink_tertiary #3d3d43;
+@define-color tc_glass_status_ask #a8690f;
+@define-color tc_glass_status_on #1a8f4c;
+@define-color tc_glass_status_off #8a8a90;
+@define-color tc_glass_tile_folder #e6e6ea;
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -168,6 +198,19 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 .tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
@@ -182,25 +225,49 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 "#;
 /// The painted Monitor window's tiers, type roles and inks, dark scheme.
 pub const GLASS_DARK_CSS: &str = r#"
-@define-color tc_glass_pane #0d1124;
-@define-color tc_glass_card #0d1124;
-@define-color tc_glass_card_quiet #0d1124;
-@define-color tc_glass_well #090c19;
-@define-color tc_glass_control #090c19;
+@define-color tc_glass_pane #171b2d;
+@define-color tc_glass_card #14182a;
+@define-color tc_glass_card_quiet #14182a;
+@define-color tc_glass_well #0e111d;
+@define-color tc_glass_control #10131f;
 @define-color tc_glass_control_selected #7ebcff;
-@define-color tc_glass_popover #0b0f22;
-@define-color tc_glass_menu #0b0f22;
-@define-color tc_glass_node_card #0b0f22;
+@define-color tc_glass_popover #0d1124;
+@define-color tc_glass_menu #0d1124;
+@define-color tc_glass_node_card #0d1124;
+@define-color tc_glass_pane_inactive #15192a;
+@define-color tc_glass_card_inactive #121628;
+@define-color tc_glass_card_quiet_inactive #131728;
+@define-color tc_glass_well_inactive #0d0f1c;
+@define-color tc_glass_control_inactive #0f121d;
+@define-color tc_glass_control_selected_inactive #7ebcff;
+@define-color tc_glass_popover_inactive #0d1123;
+@define-color tc_glass_menu_inactive #0d1123;
+@define-color tc_glass_node_card_inactive #0d1123;
 @define-color tc_glass_scene #070a1a;
 @define-color tc_glass_ink #f2f3f8;
-@define-color tc_glass_ink_secondary #d7d8df;
+@define-color tc_glass_ink_secondary #d8d9e0;
 @define-color tc_glass_selected_ink #071a2e;
 @define-color tc_glass_toolbar_glyph #e6e6ec;
 @define-color tc_glass_toolbar_glyph_hidden #83838c;
 @define-color tc_glass_toolbar_expanded #7ebcff;
-@define-color tc_glass_control_hover #353842;
-@define-color tc_glass_row_hover #191d2f;
+@define-color tc_glass_control_hover #3b3d47;
+@define-color tc_glass_row_hover #232638;
 @define-color tc_glass_tab_ember #0091fd;
+@define-color tc_glass_rule #333646;
+@define-color tc_glass_tab_ember_halo rgba(0, 145, 253, 0.31);
+@define-color tc_glass_rule_inactive #313544;
+@define-color tc_glass_edge_high_contrast rgba(242, 242, 244, 0.4);
+@define-color tc_glass_graph_focus_on #4da3ff;
+@define-color tc_glass_graph_focus_idle #d6d6dc;
+@define-color tc_glass_graph_focus_off #6b6b70;
+@define-color tc_glass_range_fill rgba(255, 255, 255, 0.07);
+@define-color tc_glass_status_on_text #acedbc;
+@define-color tc_glass_status_ask_text #ffd585;
+@define-color tc_glass_ink_tertiary #cfd0d8;
+@define-color tc_glass_status_ask #ffc75c;
+@define-color tc_glass_status_on #30d158;
+@define-color tc_glass_status_off #a9a9b0;
+@define-color tc_glass_tile_folder #2a2a2c;
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -210,6 +277,19 @@ pub const GLASS_DARK_CSS: &str = r#"
 .tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
@@ -221,6 +301,76 @@ pub const GLASS_DARK_CSS: &str = r#"
 .tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
 .tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
 .tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+/// The translucent window's colours over the painted ones, light scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_LIGHT_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(229, 232, 237, 0.7491);
+@define-color tc_glass_pane_inactive rgba(217, 220, 225, 0.7592);
+@define-color tc_glass_card rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected rgba(5, 88, 182, 1);
+@define-color tc_glass_card_inactive rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet_inactive rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well_inactive rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control_inactive rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected_inactive rgba(5, 88, 182, 1);
+@define-color tc_glass_rule rgba(0, 0, 0, 0.12);
+@define-color tc_glass_rule_inactive rgba(0, 0, 0, 0.12);
+@define-color tc_glass_control_hover rgba(213, 216, 223, 0.784);
+@define-color tc_glass_row_hover rgba(0, 0, 0, 0.04);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, light scheme.
+pub const INSIGHTS_LIGHT_BLUR_CSS: &str = r#"
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(209, 213, 220, 0.712); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(213, 216, 223, 0.784); }
+"#;
+/// The translucent window's colours over the painted ones, dark scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_DARK_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(20, 23, 38, 0.745);
+@define-color tc_glass_pane_inactive rgba(18, 21, 36, 0.7807);
+@define-color tc_glass_card rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected rgba(126, 188, 255, 1);
+@define-color tc_glass_card_inactive rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet_inactive rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected_inactive rgba(126, 188, 255, 1);
+@define-color tc_glass_rule rgba(255, 255, 255, 0.12);
+@define-color tc_glass_rule_inactive rgba(255, 255, 255, 0.12);
+@define-color tc_glass_control_hover rgba(108, 108, 108, 0.426);
+@define-color tc_glass_row_hover rgba(255, 255, 255, 0.05);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, dark scheme.
+pub const INSIGHTS_DARK_BLUR_CSS: &str = r#"
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(255, 255, 255, 0.08); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(108, 108, 108, 0.426); }
 "#;
 
 /// Radii, spacing and sizes of the glass system, as the flat theme draws them.
@@ -264,6 +414,55 @@ pub mod glass {
         pub const MODAL_INSET: i32 = 28;
         pub const EDGE_RAIL_INSET: i32 = 12;
         pub const EDGE_RAIL_GAP: i32 = 16;
+    }
+    /// The graph's inks: shared and kept dots, and the bar labels.
+    pub mod data {
+        /// `dataShared`, light.
+        pub const SHARED_LIGHT: &str = "#7A2CF5";
+        /// `dataKept`, light.
+        pub const KEPT_LIGHT: &str = "#2F6BC4";
+        /// `statusOff`, light.
+        pub const LABEL_LIGHT: &str = "#8A8A90";
+        /// `textPrimary`, light.
+        pub const TEXT_PRIMARY_LIGHT: &str = "#1D1D1F";
+        /// `dataShared`, dark.
+        pub const SHARED_DARK: &str = "#8A3DFF";
+        /// `dataKept`, dark.
+        pub const KEPT_DARK: &str = "#3A7BD5";
+        /// `statusOff`, dark.
+        pub const LABEL_DARK: &str = "#A9A9B0";
+        /// `textPrimary`, dark.
+        pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
+    }
+    /// The tab strip's ember line and its halo, as colour and alpha.
+    pub mod tabs {
+        /// `tabEmber`, light.
+        pub const EMBER_LIGHT: &str = "#056BDC";
+        /// `tabEmberHalo`, light.
+        pub const HALO_LIGHT: (&str, f64) = ("#056BDC", 0.28);
+        /// `tabEmber`, dark.
+        pub const EMBER_DARK: &str = "#0091FD";
+        /// `tabEmberHalo`, dark.
+        pub const HALO_DARK: (&str, f64) = ("#0091FD", 0.31);
+    }
+    /// Status dot inks: on, ask, off and outside.
+    pub mod status {
+        /// `statusOn`, light.
+        pub const ON_LIGHT: &str = "#1A8F4C";
+        /// `statusAsk`, light.
+        pub const ASK_LIGHT: &str = "#A8690F";
+        /// `statusOff`, light.
+        pub const OFF_LIGHT: &str = "#8A8A90";
+        /// `statusOutside`, light.
+        pub const OUTSIDE_LIGHT: &str = "#D0342C";
+        /// `statusOn`, dark.
+        pub const ON_DARK: &str = "#30D158";
+        /// `statusAsk`, dark.
+        pub const ASK_DARK: &str = "#FFC75C";
+        /// `statusOff`, dark.
+        pub const OFF_DARK: &str = "#A9A9B0";
+        /// `statusOutside`, dark.
+        pub const OUTSIDE_DARK: &str = "#FF6B6B";
     }
 }
 

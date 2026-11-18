@@ -23,6 +23,7 @@ mod first_run_terms;
 mod first_run_tools;
 pub mod folder_handoff;
 pub mod funding;
+pub mod glass_backdrop;
 pub mod glass_feedback;
 pub mod glass_motion;
 pub mod hero_art;
@@ -265,6 +266,13 @@ pub struct App {
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
     pub rollup: RefCell<HistoryRollup>,
+    /// The last `history_rollup` read that worked, as Home reads it (a
+    /// count it did not give stays unknown); `None` before the first answer
+    /// and after a failed read, so the summary never shows a stale figure.
+    pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
+    /// The commons' statement of what pending credit waits on, from the
+    /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
+    pub credit_condition: RefCell<Option<String>>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
     /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
@@ -541,6 +549,8 @@ impl App {
             last_dismissed: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
+            summary_rollup: RefCell::new(None),
+            credit_condition: RefCell::new(None),
             undo: RefCell::new(None),
             undo_writing: RefCell::new(Default::default()),
             submitting_folder: RefCell::new(None),
@@ -1075,6 +1085,7 @@ impl App {
         self.call("tool_destinations", serde_json::json!({}), |app, result| {
             app.shell.map.set_destinations(result.as_ref().ok());
             app.shell.map.render(app);
+            app.shell.inspector.render_summary(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -1104,12 +1115,28 @@ impl App {
                 serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
             });
             app.home.render_rollup(home_rollup.as_ref());
+            *app.summary_rollup.borrow_mut() = home_rollup;
+            app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
             if let Ok(Ok(rollup)) = result {
                 *app.rollup.borrow_mut() = rollup;
                 queue::render(app);
             }
         });
+        // What pending credit waits on, for the summary's pending line
+        // (D6): the same read the Mac's Home store makes. The daemon
+        // caches the answer, so a refresh does not reach the commons each
+        // time.
+        self.call(
+            "commons_credit_summary",
+            serde_json::json!({}),
+            |app, result| {
+                *app.credit_condition.borrow_mut() = result
+                    .ok()
+                    .and_then(|value| monitor::summary::pending_condition(&value));
+                app.shell.inspector.render_summary(app);
+            },
+        );
         history::refresh(self);
         home::refresh(self);
         private_inference::refresh(self);

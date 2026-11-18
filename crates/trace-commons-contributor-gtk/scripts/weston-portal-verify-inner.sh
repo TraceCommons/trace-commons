@@ -165,6 +165,11 @@ else
     fail "first-run Insights created contributor state"
   fi
 
+  # Offscreen renders a mounted test writes for review, when the job asks.
+  if [ -n "${TC_RENDER_DIR:-}" ]; then
+    mkdir -p "$TC_RENDER_DIR"
+  fi
+
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   # The background-service dialogs and the Private AI start area's "Set up"
   # (Flatpak on the host service) are mounted tests with no display
@@ -197,6 +202,14 @@ else
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
     ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
     ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
+    ui::monitor::graph_footer::tests::mounted_footer_controls_are_the_macs_sizes \
+    ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
+    ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
+    ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
+    ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
+    ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
+    ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
+    ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
     ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
@@ -217,6 +230,9 @@ else
     ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
     ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
+    ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \

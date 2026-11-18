@@ -417,7 +417,9 @@ def opaque_over(entry: dict, ground: str) -> str:
     return "#" + "".join(f"{c:02x}" for c in channels)
 
 
-def insights_palette(tokens: dict, scheme: str) -> dict[str, str]:
+def insights_palette(tokens: dict, scheme: str, dimmed: bool = False) -> dict[str, str]:
+    """Insights' opaque colours; `dimmed`, over the pane as an unfocused
+    window dims it (`GlassPaneFill`'s inactiveDim)."""
     def color(name):
         return insights_entry(tokens, "color", name, scheme)
 
@@ -432,6 +434,8 @@ def insights_palette(tokens: dict, scheme: str) -> dict[str, str]:
         return stops[0]
 
     ground = opaque_over(fill("paneFill"), color("paneOpaque")["hex"])
+    if dimmed:
+        ground = opaque_over(color("inactiveDim"), ground)
     card = opaque_over(fill("cardFill"), ground)
     control = opaque_over(fill("controlFill"), ground)
     # White hover on Linux's already-white solid surfaces is imperceptible.
@@ -480,6 +484,12 @@ def render_insights_css(tokens: dict, scheme: str) -> str:
            f".tc-insights stackswitcher button:hover {{ background: {p['control_hover']}; }}",
            f".tc-insights stackswitcher button:checked {{ background: {p['selected']}; color: {p['selected_ink']}; }}",
            f".tc-insights .caption, .tc-insights .dim-label {{ color: {p['secondary']}; opacity: 1; }}"]
+    # In an unfocused glass window Insights dims with the pane it sits in.
+    d = insights_palette(tokens, scheme, dimmed=True)
+    backdrop = "window.tc-glass-window:backdrop .tc-insights"
+    out += [f"{backdrop} {{ background: {d['ground']}; }}",
+            f"{backdrop} .tc-insights-card, {backdrop} button.tc-insights-summary {{ background: {d['card']}; }}",
+            f"{backdrop} stackswitcher {{ background: {d['control']}; }}"]
     for selector, role in [("", "body"), (" .title-2", "title"),
                            (" .title-3", "number"), (" .heading", "bodyStrong"),
                            (" .caption", "caption")]:
@@ -587,9 +597,9 @@ def css_shadow(layers: list[dict], where: str) -> str:
     return ", ".join(parts)
 
 
-def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
-    """Every opaque colour the painted window uses, in one scheme."""
-    ground = flat_color(tokens, "paneOpaque", scheme)["hex"]
+def glass_fills(tokens: dict, scheme: str, ground: str) -> dict[str, str]:
+    """Every tier's opaque fill over a pane ground: a well over a card,
+    every other tier over the pane."""
     over = lambda entry, under: opaque_over(entry, under)
     fills = {"pane": ground}
     fills["card"] = over(flat_fill(tokens, "cardFill", scheme), ground)
@@ -600,6 +610,17 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     fills["popover"] = over(flat_color(tokens, "popoverFill", scheme), ground)
     fills["menu"] = over(flat_color(tokens, "menuFill", scheme), ground)
     fills["nodeCard"] = over(flat_color(tokens, "nodeCardFill", scheme), ground)
+    return fills
+
+
+def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    """Every opaque colour the painted window uses, in one scheme."""
+    # Every Mac pane path paints paneFill over its base (`GlassPaneFill`),
+    # so the painted ground is paneFill over paneOpaque, as Insights' is.
+    ground = opaque_over(flat_fill(tokens, "paneFill", scheme),
+                         flat_color(tokens, "paneOpaque", scheme)["hex"])
+    over = lambda entry, under: opaque_over(entry, under)
+    fills = glass_fills(tokens, scheme, ground)
     palette = dict(fills)
     palette["scene"] = flat_color(tokens, "sceneBase", scheme)["hex"]
     palette["ink"] = over(flat_color(tokens, "textPrimary", scheme), ground)
@@ -617,6 +638,45 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
         raise TokenError(f"glass {scheme}: control hover is invisible on the control")
     palette["rowHover"] = over(flat_color(tokens, "rowHover", scheme), ground)
     palette["tabEmber"] = over(flat_color(tokens, "tabEmber", scheme), ground)
+    # The tab strip's 1pt rule, and the halo under the selected tab, which
+    # fades to nothing and so stays translucent (`GlassRuleTabs`).
+    palette["rule"] = over(flat_color(tokens, "rule", scheme), ground)
+    palette["tabEmberHalo"] = css_rgba(flat_color(tokens, "tabEmberHalo", scheme), "tabEmberHalo")
+    # `inactiveDim` over the pane while the window is not key (GTK's
+    # `:backdrop`), as `GlassPaneFill` draws it.
+    # The Mac's material path fills it under the pane's translucent tiers,
+    # so cards, wells and controls dim with the pane; here every tier is
+    # opaque, so each is flattened again over the dimmed ground.
+    dimmed = over(flat_color(tokens, "inactiveDim", scheme), ground)
+    inactive = glass_fills(tokens, scheme, dimmed)
+    for tier, fill in inactive.items():
+        palette[tier + "Inactive"] = fill
+    palette["ruleInactive"] = over(flat_color(tokens, "rule", scheme), dimmed)
+    for tier in GLASS_TEXT_TIERS:
+        for ink in ("ink", "inkSecondary"):
+            ratio = contrast(palette[ink], inactive[tier])
+            if ratio < 4.5:
+                where = "paneInactive" if tier == "pane" else f"{tier} unfocused"
+                raise TokenError(f"glass {scheme}: {ink} on {where} is {ratio:.2f}:1, under 4.5:1")
+    # The graph's focus glyph (MonitorShell `focusInk`) and the range
+    # capsule's ink(0.07) fill, which stays translucent over the pane.
+    for token in ("graphFocusOn", "graphFocusIdle", "graphFocusOff"):
+        palette[token] = over(flat_color(tokens, token, scheme), ground)
+    # The summary's decision-line glyphs (`SummaryDecisionLine`): a
+    # status's text colour, or the tertiary ink with no status.
+    for token in ("statusOnText", "statusAskText", "textTertiary"):
+        palette[token] = over(flat_color(tokens, token, scheme), ground)
+    # The Traces tree's rows (`GlassListRow`): a flagged sub-line in
+    # statusAsk or statusOn, the chevron in statusOff, and the folder
+    # tile's fill (`GlassToolTile`, tileFolder).
+    for token in ("statusAsk", "statusOn", "statusOff", "tileFolder"):
+        palette[token] = over(flat_color(tokens, token, scheme), ground)
+    ink = flat_color(tokens, "ink", scheme)
+    palette["rangeFill"] = css_rgba({"hex": ink["hex"], "alpha": 0.07}, "rangeFill")
+    # The solid stroke a tier with edge layers takes under Increase Contrast
+    # (`GlassEdgeModifier`'s increased branch). Kept translucent: a border
+    # paints over its own tier's fill, which is the ground the Mac strokes on.
+    palette["edgeHighContrast"] = css_rgba(flat_color(tokens, "edgeHighContrast", scheme), "edgeHighContrast")
     for tier in GLASS_TEXT_TIERS:
         for ink in ("ink", "inkSecondary"):
             ratio = contrast(palette[ink], fills[tier])
@@ -626,6 +686,190 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     if ratio < 4.5:
         raise TokenError(f"glass {scheme}: selection text on controlSelected is {ratio:.2f}:1, under 4.5:1")
     return palette
+
+
+
+# The translucent window KDE blur shows through (`ui::glass_backdrop`): the
+# panes carry the Mac's material stack as one colour, and the tiers inside a
+# pane take their flat fills with their own alpha, composited by GTK over it.
+# The Liquid Glass tint is the veil at this share of its alpha
+# (GlassTheme.swift:82 `glassTintShare`); the compositor's blur stands in for
+# the glass itself, which adds no frost of its own.
+GLASS_TINT_SHARE = 0.25
+# Tiers whose blurred fill is their flat token with alpha. A popover and a
+# menu are surfaces of their own, which no blur reaches, and a node card
+# floats over the map, which the Mac blurs within the window and Linux does
+# not: those three keep their opaque painted fills.
+GLASS_BLUR_TIERS = ["card", "cardQuiet", "well", "control", "controlSelected"]
+# The desktops a blurred pane may sit over: the blur averages what is behind,
+# and these are the extremes it can average to.
+GLASS_BLUR_DESKTOPS = ["#000000", "#ffffff"]
+
+
+def rgba_stack(layers: list[dict]) -> tuple[float, float, float, float]:
+    """Source-over compositing of colour entries, bottom first, onto nothing:
+    the colour and alpha one layer must carry to look the same."""
+    r = g = b = a = 0.0
+    for entry in layers:
+        alpha = float(entry.get("alpha", 1))
+        c = [int(entry["hex"][i:i + 2], 16) for i in (1, 3, 5)]
+        out = alpha + a * (1 - alpha)
+        if out == 0:
+            continue
+        r, g, b = ((c[i] * alpha + (r, g, b)[i] * a * (1 - alpha)) / out for i in range(3))
+        a = out
+    return r, g, b, a
+
+
+def css_rgba_tuple(colour: tuple[float, float, float, float]) -> str:
+    r, g, b, a = colour
+    return f"rgba({round(r)}, {round(g)}, {round(b)}, {round(a, 4):g})"
+
+
+def entry_of(colour: tuple[float, float, float, float]) -> dict:
+    """An rgba tuple back as a colour entry, at the precision CSS carries."""
+    r, g, b, a = colour
+    return {"hex": "#" + "".join(f"{round(c):02x}" for c in (r, g, b)), "alpha": round(a, 4)}
+
+
+def blur_pane_layers(tokens: dict, scheme: str, share: float, dimmed: bool) -> list[dict]:
+    """GlassPaneFill's layers over the glass: the tint, the veil, paneFill,
+    and inactiveDim out of focus."""
+    veil = flat_color(tokens, "glassVeil", scheme)
+    tint = dict(veil, alpha=float(veil.get("alpha", 1)) * share)
+    layers = [tint, veil, flat_fill(tokens, "paneFill", scheme)]
+    if dimmed:
+        layers.append(flat_color(tokens, "inactiveDim", scheme))
+    return layers
+
+
+def blur_failures(tokens: dict, scheme: str, share: float) -> list[str]:
+    """Every glass ink (ink, inkSecondary, selection text) that would read
+    under 4.5:1 over a black or a white desktop at this tint share, focused
+    or not. The shell's own text colours are checked against these panes in
+    style.rs, which decides whether a scheme may go translucent at all."""
+    painted = glass_palette(tokens, scheme)
+    fills = {"card": flat_fill(tokens, "cardFill", scheme),
+             "cardQuiet": flat_fill(tokens, "cardFillQuiet", scheme),
+             "control": flat_fill(tokens, "controlFill", scheme)}
+    failures = []
+    for desktop in GLASS_BLUR_DESKTOPS:
+        for dimmed in (False, True):
+            pane = entry_of(rgba_stack(blur_pane_layers(tokens, scheme, share, dimmed)))
+            ground = opaque_over(pane, desktop)
+            surfaces = {"pane": ground}
+            for tier, fill in fills.items():
+                surfaces[tier] = opaque_over(fill, ground)
+            for surface, colour in surfaces.items():
+                for ink in ("ink", "inkSecondary"):
+                    ratio = contrast(painted[ink], colour)
+                    if ratio < 4.5:
+                        focus = "unfocused" if dimmed else "focused"
+                        failures.append(f"{ink} on translucent {surface} over {desktop}, {focus}, "
+                                        f"is {ratio:.2f}:1")
+            selected = opaque_over(flat_color(tokens, "controlSelected", scheme), ground)
+            if contrast(painted["selectedInk"], selected) < 4.5:
+                failures.append(f"selection text on translucent controlSelected over {desktop}")
+    return failures
+
+
+def glass_blur_tint_share(tokens: dict, scheme: str) -> float:
+    """The Mac's tint share, or the smallest lift in 0.05 steps at which every
+    glass ink still reads over a black or white desktop. KWin's blur adds no frost
+    of its own, as the Mac's material does; a lift is a deviation from the
+    Mac, kept as small as the 4.5:1 floor allows."""
+    share = GLASS_TINT_SHARE
+    while share <= 0.5 + 1e-9:
+        if not blur_failures(tokens, scheme, share):
+            return round(share, 2)
+        share += 0.05
+    raise TokenError(f"glass {scheme}: translucent pane unreadable at every tint share: "
+                     + "; ".join(blur_failures(tokens, scheme, GLASS_TINT_SHARE)))
+
+
+def glass_blur_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    """The colours the translucent window redefines, as CSS: the panes as the
+    Mac's material stack in one colour, the tiers inside them with alpha."""
+    share = glass_blur_tint_share(tokens, scheme)
+    palette = {"scene": "transparent"}
+    palette["pane"] = css_rgba_tuple(rgba_stack(blur_pane_layers(tokens, scheme, share, False)))
+    palette["paneInactive"] = css_rgba_tuple(rgba_stack(blur_pane_layers(tokens, scheme, share, True)))
+    fills = {"card": flat_fill(tokens, "cardFill", scheme),
+             "cardQuiet": flat_fill(tokens, "cardFillQuiet", scheme),
+             "well": flat_color(tokens, "wellFill", scheme),
+             "control": flat_fill(tokens, "controlFill", scheme),
+             "controlSelected": flat_color(tokens, "controlSelected", scheme),
+             "rule": flat_color(tokens, "rule", scheme)}
+    for tier, fill in fills.items():
+        # Inside a pane a tier dims with the pane beneath it, not by itself.
+        palette[tier] = palette[tier + "Inactive"] = css_rgba_tuple(rgba_stack([fill]))
+    # As the painted palette: the hover that shows on each control, stacked
+    # on the control's own fill, and a row's hover over the pane.
+    hover = "controlOnCardHover" if scheme == "light" else "controlOnMenuHover"
+    palette["controlHover"] = css_rgba_tuple(rgba_stack([fills["control"], flat_color(tokens, hover, scheme)]))
+    palette["rowHover"] = css_rgba_tuple(rgba_stack([flat_color(tokens, "rowHover", scheme)]))
+    return palette
+
+
+GLASS_BLUR_COLOURS = [
+    ("scene", "scene"),
+    ("pane", "pane"),
+    ("paneInactive", "pane_inactive"),
+    *[(t, snake(t)) for t in GLASS_BLUR_TIERS],
+    *[(t + "Inactive", snake(t) + "_inactive") for t in GLASS_BLUR_TIERS],
+    ("rule", "rule"),
+    ("ruleInactive", "rule_inactive"),
+    ("controlHover", "control_hover"),
+    ("rowHover", "row_hover"),
+]
+
+
+def render_glass_blur_css(tokens: dict, scheme: str) -> str:
+    """Loaded after the painted sheet while blur is granted: it redefines the
+    colours the panes and tiers paint with, so every rule naming them, the
+    hand-written ones in style.css included, follows."""
+    palette = glass_blur_palette(tokens, scheme)
+    out = [f"@define-color tc_glass_{name} {palette[key]};" for key, name in GLASS_BLUR_COLOURS]
+    # GlassWindowConfigurator: no background, no window shadow. libadwaita's
+    # window.csd outline and 1px ring would draw a rectangle across the gaps;
+    # the shadow's extent stays, transparent, as the resize margin (its own
+    # `0 0 14px 5px transparent` on :backdrop), and a maximized or tiled
+    # window keeps libadwaita's zero or 20px extent without the ring.
+    out.append("window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop "
+               "{ outline: none; box-shadow: 0 0 14px 5px transparent; }")
+    out.append("window.tc-glass-window.maximized, window.tc-glass-window.fullscreen "
+               "{ box-shadow: none; }")
+    out.append("window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, "
+               "window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, "
+               "window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }")
+    return "\n".join(out)
+
+
+def render_insights_blur_css(tokens: dict, scheme: str) -> str:
+    """Insights over a translucent pane: no ground of its own, cards and the
+    switcher with their fills' alpha, in and out of focus alike."""
+    card = flat_fill(tokens, "cardFill", scheme)
+    control = flat_fill(tokens, "controlFill", scheme)
+    card_hover = (rgba_stack([card, flat_color(tokens, "controlOnCardHover", scheme)]) if scheme == "light"
+                  else rgba_stack([flat_color(tokens, "cardHover", scheme)]))
+    control_hover = rgba_stack([control, flat_color(tokens, "controlOnCardHover" if scheme == "light"
+                                                    else "controlOnMenuHover", scheme)])
+    # Scoped to the glass window: the sheet is display-wide while loaded, and
+    # an Insights window of its own keeps its painted ground.
+    cards = ".tc-insights .tc-insights-card, .tc-insights button.tc-insights-summary"
+    out = []
+    for prefix in ("window.tc-glass-window ", "window.tc-glass-window:backdrop "):
+        out += [f"{prefix}.tc-insights {{ background: transparent; }}",
+                ", ".join(prefix + part.strip() for part in cards.split(","))
+                + f" {{ background: {css_rgba(card, 'cardFill')}; }}",
+                f"{prefix}.tc-insights stackswitcher {{ background: {css_rgba(control, 'controlFill')}; }}"]
+    scope = "window.tc-glass-window "
+    out += [f"{scope}.tc-insights button.tc-insights-card:hover, "
+            f"{scope}.tc-insights button.tc-insights-summary:hover "
+            f"{{ background: {css_rgba_tuple(card_hover)}; }}",
+            f"{scope}.tc-insights stackswitcher button:hover "
+            f"{{ background: {css_rgba_tuple(control_hover)}; }}"]
+    return "\n".join(out)
 
 
 GLASS_COLOURS = [
@@ -639,6 +883,21 @@ GLASS_COLOURS = [
     ("controlHover", "control_hover"),
     ("rowHover", "row_hover"),
     ("tabEmber", "tab_ember"),
+    ("rule", "rule"),
+    ("tabEmberHalo", "tab_ember_halo"),
+    ("ruleInactive", "rule_inactive"),
+    ("edgeHighContrast", "edge_high_contrast"),
+    ("graphFocusOn", "graph_focus_on"),
+    ("graphFocusIdle", "graph_focus_idle"),
+    ("graphFocusOff", "graph_focus_off"),
+    ("rangeFill", "range_fill"),
+    ("statusOnText", "status_on_text"),
+    ("statusAskText", "status_ask_text"),
+    ("textTertiary", "ink_tertiary"),
+    ("statusAsk", "status_ask"),
+    ("statusOn", "status_on"),
+    ("statusOff", "status_off"),
+    ("tileFolder", "tile_folder"),
 ]
 
 
@@ -649,6 +908,8 @@ def render_glass_css(tokens: dict, scheme: str) -> str:
     out = []
     for tier, css, _, _, _ in GLASS_TIERS:
         out.append(f"@define-color tc_glass_{snake(tier)} {palette[tier]};")
+    for tier, css, _, _, _ in GLASS_TIERS:
+        out.append(f"@define-color tc_glass_{snake(tier)}_inactive {palette[tier + 'Inactive']};")
     for key, name in GLASS_COLOURS:
         out.append(f"@define-color tc_glass_{name} {palette[key]};")
     for tier, css, radius_token, edge, _ in GLASS_TIERS:
@@ -658,6 +919,19 @@ def render_glass_css(tokens: dict, scheme: str) -> str:
             f"border-radius: {number(radius[radius_token], where)}px; "
             f"box-shadow: {css_shadow(flat_layers(tokens, edge, scheme), where)}; }}"
         )
+    # Out of focus (GTK's :backdrop) every tier takes its fill over the
+    # dimmed pane (`GlassPaneFill`'s inactiveDim, under the tiers).
+    for tier, css, _, _, _ in GLASS_TIERS:
+        out.append(f"window.tc-glass-window:backdrop .tc-glass-{css} "
+                   f"{{ background-color: @tc_glass_{snake(tier)}_inactive; }}")
+    # Increase Contrast: a solid 1pt stroke on every tier with edge layers
+    # (`GlassEdgeModifier`), drawn as an inset shadow so, like the Mac's
+    # strokeBorder, it takes no layout space; the tier keeps its own shadow.
+    for tier, css, _, edge, _ in GLASS_TIERS:
+        layers = flat_layers(tokens, edge, scheme)
+        if layers:
+            out.append(f"window.tc-high-contrast .tc-glass-{css} {{ box-shadow: inset 0 0 0 1px "
+                       f"@tc_glass_edge_high_contrast, {css_shadow(layers, f'glass tier {tier}')}; }}")
     for role, entry in tokens["type"].items():
         body = tokens["type"]["body"]
         size = entry["size"] / body["size"]
@@ -684,6 +958,42 @@ def render_glass_rust(tokens: dict) -> list[str]:
                 raise TokenError(f"{mod}.{key}: {value!r} is not a whole number of px")
             out.append(f"        pub const {snake(key).upper()}: i32 = {value};")
         out.append("    }")
+    # The graph's dot inks (`GlassBarGraph`): shared over kept, and the bar
+    # labels' statusOff, per scheme, for cairo to draw with.
+    out.append("    /// The graph's inks: shared and kept dots, and the bar labels.")
+    out.append("    pub mod data {")
+    for scheme in SCHEMES:
+        for token, name in (("dataShared", "SHARED"), ("dataKept", "KEPT"), ("statusOff", "LABEL"),
+                            ("textPrimary", "TEXT_PRIMARY")):
+            hex_ = flat_color(tokens, token, scheme)["hex"].upper()
+            out.append(f"        /// `{token}`, {scheme}.")
+            out.append(f'        pub const {name}_{scheme.upper()}: &str = "{hex_}";')
+    out.append("    }")
+    # The selected tab's ember line and the halo behind its title
+    # (`GlassRuleTabs.emberGlow`), drawn in cairo across the strip.
+    out.append("    /// The tab strip's ember line and its halo, as colour and alpha.")
+    out.append("    pub mod tabs {")
+    for scheme in SCHEMES:
+        ember = flat_color(tokens, "tabEmber", scheme)
+        halo = flat_color(tokens, "tabEmberHalo", scheme)
+        if ember.get("alpha", 1) != 1:
+            raise TokenError(f"tabEmber {scheme}: expected an opaque ember")
+        out.append(f"        /// `tabEmber`, {scheme}.")
+        out.append(f'        pub const EMBER_{scheme.upper()}: &str = "{ember["hex"].upper()}";')
+        out.append(f"        /// `tabEmberHalo`, {scheme}.")
+        out.append(f'        pub const HALO_{scheme.upper()}: (&str, f64) = '
+                   f'("{halo["hex"].upper()}", {number(halo.get("alpha", 1), "tabEmberHalo")});')
+    out.append("    }")
+    # A status dot's ink (`GlassStatus`), per scheme, for cairo.
+    out.append("    /// Status dot inks: on, ask, off and outside.")
+    out.append("    pub mod status {")
+    for scheme in SCHEMES:
+        for token, name in (("statusOn", "ON"), ("statusAsk", "ASK"), ("statusOff", "OFF"),
+                            ("statusOutside", "OUTSIDE")):
+            hex_ = flat_color(tokens, token, scheme)["hex"].upper()
+            out.append(f"        /// `{token}`, {scheme}.")
+            out.append(f'        pub const {name}_{scheme.upper()}: &str = "{hex_}";')
+    out.append("    }")
     out.append("}")
     return out
 
@@ -997,6 +1307,16 @@ def render_gtk(tokens: dict) -> str:
         out.append(f"/// The painted Monitor window's tiers, type roles and inks, {scheme} scheme.")
         out.append(f'pub const GLASS_{scheme.upper()}_CSS: &str = r#"')
         out.append(render_glass_css(tokens, scheme))
+        out.append('"#;')
+    for scheme in SCHEMES:
+        out.append(f"/// The translucent window's colours over the painted ones, {scheme} scheme,")
+        out.append("/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).")
+        out.append(f'pub const GLASS_{scheme.upper()}_BLUR_CSS: &str = r#"')
+        out.append(render_glass_blur_css(tokens, scheme))
+        out.append('"#;')
+        out.append(f"/// Insights over the translucent pane, {scheme} scheme.")
+        out.append(f'pub const INSIGHTS_{scheme.upper()}_BLUR_CSS: &str = r#"')
+        out.append(render_insights_blur_css(tokens, scheme))
         out.append('"#;')
     out.append("")
     out.extend(render_glass_rust(tokens))

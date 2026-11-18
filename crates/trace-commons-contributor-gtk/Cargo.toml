@@ -95,5 +95,24 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # here, so this adds zero new packages -- only a direct edge.
 zbus = "5"
 
+# KWin's blur behind the glass panes (`ui::glass_backdrop`), Linux only, so
+# macOS test builds are unaffected. Owner-approved 2026-11-18: the set the
+# blur spike (#2162) measured; the dependency write-up is in its plan,
+# docs/superpowers/plans/2026-11-16-linux-blur-spike.md. Each turns FFI into
+# safe calls, so the crate keeps `unsafe_code = "forbid"`:
+# - gdk4-wayland (`wayland_crate`): GTK's wl_display and wl_surface as
+#   wayland-client proxies.
+# - wayland-client: our own registry and event queue on that connection.
+# - wayland-protocols-plasma (`client`): the org_kde_kwin_blur bindings.
+# - gdk4-x11: the X11 display check and the window's XID.
+# - x11rb (no default features: pure Rust, no Xlib): the root window's atom
+#   and _KDE_NET_WM_BLUR_BEHIND_REGION.
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
+gdk4-x11 = "0.9"
+wayland-client = "0.31"
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", default-features = false }
+
 [lints.rust]
 unsafe_code = "forbid"

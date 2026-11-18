@@ -94,6 +94,8 @@ impl Fixture {
                 | "managed_snapshot"
                 // The Traces map's tool read; refused, it draws no tools.
                 | "tool_destinations"
+                // The summary's pending-credit condition; refused, it is a dash.
+                | "commons_credit_summary"
                 // Settings' sharing choice and Uses; refused, they stay
                 // unpicked and empty.
                 | "automatic_grant"
