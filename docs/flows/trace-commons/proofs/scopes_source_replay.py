@@ -24,36 +24,32 @@ def extract(start):
     raise ValueError('Unclosed source method')
 
 
-effective = extract('fn effective_config(')
 getter = extract('    pub fn effective_cfg(')
 # These actual source expressions establish the handoff from pass snapshot to
 # pipeline context, the claim check, and the context's envelope config copy.
 for expression in [
     'let Some(cfg) = shared.store.load_config()?',
-    'crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai)',
+    'crate::submit::SubmitContext::new(&store, &cfg, &opts)',
     'current.approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice())',
 ]:
     assert expression in mod, 'Source handoff changed: ' + expression
-assert 'let effective_cfg = effective_config(cfg, opts);' in source
-for label, body in [('submit.rs', source), ('daemon/mod.rs', mod), ('effective_config', effective), ('effective_cfg', getter)]:
+assert 'let effective_cfg = cfg.clone();' in source
+for label, body in [('submit.rs', source), ('daemon/mod.rs', mod), ('effective_cfg', getter)]:
     print(label + ' SHA256:', hashlib.sha256(body.encode()).hexdigest(), flush=True)
 
 harness = '''#[derive(Clone)]
-struct ContributorConfig { consent_scopes: Vec<String>, pii_filter: Option<String> }
-struct SubmitOptions { unenrolled_preview: bool, pii_filter: Option<String> }
+struct ContributorConfig { consent_scopes: Vec<String> }
 struct SubmitContext { effective_cfg: ContributorConfig }
 impl SubmitContext {
 GETTER
 }
-EFFECTIVE
 fn main() {
- let mut saved = ContributorConfig { consent_scopes: vec!["approved-old-scope".into()], pii_filter: None };
+ let mut saved = ContributorConfig { consent_scopes: vec!["approved-old-scope".into()] };
  let approved_scopes = Some(saved.consent_scopes.clone());
  // ConfigStore::load_config returns an owned config; the source passes its
  // reference to SubmitContext::new before the claim. No live-config alias.
  let cfg = saved.clone();
- let opts = SubmitOptions { unenrolled_preview: false, pii_filter: None };
- let ctx = SubmitContext { effective_cfg: effective_config(&cfg, &opts) };
+ let ctx = SubmitContext { effective_cfg: cfg.clone() };
  // Exact source claim predicate, replacing only current.approved_scopes.
  assert!(!(approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice())));
  saved.consent_scopes = vec!["newly-saved-scope".into()];
@@ -67,7 +63,7 @@ fn main() {
  assert!(approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice()));
  println!("next pass: old approval mismatches new captured config");
 }
-'''.replace('GETTER', getter).replace('EFFECTIVE', effective)
+'''.replace('GETTER', getter)
 with tempfile.TemporaryDirectory(prefix='tc-scopes-source-replay-', dir='/private/tmp') as tmp:
     tmp = Path(tmp)
     rust = tmp / 'scopes_source_replay.rs'

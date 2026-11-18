@@ -265,7 +265,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: "device-1".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -483,7 +482,6 @@ mod tests {
             "user_subject": "alice",
             "device_key_id": "device-1",
             "consent_scopes": ["debugging_evaluation"],
-            "pii_filter": null,
             "allowed_hosts": null,
         });
         std::fs::write(
