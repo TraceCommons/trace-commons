@@ -10,6 +10,9 @@ needs Visual Studio's MSBuild tooling — and it cannot be *seen* anywhere but a
 real Windows desktop. CI proves it compiles. It cannot tell you the window
 renders, the layout holds, or the daemon state actually reaches the header.
 
+There is also an Azure box, on Windows Server 2025, with a route to a GPU.
+See "Azure: a Windows Server 2025 box" at the end of this page.
+
 The interop layer is deliberately exempt from all of this: it targets plain
 `net8.0` and its tests run against a macOS `.dylib`. Use the VM for the WinUI
 half only.
@@ -247,3 +250,194 @@ boot. The bootstrap disables it via
 **Raise the target window before capturing**, or the screenshot shows whatever
 shell launched the task and a healthy app looks like one that never opened.
 `win-capture.ps1` does this via `-ProcessName`.
+
+## Azure: a Windows Server 2025 box
+
+`provision-azure-vm.sh` builds a second test box, on Azure, for the same work.
+It exists for two reasons. Azure offers GPU sizes (NVadsA10v5) that render
+the WinUI app with hardware acceleration, and its Windows Server images
+include the licence in the hourly price, so no separate Windows licence is
+needed. The image is Windows Server 2025 Datacenter with Desktop Experience
+(Gen2, Trusted Launch). The script never sets `--license-type`.
+
+Defaults (each one can be changed with a `TC_AZ_*` variable at the top of the
+script): resource group `tc-win-azure` in `eastus`, VM `tc-win-az`,
+`Standard_D4s_v3` (4 vCPU, 16 GB), 128 GB Premium SSD, admin user `tcdev`.
+Every resource is tagged `purpose=windows-parity-testing`.
+
+```bash
+windows/scripts/provision-azure-vm.sh create       # network, NSG, VM, sshd, auto-shutdown
+windows/scripts/provision-azure-vm.sh bootstrap    # toolchain install, detached
+TC_AZ_WAIT=540 windows/scripts/provision-azure-vm.sh bootstrap-log
+```
+
+`create` is idempotent: re-running it re-points the SSH rule, re-applies the
+sshd lockdown, re-pins the host key and re-syncs the shutdown time. The
+bootstrap is the same `win-dev-bootstrap.ps1` the GCE box runs at startup,
+run here as a SYSTEM job. On a `D4s_v3` it took 25 minutes on 2026-11-18,
+21 of them Visual Studio Build Tools.
+
+Set `TC_AZ_EXPECTED_ACCOUNT` to the account you expect `az` to be signed in
+as, and every command refuses to run under any other.
+
+### Cost, and deallocating
+
+Retail prices for `eastus` on 2026-11-18, from the Azure Retail Prices API:
+
+| Item | Price |
+|---|---|
+| `Standard_D4s_v3`, Windows (licence included) | $0.376/hour |
+| `Standard_NV6ads_A10_v5`, Windows (licence included) | $0.73/hour |
+| 128 GB Premium SSD (P10) | $19.71/month |
+| Standard static public IPv4 | $0.005/hour (about $3.65/month) |
+
+**Deallocate it when you are done:**
+
+```bash
+windows/scripts/provision-azure-vm.sh stop
+```
+
+`stop` runs `az vm deallocate`, then re-reads the power state from the API
+and exits non-zero unless it is `deallocated`. On Azure, "stopped" and
+"deallocated" are different states. A VM shut down from inside Windows, or
+with `az vm stop`, is *stopped*: it keeps its hardware and **still bills for
+compute**. Only *deallocated* ends the compute and licence charge. The disk
+and the public IP bill either way, about $23.50/month together. `delete`
+removes the whole resource group.
+
+An auto-shutdown schedule deallocates the VM every night at 01:00 local time,
+as a safety net, not a substitute for `stop`. Azure takes the time in UTC, so
+`create` converts 01:00 at today's UTC offset, and the time drifts an hour
+across a daylight-saving change. Re-run `create` to re-sync it.
+
+### Access model
+
+The VM has a public IP. Its network security group admits exactly one inbound
+flow: **tcp:22 from this machine's current public address, `/32`**. Azure's
+default rules then deny everything else inbound. There is no 3389 rule and
+never a `0.0.0.0/0` rule. `create` and `status` both list the NSG's rules and
+fail if an inbound allow from a wildcard source, or one on 3389, has appeared.
+
+- **The address is never written down.** The script resolves it at run time.
+  When it changes (a new network, a new lease), SSH times out. Then run:
+
+  ```bash
+  windows/scripts/provision-azure-vm.sh allow-my-ip
+  ```
+
+  `status` says when the rule no longer matches your address.
+- **SSH is by key only.** `create` installs a dedicated key,
+  `~/.ssh/tc-win-az`, through `az vm run-command`, reusing
+  `win-enable-ssh.ps1` (including the `administrators_authorized_keys` ACL).
+  The sshd config sets `AuthenticationMethods publickey`, so the server offers
+  no password or keyboard-interactive prompt at all; `create` checks this with
+  `sshd -T` and refuses to finish otherwise.
+- **The host key is pinned.** `create` reads the box's host key through
+  run-command, which goes through the authenticated Azure control plane, and
+  writes it to `~/.ssh/tc-win-az.known_hosts`. `win-exec-az.sh` connects with
+  `StrictHostKeyChecking=yes`. That differs from `win-exec.sh`, which can
+  skip host-key checks because IAP authenticates its tunnel. A public IP has
+  no such layer.
+- **The admin password** is generated by `create`, stored in the macOS
+  Keychain (service `tc-win-az`, account `tcdev`) before the VM exists, and
+  never printed. It is needed only for RDP and console auto-logon:
+
+  ```bash
+  security find-generic-password -s tc-win-az -a tcdev -w
+  ```
+
+### Why there is no public RDP
+
+An internet-facing 3389 is scanned and credential-stuffed within minutes of
+appearing, and RDP has had pre-authentication vulnerabilities. RDP runs inside
+the SSH connection instead:
+
+```bash
+windows/scripts/provision-azure-vm.sh rdp     # forwards localhost:13389 to the box's 3389
+```
+
+Connect an RDP client to `localhost:13389` as `tcdev`.
+
+**Do not let `az vm create` build the network.** Given no NIC, `az vm create`
+makes its own NSG and, for a Windows image, adds a rule opening 3389 to any
+source. The script creates the NSG, public IP and NIC first and passes
+`--nics`, so that rule never exists.
+
+### Working headlessly
+
+`win-exec-az.sh` is the counterpart of `win-exec.sh`:
+
+```bash
+windows/scripts/win-exec-az.sh 'cargo --version'
+```
+
+The command travels as `-EncodedCommand`, so it needs no escaping. Standard
+input is passed through, which is how a secret reaches the box without
+appearing in a command line or a stored script.
+
+**Long work runs as a job.** A process started from an SSH session dies when
+the session closes, so a cold build cannot ride on one connection. `--job`
+runs the command as a detached scheduled task that writes a log and an
+exit-code file. `--wait` waits on the box and prints the log's tail:
+
+```bash
+windows/scripts/win-exec-az.sh --job ffi 'Set-Location C:\src\trace-commons; cargo build -p trace-commons-contributor-ffi'
+windows/scripts/win-exec-az.sh --wait ffi 540   # exit: the job's code, or 75 while still running
+```
+
+A job runs as `tcdev` through an S4U logon, with no stored password.
+`--system` runs it as SYSTEM, which the bootstrap needs.
+
+### Seeing the app
+
+The steps are the same as for the GCE box (see "Seeing the app" above), and
+need the same console auto-logon. Install it once, piping the password from
+the Keychain over SSH:
+
+```bash
+security find-generic-password -s tc-win-az -a tcdev -w | windows/scripts/win-exec-az.sh \
+  '$p = [Console]::In.ReadLine(); & C:\bootstrap-downloads\autologon\Autologon64.exe tcdev $env:COMPUTERNAME $p /accepteula; $p = $null'
+windows/scripts/win-exec-az.sh 'Restart-Computer -Force'
+```
+
+The Azure guest agent does not clear auto-logon (checked across two
+restarts on 2026-11-18), so no step like GCE's `disable-account-manager` is
+needed. Autologon stores the password as an LSA secret: the `DefaultPassword`
+registry value stays empty.
+
+`bootstrap` copies `win-capture.ps1` to `C:\tc`, so:
+
+```bash
+windows/scripts/win-exec-az.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\tc\win-capture.ps1 -Exe "C:\src\trace-commons\windows\src\TraceCommons.App\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\TraceCommons.exe" -SettleSeconds 25'
+scp -i ~/.ssh/tc-win-az -o HostKeyAlias=tc-win-az -o UserKnownHostsFile=~/.ssh/tc-win-az.known_hosts \
+  "tcdev@$(az network public-ip show -g tc-win-azure -n tc-win-az-ip --query ipAddress -o tsv):C:/tc-captures/tc-capture.png" /tmp/screen.png
+```
+
+The Azure console session is 1024x768, not GCE's 640x480.
+
+**Windows Server 2025 opens a full-screen "Send diagnostic data to
+Microsoft" page at first logon**, above every other window, so the first
+capture shows that page and not the app. The bootstrap sets the
+`DisablePrivacyExperience` policy to skip it. The policy acts at logon, so on
+a box whose first logon happened before the policy was set, restart once.
+
+### Moving to a GPU
+
+The GPU size is `Standard_NV6ads_A10_v5`: 6 vCPU and a sixth of an A10.
+`resize` deallocates the VM, changes the size and starts it again:
+
+```bash
+windows/scripts/provision-azure-vm.sh resize Standard_NV6ads_A10_v5
+```
+
+That needs `StandardNVADSA10v5Family` vCPU quota in the region. A new
+pay-as-you-go subscription has none, and the regional `cores` total (10 by
+default) also has to cover it. The A10 also needs the NVIDIA GRID driver
+extension before it renders anything.
+
+**`az quota create` cannot raise this family on a pay-as-you-go
+subscription.** On 2026-11-18 it failed in `eastus`, `westus2` and
+`southcentralus` with `QuotaNotAvailableForResource`. GPU families need a
+quota support request (Help + support, "Service and subscription limits
+(quotas)" in the portal). Quota requests are free on every support plan,
+Basic included.

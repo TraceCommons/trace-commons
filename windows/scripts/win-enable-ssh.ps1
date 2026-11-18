@@ -75,6 +75,15 @@ $config = $config -replace '(?m)^#?\s*PubkeyAuthentication\s+.*$', 'PubkeyAuthen
 if ($config -notmatch '(?m)^PasswordAuthentication no$') {
     $config += "`r`nPasswordAuthentication no`r`n"
 }
+# PasswordAuthentication alone still leaves keyboard-interactive advertised
+# (`Permission denied (publickey,keyboard-interactive)`), which is a password
+# prompt by another name. Pin the method list to public keys outright. Put at
+# the TOP of the file: the stock Windows config ends in a `Match Group
+# administrators` block, so anything appended lands inside it, and for
+# duplicated keywords sshd takes the first value it reads.
+if ($config -notmatch '(?m)^AuthenticationMethods publickey$') {
+    $config = "AuthenticationMethods publickey`r`nKbdInteractiveAuthentication no`r`n" + $config
+}
 Set-Content -Path $sshdConfig -Value $config -Encoding ascii
 Write-Log 'sshd_config set to public-key authentication only'
 
