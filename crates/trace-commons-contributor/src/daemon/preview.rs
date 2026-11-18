@@ -6,7 +6,7 @@
 //! shrinks (and reshapes) the payload, so that number overstated what
 //! actually gets sent and was the one figure backing a contributor's consent
 //! decision. `build_preview` runs the *same* redaction path `submit_one`
-//! uses (`build_redactor_with` + `build_raw_contribution` +
+//! uses (`build_redactor` + `build_raw_contribution` +
 //! `redact_to_envelope`).
 //!
 //! Running the same *code* is not the same as producing the same
@@ -32,8 +32,9 @@
 //! [`build_preview`] hands back the envelope it built, the caller persists
 //! it (`daemon::approved_envelope`), and the upload sends exactly those
 //! bytes. An earlier round compared a digest instead, and that comparison
-//! made the whole feature unusable with `pii_filter = "near-ai"`: an
-//! LLM-backed filter does not return identical spans for identical text,
+//! made the whole feature unusable under the LLM-backed client-side filter
+//! the pilot then ran (since retired), which does not return identical
+//! spans for identical text,
 //! so every previewed entry was refused and re-offered forever. See
 //! `daemon::approved_envelope` for the full account.
 //!
@@ -54,8 +55,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, ContributorConfig};
 use crate::envelope::{
-    NearAiSettings, build_raw_contribution_with_correction, build_redactor_with, envelope_size,
-    redact_to_envelope, residual_secret_labels_fail_closed,
+    build_raw_contribution_with_correction, build_redactor, envelope_size, redact_to_envelope,
+    residual_secret_labels_fail_closed,
 };
 use crate::source::{SessionRef, TraceSource};
 use trace_commons_protocol::canonical_json;
@@ -300,23 +301,14 @@ fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
 
 /// A fingerprint of everything outside the session file that determines the
 /// envelope: the envelope-determining fields of the contributor config
-/// (consent scopes, PII filter selection, tenant/instance/subject/device
-/// identity, audience, endpoints, host allowlist -- that is, everything
-/// except `NON_ENVELOPE_CONFIG_FIELDS`), the presence and identity of the
-/// NEAR AI privacy-filter backend, and the redaction ruleset/build this
-/// daemon is running.
+/// (consent scopes, tenant/instance/subject/device identity, audience,
+/// endpoints, host allowlist -- that is, everything except
+/// `NON_ENVELOPE_CONFIG_FIELDS`), the environment-attached privacy filter,
+/// and the redaction ruleset/build this daemon is running.
 ///
 /// Cheap -- no redaction pass, no network -- so it is recorded on every
 /// approval and re-derived before every upload, including for entries that
 /// were never previewed and for armed auto-upload.
-///
-/// The NEAR AI **API key is deliberately never hashed in**, and that is a
-/// decision rather than an omission: rotating a credential does not change
-/// what the filter does to a trace, so hashing it in would revoke every
-/// standing approval on a routine rotation for no consent-relevant reason
-/// -- and hashing a live secret into a value this crate writes to disk is
-/// not something it does. The base URL and model *are* hashed in, because
-/// both change what comes back.
 ///
 /// One envelope-determining input is still outside this: `SubmitOptions`.
 /// See the note at the daemon's construction site in `daemon::drain_approved`.
@@ -326,14 +318,9 @@ fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
 /// name it goes by: with it on, a submission carries the final inference
 /// call's verbatim prompt to a witness, which is a change in what leaves the
 /// machine that an earlier approval never covered.
-pub fn input_fingerprint(
-    cfg: &ContributorConfig,
-    near_ai: Option<&NearAiSettings>,
-    attested_bodies: bool,
-) -> String {
+pub fn input_fingerprint(cfg: &ContributorConfig, attested_bodies: bool) -> String {
     input_fingerprint_with_env_filter(
         cfg,
-        near_ai,
         attested_bodies,
         &super::grant_terms::env_filter_backend(),
     )
@@ -345,7 +332,6 @@ pub fn input_fingerprint(
 /// state.
 pub(crate) fn input_fingerprint_with_env_filter(
     cfg: &ContributorConfig,
-    near_ai: Option<&NearAiSettings>,
     attested_bodies: bool,
     env_backend: &str,
 ) -> String {
@@ -355,16 +341,6 @@ pub(crate) fn input_fingerprint_with_env_filter(
     h.update(REDACTION_RULESET_VERSION.as_bytes());
     h.update(b"\x00");
     h.update(env!("CARGO_PKG_VERSION").as_bytes());
-    h.update(b"\x00near_ai\x00");
-    match near_ai {
-        None => h.update(b"absent"),
-        Some(s) => {
-            h.update(b"present\x00");
-            h.update(s.base_url.as_deref().unwrap_or("").as_bytes());
-            h.update(b"\x00");
-            h.update(s.model.as_deref().unwrap_or("").as_bytes());
-        }
-    }
     // The attested-bodies switch. It does not change the envelope, and it is
     // hashed in anyway: what it changes is what leaves the machine. With it
     // on, a submission carries the final inference call's verbatim request
@@ -753,7 +729,6 @@ impl PreviewCardSummary {
 pub async fn build_preview(
     store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
@@ -763,7 +738,7 @@ pub async fn build_preview(
     // `build_preview_card` and pass the contributor's real answer -- a
     // summary built here reports the terms of a machine that carries no
     // bodies, which is what a caller with no daemon settings is.
-    build_preview_with_correction(store, cfg, near_ai, source, session_ref, None, false).await
+    build_preview_with_correction(store, cfg, source, session_ref, None, false).await
 }
 
 /// [`build_preview`], with the contributor's written correction folded into
@@ -781,7 +756,6 @@ pub async fn build_preview(
 pub async fn build_preview_with_correction(
     store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     correction: Option<&str>,
@@ -792,7 +766,6 @@ pub async fn build_preview_with_correction(
         build_preview_with_correction_unbounded(
             store,
             cfg,
-            near_ai,
             source,
             session_ref,
             correction,
@@ -805,7 +778,6 @@ pub async fn build_preview_with_correction(
 async fn build_preview_with_correction_unbounded(
     store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     correction: Option<&str>,
@@ -817,7 +789,6 @@ async fn build_preview_with_correction_unbounded(
     let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
     let (core, envelope) = build_preview_core(
         cfg,
-        near_ai,
         source,
         session_ref,
         correction,
@@ -874,7 +845,6 @@ async fn build_preview_with_correction_unbounded(
 pub async fn build_preview_card(
     store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
-    near_ai: Option<NearAiSettings>,
     attested_bodies: bool,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
@@ -885,7 +855,6 @@ pub async fn build_preview_card(
         let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
         let (core, _envelope) = build_preview_core(
             cfg,
-            near_ai,
             source,
             session_ref,
             None,
@@ -904,7 +873,6 @@ pub async fn build_preview_card(
 /// pretty-printed body is computed here; each caller adds the one it needs.
 async fn build_preview_core(
     cfg: Option<&ContributorConfig>,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     correction: Option<&str>,
@@ -936,11 +904,10 @@ async fn build_preview_core(
     // The fingerprint of an unenrolled build describes the placeholder, and
     // is reported only so the summary is self-describing. Nothing binds an
     // approval to it -- see `PreviewSummary::enrolled`.
-    let fingerprint =
-        input_fingerprint(cfg, near_ai.as_ref().filter(|_| enrolled), attested_bodies);
+    let fingerprint = input_fingerprint(cfg, attested_bodies);
     let (redactor, raw) = if enrolled {
         (
-            build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
+            build_redactor(transcript.cwd.as_deref())
                 .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?,
             build_raw_contribution_with_correction(&transcript, cfg, Utc::now(), None, correction),
         )
@@ -1101,14 +1068,13 @@ pub struct WitnessPreview {
 pub async fn build_witnessed_preview(
     store: &ConfigStore,
     cfg: &ContributorConfig,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     options: WitnessPreviewOptions<'_>,
 ) -> Result<WitnessPreview> {
     within_deadline(
         PREVIEW_BUILD_DEADLINE,
-        build_witnessed_preview_unbounded(store, cfg, near_ai, source, session_ref, options),
+        build_witnessed_preview_unbounded(store, cfg, source, session_ref, options),
     )
     .await
 }
@@ -1116,7 +1082,6 @@ pub async fn build_witnessed_preview(
 async fn build_witnessed_preview_unbounded(
     store: &ConfigStore,
     cfg: &ContributorConfig,
-    near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
     options: WitnessPreviewOptions<'_>,
@@ -1142,17 +1107,15 @@ async fn build_witnessed_preview_unbounded(
     }
     let submit_options = crate::submit::SubmitOptions {
         dry_run: false,
-        pii_filter: None,
         no_reasoning: false,
         machine_readable: true,
         unenrolled_preview: false,
         remediate_quarantined: false,
         verdict: options.verdict,
     };
-    let mut context = super::run_blocking(|| {
-        crate::submit::SubmitContext::new(store, cfg, &submit_options, near_ai.clone())
-    })
-    .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
+    let mut context =
+        super::run_blocking(|| crate::submit::SubmitContext::new(store, cfg, &submit_options))
+            .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
     let (response, attested_inference, token_bundle) = if let Some(control) = options.token_capture
     {
         if !options.include_inference_bodies
@@ -1215,7 +1178,7 @@ async fn build_witnessed_preview_unbounded(
     };
     let mut pin_guard =
         crate::token_bundle::ReviewPinGuard::new(store.dir(), token_bundle.as_ref());
-    let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), options.include_inference_bodies);
+    let fingerprint = input_fingerprint(cfg, options.include_inference_bodies);
     let verdict = options.verdict.map(|verdict| match verdict {
         crate::envelope::ContributorVerdict::Worked => "worked",
         crate::envelope::ContributorVerdict::Partly => "partly",
@@ -1238,7 +1201,7 @@ async fn build_witnessed_preview_unbounded(
         verdict,
         options.correction,
     )?;
-    let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
+    let redactor = build_redactor(transcript.cwd.as_deref())
         .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
     let mut summary = summarize_envelope(
         &envelope,
@@ -1271,16 +1234,15 @@ pub fn summarize_witnessed_preview(
     artifact: &super::approved_envelope::WitnessReviewArtifact,
     cfg: &ContributorConfig,
     store: &ConfigStore,
-    near_ai: Option<NearAiSettings>,
     transcript: &crate::source::SessionTranscript,
     raw_session_bytes: u64,
     include_inference_bodies: bool,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
     let envelope_limit = store.envelope_limit_bytes();
-    let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), include_inference_bodies);
+    let fingerprint = input_fingerprint(cfg, include_inference_bodies);
     let envelope =
         artifact.validate_stored(cfg, store.dir(), &transcript.session_hash, &fingerprint)?;
-    let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)?;
+    let redactor = build_redactor(transcript.cwd.as_deref())?;
     let mut summary = summarize_envelope(
         &envelope,
         raw_session_bytes,
@@ -1611,9 +1573,8 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         let title = summary.title.expect("the prompt names a task");
         assert!(!title.contains("alice.smith@example.org"), "{title}");
         assert!(!title.contains("/Users/testuser"), "{title}");
@@ -1656,7 +1617,6 @@ mod tests {
         let error = build_witnessed_preview(
             &store,
             &cfg,
-            None,
             &source,
             &reference,
             WitnessPreviewOptions::default(),
@@ -1677,7 +1637,7 @@ mod tests {
             expected_session_hash: "changed",
             ..Default::default()
         };
-        let error = build_witnessed_preview(&store, &cfg, None, &source, &reference, options)
+        let error = build_witnessed_preview(&store, &cfg, &source, &reference, options)
             .await
             .err()
             .unwrap();
@@ -1696,7 +1656,7 @@ mod tests {
         });
         let (_session_dir, source, reference) = fixture_session();
         assert_eq!(
-            build_preview(&store, Some(&cfg), None, &source, &reference)
+            build_preview(&store, Some(&cfg), &source, &reference)
                 .await
                 .err()
                 .unwrap()
@@ -1704,7 +1664,7 @@ mod tests {
             "witness_claim_unavailable"
         );
         assert_eq!(
-            build_preview_card(&store, Some(&cfg), None, true, &source, &reference)
+            build_preview_card(&store, Some(&cfg), true, &source, &reference)
                 .await
                 .err()
                 .unwrap()
@@ -1713,7 +1673,7 @@ mod tests {
         );
         // ...and that refusal reaches a caller as the instruction it is,
         // never as the generic `preview-failed` it used to collapse to.
-        let error = build_preview_card(&store, Some(&cfg), None, true, &source, &reference)
+        let error = build_preview_card(&store, Some(&cfg), true, &source, &reference)
             .await
             .err()
             .unwrap();
@@ -1827,7 +1787,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -1912,9 +1871,7 @@ mod tests {
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
         let (clean_summary, _body, mut envelope) =
-            build_preview(&store, Some(&cfg), None, &src, &r)
-                .await
-                .unwrap();
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
 
         assert!(
             !serde_json::to_string(&envelope)
@@ -1977,7 +1934,7 @@ mod tests {
         }
 
         // The queue card reads the same map through the same shared build.
-        let card = build_preview_card(&store, Some(&cfg), None, false, &src, &r)
+        let card = build_preview_card(&store, Some(&cfg), false, &src, &r)
             .await
             .unwrap();
         assert_eq!(
@@ -1994,7 +1951,7 @@ mod tests {
         let (_d, src, r) = session_with_secret_in_unredacted_model_field();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let error = build_preview(&store, Some(&cfg), None, &src, &r)
+        let error = build_preview(&store, Some(&cfg), &src, &r)
             .await
             .expect_err("a credential in metadata is a refusal");
         assert_eq!(
@@ -2010,9 +1967,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(
             !summary
                 .redactions
@@ -2076,9 +2032,7 @@ mod tests {
         let (_d, src, r) = grouped_session(3, 1);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, body, envelope) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
 
         assert_eq!(summary.subagent_count, 3);
         assert_eq!(summary.subagents_dropped, 0);
@@ -2112,9 +2066,8 @@ mod tests {
         let (_d, src, r) = grouped_session(114, 200);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert_eq!(summary.subagent_count, 114);
         assert_eq!(summary.subagents_dropped, 0, "nothing should need dropping");
         assert!(
@@ -2143,7 +2096,7 @@ mod tests {
 
         let small = tokio::time::timeout(
             Duration::from_secs(30),
-            build_preview_card(&store, None, None, false, &src, &small_ref),
+            build_preview_card(&store, None, false, &src, &small_ref),
         )
         .await
         .expect("a small session is never queued behind a large one");
@@ -2151,7 +2104,7 @@ mod tests {
 
         let blocked = tokio::time::timeout(
             Duration::from_millis(200),
-            build_preview_card(&store, None, None, false, &src, &large_ref),
+            build_preview_card(&store, None, false, &src, &large_ref),
         )
         .await;
         assert!(
@@ -2162,7 +2115,7 @@ mod tests {
         drop(held);
         let admitted = tokio::time::timeout(
             Duration::from_secs(30),
-            build_preview_card(&store, None, None, false, &src, &large_ref),
+            build_preview_card(&store, None, false, &src, &large_ref),
         )
         .await
         .expect("a large preview proceeds once the gate is free");
@@ -2187,9 +2140,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert_eq!(summary.reason_label, None);
         let value = serde_json::to_value(&summary).unwrap();
         assert!(value.get("reason_label").is_none(), "{value}");
@@ -2211,9 +2163,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(summary.raw_session_bytes > 0);
         assert!(summary.would_send_bytes > 0);
         assert_ne!(
@@ -2230,14 +2181,7 @@ mod tests {
         // never leaves the machine to be classified.
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
-        let near_ai = NearAiSettings {
-            api_key: "unused".into(),
-            base_url: Some("http://filter.invalid".into()),
-            model: None,
-        };
-        let (summary, _body, envelope) = build_preview(&store, None, Some(near_ai), &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, envelope) = build_preview(&store, None, &src, &r).await.unwrap();
 
         assert!(!summary.enrolled);
         assert!(summary.would_send_bytes > 0);
@@ -2247,7 +2191,7 @@ mod tests {
             summary.redactions
         );
         let placeholder = crate::commands::unenrolled_preview_config();
-        let real = build_preview(&store, Some(&sample_cfg(&store)), None, &src, &r)
+        let real = build_preview(&store, Some(&sample_cfg(&store)), &src, &r)
             .await
             .unwrap()
             .2;
@@ -2264,9 +2208,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         let total: u32 = summary.redactions.values().sum();
         assert!(
             total > 0,
@@ -2318,9 +2261,7 @@ mod tests {
         let (_d, src, r) = fixture_session_naming_its_own_path();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, envelope) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         let occurrences: u32 = summary.redactions.values().sum();
         let distinct: u32 = summary.redactions_distinct.values().sum();
         assert!(occurrences > 0, "the fixture must have something to redact");
@@ -2341,9 +2282,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (_summary, body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (_summary, body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(
             !body.contains("sk-fake-fixture-secret-1234"),
             "secret survived into the preview body"
@@ -2355,9 +2295,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert_eq!(summary.event_count, 1);
         assert!(!summary.opening_prompt.is_empty());
         assert!(
@@ -2452,7 +2391,7 @@ mod tests {
         let reference = source.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, body, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+        let (summary, body, _) = build_preview(&store, Some(&cfg), &source, &reference)
             .await
             .unwrap();
         assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
@@ -2504,10 +2443,9 @@ mod tests {
         let reference = source.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, body, envelope) =
-            build_preview(&store, Some(&cfg), None, &source, &reference)
-                .await
-                .unwrap();
+        let (summary, body, envelope) = build_preview(&store, Some(&cfg), &source, &reference)
+            .await
+            .unwrap();
         assert!(summary.opening_prompt.starts_with("Fix login refresh in "));
         assert!(!summary.opening_prompt.contains("/Users/test"));
         assert!(body.contains("Project rules"));
@@ -2515,7 +2453,7 @@ mod tests {
 
         records.pop();
         write_records(&records);
-        let (summary, _, _) = build_preview(&store, Some(&cfg), None, &source, &reference)
+        let (summary, _, _) = build_preview(&store, Some(&cfg), &source, &reference)
             .await
             .unwrap();
         assert_eq!(summary.opening_prompt, "No task description found.");
@@ -2543,9 +2481,8 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(summary.opening_prompt.chars().count() <= 200);
     }
 
@@ -2556,12 +2493,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
-        let (b, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (a, _, _) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
+        let (b, _, _) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert_eq!(a.envelope_digest, b.envelope_digest);
         assert!(a.envelope_digest.starts_with("sha256:"));
     }
@@ -2588,7 +2521,7 @@ mod tests {
             "this fixture has to carry a result that names its call, or the \
              test proves nothing"
         );
-        let redactor = build_redactor_with(&cfg, t.cwd.as_deref(), None).unwrap();
+        let redactor = build_redactor(t.cwd.as_deref()).unwrap();
         let a = redact_to_envelope(&redactor, build_raw_contribution(&t, &cfg, Utc::now()))
             .await
             .unwrap();
@@ -2649,9 +2582,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         // The pin moved once, deliberately, for issue #373: this fixture
         // pastes an API key, and a scrubbed secret is now the Medium
         // found-and-removed floor rather than terminal High. That changes
@@ -2731,7 +2663,7 @@ mod tests {
         for e in t.events.iter_mut() {
             e.timestamp = None;
         }
-        let redactor = build_redactor_with(&cfg, t.cwd.as_deref(), None).unwrap();
+        let redactor = build_redactor(t.cwd.as_deref()).unwrap();
         let a = redact_to_envelope(&redactor, build_raw_contribution(&t, &cfg, Utc::now()))
             .await
             .unwrap();
@@ -2780,18 +2712,13 @@ mod tests {
     fn the_input_fingerprint_moves_with_every_envelope_determining_input() {
         let (_sd, store) = crate::config::tests_support::temp_store();
         let base = sample_cfg(&store);
-        let baseline = input_fingerprint(&base, None, false);
-        assert_eq!(
-            baseline,
-            input_fingerprint(&base, None, false),
-            "must be stable"
-        );
+        let baseline = input_fingerprint(&base, false);
+        assert_eq!(baseline, input_fingerprint(&base, false), "must be stable");
 
         for mutate in [
             (|c: &mut ContributorConfig| c.tenant_id = "other-tenant".into())
                 as fn(&mut ContributorConfig),
             |c: &mut ContributorConfig| c.consent_scopes = vec!["model_training".into()],
-            |c: &mut ContributorConfig| c.pii_filter = Some("near-ai".into()),
             |c: &mut ContributorConfig| c.user_subject = "bob".into(),
             |c: &mut ContributorConfig| c.ingest_url = "http://elsewhere.invalid".into(),
             |c: &mut ContributorConfig| c.device_key_id = "sha256:zz".into(),
@@ -2800,38 +2727,10 @@ mod tests {
             mutate(&mut cfg);
             assert_ne!(
                 baseline,
-                input_fingerprint(&cfg, None, false),
+                input_fingerprint(&cfg, false),
                 "an envelope-determining config change must move the fingerprint"
             );
         }
-
-        // Attaching a privacy-filter backend changes it; so does pointing
-        // that backend at a different service or model.
-        let near = NearAiSettings {
-            api_key: "secret-key".into(),
-            base_url: Some("https://filter.invalid".into()),
-            model: Some("m1".into()),
-        };
-        assert_ne!(baseline, input_fingerprint(&base, Some(&near), false));
-        let other_model = NearAiSettings {
-            model: Some("m2".into()),
-            ..near.clone()
-        };
-        assert_ne!(
-            input_fingerprint(&base, Some(&near), false),
-            input_fingerprint(&base, Some(&other_model), false)
-        );
-        // But rotating the credential does not: it changes nothing about
-        // what the filter does, and a secret is not hashed into a value
-        // that lands on disk.
-        let rotated = NearAiSettings {
-            api_key: "a-different-secret".into(),
-            ..near.clone()
-        };
-        assert_eq!(
-            input_fingerprint(&base, Some(&near), false),
-            input_fingerprint(&base, Some(&rotated), false)
-        );
     }
 
     /// Turning the attested-bodies switch on starts sending the final
@@ -2843,8 +2742,8 @@ mod tests {
         let (_sd, store) = crate::config::tests_support::temp_store();
         let base = sample_cfg(&store);
         assert_ne!(
-            input_fingerprint(&base, None, false),
-            input_fingerprint(&base, None, true),
+            input_fingerprint(&base, false),
+            input_fingerprint(&base, true),
             "an approval given before prompt bodies were carried must not \
              be honoured after"
         );
@@ -2859,7 +2758,7 @@ mod tests {
         // under `approval-inputs-changed`.
         let (_sd, store) = crate::config::tests_support::temp_store();
         let base = sample_cfg(&store);
-        let baseline = input_fingerprint(&base, None, false);
+        let baseline = input_fingerprint(&base, false);
 
         let mut claimed = base.clone();
         claimed.display_handle = Some("quiet-otter".into());
@@ -2867,7 +2766,7 @@ mod tests {
         claimed.public_since = Some(chrono::Utc::now());
         assert_eq!(
             baseline,
-            input_fingerprint(&claimed, None, false),
+            input_fingerprint(&claimed, false),
             "claiming a handle must not move the fingerprint"
         );
 
@@ -2876,7 +2775,7 @@ mod tests {
         renamed.public_bio = None;
         assert_eq!(
             baseline,
-            input_fingerprint(&renamed, None, false),
+            input_fingerprint(&renamed, false),
             "editing a published profile must not move the fingerprint"
         );
     }
@@ -2947,7 +2846,6 @@ mod tests {
                 "ingest_url",
                 "instance_id",
                 "issuer_url",
-                "pii_filter",
                 "public_bio",
                 "public_since",
                 "schema_version",
@@ -2994,8 +2892,8 @@ mod tests {
         let mut recorded = unrecorded.clone();
         recorded.set_witness(witness, crate::config::WitnessOrigin::PublishedAtJoin);
         assert_eq!(
-            input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
-            input_fingerprint_with_env_filter(&recorded, None, false, "none")
+            input_fingerprint_with_env_filter(&unrecorded, false, "none"),
+            input_fingerprint_with_env_filter(&recorded, false, "none")
         );
     }
 
@@ -3020,8 +2918,8 @@ mod tests {
             for kind in [IdentityKind::Wallet, IdentityKind::NearAiLogin] {
                 base.account_identity = Some(kind);
                 assert_eq!(
-                    input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
-                    input_fingerprint_with_env_filter(base, None, false, "none")
+                    input_fingerprint_with_env_filter(&unrecorded, false, "none"),
+                    input_fingerprint_with_env_filter(base, false, "none")
                 );
             }
         }
@@ -3034,13 +2932,11 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (a, _, _) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
 
         let mut widened = cfg.clone();
         widened.consent_scopes = vec!["model_training".into()];
-        let (b, _, _) = build_preview(&store, Some(&widened), None, &src, &r)
+        let (b, _, _) = build_preview(&store, Some(&widened), &src, &r)
             .await
             .unwrap();
         assert_ne!(a.envelope_digest, b.envelope_digest);
@@ -3055,9 +2951,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (_summary, _body, mut envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (_summary, _body, mut envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         let template = envelope.events[0].clone();
 
         let mut call = template.clone();
@@ -3231,9 +3126,7 @@ mod tests {
         ));
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, body, _envelope) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(
             !body.contains("fixture-user@example.com"),
             "matched one taken"
@@ -3267,9 +3160,8 @@ mod tests {
         let (_d, src, r) = session_saying("open /Users/testuser/code/myproj/src/main.rs please");
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert!(
             summary.scrub_counts.marks >= 1,
             "{:?}",
@@ -3376,15 +3268,11 @@ mod tests {
         let cfg = sample_cfg(&store);
 
         let (_d, src, r) = session_saying("cd myproj && cat ../myproj/src/main.rs");
-        let (_s, _b, named) = build_preview(&store, Some(&cfg), None, &src, &r)
-            .await
-            .unwrap();
+        let (_s, _b, named) = build_preview(&store, Some(&cfg), &src, &r).await.unwrap();
         assert_eq!(folder_named_in(&named, &["myproj"]), (false, true));
 
         let (_d2, src2, r2) = session_saying("please list the files");
-        let (_s2, _b2, silent) = build_preview(&store, Some(&cfg), None, &src2, &r2)
-            .await
-            .unwrap();
+        let (_s2, _b2, silent) = build_preview(&store, Some(&cfg), &src2, &r2).await.unwrap();
         assert_eq!(folder_named_in(&silent, &["myproj"]), (false, false));
         // The metadata half of the claim is about these bytes.
         let wire = serde_json::to_string(&silent).unwrap();

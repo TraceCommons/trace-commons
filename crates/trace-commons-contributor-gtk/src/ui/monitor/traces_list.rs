@@ -25,11 +25,10 @@
 //!   ("Arming is allowed from the app, but never silently",
 //!   `settings::confirm_arming`); the Mac's switch writes at once (owner,
 //!   2026-11-11).
-//! - The chevron, folder tile and History button take stock GTK symbolic
-//!   icons where the Mac draws SF Symbols (owner, 2026-11-18). A tool's
-//!   tile draws its two-letter initials (`GlassTool.initials`) until the
-//!   tool logos (`monitor::tool_art`, on the map-art branch) land; then
-//!   `tool_tile` draws the logo.
+//! - The chevron and History button take stock GTK symbolic icons where
+//!   the Mac draws SF Symbols (owner, 2026-11-18). Every tile is the shared
+//!   `ui::tool_tile`: a tool's logo in its tint, the folder mark, or the
+//!   plain trace mark.
 //! - The search field, the order menu, "Show ignored folders", dragging
 //!   folders into place and the toolbar's Automatic-for-every-folder eye
 //!   are not ported yet; ignored folders are not listed (the Mac's
@@ -48,6 +47,7 @@ use super::traces_tree::{FolderNode, ProjectMode, SourceKind, TracesTree};
 use crate::copy::PrivateInferenceTone;
 use crate::model::{QueueEntry, human_bytes};
 use crate::ui::App;
+use crate::ui::tool_tile::{Kind, ToolTile};
 
 /// The row's measures, the Mac's (`GlassTokens.Size`, `GlassListRow`,
 /// `TracesColumnTitles`). Pinned to the Swift by
@@ -389,40 +389,19 @@ pub fn tool(entry: &QueueEntry) -> Option<SourceKind> {
         .or_else(|| SourceKind::from_wire(&entry.source))
 }
 
-/// A tool's two letters (`GlassTool.initials`), for its tile.
-pub fn initials(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::ClaudeCode => "CC",
-        SourceKind::Codex => "Cx",
-        SourceKind::GeminiCli => "Gm",
-        SourceKind::Cline => "Cl",
-        SourceKind::Opencode => "OC",
-    }
-}
-
-/// The session tile's mark, for a source this build does not know
-/// (`GlassToolTile.sessionMark`).
-pub const SESSION_MARK: &str = "\u{25a4}";
-
-// --- Where this list meets the consent rules of #2179 ------------------
-//
-// linux-consent-parity (#2179) adds held traces (`eligibility::is_held`,
-// `held_for_review`), a row Submit that never sends a held trace
-// (`eligibility::offers_row_send`) and a dismiss that asks first
-// (`queue::confirm_dismiss`). This branch predates it, so each is one call
-// here, and `the_consent_seams_follow_what_this_tree_has` fails the moment
-// they arrive, naming the call to switch.
-
-/// The core's held word for a trace, or nothing. Nothing on this branch:
-/// `QueueEntry` carries no hold yet.
-pub fn held_word(_entry: &QueueEntry) -> Option<&'static str> {
-    None
+/// The core's held word for a trace held for a person (the Mac's amber
+/// flag), or nothing: the same word the review card says
+/// (`queue::held_fact_texts`).
+pub fn held_word(entry: &QueueEntry) -> Option<&'static str> {
+    (crate::eligibility::is_held(entry) || crate::eligibility::held_for_review(entry))
+        .then(|| monitor_traces_copy().held)
 }
 
 /// Whether a trace row offers Submit (`maySubmitSession`): never under an
-/// ignored folder, and only while the shared table offers Contribute.
+/// ignored folder, never for a held trace, and only while the shared table
+/// offers Contribute (`eligibility::offers_row_send`).
 pub fn row_offers_send(entry: &QueueEntry, folder_ignored: bool) -> bool {
-    !folder_ignored && crate::eligibility::offers_send(entry)
+    !folder_ignored && crate::eligibility::offers_row_send(entry)
 }
 
 // --- The widgets -----------------------------------------------------
@@ -552,51 +531,26 @@ fn chevron(open: bool, name: &str, on_toggle: impl Fn() + 'static) -> gtk::Widge
     button.upcast()
 }
 
-/// A tile (`GlassToolTile`): the folder's, a tool's initials, or the plain
-/// trace mark. Decorative.
-fn tile(kind: TileKind) -> gtk::Widget {
-    let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    frame.set_size_request(size::TILE, size::TILE);
+/// A tile (`GlassToolTile`), the shared `ui::tool_tile`: the folder's, a
+/// tool's logo, or the plain trace mark. Decorative. The class names the
+/// tile for the layout tests; the tile paints itself.
+fn tile(kind: Kind) -> gtk::Widget {
+    let class = if kind == Kind::Folder {
+        "tc-tree-tile-folder"
+    } else {
+        "tc-tree-tile"
+    };
+    let tile = ToolTile::new(kind, false);
     // A fixed square: never a share of the row's spare width.
-    frame.set_hexpand(false);
-    frame.set_homogeneous(true);
-    frame.set_accessible_role(gtk::AccessibleRole::Presentation);
-    match kind {
-        TileKind::Folder => {
-            frame.add_css_class("tc-tree-tile-folder");
-            let image = gtk::Image::from_icon_name("folder-symbolic");
-            image.set_pixel_size(11);
-            image.set_halign(gtk::Align::Center);
-            frame.append(&image);
-        }
-        TileKind::Tool(kind) => {
-            frame.add_css_class("tc-tree-tile");
-            let label = gtk::Label::new(Some(initials(kind)));
-            label.add_css_class("tc-tree-tile-initials");
-            label.set_halign(gtk::Align::Center);
-            frame.append(&label);
-        }
-        TileKind::Session => {
-            frame.add_css_class("tc-tree-tile");
-            let label = gtk::Label::new(Some(SESSION_MARK));
-            label.add_css_class("tc-tree-tile-initials");
-            label.set_halign(gtk::Align::Center);
-            frame.append(&label);
-        }
-    }
-    frame.upcast()
+    tile.set_hexpand(false);
+    tile.add_css_class(class);
+    tile.upcast()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TileKind {
-    Folder,
-    Tool(SourceKind),
-    Session,
-}
-
-/// A trace row's tile (`sessionTile`).
-pub fn session_tile(entry: &QueueEntry) -> TileKind {
-    tool(entry).map_or(TileKind::Session, TileKind::Tool)
+/// A trace row's tile (`sessionTile`): its tool's, the declared source
+/// first, else the plain trace mark.
+pub fn session_tile(entry: &QueueEntry) -> Kind {
+    Kind::session(entry.declared_source.as_deref(), &entry.source)
 }
 
 /// The Submit pill (`GlassButtonStyle(.submit)`).
@@ -670,7 +624,7 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
     let frame = row_frame(
         Depth::Folder,
         chevron,
-        tile(TileKind::Folder),
+        tile(Kind::Folder),
         &folder.label,
         Some((&sub, None)),
         selected,
@@ -1370,59 +1324,51 @@ mod tests {
 
     /// `test_sessionRowsShowTheirTool`: each trace's own tool's tile, the
     /// declared source first; the plain trace mark for one this build does
-    /// not know. The initials are `GlassTool.initials`.
+    /// not know.
     #[test]
     fn a_trace_row_shows_its_own_tool() {
         let mut claude = entry("a", "p");
         claude.source = "claude-code".into();
-        assert_eq!(
-            session_tile(&claude),
-            TileKind::Tool(SourceKind::ClaudeCode)
-        );
+        assert_eq!(session_tile(&claude), Kind::source(SourceKind::ClaudeCode));
         assert_eq!(
             session_tile(&entry("b", "p")),
-            TileKind::Tool(SourceKind::Codex)
+            Kind::source(SourceKind::Codex)
         );
         let mut declared = entry("c", "p");
         declared.declared_source = Some("cline".into());
-        assert_eq!(session_tile(&declared), TileKind::Tool(SourceKind::Cline));
+        assert_eq!(session_tile(&declared), Kind::source(SourceKind::Cline));
         let mut unknown = entry("d", "p");
         unknown.source = "not-a-tool".into();
-        assert_eq!(session_tile(&unknown), TileKind::Session);
-        const INDICATORS: &str =
-            include_str!("../../../../../macos/Sources/TCDesign/Components/Indicators.swift");
-        for (kind, case) in [
-            (SourceKind::ClaudeCode, ".claudeCode"),
-            (SourceKind::Codex, ".codex"),
-            (SourceKind::GeminiCli, ".geminiCLI"),
-            (SourceKind::Cline, ".cline"),
-            (SourceKind::Opencode, ".openCode"),
-        ] {
-            assert!(
-                INDICATORS.contains(&format!("case {case}: \"{}\"", initials(kind))),
-                "{kind:?}"
-            );
-        }
-        assert!(INDICATORS.contains(&format!("static let sessionMark = \"{SESSION_MARK}\"")));
+        assert_eq!(session_tile(&unknown), Kind::Session);
     }
 
-    /// The seams to #2179: while this tree has none of its consent calls,
-    /// the seams stand in; once they land, this fails and names the switch.
+    /// A trace held for a person says the core's held word, flagged amber,
+    /// and its row offers no Submit, as the Mac's `maySubmitSession`.
     #[test]
-    fn the_consent_seams_follow_what_this_tree_has() {
-        let eligibility = include_str!("../../eligibility.rs");
+    fn a_held_trace_says_so_and_offers_no_submit() {
+        let traces = monitor_traces_copy();
+        let held: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e", "project_id": "p", "project_label": "p",
+            "state": "pending", "reason_label": "second-look-review-required",
+            "second_look": ["looks-unsure"],
+        }))
+        .unwrap();
+        assert_eq!(held_word(&held), Some(traces.held));
+        assert!(!row_offers_send(&held, false));
+        assert_eq!(held_word(&entry("a", "p")), None);
+        assert!(row_offers_send(&entry("a", "p"), false));
+    }
+
+    /// The row menu's Dismiss trace asks first, through the queue's one
+    /// confirmation (`queue::confirm_dismiss`), as the Mac's `dismissModal`.
+    #[test]
+    fn dismissing_a_trace_asks_first() {
         let queue = include_str!("../queue.rs");
-        assert!(
-            !eligibility.contains("pub fn offers_row_send("),
-            "#2179 landed: row_offers_send must call eligibility::offers_row_send"
-        );
-        assert!(
-            !eligibility.contains("pub fn is_held("),
-            "#2179 landed: held_word must say the core's held word for a held trace"
-        );
-        assert!(
-            !queue.contains("fn confirm_dismiss("),
-            "#2179 landed: queue::dismiss_entry must ask first through confirm_dismiss"
-        );
+        let at = queue
+            .find("pub(crate) fn dismiss_entry(")
+            .expect("queue::dismiss_entry");
+        let body = &queue[at..at + queue[at..].find("\n}\n").unwrap()];
+        assert!(body.contains("confirm_dismiss("), "{body}");
+        assert!(!body.contains("\"dismiss\""), "{body}");
     }
 }

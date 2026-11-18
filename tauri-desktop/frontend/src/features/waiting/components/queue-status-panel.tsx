@@ -4,8 +4,6 @@ import {
   type WitnessCapacity,
 } from "../../../lib/tauri/witness-capacity";
 import { GATE_HELD_LABEL, parseGateHeld } from "../../../lib/tauri/switch-on-notices";
-import { NEAR_AI_NOTICE_LABEL } from "../health-recovery";
-import { NearAiNoticeRecovery } from "./near-ai-notice-recovery";
 import { WitnessCapacityNotice } from "./witness-capacity-notice";
 
 type Health = { last_error_label: string | null; since: string | null };
@@ -93,12 +91,6 @@ export function QueueStatusPanel({
         <h2>Contribution safeguards</h2>
       </div>
       <div className="grid grid-cols-3 gap-px border-y border-border">
-        {health.last_error_label === NEAR_AI_NOTICE_LABEL && (
-          <NearAiNoticeRecovery
-            label={health.last_error_label}
-            since={health.since}
-          />
-        )}
         {capacity.kind === "waiting" && (
           <WitnessCapacityNotice capacity={capacity.capacity} />
         )}
@@ -111,7 +103,6 @@ export function QueueStatusPanel({
           </div>
         )}
         {health.last_error_label &&
-          health.last_error_label !== NEAR_AI_NOTICE_LABEL &&
           !saturatedShownByNotice &&
           !heldShownByNotice && (
           <div className="text-destructive">

@@ -1461,7 +1461,6 @@ fn inference_consent_round_trips_without_changing_proxy_or_other_permissions() {
             trace_commons_contributor::daemon::settings::DaemonSettings::load(&store).unwrap();
         assert_eq!(saved.ironwire_attested_bodies, enabled);
         assert!(saved.ironwire.is_none());
-        assert!(saved.near_ai.is_none());
     }
     stop(handle);
 }
@@ -2553,7 +2552,6 @@ fn write_enrolled_config(
         user_subject: "subject".into(),
         device_key_id: "device".into(),
         consent_scopes: vec![],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -5687,19 +5685,13 @@ fn a_named_automatic_disclosure_crosses_the_abi() {
 }
 
 #[test]
-fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
+fn the_inference_connection_copy_crosses_the_abi() {
     use trace_commons_contributor::consent_copy::inference_connection_copy;
-    use trace_commons_contributor::privacy_scan_copy::{DISCLOSURE, privacy_scan_copy};
-    use trace_commons_contributor_ffi::{
-        tc_inference_connection_copy_json, tc_privacy_scan_copy_json,
-    };
+    use trace_commons_contributor_ffi::tc_inference_connection_copy_json;
     assert_eq!(
         json_owned(tc_inference_connection_copy_json()),
         serde_json::to_value(inference_connection_copy()).unwrap()
     );
-    let scan = json_owned(tc_privacy_scan_copy_json());
-    assert_eq!(scan, serde_json::to_value(privacy_scan_copy()).unwrap());
-    assert_eq!(scan["disclosure"], DISCLOSURE);
 }
 
 #[test]

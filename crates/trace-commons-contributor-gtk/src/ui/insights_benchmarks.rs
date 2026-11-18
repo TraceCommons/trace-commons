@@ -260,8 +260,7 @@ impl Benchmarks {
             self.body.append(&label(copy("analytics_unavailable")));
             return;
         };
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        let spinner = crate::ui::glass_feedback::spinner();
         self.body.append(&spinner);
         let Some(generation) = self.flight.borrow_mut().begin() else {
             return;

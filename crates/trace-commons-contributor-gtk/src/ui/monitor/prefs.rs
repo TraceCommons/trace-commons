@@ -2,7 +2,8 @@
 //!
 //! The Mac keeps these in the person's defaults (`monitor.showsMap`,
 //! `monitor.showsInspector`, `monitor.mapWidth`, `monitor.mainWidth`,
-//! `monitor.panesSeeded`, `monitor.showsGraph`). This shell has no
+//! `monitor.panesSeeded`, `monitor.showsGraph`) and the Traces map's
+//! style (`traces_map_rocket`). This shell has no
 //! preferences database: what it remembers about its own window it keeps as
 //! one small JSON file beside `onboarded.json`
 //! (`ui::onboarding::completion_file`) and `legacy-move-dismissed.json`, and
@@ -12,6 +13,7 @@
 //! Unreadable, absent or damaged is the defaults, unseeded; a failed write
 //! is dropped. Neither can keep the window from opening.
 
+use super::map_scene::MapStyle;
 use super::pane_layout::{self, Visibility};
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +27,10 @@ pub struct PanePrefs {
     /// False until the window has seeded the two panes from the room its
     /// monitor has. After that the person's own choice is restored.
     pub seeded: bool,
+    /// The Traces map's style, under the Mac's key (`TracesMapStyle.key`):
+    /// the rocket and station unless explicitly `false`, then the laptop
+    /// and the orb. Only the drawing changes, never what is sent.
+    pub traces_map_rocket: bool,
 }
 
 impl Default for PanePrefs {
@@ -36,6 +42,7 @@ impl Default for PanePrefs {
             map_width: pane_layout::MAP_WIDTH,
             main_width: pane_layout::MAIN_WIDTH,
             seeded: false,
+            traces_map_rocket: true,
         }
     }
 }
@@ -71,6 +78,19 @@ impl PanePrefs {
         self.shows_inspector = inspector || demanded;
         self.seeded = true;
         true
+    }
+
+    /// The Traces map's style (`TracesMapStyle.stored`).
+    pub fn map_style(&self) -> MapStyle {
+        if self.traces_map_rocket {
+            MapStyle::Launch
+        } else {
+            MapStyle::Standard
+        }
+    }
+
+    pub fn set_map_style(&mut self, style: MapStyle) {
+        self.traces_map_rocket = style == MapStyle::Launch;
     }
 
     pub fn load() -> Self {
@@ -130,6 +150,7 @@ mod tests {
             map_width: 620.0,
             main_width: 512.0,
             seeded: true,
+            traces_map_rocket: false,
         };
         let bytes = serde_json::to_vec(&chosen).unwrap();
         assert_eq!(PanePrefs::from_bytes(&bytes), chosen);
@@ -178,5 +199,27 @@ mod tests {
         prefs.seed(800.0, true);
         assert!(prefs.shows_inspector);
         assert!(!prefs.shows_map);
+    }
+
+    /// The Traces map's style (`TracesMapStyle`): the rocket until the
+    /// person turns it off. As on the Mac, a file without the key, or with
+    /// anything but `false` there, is the rocket map; only an explicit
+    /// `false` is the standard map. It is kept under the Mac's key.
+    #[test]
+    fn the_map_style_is_the_rocket_until_turned_off() {
+        assert_eq!(PanePrefs::default().map_style(), MapStyle::Launch);
+        assert_eq!(
+            PanePrefs::from_bytes(br#"{"seeded":true}"#).map_style(),
+            MapStyle::Launch
+        );
+        let off = PanePrefs::from_bytes(br#"{"traces_map_rocket":false}"#);
+        assert_eq!(off.map_style(), MapStyle::Standard);
+        assert!(off.shows_map, "the rest keeps its default");
+        let mut prefs = PanePrefs::default();
+        prefs.set_map_style(MapStyle::Standard);
+        let json: serde_json::Value = serde_json::to_value(prefs).unwrap();
+        assert_eq!(json["traces_map_rocket"], serde_json::json!(false));
+        prefs.set_map_style(MapStyle::Launch);
+        assert_eq!(prefs.map_style(), MapStyle::Launch);
     }
 }

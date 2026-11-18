@@ -524,7 +524,7 @@ async fn without_the_rebaseline_the_same_switch_voids_the_folder() {
 #[test]
 fn only_the_identity_term_is_rebaselined() {
     let mut cfg = legacy_config("https://ingest.example", "sha256:aa");
-    let granted = GrantTerms::current(&cfg, None, false, "none");
+    let granted = GrantTerms::current(&cfg, false, "none");
     let mut policy = ProjectPolicy::new();
     policy
         .set_mode(PROJECT, ProjectMode::AutoUpload, Utc::now())
@@ -538,7 +538,7 @@ fn only_the_identity_term_is_rebaselined() {
     let out = rebaseline_identity(&mut policy, &from, &to);
     assert_eq!(out.project_labels.len(), 1);
     // Identity alone: nothing voids.
-    let now_terms = GrantTerms::current(&cfg, None, false, "none");
+    let now_terms = GrantTerms::current(&cfg, false, "none");
     assert!(
         now_terms
             .widening_from(&policy.projects[PROJECT].armed_under.clone().unwrap())
@@ -546,7 +546,7 @@ fn only_the_identity_term_is_rebaselined() {
     );
     // Identity plus a destination: the destination still voids.
     cfg.ingest_url = "https://elsewhere.example".into();
-    let moved = GrantTerms::current(&cfg, None, false, "none");
+    let moved = GrantTerms::current(&cfg, false, "none");
     assert_eq!(
         moved.widening_from(&policy.projects[PROJECT].armed_under.clone().unwrap()),
         [super::super::grant_terms::VOID_DESTINATION]

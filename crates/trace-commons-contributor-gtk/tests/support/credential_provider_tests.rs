@@ -100,7 +100,16 @@ impl Fixture {
                 // The Traces map's tool read; refused, it draws no tools.
                 | "tool_destinations"
                 // The summary's pending-credit condition; refused, it is a dash.
-                | "commons_credit_summary" => {
+                | "commons_credit_summary"
+                // Settings' sharing choice and Uses; refused, they stay
+                // unpicked and empty.
+                | "automatic_grant"
+                | "consent_options"
+                // Settings' bulk change asks which modes it may set;
+                // refused, its menu offers nothing.
+                | "plan_project_modes"
+                // Home's Insights hero; refused, it draws its teaser.
+                | "insights_glance" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected credential-side operation: {method}"),

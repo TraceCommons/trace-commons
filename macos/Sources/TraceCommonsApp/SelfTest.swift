@@ -100,10 +100,9 @@ enum SelfTest {
     /// needs a real `enroll` round trip against a stub issuer, and this repo
     /// has no macOS GUI-automation tool to drive Join's field and buttons
     /// directly. This makes `enroll(invite:)` with no scopes, then
-    /// `setConsentScopes` with a chosen scope set, then
-    /// `acknowledgeNearAINotice()` when the operator has the second scanner
-    /// configured -- and reports what the daemon's own `status` says
-    /// afterward, which is the only thing this self-test asserts on.
+    /// `setConsentScopes` with a chosen scope set -- and reports what the
+    /// daemon's own `status` says afterward, which is the only thing this
+    /// self-test asserts on.
     @MainActor
     private static func runOnboardingSelfTestIfRequested(model: AppModel) {
         guard let path = ProcessInfo.processInfo.environment["TRACE_COMMONS_ONBOARD_SELFTEST_OUT"],
@@ -149,18 +148,6 @@ enum SelfTest {
         case .failed:
             lines.append("FAIL: set_consent_scopes did not succeed")
             return lines.joined(separator: "\n") + "\n"
-        }
-
-        // Only when the operator has the second scanner configured. Not a
-        // first-run step any more: a new contributor clears this hold after
-        // setup, from the `near-ai-notice-not-acknowledged` recovery
-        // prompt. Kept so the report still shows the daemon's hold clears.
-        if model.daemonSettings?.nearAIConfigured == true {
-            model.acknowledgeNearAINotice()
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            lines.append("acknowledge_near_ai_notice: health=\(model.status.health.lastErrorLabel ?? "none")")
-        } else {
-            lines.append("near_ai not configured; screen 4 would not have shown")
         }
 
         model.refreshStatus()

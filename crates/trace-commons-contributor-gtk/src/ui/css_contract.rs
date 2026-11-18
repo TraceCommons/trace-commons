@@ -19,6 +19,7 @@ mod tests {
     /// names nothing defines.
     const SOURCES: &[(&str, &str)] = &[
         ("roots.rs", include_str!("roots.rs")),
+        ("first_run.rs", include_str!("first_run.rs")),
         ("insights.rs", include_str!("insights.rs")),
         (
             "insights_analytics.rs",
@@ -27,6 +28,7 @@ mod tests {
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
         ("home.rs", include_str!("home.rs")),
+        ("hero_card.rs", include_str!("hero_card.rs")),
         ("settings.rs", include_str!("settings.rs")),
         ("queue.rs", include_str!("queue.rs")),
         ("preview.rs", include_str!("preview.rs")),
@@ -135,9 +137,12 @@ mod tests {
         let selector = format!(".{class}");
         let ends_name =
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
+        // Home's hero cards: generated from the hero tokens at load time.
+        let hero = super::super::hero_art::css();
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,
+            hero.as_str(),
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
             super::super::style::brand_tokens::GLASS_LIGHT_CSS,
@@ -193,6 +198,46 @@ mod tests {
             "these classes are asked for but defined by no stylesheet, so the \
              widgets wearing them render unstyled and nothing fails:\n  {}",
             dead.join("\n  ")
+        );
+    }
+
+    /// The first-run, roots and onboarding windows sit on the window ground,
+    /// which follows the desktop scheme, so their text must follow it too.
+    /// The brand sheet is light-only by design: `tc-brand-body`,
+    /// `-dialog-title`, `-emphasis` and `-link` set a foreground of #000000
+    /// and no background. Worn directly on one of these windows they print
+    /// black on the dark ground. Only a class that sets BOTH ground and
+    /// foreground (`tc-brand-notice`, a paper box) may carry the brand.
+    #[test]
+    fn flow_windows_use_no_foreground_only_brand_class() {
+        const FOREGROUND_ONLY: &[&str] = &[
+            "tc-brand-body",
+            "tc-brand-dialog-title",
+            "tc-brand-emphasis",
+            "tc-brand-link",
+        ];
+        const FLOW: &[(&str, &str)] = &[
+            ("first_run.rs", include_str!("first_run.rs")),
+            ("first_run_terms.rs", include_str!("first_run_terms.rs")),
+            ("roots.rs", include_str!("roots.rs")),
+            ("onboarding.rs", include_str!("onboarding.rs")),
+            ("onboarding_nearai.rs", include_str!("onboarding_nearai.rs")),
+            ("onboarding_wallet.rs", include_str!("onboarding_wallet.rs")),
+        ];
+        let mut offenders = Vec::new();
+        for (file, source) in FLOW {
+            for class in classes_used(source) {
+                if FOREGROUND_ONLY.contains(&class.as_str()) {
+                    offenders.push(format!("{file}: .{class}"));
+                }
+            }
+        }
+        offenders.sort();
+        offenders.dedup();
+        assert!(
+            offenders.is_empty(),
+            "light-only brand classes on a scheme-following window:\n  {}",
+            offenders.join("\n  ")
         );
     }
 

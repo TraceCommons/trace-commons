@@ -173,13 +173,19 @@ else
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   for test_name in \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
+    ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
+    ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
+    ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
+    ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
+    ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
+    ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
@@ -195,20 +201,49 @@ else
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
     ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
     ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
     ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_a_new_card_slides_in_and_a_revealed_one_fades \
     ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
     ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
     ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
     ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
+    ui::tool_tile::mounted::mounted_a_tile_is_the_macs_size_and_says_nothing \
+    ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
+    ui::armed_mark::tests::mounted_the_armed_card_goes_once \
+    ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
+    ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
-    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
+    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
+    ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
+    ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::queue::consent_mounted_tests::mounted_held_trace_shows_its_reasons_and_no_row_submit \
+    ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
+    ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
+    ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
+    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
+    ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
+    ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::history::consent_mounted_tests::mounted_tab_reaches_a_history_folders_records \
+    ui::style::tests::mounted_tab_passes_a_grid_of_figures \
+    ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
+    ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
+    ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
+    ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
+    ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

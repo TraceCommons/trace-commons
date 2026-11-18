@@ -59,8 +59,14 @@ fn page(title: &str) -> gtk::Box {
     root.set_margin_end(32);
     root.set_margin_top(24);
     root.set_margin_bottom(24);
-    let label = body_label(title);
-    label.add_css_class("tc-brand-dialog-title");
+    // Its own label, not `body_label` plus a title class: two type classes on
+    // one label leave the size to whichever rule is declared later.
+    let label = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    label.add_css_class("tc-flow-title");
     root.append(&label);
     root
 }
@@ -330,8 +336,9 @@ impl Coordinator {
         self.generation.set(self.generation.get().wrapping_add(1));
         let step = self.state.borrow().step;
         let copy = first_run_copy();
+        // Welcome names no step, as on the Mac: its own title is on the page.
         self.heading.set_subtitle(match step {
-            Step::Welcome => copy.welcome.title,
+            Step::Welcome => "",
             Step::Tools => copy.frame.step_tools,
             Step::PrivateAi => copy.frame.step_private_ai,
             Step::Traces => copy.frame.step_traces,
@@ -754,9 +761,16 @@ impl Coordinator {
         }
     }
     fn disclose_scrub(self: &Rc<Self>) {
-        // Before a grant there is no certificate evidence of model scrubbing.
-        // The core's configuration-only selector deliberately says patterns.
-        let grant = consent_copy::automatic_contribution_copy(None);
+        // The core's words for this contributor's configuration, as the
+        // Mac reads them; an unreadable configuration discloses nothing.
+        let Some(grant) = self
+            .app
+            .upgrade()
+            .and_then(|app| super::consent_settings::automatic_copy_for(&app.worker.dir))
+        else {
+            self.fail(first_run_copy().uses.sharing_unavailable);
+            return;
+        };
         let body = page(first_run_copy().uses.sharing);
         for line in [
             grant.summary,
@@ -1082,5 +1096,79 @@ mod read_tests {
         ] {
             assert_eq!(trace_count(&value), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod dark_tests {
+    use super::*;
+
+    fn luminance(c: &gtk::gdk::RGBA) -> f64 {
+        let ch = |v: f32| {
+            let v = f64::from(v);
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+    }
+
+    fn contrast(a: &gtk::gdk::RGBA, b: &gtk::gdk::RGBA) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn welcome_is_readable_in_dark_and_title_is_larger_than_body() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        super::super::style::install();
+        super::super::community_brand::install();
+        let copy = first_run_copy();
+        let window = adw::Window::builder().default_width(680).build();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("tc-root");
+        let welcome = page(copy.welcome.title);
+        let body = body_label(copy.welcome.body);
+        welcome.append(&body);
+        root.append(&welcome);
+        window.set_content(Some(&root));
+        window.present();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let title = welcome.first_child().unwrap();
+        let ground = root.style_context().lookup_color("tc_bg").expect("tc_bg");
+        let body_colour = body.style_context().color();
+        let title_colour = title.style_context().color();
+        assert!(
+            contrast(&body_colour, &ground) >= 4.5,
+            "body {body_colour} on {ground}"
+        );
+        assert!(
+            contrast(&title_colour, &ground) >= 4.5,
+            "title {title_colour} on {ground}"
+        );
+        let size = |w: &gtk::Widget| {
+            let layout = w
+                .clone()
+                .downcast::<gtk::Label>()
+                .unwrap()
+                .create_pango_layout(Some("Ag"));
+            layout.pixel_size().1
+        };
+        assert!(
+            size(&title) > size(body.upcast_ref()),
+            "title not larger than body"
+        );
+        window.close();
     }
 }

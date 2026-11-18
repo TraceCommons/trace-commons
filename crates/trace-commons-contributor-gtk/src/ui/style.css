@@ -182,7 +182,7 @@
   color: @tc_muted;
 }
 
-/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "held 41s". */
+/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "Approved 41s ago". */
 .tc-ledger {
   font-family: monospace;
   font-size: 12px;
@@ -475,14 +475,6 @@ row:selected {
 }
 
 /* The tool's coin on the card: its initials in a ring. */
-.tc-map-transfer-mark {
-  min-width: 26px;
-  min-height: 26px;
-  border: 2px solid @tc_line_divider;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 700;
-}
 
 /* The tool's memory files and that they stay on this computer, in the
    card's Details: a well, as the Mac's `TraceTransferCard` draws it. */
@@ -868,8 +860,8 @@ stackswitcher.tc-compact-switcher > button.text-button {
    `size.listRow` (40) high on the control radius, the hover fill under the
    pointer and the selection's fill and ink on the selected row; the title
    in body (semibold for a folder, medium for a trace) over a caption
-   sub-line in the tertiary ink, amber or green when flagged; a 22 tile on
-   the tile radius, `ink(0.1)` for a tool and `tileFolder` for a folder;
+   sub-line in the tertiary ink, amber or green when flagged; a 22 tile
+   (`ui::tool_tile`, which paints itself);
    the Submit pill a glass control `size.submitPill` (24) high with 10 of
    padding, its disabled form at 0.55 (`disabledSubmit`) in `statusOff`.
    `GlassTabHeading` is bodyStrong, its round buttons `controlLarge` (28). */
@@ -976,23 +968,6 @@ window.tc-glass-window:backdrop .tc-tree-round {
   -gtk-icon-size: 10px;
 }
 
-.tc-tree-tile {
-  border-radius: 6px;
-  background-color: alpha(@tc_glass_ink, 0.1);
-  color: @tc_glass_ink;
-}
-
-.tc-tree-tile-folder {
-  border-radius: 6px;
-  background-color: @tc_glass_tile_folder;
-  color: @tc_glass_ink;
-}
-
-.tc-tree-tile-initials {
-  font-size: 9px;
-  font-weight: 700;
-}
-
 .tc-tree-submit {
   min-height: 24px;
   padding: 0 10px;
@@ -1081,4 +1056,54 @@ switch.tc-tree-switch > slider {
 
 .tc-tree-menu-current {
   font-weight: 600;
+}
+
+/* --- First run, roots and onboarding text ---------------------------
+   These windows sit on `.tc-root`, which follows the desktop scheme, so
+   their type takes `@tc_ink` and follows it too. The `tc-brand-*` type
+   classes are light-only (a #000000 foreground and no ground) and belong on
+   a brand paper surface, never on these windows. A label inside a
+   `.tc-brand-notice` box still gets the box's own ink, because the brand
+   sheet loads at a higher priority than this one.
+   Title and body are separate classes on separate labels so neither size
+   depends on declaration order. */
+
+.tc-flow-title {
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.95px;
+  color: @tc_ink;
+}
+
+.tc-flow-body {
+  font-size: 13px;
+  font-weight: 500;
+  color: @tc_ink;
+}
+
+.tc-flow-emphasis {
+  font-size: 13px;
+  font-weight: 700;
+  color: @tc_ink;
+}
+
+.tc-flow-link,
+.tc-flow-link label {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-height: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: @tc_ink;
+  text-decoration: underline;
+}
+
+/* A transfer card behind the front one, peeking out above it at the map's
+   foot (`GlassPopoverStack`'s plates, hung from the bottom). */
+.tc-map-transfer-plate {
+  background-color: @tc_glass_popover;
+  border-radius: 16px 16px 0 0;
 }

@@ -66,6 +66,12 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+  # The daemon runs inside this sandbox and talks to the Trace Commons
+  # server (enrollment, uploads) and to NEAR AI (inference). Without network
+  # access it can do neither. This is the only network grant; the session
+  # roots below stay read-only, so what the daemon may send is still bounded
+  # by what it may read.
+  - --share=network
   # Talks to org.freedesktop.Notifications (libnotify), the
   # org.freedesktop.portal.* surfaces (background, and file-chooser if
   # onboarding ever needs one), and org.kde.StatusNotifierWatcher for the

@@ -130,9 +130,6 @@ export async function nearAiAccountEnroll(commons: string) {
 export async function setConsentScopes(scopes: string[]) {
   return invokeTauriDiscardResult("set_consent_scopes", { scopes });
 }
-export async function acknowledgeNearAiNotice() {
-  return invokeTauriDiscardResult("acknowledge_near_ai_notice");
-}
 export async function getScrubberPatternNames(): Promise<string[]> {
   const response = record(
     await invokeTauri("scrubber_pattern_names"),
