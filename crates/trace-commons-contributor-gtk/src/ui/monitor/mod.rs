@@ -8,12 +8,15 @@
 //! is recorded beside the code that makes it.
 //!
 //! The pure rules (`pane_layout`, `tabs`, `demand`, `graph_model`,
-//! `notices`, `prefs`, `traces_tree`, `map_scene`, `transfers`) build no
-//! widget and are tested without a display. `three_pane`, `graph_footer`,
-//! `inspector`, `map`, `map_transfers`, `transfer_card` and `shell` are
-//! the widgets and their drawing.
+//! `notices`, `prefs`, `traces_tree`, `map_scene`, `transfers`,
+//! `tool_art`) build no widget and are tested without a display.
+//! `three_pane`, `graph_footer`, `inspector`, `map`, `map_transfers`,
+//! `transfer_card` and `shell` are the widgets and their drawing;
+//! `glyph`, `station` and `orb` are drawings (the Mac's glyphs and logos,
+//! the library's station and orb), tested offscreen with cairo.
 
 pub mod demand;
+pub mod field;
 pub mod glyph;
 pub mod graph_footer;
 pub mod graph_model;
@@ -22,9 +25,11 @@ pub mod map;
 pub mod map_scene;
 pub mod map_transfers;
 pub mod notices;
+pub mod orb;
 pub mod pane_layout;
 pub mod prefs;
 pub mod shell;
+pub mod station;
 pub mod tabs;
 pub mod three_pane;
 pub mod tool_art;

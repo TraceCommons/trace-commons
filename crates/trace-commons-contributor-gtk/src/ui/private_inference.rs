@@ -369,7 +369,16 @@ fn seconds_since(at: Option<&str>) -> Option<u64> {
 /// claiming the old answer.
 pub fn render_harnesses(app: &Rc<App>) {
     app.call("harness_list", serde_json::json!({}), |app, result| {
-        let Ok(Ok(list)) = result.map(serde_json::from_value::<crate::model::HarnessList>) else {
+        let read = result.map(serde_json::from_value::<crate::model::HarnessList>);
+        // The Private AI map draws the same list, and after a failed read
+        // none at all: a stale list is never drawn as current.
+        let list = match read {
+            Ok(Ok(list)) => Some(list),
+            _ => None,
+        };
+        app.shell.map.set_harnesses(list.as_ref());
+        app.shell.map.render(app);
+        let Some(list) = list else {
             return;
         };
         let view = &app.private_inference;
