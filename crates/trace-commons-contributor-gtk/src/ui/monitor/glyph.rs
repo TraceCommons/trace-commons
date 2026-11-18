@@ -445,11 +445,28 @@ impl Artwork {
         Some(out)
     }
 
+    /// `segments`, read once per artwork and kept: the map fills a logo
+    /// on every frame of a run.
+    pub fn cached_segments(&self) -> Option<std::rc::Rc<Vec<Segment>>> {
+        type Kept = std::collections::HashMap<(usize, usize), Option<std::rc::Rc<Vec<Segment>>>>;
+        thread_local! {
+            static KEPT: std::cell::RefCell<Kept> = std::cell::RefCell::default();
+        }
+        // The path data is static: its address names it.
+        let key = (self.paths.as_ptr() as usize, self.paths.len());
+        KEPT.with(|kept| {
+            kept.borrow_mut()
+                .entry(key)
+                .or_insert_with(|| self.segments().map(std::rc::Rc::new))
+                .clone()
+        })
+    }
+
     /// Fills the artwork into the square `side` across with its top-left
     /// at `origin`, aspect kept and centred, non-zero as SVG fills it, in
     /// the colour already set on `cr`.
     pub fn fill(&self, cr: &gtk::cairo::Context, origin: (f64, f64), side: f64) {
-        let Some(segments) = self.segments() else {
+        let Some(segments) = self.cached_segments() else {
             return;
         };
         let [bx, by, bw, bh] = self.view_box;
@@ -633,6 +650,23 @@ mod tests {
         let segments = mark.segments().expect("the NEAR AI mark parses");
         assert!(matches!(segments.first(), Some(Segment::Move(..))));
         assert_eq!(mark.view_box, [82.96, 82.13, 234.08, 231.72]);
+    }
+
+    /// A logo's path data is read once, not on every frame it is drawn:
+    /// the second reading hands back the first one's segments.
+    #[test]
+    fn a_logos_segments_are_read_once() {
+        for (name, artwork) in Artwork::TOOLS {
+            let first = artwork.cached_segments().expect("parses");
+            let again = artwork.cached_segments().expect("parses");
+            assert!(std::rc::Rc::ptr_eq(&first, &again), "{name} was read twice");
+            assert_eq!(*first, artwork.segments().unwrap());
+        }
+        let mark = Artwork::brand_mark();
+        assert!(std::rc::Rc::ptr_eq(
+            &mark.cached_segments().unwrap(),
+            &Artwork::brand_mark().cached_segments().unwrap()
+        ));
     }
 
     #[test]

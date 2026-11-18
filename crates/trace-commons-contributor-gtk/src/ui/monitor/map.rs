@@ -1365,7 +1365,20 @@ pub struct MapColours {
 }
 
 impl MapColours {
+    /// The colours for one scheme, read from the tokens once a scheme and
+    /// kept: the map asks for them on every frame it draws.
     pub fn scheme(dark: bool) -> Self {
+        thread_local! {
+            static KEPT: [std::cell::OnceCell<MapColours>; 2] = Default::default();
+        }
+        KEPT.with(|kept| {
+            kept[usize::from(dark)]
+                .get_or_init(|| Self::read(dark))
+                .clone()
+        })
+    }
+
+    fn read(dark: bool) -> Self {
         use crate::ui::style::brand_tokens::map::{Rgba, dark as d, light as l};
         let c = |(hex, alpha): Rgba| {
             let rgba = gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
@@ -1552,26 +1565,39 @@ impl Palette {
         }
     }
 
+    /// The shell's accent and status colours for a scheme, parsed once.
+    fn shell_colours(dark_scheme: bool) -> [gtk::gdk::RGBA; 4] {
+        use crate::ui::style::brand_tokens::{dark, light};
+        thread_local! {
+            static KEPT: [std::cell::OnceCell<[gtk::gdk::RGBA; 4]>; 2] = Default::default();
+        }
+        KEPT.with(|kept| {
+            *kept[usize::from(dark_scheme)].get_or_init(|| {
+                let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
+                let hexes = if dark_scheme {
+                    [
+                        dark::ACCENT,
+                        dark::STATUS_ON,
+                        dark::STATUS_ASK,
+                        dark::STATUS_OUTSIDE,
+                    ]
+                } else {
+                    [
+                        light::ACCENT,
+                        light::STATUS_ON,
+                        light::STATUS_ASK,
+                        light::STATUS_OUTSIDE,
+                    ]
+                };
+                hexes.map(parse)
+            })
+        })
+    }
+
     #[allow(deprecated)]
     pub fn current(widget: &impl IsA<gtk::Widget>) -> Self {
-        use crate::ui::style::brand_tokens::{dark, light};
-        let parse = |hex: &str| gtk::gdk::RGBA::parse(hex).unwrap_or(gtk::gdk::RGBA::BLACK);
         let dark_scheme = adw::StyleManager::default().is_dark();
-        let (accent, on, ask, outside) = if dark_scheme {
-            (
-                dark::ACCENT,
-                dark::STATUS_ON,
-                dark::STATUS_ASK,
-                dark::STATUS_OUTSIDE,
-            )
-        } else {
-            (
-                light::ACCENT,
-                light::STATUS_ON,
-                light::STATUS_ASK,
-                light::STATUS_OUTSIDE,
-            )
-        };
+        let [accent, on, ask, outside] = Self::shell_colours(dark_scheme);
         let context = widget.as_ref().style_context();
         let fallback = if dark_scheme {
             gtk::gdk::RGBA::BLACK
@@ -1581,10 +1607,10 @@ impl Palette {
         Self {
             ink: context.color(),
             background: context.lookup_color("window_bg_color").unwrap_or(fallback),
-            accent: parse(accent),
-            on: parse(on),
-            ask: parse(ask),
-            outside: parse(outside),
+            accent,
+            on,
+            ask,
+            outside,
             map: MapColours::scheme(dark_scheme),
         }
     }

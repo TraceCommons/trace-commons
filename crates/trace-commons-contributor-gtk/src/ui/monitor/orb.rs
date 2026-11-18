@@ -133,7 +133,7 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64, lit: 
     // longer side (`GlassBrandMark.path(at:size:)`).
     let side = r * 0.95;
     let mark = Artwork::brand_mark();
-    if let Some(segments) = mark.segments() {
+    if let Some(segments) = mark.cached_segments() {
         let [bx, by, bw, bh] = mark.view_box;
         let _ = cr.save();
         cr.translate(cx - side / 2.0, cy - side / 2.0);
