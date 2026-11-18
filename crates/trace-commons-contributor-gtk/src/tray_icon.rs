@@ -179,12 +179,12 @@ pub fn badge_text(badge: u64) -> String {
 
 /// `MenuPanelStatus.markWords`: the core's words for the mark the icon
 /// draws, or none while it draws none.
-pub fn mark_words<'a>(
-    nudge: Option<&'a Nudge>,
+pub fn mark_words(
+    nudge: Option<&Nudge>,
     available: bool,
     badge: Option<u64>,
     condition: Condition,
-) -> Option<&'a NudgeMarkText> {
+) -> Option<&NudgeMarkText> {
     let lit = lit_mark(nudge, available);
     if shown_mark(lit, badge, condition) == Mark::None {
         return None;

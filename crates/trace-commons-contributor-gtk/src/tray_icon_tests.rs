@@ -104,7 +104,7 @@ fn the_mark_is_only_news_or_ready_and_only_while_available() {
     let status: crate::model::Status = serde_json::from_str(
         r#"{"nudge":{"state":"armed","lead":"verdicts_landed","mark":"news",
             "mark_kinds":["verdicts_landed"],
-            "mark_text":{"accessibility":"a","tooltip":"Verdicts are in."}}}"#,
+            "mark_text":{"accessibility":"a","tooltip":"news-tooltip"}}}"#,
     )
     .expect("status");
     let news = status.nudge.as_ref();
@@ -112,7 +112,7 @@ fn the_mark_is_only_news_or_ready_and_only_while_available() {
     assert_eq!(lit_mark(news, false), Mark::None);
     assert_eq!(
         mark_words(news, true, None, Condition::Live).map(|w| w.tooltip.as_str()),
-        Some("Verdicts are in.")
+        Some("news-tooltip")
     );
     assert_eq!(mark_words(news, false, None, Condition::Live), None);
     // A ring the badge hides is never spoken.
@@ -217,7 +217,7 @@ fn the_news_ring_sits_in_the_empty_slot() {
     assert_eq!(pixel(&news, Scheme::Light, 16, 16)[0], 0);
     // On the ring: the accent.
     let [a, r, g, b] = pixel(&news, Scheme::Light, 16, 12);
-    assert!(a > 200, "alpha {a}");
+    assert!(a > 200, "{a}");
     assert!(
         (i32::from(r) - 0x02).abs() <= 2
             && (i32::from(g) - 0x3E).abs() <= 2
