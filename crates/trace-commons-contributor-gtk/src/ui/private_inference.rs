@@ -839,6 +839,8 @@ pub fn render(app: &Rc<App>, settings: &crate::model::Settings) {
         Some(state) => (state.state.as_str(), state.port),
         None => ("", None),
     };
+    // The Inference tab's dot draws the same state from the same table.
+    app.shell.render_inference_state(label);
     status.append(&tone_row(
         copy::private_inference_state_line(label),
         indicator_tone(copy::private_inference_state_tone(label)),

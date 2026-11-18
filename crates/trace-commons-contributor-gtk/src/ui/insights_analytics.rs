@@ -1204,10 +1204,13 @@ impl AnalyticsTabs {
         for line in feed_lines(patterns.feed) {
             body.append(&small(&line));
         }
-        let cards = gtk::Box::new(gtk::Orientation::Horizontal, metrics::HEADING_GAP);
-        cards.set_homogeneous(true);
+        // Wraps as the pane narrows (the Monitor's main pane is 440).
+        let cards = summary_grid();
         for card in &patterns.cards {
-            cards.append(&self.pattern_card(card, patterns.long_context_threshold));
+            cards.insert(
+                &self.pattern_card(card, patterns.long_context_threshold),
+                -1,
+            );
         }
         body.append(&cards);
         if let Some(line) = claude_only_line(patterns) {
@@ -1430,6 +1433,9 @@ fn breakdown(overview: &WeekOverview) -> gtk::Box {
     let card = card_box();
     let stack = gtk::Stack::new();
     let switcher = gtk::StackSwitcher::new();
+    // Each button as wide as its words: libadwaita's 100px floor for a
+    // switcher button made these three wider than the 440 pane's column.
+    switcher.add_css_class("tc-compact-switcher");
     switcher.set_stack(Some(&stack));
     card.append(&switcher);
     card.append(&stack);

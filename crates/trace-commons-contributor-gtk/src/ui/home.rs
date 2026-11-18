@@ -107,7 +107,7 @@ impl HomeView {
             let target = *target;
             button.connect_clicked(move |_| {
                 if let Some(app) = weak.upgrade() {
-                    app.stack.set_visible_child_name(target);
+                    app.open_screen(target);
                 }
             });
         }
@@ -219,10 +219,15 @@ mod tests {
         );
         assert!(!subtitle.text().contains("Mac"));
         for (_, target) in &view.links {
+            // Every link names something the shell can open.
             assert!(
-                super::super::screens_with(false)
-                    .iter()
-                    .any(|(name, _, _)| name == target)
+                super::super::monitor::tabs::route(
+                    target,
+                    super::super::monitor::tabs::Location::default(),
+                    false
+                )
+                .is_some(),
+                "{target} opens nothing"
             );
         }
         let status = serde_json::from_value(serde_json::json!({"decisions_owed": 4})).unwrap();

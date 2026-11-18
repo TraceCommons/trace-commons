@@ -14,7 +14,8 @@
 #      composition) -- not a display-less pixel sink. This captures the
 #      composited output with weston-screenshooter and asserts the frame is
 #      not blank/uniform (a standard-deviation check on pixel values) and
-#      that the header-bar switcher text ("Queue") is present via OCR
+#      that the Insights page's own tabs and its "Tokens by day" card
+#      are present via OCR
 #      (tesseract). A test that only checked "the process stayed alive"
 #      would be exactly the weak evidence this script exists to replace.
 #

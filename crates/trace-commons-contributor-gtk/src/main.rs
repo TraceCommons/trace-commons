@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
     let start_page = std::env::args()
         .position(|a| a == "--start-page")
         .and_then(|i| std::env::args().nth(i + 1));
-    // The main window's stack and onboarding's steps are different things:
+    // The main window's screens and onboarding's steps are different things:
     // `--start-page` moves the former, and onboarding is a modal with its own
     // pages that had no way to be opened past its first screen.
     let onboarding_page = std::env::args()
@@ -379,7 +379,9 @@ fn finish_start(
     // application that contributes a trace without a person pressing
     // Contribute in the preview sheet.
     if let Some(page) = drivers.start_page.clone() {
-        app.stack.set_visible_child_name(&page);
+        if !app.open_screen(&page) {
+            eprintln!("trace-commons-shell: unknown --start-page {page}");
+        }
     }
     if let Some(page) = drivers.onboarding_page.clone() {
         let app = app.clone();

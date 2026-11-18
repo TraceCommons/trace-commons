@@ -22,25 +22,28 @@ fail() {
 
 # The rendering fixture explicitly selects Insights and its Overview tab;
 # the connected shell's default destination is Home.
-# Require the page's own tab switcher -- an interactive control on the
-# Insights page, not the sidebar's "Insights" entry -- and the Overview's
-# "Tokens by day" card heading, which shows its body rendered.
 #
-# $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
-# the page in a shaded bar, and Tesseract's default layout analysis skips
-# that bar entirely, so the tab names are read word by word instead of as
-# one line. The selected tab (Overview, white on the accent) is not read
-# even then -- not inverted, thresholded or upscaled either -- so the check
-# asks for two unselected tabs: "Breakdown", and "Analyze" as a whole,
-# case-sensitive word ("analyzed" is in the page's own text). Every label
-# and the switching itself are asserted by the mounted
+# The popover notices are laid over the top of the tab, as on the Mac
+# (owner decision 1 of the 2026-11-16 spec, chosen again 2026-11-17), and a
+# build from source outside a flatpak always shows the update notice. That
+# card lies over the Insights page's tab switcher (Overview, Benchmarks,
+# Breakdown), which is the first thing on the page, so no switcher word is
+# readable in this frame and none is asked for. The switcher's labels and
+# its switching are asserted by the mounted
 # `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
-# run above. Tesseract has misread tab names before ("Details" as "Deta"),
-# so only Breakdown's first letters are required. The capture loop below
-# retries while the body loads.
+# run above, and the notices' placement and X by
+# `ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to`
+# and `mounted_closing_every_notice_uncovers_the_tabs_first_heading`.
+#
+# What the frame does require is the Overview's body, below the card: the
+# "Cache share" and "Tokens by day" card headings, which only the Overview
+# draws (the tab strip and the map say neither). No notice's text is asked
+# for.
+#
+# $1 is a sparse-text OCR pass (`--psm 11`), which reads the page's text
+# word by word; the capture loop below retries while the body loads.
 insights_frame() {
-  grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
-    grep -qE '(^|[[:space:]])Analyze([[:space:]]|$)' <<< "$1" &&
+  grep -qi 'Cache share' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
@@ -168,8 +171,52 @@ else
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
+    ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
-    ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion \
+    ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
+    ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
+    ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
+    ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
+    ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
+    ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
+    ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
+    ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
+    ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
+    ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
+    ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
+    ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
+    ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
+    ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
+    ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
+    ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
+    ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
+    ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
+    ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
+    ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
+    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
+    ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
+    ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::queue::consent_mounted_tests::mounted_held_trace_shows_its_reasons_and_no_row_submit \
+    ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
+    ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
+    ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
+    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
+    ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
+    ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::history::consent_mounted_tests::mounted_tab_reaches_a_history_folders_records \
+    ui::style::tests::mounted_tab_passes_a_grid_of_figures \
+    ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
+    ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
+    ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
+    ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
+    ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
     ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
@@ -329,9 +376,9 @@ else
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
-        echo "OCR found the Insights tab switcher and the Overview's Tokens by day card"
+        echo "OCR found the Overview's Cache share and Tokens by day cards"
       else
-        fail "OCR did not find the Insights tab switcher and the Overview's Tokens by day card in the screenshot"
+        fail "OCR did not find the Overview's Cache share and Tokens by day cards in the screenshot"
       fi
     else
       fail "tesseract not available -- OCR text-presence check could not run"

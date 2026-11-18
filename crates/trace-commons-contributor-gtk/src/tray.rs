@@ -134,22 +134,34 @@ pub fn toggle_request(answering: bool) -> TrayRequest {
     }
 }
 
+/// The rows that only open something, as `(label, request)`: one per tab,
+/// then Settings, which is its own window and no tab.
+///
+/// The tabs come from `ui::screens()` rather than being listed here, so a
+/// tab added to the window arrives in this menu without this module being
+/// edited, and no item can ever name a screen the window does not carry.
+/// The labels are the window's own, from the core's shell table.
+fn navigation_rows() -> Vec<(&'static str, TrayRequest)> {
+    let mut rows: Vec<(&'static str, TrayRequest)> = crate::ui::screens()
+        .iter()
+        .map(|(name, label)| (*label, TrayRequest::Open(name)))
+        .collect();
+    rows.push((
+        trace_commons_contributor::preview_copy::monitor_screens_copy().settings_title,
+        TrayRequest::Open(crate::ui::SETTINGS_SCREEN),
+    ));
+    rows
+}
+
 /// The menu, as `(label, request)` in the order it is shown.
 ///
-/// The screens come from `ui::SCREENS` rather than being listed here, so a
-/// screen added to the window arrives in this menu without this module being
-/// edited, and no item can ever name a screen the stack does not carry. The
-/// labels are the window's own -- the model-calls ones are the shared copy
-/// module's words, which is the only place that wording is allowed to be
-/// decided.
+/// The model-calls words are the shared copy module's, which is the only
+/// place that wording is allowed to be decided.
 ///
 /// The last row is the action, and which way it points is the whole of the
 /// asymmetry: while it is off it is another `Open`.
 fn menu_rows(answering: bool) -> Vec<(&'static str, TrayRequest)> {
-    let mut rows: Vec<(&'static str, TrayRequest)> = crate::ui::screens()
-        .iter()
-        .map(|(name, label, _)| (*label, TrayRequest::Open(name)))
-        .collect();
+    let mut rows = navigation_rows();
     // Which request the row carries is `toggle_request`'s decision and is
     // not made again here; this only picks the words for the request it was
     // handed. The trailing ellipsis on the open one is the convention for an
@@ -709,22 +721,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The menu is built from the window's own screen list, so an item can
-    /// never offer a screen the window does not have -- and a screen added
-    /// to the window arrives here without this module being edited. One row
-    /// beyond the screens: the model-calls action, which is the only thing
-    /// in this menu that is not simply a screen.
+    /// The menu is built from the window's own tab list, so an item can
+    /// never offer a screen the window does not have -- and a tab added to
+    /// the window arrives here without this module being edited. Two rows
+    /// beyond the tabs: Settings, which is its own window, and the
+    /// model-calls action, the only thing in this menu that is not simply
+    /// an open.
     #[test]
-    fn the_menu_offers_one_item_per_screen_and_one_action() {
+    fn the_menu_offers_one_item_per_tab_then_settings_and_one_action() {
         for answering in [false, true] {
             let rows = menu_rows(answering);
             let screens = crate::ui::screens();
-            assert_eq!(rows.len(), screens.len() + 1);
+            assert_eq!(screens.len(), 4, "Home, Inference, Traces, Insights");
+            assert_eq!(rows.len(), screens.len() + 2);
             for (id, (label, request)) in rows.iter().take(screens.len()).enumerate() {
-                let (screen, title, _) = screens[id];
+                let (screen, title) = screens[id];
                 assert_eq!(*request, TrayRequest::Open(screen));
                 assert_eq!(*label, title);
             }
+            let (label, request) = rows[screens.len()];
+            assert_eq!(request, TrayRequest::Open(crate::ui::SETTINGS_SCREEN));
+            assert_eq!(
+                label,
+                trace_commons_contributor::preview_copy::monitor_screens_copy().settings_title
+            );
+            assert_eq!(navigation_rows(), rows[..rows.len() - 1]);
+        }
+    }
+
+    /// Every row that opens something names something the window can open.
+    #[test]
+    fn every_open_row_lands_somewhere() {
+        use crate::ui::monitor::tabs::{Location, route};
+        for (label, request) in navigation_rows() {
+            let TrayRequest::Open(screen) = request else {
+                panic!("{label} is not an open");
+            };
+            assert!(
+                route(screen, Location::default(), false).is_some(),
+                "{label} opens nothing"
+            );
         }
     }
 
@@ -806,7 +842,7 @@ mod tests {
     /// `AboutToShow` is for.
     #[test]
     fn a_stale_menu_is_refetched_rather_than_acted_on() {
-        let action = menu_id(crate::ui::screens().len());
+        let action = menu_id(navigation_rows().len());
         assert_eq!(
             menu_request(action, true),
             Some(TrayRequest::StopAnsweringModelCalls)
@@ -853,11 +889,7 @@ mod tests {
         ] {
             match request {
                 TrayRequest::Open(screen) => {
-                    assert!(
-                        crate::ui::screens()
-                            .iter()
-                            .any(|(name, _, _)| *name == screen)
-                    )
+                    assert!(crate::ui::screens().iter().any(|(name, _)| *name == screen))
                 }
                 TrayRequest::StopAnsweringModelCalls => {}
             }
