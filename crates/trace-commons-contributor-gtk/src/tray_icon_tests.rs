@@ -182,25 +182,26 @@ fn the_badge_is_the_marks_ink_with_its_figure_cut_out() {
     assert_eq!(many.badge, Some((6.0, 11.0, 16.0, 11.0)));
 }
 
-/// The halo: the accent line outside the badge, never clipped by the cell.
+/// The halo: the accent line outside the badge on the corner, the badge
+/// where it is without one.
 #[test]
-fn the_halo_rings_the_badge_inside_the_cell() {
+fn the_halo_rings_the_badge_on_the_corner() {
     let ready = strip(Condition::Live, Some(4), Mark::Ready);
     let s = slot(&ready, 1.0);
     assert!(s.halo);
-    assert_eq!(s.badge, Some((7.5, 7.5, 11.0, 11.0)));
-    let (_, _, x0, y0) = (0, 0, 7.5 - HALO_REACH, 7.5 - HALO_REACH);
-    assert!(x0 >= 0.0 && y0 >= 0.0 && 7.5 + 11.0 + HALO_REACH <= HEIGHT);
     assert_eq!(
-        pixel(&ready, Scheme::Light, 20, 13),
-        [255, 0x02, 0x3E, 0x83]
+        s.badge,
+        slot(&strip(Condition::Live, Some(4), Mark::None), 1.0).badge
     );
-    assert_eq!(
-        pixel(&ready, Scheme::Light, 13, 20),
-        [255, 0x02, 0x3E, 0x83]
-    );
-    assert_eq!(pixel(&ready, Scheme::Dark, 20, 13), [255, 0xC6, 0xE1, 0xFF]);
-    // No halo without a badge, and none while paused hides nothing.
+    // Centre (16.5, 16.5), radius 5.5 + 2.5: the line covers 7..9 out.
+    assert_eq!(pixel(&ready, Scheme::Light, 16, 8), [255, 0x02, 0x3E, 0x83]);
+    assert_eq!(pixel(&ready, Scheme::Light, 8, 16), [255, 0x02, 0x3E, 0x83]);
+    assert_eq!(pixel(&ready, Scheme::Dark, 16, 8), [255, 0xC6, 0xE1, 0xFF]);
+    // Between the badge and the halo, the mark is cleared.
+    assert_eq!(pixel(&ready, Scheme::Light, 16, 10)[0], 0);
+    // The N's left stem survives.
+    assert_eq!(pixel(&ready, Scheme::Light, 5, 11), [255, 0, 0, 0]);
+    // No halo without a badge; pausing keeps it.
     assert!(!slot(&strip(Condition::Live, None, Mark::Ready), 1.0).halo);
     assert!(slot(&strip(Condition::Paused, Some(4), Mark::Ready), 1.0).halo);
 }

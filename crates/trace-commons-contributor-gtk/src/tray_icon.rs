@@ -23,12 +23,14 @@
 //! Every length is in the Mac's points on its 22-point item, scaled to the
 //! pixmap. The Mac's item is a row: the 14-point mark, then the slot. A
 //! tray icon is a square cell, so the mark keeps its 14 points centred in a
-//! 22-point square and the slot moves onto its bottom-right corner, its
-//! outermost drawn edge on the cell's corner: the Mac pads past the badge
-//! by the halo's reach so the halo is not clipped by the next item, and a
-//! tray cell has no next item. The mark is cut away under the slot with
-//! the Mac's `markOnlyGap` (2) to spare, as the Mac's badge clears the mark
-//! rather than touching it. The badge's figure is a hand-drawn pixel face
+//! 22-point square and the slot moves onto its bottom-right corner, the
+//! badge or the ring touching the cell's edges. The Mac pads the item by
+//! the halo's reach so its halo is never clipped; in a 22-point square
+//! that padding would push the badge over the middle of the N, so here the
+//! badge stays on the corner and the cell's edge cuts the halo on its two
+//! outer sides. The mark is cut away under the slot with the Mac's
+//! `markOnlyGap` (2) to spare, as the Mac's badge clears the mark rather
+//! than touching it, or to the halo's outer edge while a halo is drawn. The badge's figure is a hand-drawn pixel face
 //! (no font is guaranteed in a tray host), cut out of the badge as the Mac
 //! cuts its figure out.
 
@@ -235,19 +237,16 @@ pub struct Slot {
 }
 
 /// Where the slot's contents sit for `strip`, with a figure cell of `cell`
-/// points. The outermost drawn edge lands on the square's bottom-right
-/// corner.
+/// points: the badge, or the ring, on the square's bottom-right corner. A
+/// halo is drawn at its own inset around the badge and the cell's edge
+/// cuts it on the two outer sides.
 pub fn slot(strip: &Strip, cell: f64) -> Slot {
     let shown = shown_mark(strip.mark, strip.badge, strip.condition);
     if let Some(n) = shown_badge(strip.badge, strip.condition) {
-        let halo = shown == Mark::Ready;
-        let reach = if halo { HALO_REACH } else { 0.0 };
         let w = badge_width(&badge_text(n), cell);
-        let right = HEIGHT - reach;
-        let bottom = HEIGHT - reach;
         return Slot {
-            badge: Some((right - w, bottom - BADGE_SIZE, w, BADGE_SIZE)),
-            halo,
+            badge: Some((HEIGHT - w, HEIGHT - BADGE_SIZE, w, BADGE_SIZE)),
+            halo: shown == Mark::Ready,
             ring: None,
         };
     }
@@ -304,7 +303,8 @@ pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
     // Clear the mark under the slot, with the gap to spare.
     cr.set_operator(cairo::Operator::DestOut);
     if let Some((x, y, w, h)) = slot.badge {
-        let out = MARK_GAP + if slot.halo { HALO_REACH } else { 0.0 };
+        // The halo's own outer edge, or the gap past the badge.
+        let out = if slot.halo { HALO_REACH } else { MARK_GAP };
         capsule(cr, x - out, y - out, w + 2.0 * out, h + 2.0 * out);
         let _ = cr.fill();
     }
