@@ -27,6 +27,14 @@ impl RailKeyboard {
         open && self.clicked.get()
     }
 
+    /// The rail starts to close. Answers whether it takes the keyboard
+    /// now: never, and the click is forgotten, so a rail opened again by
+    /// hover before it finished closing takes nothing.
+    pub fn closing(&self) -> bool {
+        self.clicked.set(false);
+        false
+    }
+
     /// A press inside the rail. Answers whether it takes the keyboard now:
     /// only an open rail does.
     pub fn pressed(&self, open: bool) -> bool {
@@ -68,5 +76,16 @@ mod tests {
         let keyboard = RailKeyboard::default();
         assert!(!keyboard.pressed(false));
         assert!(!keyboard.placed(true));
+    }
+
+    #[test]
+    fn a_rail_opened_again_while_closing_takes_nothing() {
+        let keyboard = RailKeyboard::default();
+        keyboard.placed(true);
+        keyboard.pressed(true);
+        // Closing starts; a hover opens it again before the slide ends, so
+        // the closed size is never placed.
+        assert!(!keyboard.closing());
+        assert!(!keyboard.placed(true), "the click outlived the close");
     }
 }

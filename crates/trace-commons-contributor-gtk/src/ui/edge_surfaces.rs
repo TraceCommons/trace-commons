@@ -128,7 +128,9 @@ pub fn wire(app: &Rc<App>) {
             }
             set_rail_enabled(&app, switch.is_active());
         });
-    // Neither window keeps the process alive, or outlives the main one.
+    // Neither window outlives the main one. On GNOME both belong to the
+    // application (`gnome::surface_window`) and would keep the process
+    // alive; destroyed here with the main window, they do not.
     let weak = Rc::downgrade(app);
     app.window.connect_destroy(move |_| {
         if let Some(app) = weak.upgrade() {
@@ -771,11 +773,23 @@ impl Rail {
             });
             let animate: crate::edge::opening::Animate = {
                 let revealer = revealer.clone();
+                let keyboard = Rc::clone(&keyboard);
+                #[cfg(all(target_os = "linux", feature = "layer-shell"))]
+                let window = window.clone();
                 Box::new(move |open, done| {
                     revealer.set_reveal_child(open);
                     if open {
                         done();
                     } else {
+                        // The keyboard goes back as the close starts: a
+                        // hover that opens the rail again before the slide
+                        // ends never places it closed.
+                        let takes = keyboard.closing();
+                        #[cfg(all(target_os = "linux", feature = "layer-shell"))]
+                        if mode == RailMode::LayerShell {
+                            crate::edge::layer::set_rail_keyboard(&window, takes);
+                        }
+                        let _ = takes;
                         let duration = u64::from(revealer.transition_duration());
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(duration + 16),

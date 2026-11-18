@@ -658,6 +658,34 @@ mod live_tests {
         panel: String,
     }
 
+    /// Asks for a placement and waits for the extension's answer, which it
+    /// sends only once the placement is stored: a barrier before a step that
+    /// depends on it (the client's own `send` does not wait).
+    async fn place_now(
+        connection: &gtk::gio::DBusConnection,
+        client: &Client,
+        request: Request,
+    ) -> Result<(), String> {
+        client.send(request.clone());
+        let Request::Place { role, at, open } = request else {
+            return Err("place_now takes a Place".into());
+        };
+        connection
+            .call_future(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                INTERFACE,
+                "Place",
+                Some(&(role.wire(), at.0, at.1, open).to_variant()),
+                None,
+                gtk::gio::DBusCallFlags::NONE,
+                5_000,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Place: {e}"))
+    }
+
     fn path_of(application: &gtk::Application, window: &gtk::ApplicationWindow) -> String {
         format!(
             "{}/window/{}",
@@ -862,7 +890,7 @@ mod live_tests {
         }
 
         // The open rail keeps it, so Escape and Tab reach it ...
-        client.send(place_rail(true));
+        place_now(connection, client, place_rail(true)).await?;
         with_windows(
             connection,
             &format!("w('{rail_path}').activate(now); return '';"),

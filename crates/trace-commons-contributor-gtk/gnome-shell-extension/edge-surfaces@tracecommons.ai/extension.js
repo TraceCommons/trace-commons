@@ -262,9 +262,12 @@ export default class EdgeSurfacesExtension extends Extension {
         if (this._waiting.has(window))
             return;
         const again = () => this._consider(window);
+        // GTK sends the path while realizing, before the window is first
+        // shown; shown is the fallback should the notify not come.
         this._waiting.set(window, [
             window.connect('notify::gtk-window-object-path', again),
             window.connect('notify::gtk-unique-bus-name', again),
+            window.connect('shown', again),
             window.connect('unmanaging', () => this._stopWaiting(window)),
         ]);
     }
