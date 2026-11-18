@@ -25,6 +25,12 @@ pub const PATH: &str = "M292.106,82.1357C283.445,82.1357,275.379,86.5848,270.847
 /// The app icon's ground, `brand-tile`, as the Mac's `AppIcon.icon` fills it.
 pub const TILE: &str = "#0B8FF6";
 
+/// The ground in the Mac icon's dark appearance: the NEAR blue at the brand
+/// hue, stepped down. The window's own drawing of the tile follows the
+/// desktop's dark style with it; the installed icon is one file and stays
+/// on [`TILE`].
+pub const TILE_DARK: &str = "#024175";
+
 /// The N on the tile, `brand-paper`.
 pub const PAPER: &str = "#F3F3F2";
 
@@ -35,14 +41,22 @@ pub const N_SHARE: f64 = 0.585;
 pub const CORNER_SHARE: f64 = 0.225;
 
 /// The tile's side in the document's own units, the kit's 400.
-const SIDE: f64 = 400.0;
+pub const SIDE: f64 = 400.0;
 
-/// The app icon: the N in paper on the brand tile, `size` pixels across.
-pub fn app_icon_svg(size: u32) -> String {
+/// Where the N sits on a tile [`SIDE`] across: the scale from the path's
+/// units, then the x and y offsets, so it spans [`N_SHARE`] of the width,
+/// centred. The SVG below and the window's cairo drawing both use this.
+pub fn n_on_tile() -> (f64, f64, f64) {
     let [bx, by, bw, bh] = VIEW_BOX;
     let scale = SIDE * N_SHARE / bw;
     let tx = (SIDE - bw * scale) / 2.0 - bx * scale;
     let ty = (SIDE - bh * scale) / 2.0 - by * scale;
+    (scale, tx, ty)
+}
+
+/// The app icon: the N in paper on the brand tile, `size` pixels across.
+pub fn app_icon_svg(size: u32) -> String {
+    let (scale, tx, ty) = n_on_tile();
     let r = SIDE * CORNER_SHARE;
     format!(
         concat!(
@@ -128,6 +142,12 @@ mod tests {
             json.contains("srgb:0.04314,0.56078,0.96471,1.00000"),
             "tile ground moved"
         );
+        // 0x02/255, 0x41/255, 0x75/255: the dark appearance's fill.
+        assert!(
+            json.contains("srgb:0.00784,0.25490,0.45882,1.00000"),
+            "dark ground moved"
+        );
+        assert_eq!(TILE_DARK, "#024175");
         let n = std::fs::read_to_string(format!("{icon}/Assets/near-n.svg")).expect("near-n.svg");
         assert!(n.contains(r##"fill="#F3F3F2""##), "paper moved");
         // The Mac's N layer: the same path, spaces for commas.
@@ -151,9 +171,7 @@ mod tests {
     #[test]
     fn the_n_is_centred_on_the_tile() {
         let [bx, by, bw, bh] = VIEW_BOX;
-        let s = SIDE * N_SHARE / bw;
-        let tx = (SIDE - bw * s) / 2.0 - bx * s;
-        let ty = (SIDE - bh * s) / 2.0 - by * s;
+        let (s, tx, ty) = n_on_tile();
         let left = bx * s + tx;
         let right = SIDE - ((bx + bw) * s + tx);
         let top = by * s + ty;

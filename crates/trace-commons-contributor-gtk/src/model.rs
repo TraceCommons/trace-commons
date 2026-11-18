@@ -101,6 +101,33 @@ pub struct Status {
     /// F10: the last NEAR AI sign-in was refused as another account.
     #[serde(default)]
     pub login_mismatch: bool,
+    /// The re-engagement state (`status.nudge`): only the menu-bar mark and
+    /// its words are read here, for the tray icon. Absent on a daemon older
+    /// than the block, which lights nothing.
+    #[serde(default)]
+    pub nudge: Option<Nudge>,
+}
+
+/// The parts of `status.nudge` the tray draws: the mark the core lit after
+/// its own mute and caps (`menu_bar_mark_enabled`, the cooldowns, the news
+/// window), and the core's words for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Nudge {
+    /// `news`, `ready`, `none` or `unknown`. Anything else draws nothing.
+    #[serde(default)]
+    pub mark: Option<String>,
+    /// The lit mark's sentence and tooltip, present only while it is lit.
+    #[serde(default)]
+    pub mark_text: Option<NudgeMarkText>,
+}
+
+/// `status.nudge.mark_text`, the core's words (`nudge_render::MarkText`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NudgeMarkText {
+    #[serde(default)]
+    pub accessibility: String,
+    #[serde(default)]
+    pub tooltip: String,
 }
 
 /// One rewording notice as the window draws it (K5).

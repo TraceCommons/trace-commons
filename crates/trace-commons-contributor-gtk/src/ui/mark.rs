@@ -1,86 +1,37 @@
-//! "The Turn" -- the adopted product mark, as pure geometry.
+//! The NEAR AI mark, drawn in the window.
 //!
-//! Two corner brackets facing each other inside a hairline frame: the
-//! user's bracket top-left in the accent, the agent's answer bottom-right in
-//! blue, and the session implied in the space between them. No gradients,
-//! no fills other than the frame, no asset file.
+//! The Linux shell shows the NEAR AI "N" wherever it shows its mark (owner,
+//! 2026-11-18), as the Mac does: the app icon's tile on the larger surfaces
+//! and the N alone, in the logo kit's single ink, where the Mac's menu-bar
+//! item draws it. "The Turn" is no longer drawn here; the Windows tiles still
+//! come from it in `trace-commons-mark`.
 //!
 //! ## Where the numbers live
 //!
-//! Not here, any more. The geometry, the palette and the SVG emitters moved
-//! to `trace-commons-mark`, which this module re-exports; what stays is the
-//! cairo drawing and the GTK widgets around it. The move was forced by
-//! packaging: the root workspace excludes this crate and it links GTK 4, so
-//! an export tool that has to run on a macOS or Windows runner could not
-//! reach the emitters while they lived here.
-//!
-//! The drawing code below reads `FRAME_RECT`, the stroke widths and the
-//! bracket vertices from that crate rather than restating them, so cairo and
-//! SVG cannot disagree about what the mark is.
-//!
-//! The geometry is `design-import/DESIGN-SPEC.md` §1.2, transcribed unit
-//! for unit on its 64-unit coordinate space:
-//!
-//! ```text
-//! frame     rect x=1 y=1 w=62 h=62, stroke-width 2
-//! green     M11 28 V11 H28          stroke-width 7
-//! blue      M53 36 v17 H36          stroke-width 7
-//! template  the same two paths in one ink, stroke-width 8, no frame
-//! ```
-//!
-//! The frame is inset one unit under a two-unit stroke, so its outer edge
-//! lands exactly on the 64x64 boundary. The template variant thickens to 8
-//! because it loses the frame that was holding the brackets apart.
-//!
-//! ## Why it is drawn, not shipped as a file
-//!
-//! It has to be legible at 14px in a tray and at 84px on an onboarding
-//! screen, on displays at 1x, 1.5x, 2x and fractional scales in between.
-//! A `DrawingArea` is handed the real device scale by GTK and redraws into
-//! it, so there is one description of the mark and no size ladder of PNGs
-//! to keep in step with it. [`svg`] exists for the surfaces that can only
-//! take a serialised icon -- a `StatusNotifierItem` pixmap, a desktop
-//! entry, a notification -- and emits exactly the same geometry.
+//! The N's path is the brand kit's, exported from `GlassBrandMark.swift` to
+//! `brand_tokens::logo::BRAND_MARK` and read by `monitor::glyph::Artwork`;
+//! the tile's inks and proportion are `trace_commons_mark::near`, which the
+//! installed app icon is generated from. A test below pins the two copies of
+//! the path to each other.
 //!
 //! ## Colour
 //!
-//! The open bracket in the window is the brand purple,
-//! [`super::style::mark_accent`], which reads the generated design tokens.
-//! The frame, the closing bracket and the template ink come from the
-//! crate's `Scheme`. The crate's own `bracket_open` (and so [`svg`], for
-//! the icon surfaces) still carries the site mint, which the macOS shell
-//! shares; the two converge when the final brand lands. Cairo takes the
-//! values as literals because GTK offers no supported way to read a
-//! `@define-color` back out of a provider.
+//! Neither ink is recoloured (the kit's rule). The tile is `brand-tile`
+//! #0B8FF6, #024175 under the dark style as in the Mac icon's dark
+//! appearance, with the N in `brand-paper`. The single-ink N is the Mac's
+//! `menuItemMark`: black on light, white on dark.
 
 use std::cell::RefCell;
 
 use adw::prelude::*;
 use gtk::cairo;
+use trace_commons_mark::near;
 
-pub use trace_commons_mark::{Scheme, svg, template_svg};
+use super::monitor::glyph::Artwork;
 
-/// The mark's coordinate space. Every number in this module is in these
-/// units and is scaled to the requested pixel size at draw time.
-const VIEW: f64 = trace_commons_mark::VIEW as f64;
-
-/// Stroke width of a bracket inside the frame, in view units.
-const STROKE_FRAMED: f64 = trace_commons_mark::STROKE_FRAMED as f64;
-
-/// Stroke width of a bracket without the frame. Thicker, because the frame
-/// is no longer there to give the two brackets something to sit against.
-const STROKE_TEMPLATE: f64 = trace_commons_mark::STROKE_TEMPLATE as f64;
-
-/// Stroke width of the frame itself, in view units.
-const STROKE_FRAME: f64 = trace_commons_mark::STROKE_FRAME as f64;
+pub use trace_commons_mark::Scheme;
 
 /// The scheme the desktop is currently asking for.
-///
-/// This is the one part of the mark that cannot live in
-/// `trace-commons-mark`: the answer comes from libadwaita, and that crate is
-/// deliberately GUI-free so the export tool can run on a macOS or Windows
-/// runner. Everything else -- geometry, palette, SVG -- is re-exported above
-/// rather than restated here.
 pub fn current_scheme() -> Scheme {
     if adw::StyleManager::default().is_dark() {
         Scheme::Dark
@@ -89,30 +40,44 @@ pub fn current_scheme() -> Scheme {
     }
 }
 
-/// The framed mark as a widget, in the palette the desktop is currently
-/// using and following it when it changes.
+/// The single ink the N is drawn in on `scheme`: the Mac's `menuItemMark`,
+/// the logo kit's black on light and white on dark.
+pub fn ink(scheme: Scheme) -> &'static str {
+    scheme.ink()
+}
+
+/// The tile's ground on `scheme`.
+pub fn tile_ground(scheme: Scheme) -> &'static str {
+    match scheme {
+        Scheme::Light => near::TILE,
+        Scheme::Dark => near::TILE_DARK,
+    }
+}
+
+/// The app icon's tile as a widget, following the desktop's style.
 ///
-/// `size` is the edge in logical pixels: 20 in the GNOME header bar, 22
-/// inline, 40 and 84 on the larger surfaces.
+/// `size` is the edge in logical pixels: 20 in a header bar, 84 on the
+/// welcome screen.
 pub fn framed(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_framed(cr, current_scheme(), width as f64, height as f64);
+        draw_tile(cr, current_scheme(), f64::from(width), f64::from(height));
     });
     follow_scheme(&area);
     area
 }
 
-/// The frameless, single-ink variant as a widget, for a status area or a
-/// place that wants the brackets without a card under them.
-///
-/// It picks up `tc_ink` for the current scheme; a tray that recolours its
-/// own icons should take [`template_svg`] instead and hand it its colour.
+/// The N alone in the scheme's single ink, as a widget.
 pub fn template(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        let scheme = current_scheme();
-        draw_template(cr, scheme.ink(), width as f64, height as f64);
+        let side = f64::from(width.min(height));
+        let origin = (
+            (f64::from(width) - side) / 2.0,
+            (f64::from(height) - side) / 2.0,
+        );
+        set_source(cr, ink(current_scheme()));
+        fill_n(cr, origin, side);
     });
     follow_scheme(&area);
     area
@@ -155,91 +120,56 @@ fn follow_scheme(area: &gtk::DrawingArea) {
     });
 }
 
-/// The framed variant: `tc_surface` card, `tc_line` hairline, two brackets.
-fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
-    let unit = width.min(height) / VIEW;
-    if unit <= 0.0 {
+/// Fills the N in the source already set on `cr`, `side` across with its
+/// top-left at `origin`, aspect kept and centred, as `GlassBrandMark.path`.
+pub fn fill_n(cr: &cairo::Context, origin: (f64, f64), side: f64) {
+    Artwork::brand_mark().fill(cr, origin, side);
+}
+
+/// The app icon's tile, centred in `width` x `height`: the rounded ground,
+/// then the N in paper at the kit's proportion.
+pub fn draw_tile(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
+    let side = width.min(height);
+    if side <= 0.0 {
         return;
     }
+    let unit = side / near::SIDE;
     let _ = cr.save();
+    cr.translate((width - side) / 2.0, (height - side) / 2.0);
     cr.scale(unit, unit);
-    cr.set_line_cap(cairo::LineCap::Butt);
-    cr.set_line_join(cairo::LineJoin::Miter);
-
-    // The frame: inset one unit, two-unit stroke, so its outer edge is the
-    // 64x64 boundary exactly.
-    let (fx, fy, fw, fh) = trace_commons_mark::FRAME_RECT;
-    cr.rectangle(f64::from(fx), f64::from(fy), f64::from(fw), f64::from(fh));
-    set_source(cr, scheme.surface());
-    let _ = cr.fill_preserve();
-    set_source(cr, scheme.line());
-    cr.set_line_width(STROKE_FRAME);
-    let _ = cr.stroke();
-
-    cr.set_line_width(STROKE_FRAMED);
-    set_source(cr, super::style::mark_accent(scheme == Scheme::Dark));
-    bracket_top_left(cr);
-    let _ = cr.stroke();
-
-    set_source(cr, scheme.bracket_close());
-    bracket_bottom_right(cr);
-    let _ = cr.stroke();
-
+    rounded_square(cr, near::SIDE, near::SIDE * near::CORNER_SHARE);
+    set_source(cr, tile_ground(scheme));
+    let _ = cr.fill();
+    let (scale, tx, ty) = near::n_on_tile();
+    let [bx, by, bw, bh] = near::VIEW_BOX;
+    let n_side = bw.max(bh) * scale;
+    // `fill_n` centres the N in a square; this square is the one the kit's
+    // placement puts it in.
+    let origin = (
+        bx * scale + tx - (n_side - bw * scale) / 2.0,
+        by * scale + ty - (n_side - bh * scale) / 2.0,
+    );
+    set_source(cr, near::PAPER);
+    fill_n(cr, origin, n_side);
     let _ = cr.restore();
 }
 
-/// The template variant: the same two brackets, one ink, no frame.
-fn draw_template(cr: &cairo::Context, ink: &str, width: f64, height: f64) {
-    let unit = width.min(height) / VIEW;
-    if unit <= 0.0 {
-        return;
-    }
-    let _ = cr.save();
-    cr.scale(unit, unit);
-    cr.set_line_cap(cairo::LineCap::Butt);
-    cr.set_line_join(cairo::LineJoin::Miter);
-    cr.set_line_width(STROKE_TEMPLATE);
-    set_source(cr, ink);
-    bracket_top_left(cr);
-    let _ = cr.stroke();
-    bracket_bottom_right(cr);
-    let _ = cr.stroke();
-    let _ = cr.restore();
-}
-
-/// `M11 28V11h17` -- up the left edge, then right along the top.
-fn bracket_top_left(cr: &cairo::Context) {
-    polyline(cr, &trace_commons_mark::VERTICES_BRACKET_OPEN);
-}
-
-/// `M53 36v17H36` -- down the right edge, then left along the bottom.
-fn bracket_bottom_right(cr: &cairo::Context) {
-    polyline(cr, &trace_commons_mark::VERTICES_BRACKET_CLOSE);
-}
-
-/// Trace a bracket from the canonical vertices.
-///
-/// The numbers are not repeated here: they come from `trace-commons-mark`,
-/// which is also what the SVG emitter and the packaging artwork are built
-/// from. A bracket typed out again in cairo coordinates is how the mark ends
-/// up meaning two slightly different things depending on which surface drew
-/// it.
-fn polyline(cr: &cairo::Context, vertices: &[(u32, u32)]) {
-    let mut points = vertices.iter();
-    if let Some(&(x, y)) = points.next() {
-        cr.move_to(f64::from(x), f64::from(y));
-    }
-    for &(x, y) in points {
-        cr.line_to(f64::from(x), f64::from(y));
-    }
+fn rounded_square(cr: &cairo::Context, side: f64, radius: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    cr.new_sub_path();
+    cr.arc(side - radius, radius, radius, -FRAC_PI_2, 0.0);
+    cr.arc(side - radius, side - radius, radius, 0.0, FRAC_PI_2);
+    cr.arc(radius, side - radius, radius, FRAC_PI_2, PI);
+    cr.arc(radius, radius, radius, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
 }
 
 /// Set a `#rrggbb` literal as the source colour.
 ///
-/// The inks are compile-time constants in this module, so a malformed one
-/// is a typo rather than a runtime condition; it falls back to fully
-/// transparent rather than panicking a draw handler.
-fn set_source(cr: &cairo::Context, hex: &str) {
+/// The inks are compile-time constants, so a malformed one is a typo rather
+/// than a runtime condition; it sets nothing rather than panicking a draw
+/// handler.
+pub fn set_source(cr: &cairo::Context, hex: &str) {
     let (r, g, b) = match rgb(hex) {
         Some(components) => components,
         None => return,
@@ -247,7 +177,7 @@ fn set_source(cr: &cairo::Context, hex: &str) {
     cr.set_source_rgb(r, g, b);
 }
 
-fn rgb(hex: &str) -> Option<(f64, f64, f64)> {
+pub fn rgb(hex: &str) -> Option<(f64, f64, f64)> {
     let hex = hex.strip_prefix('#')?;
     if hex.len() != 6 {
         return None;
@@ -263,43 +193,95 @@ fn rgb(hex: &str) -> Option<(f64, f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::style::brand_tokens::logo;
 
+    /// The window draws the same N the app icon is generated from.
     #[test]
-    fn geometry_is_the_spec_verbatim() {
-        let light = svg(Scheme::Light, 64);
-        assert!(light.contains(r##"viewBox="0 0 64 64""##));
-        assert!(light.contains(
-            r##"<rect x="1" y="1" width="62" height="62" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>"##
-        ));
-        assert!(light.contains(
-            r##"<path d="M11 28V11h17" fill="none" stroke="#00D4AA" stroke-width="7"/>"##
-        ));
-        assert!(light.contains(
-            r##"<path d="M53 36v17H36" fill="none" stroke="#000000" stroke-width="7"/>"##
-        ));
-
-        let dark = svg(Scheme::Dark, 64);
-        assert!(dark.contains(r##"fill="#000000" stroke="#FFFFFF""##));
-        assert!(dark.contains(r##"stroke="#00D4AA""##));
-        assert!(dark.contains(r##"stroke="#FFFFFF""##));
+    fn the_window_and_the_app_icon_share_one_n() {
+        assert_eq!(logo::BRAND_MARK, near::PATH);
+        assert_eq!(logo::BRAND_MARK_VIEW_BOX, near::VIEW_BOX);
     }
 
+    /// Light and dark grounds are the Mac icon's two fills, and the N's
+    /// single ink is `menuItemMark`.
     #[test]
-    fn template_is_frameless_and_thicker() {
-        let ink = template_svg(Scheme::Light.ink(), 20);
-        assert!(!ink.contains("<rect"));
-        assert_eq!(ink.matches(r##"stroke-width="8""##).count(), 2);
-        assert!(ink.contains(r##"stroke="#000000""##));
+    fn the_inks_are_the_macs() {
+        assert_eq!(tile_ground(Scheme::Light), "#0B8FF6");
+        assert_eq!(tile_ground(Scheme::Dark), "#024175");
+        assert_eq!(ink(Scheme::Light), "#000000");
+        assert_eq!(ink(Scheme::Dark), "#FFFFFF");
     }
 
-    #[test]
-    fn requested_size_reaches_the_document() {
-        for size in [14, 16, 20, 22, 40, 84] {
-            let doc = svg(Scheme::Light, size);
-            assert!(doc.contains(&format!(r##"width="{size}" height="{size}""##)));
-            // The coordinate space never moves with the rendered size.
-            assert!(doc.contains(r##"viewBox="0 0 64 64""##));
+    fn pixels(draw: impl Fn(&cairo::Context), side: i32) -> (Vec<u8>, i32) {
+        let mut surface =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, side, side).expect("surface");
+        {
+            let cr = cairo::Context::new(&surface).expect("context");
+            draw(&cr);
         }
+        surface.flush();
+        let stride = surface.stride();
+        let data = surface.data().expect("data").to_vec();
+        (data, stride)
+    }
+
+    /// Cairo's native-endian premultiplied pixel at (x, y), as (r, g, b, a).
+    fn at(data: &[u8], stride: i32, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        let i = (y * stride + x * 4) as usize;
+        let word = u32::from_ne_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        (
+            (word >> 16) as u8,
+            (word >> 8) as u8,
+            word as u8,
+            (word >> 24) as u8,
+        )
+    }
+
+    /// The tile at 64px: corners clear, the ground blue, the N's left stem
+    /// paper. Kit coordinates (100, 200) are inside the stem and (200, 50)
+    /// above the N; at 64px that is (16, 32) and (32, 8).
+    #[test]
+    fn the_tile_paints_the_ground_and_the_n() {
+        for (scheme, ground) in [
+            (Scheme::Light, (0x0B, 0x8F, 0xF6)),
+            (Scheme::Dark, (0x02, 0x41, 0x75)),
+        ] {
+            let (data, stride) = pixels(|cr| draw_tile(cr, scheme, 64.0, 64.0), 64);
+            assert_eq!(
+                at(&data, stride, 0, 0).3,
+                0,
+                "{scheme:?}: the corner is rounded off"
+            );
+            let (r, g, b, a) = at(&data, stride, 32, 8);
+            assert_eq!(
+                (r, g, b, a),
+                (ground.0, ground.1, ground.2, 255),
+                "{scheme:?}"
+            );
+            assert_eq!(
+                at(&data, stride, 16, 32),
+                (0xF3, 0xF3, 0xF2, 255),
+                "{scheme:?}"
+            );
+        }
+    }
+
+    /// The N alone fills only itself, in the ink it is given.
+    #[test]
+    fn the_n_fills_only_itself() {
+        let (data, stride) = pixels(
+            |cr| {
+                set_source(cr, ink(Scheme::Light));
+                fill_n(cr, (0.0, 0.0), 64.0);
+            },
+            64,
+        );
+        // Kit (100, 200) is in the stem; in a 64px square around the
+        // 234.08-unit N that is ((100-82.96)/234.08*64, (200-80.95)/234.08*64).
+        assert_eq!(at(&data, stride, 4, 32), (0, 0, 0, 255));
+        // Kit (150, 200), between the left stem, the diagonal and the
+        // flag, is empty.
+        assert_eq!(at(&data, stride, 18, 32).3, 0);
     }
 
     #[test]
