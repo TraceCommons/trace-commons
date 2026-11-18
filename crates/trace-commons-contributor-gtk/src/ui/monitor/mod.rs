@@ -22,6 +22,7 @@ pub mod map;
 pub mod map_scene;
 pub mod map_transfers;
 pub mod notices;
+pub mod orb;
 pub mod pane_layout;
 pub mod prefs;
 pub mod shell;

@@ -275,12 +275,12 @@ impl Glyph {
     }
 
     fn trace(&self, cr: &gtk::cairo::Context) {
-        trace(cr, &self.segments);
+        trace_segments(cr, &self.segments);
     }
 }
 
 /// Adds `segments` to `cr`'s path, after clearing it.
-fn trace(cr: &gtk::cairo::Context, segments: &[Segment]) {
+pub fn trace_segments(cr: &gtk::cairo::Context, segments: &[Segment]) {
     {
         cr.new_path();
         let (mut x, mut y) = (0.0, 0.0);
@@ -455,7 +455,7 @@ impl Artwork {
         cr.translate(origin.0 + side / 2.0, origin.1 + side / 2.0);
         cr.scale(scale, scale);
         cr.translate(-(bx + bw / 2.0), -(by + bh / 2.0));
-        trace(cr, &segments);
+        trace_segments(cr, &segments);
         cr.set_fill_rule(gtk::cairo::FillRule::Winding);
         let _ = cr.fill();
         let _ = cr.restore();
