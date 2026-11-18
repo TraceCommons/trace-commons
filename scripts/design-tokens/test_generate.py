@@ -191,6 +191,10 @@ class FirstRunStageTokensTests(unittest.TestCase):
         self.assertIn('pub const FIRST_RUN_RULE: Rgba = ("#ffffff", 0.18);', rendered)
         self.assertIn('pub const HERO_INK: Rgba = ("#ffffff", 1.0);', rendered)
         self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);', rendered)
+        # The marker check's well and stroke (`FirstRunMarkerCheck`).
+        self.assertIn('pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);', rendered)
+        self.assertIn('pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);', rendered)
+        self.assertIn('pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);', rendered)
 
     def test_first_run_carries_the_motion_curve(self):
         rendered = "\n".join(generate.render_first_run_rust(self.tokens))

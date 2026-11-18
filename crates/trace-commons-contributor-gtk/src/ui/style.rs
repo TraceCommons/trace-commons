@@ -453,8 +453,11 @@ pub(super) fn stylesheet(dark: bool) -> String {
     } else {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
+    // The first run's stage is dark in either scheme (`stage.rs`), so its
+    // glow is the dark scheme's.
+    let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
     format!(
-        "{brand}\n{tokens}\n{}\n{insights}",
+        "{brand}\n{tokens}\n@define-color tc_first_run_glow {glow};\n{}\n{insights}",
         include_str!("style.css")
     )
 }

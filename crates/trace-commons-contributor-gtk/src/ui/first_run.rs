@@ -69,6 +69,10 @@ pub(super) struct Coordinator {
     uses_action: gtk::Button,
     customize: gtk::Button,
     customize_box: gtk::Box,
+    /// The Customize card, risen to its place when it opens.
+    customize_lift: super::lift::Lift,
+    /// Uses' title, which gives way to the opened card as on the Mac.
+    uses_title: RefCell<Option<gtk::Widget>>,
     customizing: Cell<bool>,
     join_body: gtk::Box,
     start: gtk::Button,
@@ -173,6 +177,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     start.set_sensitive(false);
     let tools = Rc::new(RefCell::new(Tools::default()));
     let stage = super::first_run_stage_view::Stage::new(tools.clone());
+    let customize_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let c = Rc::new(Coordinator {
         app: Rc::downgrade(app),
         window: window.downgrade(),
@@ -202,7 +207,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         uses_flow: gtk::Box::new(gtk::Orientation::Vertical, 0),
         uses_action: primary(copy.join.skip),
         customize: gtk::Button::with_label(copy.frame.custom_setup_instead),
-        customize_box: gtk::Box::new(gtk::Orientation::Vertical, 12),
+        customize_box: customize_box.clone(),
+        customize_lift: super::lift::Lift::new(&customize_box),
+        uses_title: RefCell::new(None),
         customizing: Cell::new(false),
         join_body: gtk::Box::new(gtk::Orientation::Vertical, 16),
         start: start.clone(),
@@ -290,7 +297,7 @@ impl Coordinator {
                 }
             }
         };
-        let welcome = screens::welcome(next.clone(), {
+        let (welcome, rises) = screens::welcome(next.clone(), {
             let weak = weak.clone();
             move || {
                 if let Some(c) = weak.upgrade() {
@@ -300,6 +307,7 @@ impl Coordinator {
             }
         });
         welcome.prepend(&self.stage.slot(Step::Welcome));
+        self.stage.set_rises(rises);
         self.stack.add_named(&welcome, Some("welcome"));
         let agent = screens::agent_configuration({
             let weak = weak.clone();
@@ -320,6 +328,14 @@ impl Coordinator {
             }
         });
         tools.root.prepend(&self.stage.slot(Step::Tools));
+        tools.connect_changed({
+            let stage = Rc::downgrade(&self.stage);
+            move || {
+                if let Some(stage) = stage.upgrade() {
+                    stage.refresh();
+                }
+            }
+        });
         self.stack.add_named(&tools.root, Some("tools"));
         *self.tools_screen.borrow_mut() = Some(tools);
 
@@ -349,14 +365,15 @@ impl Coordinator {
         self.stack.add_named(&traces, Some("traces"));
 
         let uses_page = page(&title(copy.uses.title_light, copy.uses.title_bold));
+        *self.uses_title.borrow_mut() = uses_page.first_child();
         // The flow's captions sit under the stage's graphic, above the
         // title, as the Mac sets them inside its graphic.
         let uses_slot = self.stage.slot(Step::Uses);
         uses_page.prepend(&uses_slot);
         uses_page.insert_child_after(&self.uses_flow, Some(&uses_slot));
         uses_page.append(&self.uses_card);
-        self.customize_box.set_visible(false);
-        uses_page.append(&self.customize_box);
+        self.customize_lift.set_visible(false);
+        uses_page.append(&self.customize_lift);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         self.customize.add_css_class("flat");
         self.customize.connect_clicked({
@@ -476,6 +493,7 @@ impl Coordinator {
     }
     fn set_busy(&self, busy: bool) {
         self.busy.set(busy);
+        self.stage.set_enabled(!busy);
         self.stack.set_sensitive(!busy || self.login_waiting.get());
         self.back.set_sensitive(!busy || self.login_waiting.get());
     }
@@ -666,7 +684,12 @@ impl Coordinator {
         } else {
             copy.uses.you_review
         };
-        self.uses_flow.append(&screens::uses_flow(gate));
+        let (flow, relayout) = screens::uses_flow(gate, {
+            let stage = Rc::downgrade(&self.stage);
+            move || stage.upgrade().map_or(1.0, |s| s.scale())
+        });
+        self.stage.set_captions(relayout);
+        self.uses_flow.append(&flow);
         clear(&self.uses_card);
         for option in uses::shown_optional_scopes(&options, copy.uses.credit_scope) {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -793,11 +816,25 @@ impl Coordinator {
         if self.busy.get() || !self.tools.borrow().watches_anything() {
             return;
         }
+        // The card rises from where Uses' card was to the top, as the
+        // graphic and the title give way (`FirstRunFrame`'s `open`).
+        let page = self.customize_lift.parent();
+        let from = page.as_ref().and_then(|page| {
+            self.uses_card
+                .compute_point(page, &gtk::graphene::Point::new(0.0, 0.0))
+                .map(|p| f64::from(p.y()))
+        });
         self.customizing.set(true);
         self.stage.set_open(true);
         self.uses_card.set_visible(false);
         self.uses_flow.set_visible(false);
-        self.customize_box.set_visible(true);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            title.set_visible(false);
+        }
+        self.customize_lift.set_visible(true);
+        if let (Some(page), Some(from)) = (page, from) {
+            self.customize_lift.slide_from(&page, from);
+        }
         self.update_uses_action();
         clear(&self.customize_box);
         let spinner = gtk::Spinner::new();
@@ -818,7 +855,11 @@ impl Coordinator {
         self.stage.set_open(false);
         self.uses_card.set_visible(true);
         self.uses_flow.set_visible(true);
-        self.customize_box.set_visible(false);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            title.set_visible(true);
+        }
+        self.customize_lift.settle();
+        self.customize_lift.set_visible(false);
         self.update_uses_action();
     }
 

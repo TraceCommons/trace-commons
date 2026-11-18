@@ -62,6 +62,9 @@ pub struct Palette {
     pub hero_ink: Rgba,
     pub well: Rgba,
     pub text_primary: Rgba,
+    pub text_tertiary: Rgba,
+    pub tint_accent: Rgba,
+    pub toggle_on: Rgba,
     pub tool_claude: Rgba,
     pub tool_codex: Rgba,
     pub tool_antigravity: Rgba,
@@ -98,6 +101,9 @@ impl Palette {
             hero_ink: pick!(HERO_INK),
             well: pick!(WELL_FILL),
             text_primary: pick!(TEXT_PRIMARY),
+            text_tertiary: pick!(TEXT_TERTIARY),
+            tint_accent: pick!(TINT_ACCENT),
+            toggle_on: pick!(TOGGLE_ON),
             tool_claude: pick!(TOOL_CLAUDE),
             tool_codex: pick!(TOOL_CODEX),
             tool_antigravity: pick!(TOOL_ANTIGRAVITY),
@@ -160,6 +166,69 @@ fn glow_disc(cr: &cairo::Context, center: Point, radius: f64, c: Rgba) {
     stop(&g, 1.0, c.with(0.0));
     let _ = cr.set_source(&g);
     cr.arc(center.0, center.1, radius, 0.0, TAU);
+    let _ = cr.fill();
+}
+
+/// The pen tip's shadow (`.shadow(color: tipGlow, radius: radius * 1.6)`
+/// on a disc `radius` across): the disc blurred by a Gaussian whose
+/// standard deviation is the shadow's radius, at twice the disc's own
+/// weight. Both were fitted to the Mac's render with the tip drawn and
+/// without it (`welcome-hub-0.8`): standard deviation 0.95 times the
+/// shadow radius, weight 2.0, worst error 0.004 in alpha from 8 to 28
+/// points out.
+pub const TIP_SHADOW: f64 = 1.6;
+pub const TIP_SIGMA: f64 = 0.95 * TIP_SHADOW;
+pub const TIP_SHADOW_WEIGHT: f64 = 2.0;
+
+/// The tip's halo at `d` disc radii from its centre, as a fraction of its
+/// colour's alpha: [`TIP_SHADOW_WEIGHT`] times the disc blurred.
+pub fn tip_halo_at(d: f64) -> f64 {
+    (TIP_SHADOW_WEIGHT * blurred_disc(d, TIP_SIGMA)).min(1.0)
+}
+
+/// How much of a unit disc, blurred by a Gaussian of standard deviation
+/// `sigma` (in disc radii), lands `d` radii from its centre.
+fn blurred_disc(d: f64, sigma: f64) -> f64 {
+    // A midpoint sum over the disc in polar steps: smooth enough for a
+    // gradient's stops, and computed once per stop, not per pixel.
+    let (rings, spokes) = (24, 48);
+    let mut sum = 0.0;
+    for i in 0..rings {
+        let r = (f64::from(i) + 0.5) / f64::from(rings);
+        for j in 0..spokes {
+            let a = TAU * (f64::from(j) + 0.5) / f64::from(spokes);
+            let (x, y) = (r * a.cos() - d, r * a.sin());
+            sum += (-(x * x + y * y) / (2.0 * sigma * sigma)).exp() * r;
+        }
+    }
+    let area = (1.0 / f64::from(rings)) * (TAU / f64::from(spokes));
+    sum * area / (TAU * sigma * sigma)
+}
+
+/// The halo's stops, in disc radii out to where it has faded away.
+fn tip_halo_stops() -> &'static [(f64, f64)] {
+    static STOPS: std::sync::OnceLock<Vec<(f64, f64)>> = std::sync::OnceLock::new();
+    STOPS.get_or_init(|| {
+        let reach = 1.0 + 3.0 * TIP_SIGMA;
+        (0..=20)
+            .map(|i| {
+                let d = reach * f64::from(i) / 20.0;
+                (d / reach, tip_halo_at(d))
+            })
+            .chain([(1.0, 0.0)])
+            .collect()
+    })
+}
+
+/// The tip's halo around a disc `radius` across at `at`, in `c`.
+fn tip_halo(cr: &cairo::Context, at: Point, radius: f64, c: Rgba) {
+    let reach = radius * (1.0 + 3.0 * TIP_SIGMA);
+    let g = cairo::RadialGradient::new(at.0, at.1, 0.0, at.0, at.1, reach);
+    for (offset, alpha) in tip_halo_stops() {
+        stop(&g, *offset, c.alpha(*alpha));
+    }
+    let _ = cr.set_source(&g);
+    cr.arc(at.0, at.1, reach, 0.0, TAU);
     let _ = cr.fill();
 }
 
@@ -345,11 +414,79 @@ pub fn brand_mark(
     if tip {
         if let Some((at, radius, fade)) = stage::pen_tip(drawn) {
             // The shadow's glow, then the tip in the hero ink.
-            glow_disc(cr, at, radius * 2.6, p.glow.alpha(fade * 0.9));
+            tip_halo(cr, at, radius, p.glow.alpha(fade));
             cr.arc(at.0, at.1, radius, 0.0, TAU);
             source(cr, p.hero_ink.alpha(fade));
             let _ = cr.fill();
         }
+    }
+    let _ = cr.restore();
+}
+
+/// The marker check (`FirstRunMarkerCheck`) with its 26-point frame's
+/// top-left at `origin`: the rounded box, filled in the accent's tint and
+/// ringed in the glow when ticked, ringed in the text's ink when not (the
+/// primary ink under the pointer), and the stroke `trim` drawn, in the
+/// switch's on colour. A disabled check is drawn at
+/// [`stage::marker_check::DISABLED`].
+pub fn marker_check(
+    cr: &cairo::Context,
+    origin: Point,
+    on: bool,
+    trim: f64,
+    hovered: bool,
+    enabled: bool,
+    p: &Palette,
+) {
+    use stage::marker_check as m;
+    let _ = cr.save();
+    if !enabled {
+        cr.push_group();
+    }
+    let (x, y) = (origin.0 + m::BOX_INSET, origin.1 + m::BOX_INSET);
+    if on {
+        rounded(cr, x, y, m::BOX, m::BOX, m::BOX_RADIUS);
+        source(cr, p.tint_accent);
+        let _ = cr.fill();
+    }
+    // `strokeBorder`: the line inside the box's edge.
+    let half = m::BORDER / 2.0;
+    rounded(
+        cr,
+        x + half,
+        y + half,
+        m::BOX - m::BORDER,
+        m::BOX - m::BORDER,
+        m::BOX_RADIUS - half,
+    );
+    source(
+        cr,
+        if on {
+            p.glow
+        } else if hovered {
+            p.text_primary
+        } else {
+            p.text_tertiary
+        },
+    );
+    cr.set_line_width(m::BORDER);
+    let _ = cr.stroke();
+    let line = m::trimmed(trim);
+    if let Some((first, rest)) = line.split_first() {
+        let (sx, sy) = (origin.0 + m::STROKE_ORIGIN.0, origin.1 + m::STROKE_ORIGIN.1);
+        cr.move_to(sx + first.0, sy + first.1);
+        for point in rest {
+            cr.line_to(sx + point.0, sy + point.1);
+        }
+        source(cr, p.toggle_on);
+        cr.set_line_width(m::STROKE_WIDTH);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        let _ = cr.stroke();
+    }
+    if !enabled {
+        let _ = cr.pop_group_to_source();
+        let _ = cr.paint_with_alpha(m::DISABLED);
     }
     let _ = cr.restore();
 }
@@ -614,6 +751,7 @@ fn sweep(cr: &cairo::Context, center: Point, rotation: f64, elapsed: f64, p: &Pa
         (1.0, p.glow.with(0.0)),
     ];
     let colour = |at: f64| {
+        let at = at.rem_euclid(1.0);
         for w in stops.windows(2) {
             if at <= w[1].0 {
                 let t = (at - w[0].0) / (w[1].0 - w[0].0);
@@ -628,25 +766,96 @@ fn sweep(cr: &cairo::Context, center: Point, rotation: f64, elapsed: f64, p: &Pa
         }
         stops[7].1
     };
+    // The Mac blurs the band by 4 points. Around the circle that is the
+    // angular profile smoothed by a Gaussian of 4 points at the band's
+    // middle radius; at its rims, the edge softened over the same.
+    let sigma = SWEEP_BLUR / SWEEP_MID_RADIUS / TAU;
+    let blurred = |at: f64| {
+        let mut sum = [0.0; 4];
+        let mut weight = 0.0;
+        for k in -12..=12 {
+            let dx = f64::from(k) / 4.0 * sigma;
+            let w = (-(f64::from(k) / 4.0).powi(2) / 2.0).exp();
+            let c = colour(at + dx);
+            // Premultiplied, so a clear stop does not drag in its colour.
+            sum[0] += c.0 * c.3 * w;
+            sum[1] += c.1 * c.3 * w;
+            sum[2] += c.2 * c.3 * w;
+            sum[3] += c.3 * w;
+            weight += w;
+        }
+        let a = sum[3] / weight;
+        if a <= 0.0 {
+            Rgba(0.0, 0.0, 0.0, 0.0)
+        } else {
+            Rgba(sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], a)
+        }
+    };
+    let outer = SWEEP_RADIUS + 3.0 * SWEEP_BLUR;
     cr.push_group();
-    let wedges = 180;
+    // A wedge per quarter degree, without antialiasing, so neighbours meet
+    // without the seam two antialiased edges would draw twice, finely
+    // enough that the leading edge shows no steps; the radial mask below
+    // softens the rim the wedges leave stepped.
+    cr.set_antialias(cairo::Antialias::None);
+    let wedges = 1440;
     for i in 0..wedges {
-        let at = (i as f64 + 0.5) / wedges as f64;
+        let at = (f64::from(i) + 0.5) / f64::from(wedges);
         // From the top, clockwise, turned with the sweep.
-        let a0 = (-90.0 + rotation + 360.0 * i as f64 / wedges as f64).to_radians();
-        let a1 = (-90.0 + rotation + 360.0 * (i + 1) as f64 / wedges as f64).to_radians() + 0.004;
+        let a0 = (-90.0 + rotation + 360.0 * f64::from(i) / f64::from(wedges)).to_radians();
+        let a1 = (-90.0 + rotation + 360.0 * f64::from(i + 1) / f64::from(wedges)).to_radians();
         cr.move_to(center.0, center.1);
-        cr.arc(center.0, center.1, 150.0, a0, a1);
+        cr.arc(center.0, center.1, outer, a0, a1);
         cr.close_path();
-        source(cr, colour(at));
+        source(cr, blurred(at));
         let _ = cr.fill();
     }
+    cr.set_antialias(cairo::Antialias::Default);
     let _ = cr.pop_group_to_source();
-    let mask = cairo::RadialGradient::new(center.0, center.1, 0.0, center.0, center.1, 150.0);
-    mask.add_color_stop_rgba(36.0 / 150.0, 0.0, 0.0, 0.0, 0.0);
-    mask.add_color_stop_rgba(64.0 / 150.0, 0.0, 0.0, 0.0, fade);
-    mask.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, fade);
+    let mask = cairo::RadialGradient::new(center.0, center.1, 0.0, center.0, center.1, outer);
+    for (r, a) in sweep_mask() {
+        mask.add_color_stop_rgba(r / outer, 0.0, 0.0, 0.0, a * fade);
+    }
     let _ = cr.mask(&mask);
+}
+
+/// The sweep's radius (a 300-point circle) and the Mac's blur on it.
+pub const SWEEP_RADIUS: f64 = 150.0;
+pub const SWEEP_BLUR: f64 = 4.0;
+/// Where the band is brightest across its width: between the mask's
+/// opaque start (64) and the rim.
+const SWEEP_MID_RADIUS: f64 = (64.0 + SWEEP_RADIUS) / 2.0;
+
+/// The sweep's radial mask with the blur's softening: clear to 36 points,
+/// opaque from 64 (the Mac's mask), to the rim at 150, which the blur
+/// spreads over a Gaussian of [`SWEEP_BLUR`].
+fn sweep_mask() -> Vec<(f64, f64)> {
+    let outer = SWEEP_RADIUS + 3.0 * SWEEP_BLUR;
+    let mac = |r: f64| {
+        if r <= 36.0 {
+            0.0
+        } else if r <= 64.0 {
+            (r - 36.0) / 28.0
+        } else if r <= SWEEP_RADIUS {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    (0..=40)
+        .map(|i| {
+            let r = outer * f64::from(i) / 40.0;
+            let mut sum = 0.0;
+            let mut weight = 0.0;
+            for k in -12..=12 {
+                let x = f64::from(k) / 4.0;
+                let w = (-x * x / 2.0).exp();
+                sum += mac(r + x * SWEEP_BLUR) * w;
+                weight += w;
+            }
+            (r, sum / weight)
+        })
+        .collect()
 }
 
 /// One watched tile's beam into the N (`ToolsBeam`): a wide halo, a body, a
@@ -1124,6 +1333,266 @@ mod tests {
         }
     }
 
+    /// One of the comparison renders at 2x, as straight RGB over the
+    /// dark scene's navy, 0 to 255: the same scenes the Mac probe renders.
+    fn render_over_navy(name: &str) -> (Vec<[f64; 3]>, usize) {
+        let p = Palette::scheme(true);
+        let time = 1000.0;
+        let scene = Scene {
+            time,
+            ..Scene::default()
+        };
+        let (w, h): (i32, i32) = match name {
+            "welcome-hub-1.9" | "welcome-hub-0.8" => (240, 240),
+            "tools-ring-2.4" => (860, 300),
+            "backdrop" => (860, 760),
+            "hub-charged" => (120, 120),
+            _ => (44, 44),
+        };
+        let mut s = surface(w * 2, h * 2);
+        {
+            let cr = cairo::Context::new(&s).unwrap();
+            cr.scale(2.0, 2.0);
+            let welcome = |e: f64| {
+                let frame = Frame {
+                    center: (120.0, 120.0),
+                    side: 132.0,
+                };
+                hub(
+                    &cr,
+                    frame,
+                    hub_look(Step::Welcome, &scene, e),
+                    time,
+                    false,
+                    1.0,
+                    &p,
+                );
+            };
+            match name {
+                "welcome-hub-1.9" => welcome(1.9),
+                "welcome-hub-0.8" => welcome(0.8),
+                "tools-ring-2.4" => {
+                    let scene = Scene {
+                        tools: stage::ToolsSeen {
+                            rows: [
+                                ("claude-code", true),
+                                ("gemini-cli", false),
+                                ("codex", true),
+                                ("cline", true),
+                                ("opencode", false),
+                            ]
+                            .iter()
+                            .map(|(k, e)| ((*k).to_owned(), *e))
+                            .collect(),
+                            watched: vec!["codex".into()],
+                            connectable: vec![],
+                        },
+                        scan: Some(2.4),
+                        time,
+                        ..Scene::default()
+                    };
+                    step_graphic(&cr, Step::Tools, &scene, 0.0, &p);
+                }
+                "backdrop" => backdrop(&cr, 860.0, 760.0, &p, stage::backdrop_phase(time, false)),
+                "hub-charged" => {
+                    let look = Hub {
+                        charged: true,
+                        ..Hub::default()
+                    };
+                    let frame = Frame {
+                        center: (60.0, 60.0),
+                        side: 64.0,
+                    };
+                    hub(&cr, frame, look, time, false, 1.0, &p);
+                }
+                check => {
+                    let trim: f64 = check.trim_start_matches("marker-check-").parse().unwrap();
+                    let line = stage::marker_check::trimmed(trim);
+                    cr.move_to(line[0].0, line[0].1);
+                    for point in &line[1..] {
+                        cr.line_to(point.0, point.1);
+                    }
+                    source(&cr, p.toggle_on);
+                    cr.set_line_width(stage::marker_check::STROKE_WIDTH);
+                    cr.set_line_cap(cairo::LineCap::Round);
+                    cr.set_line_join(cairo::LineJoin::Round);
+                    let _ = cr.stroke();
+                }
+            }
+        }
+        s.flush();
+        let stride = s.stride() as usize;
+        let data = s.data().unwrap();
+        let navy = [7.0, 10.0, 26.0];
+        let width = (w * 2) as usize;
+        let mut out = Vec::with_capacity(width * (h * 2) as usize);
+        for y in 0..(h * 2) as usize {
+            for x in 0..width {
+                let i = y * stride + x * 4;
+                let a = f64::from(data[i + 3]) / 255.0;
+                let px = [data[i + 2], data[i + 1], data[i]];
+                out.push([0, 1, 2].map(|c| f64::from(px[c]) + navy[c] * (1.0 - a)));
+            }
+        }
+        (out, width)
+    }
+
+    /// Pixels of the Mac's own renders (the probe, composited over the
+    /// navy), at 2x: each named piece drawn here lands within a few levels
+    /// of every one. The points sit where a paint value shows: the shine's
+    /// band (its 0.7 peak), the pen tip's halo, the sweep's band, the
+    /// corner glow's stops, the charged hub's glow (0.35 over 0.31 of the
+    /// disc) and the marker check's stroke, drawn and not yet drawn.
+    #[test]
+    fn the_paint_matches_the_macs_renders() {
+        type Sample = ((usize, usize), [f64; 3]);
+        let cases: [(&str, f64, &[Sample]); 7] = [
+            (
+                "welcome-hub-1.9",
+                6.0,
+                &[
+                    ((369, 315), [175.0, 220.0, 255.0]),
+                    ((369, 321), [169.0, 218.0, 254.0]),
+                    ((332, 329), [88.0, 183.0, 254.0]),
+                    ((359, 353), [169.0, 218.0, 255.0]),
+                    ((357, 359), [169.0, 218.0, 254.0]),
+                ],
+            ),
+            (
+                "welcome-hub-0.8",
+                6.0,
+                &[
+                    ((357, 217), [6.0, 24.0, 48.0]),
+                    ((361, 232), [5.0, 40.0, 76.0]),
+                    ((336, 233), [5.0, 42.0, 80.0]),
+                    ((376, 263), [6.0, 30.0, 58.0]),
+                    ((324, 267), [6.0, 35.0, 67.0]),
+                ],
+            ),
+            (
+                "tools-ring-2.4",
+                6.0,
+                &[
+                    ((913, 497), [6.0, 27.0, 53.0]),
+                    ((843, 519), [6.0, 33.0, 64.0]),
+                    ((762, 539), [5.0, 32.0, 62.0]),
+                    ((805, 566), [6.0, 36.0, 69.0]),
+                    ((811, 581), [6.0, 35.0, 68.0]),
+                ],
+            ),
+            (
+                "backdrop",
+                6.0,
+                &[
+                    ((173, 268), [4.0, 79.0, 142.0]),
+                    ((305, 271), [4.0, 84.0, 150.0]),
+                    ((267, 291), [3.0, 82.0, 148.0]),
+                    ((114, 303), [4.0, 75.0, 135.0]),
+                    ((178, 901), [6.0, 26.0, 53.0]),
+                ],
+            ),
+            (
+                "hub-charged",
+                6.0,
+                &[
+                    ((132, 86), [6.0, 34.0, 67.0]),
+                    ((77, 103), [6.0, 29.0, 57.0]),
+                    ((104, 116), [4.0, 69.0, 126.0]),
+                    ((132, 161), [6.0, 31.0, 59.0]),
+                    ((116, 178), [6.0, 20.0, 44.0]),
+                ],
+            ),
+            (
+                "marker-check-1.0",
+                10.0,
+                &[
+                    ((65, 24), [126.0, 188.0, 255.0]),
+                    ((63, 30), [126.0, 188.0, 255.0]),
+                    ((46, 50), [126.0, 188.0, 255.0]),
+                    ((24, 53), [126.0, 188.0, 255.0]),
+                ],
+            ),
+            (
+                "marker-check-0.6",
+                10.0,
+                &[
+                    ((44, 57), [126.0, 188.0, 255.0]),
+                    ((29, 59), [126.0, 188.0, 255.0]),
+                    ((38, 65), [126.0, 188.0, 255.0]),
+                    // The tail's end, not drawn yet at 0.6.
+                    ((65, 24), [7.0, 10.0, 26.0]),
+                ],
+            ),
+        ];
+        for (name, tolerance, samples) in cases {
+            let (pixels, width) = render_over_navy(name);
+            for ((x, y), want) in samples {
+                let got = pixels[y * width + x];
+                for c in 0..3 {
+                    assert!(
+                        (got[c] - want[c]).abs() <= tolerance,
+                        "{name} at ({x}, {y}): {got:?} against the Mac's {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pen tip's halo falls off as the Mac's does: the alpha the Mac's
+    /// shadow adds 10 to 22 points out from a tip 10.5 tile units across
+    /// on Welcome's 132-point N (5.92 points), measured from its renders
+    /// with the tip and without. The old 2.6-radius disc was gone by 15.
+    #[test]
+    fn the_pen_tip_halo_falls_off_as_the_macs_shadow() {
+        let radius = 10.5 * 132.0 / 234.08;
+        for (points, want) in [
+            (10.25, 0.2177),
+            (12.25, 0.1708),
+            (14.25, 0.1286),
+            (16.25, 0.0927),
+            (18.25, 0.0630),
+            (20.25, 0.0398),
+            (22.25, 0.0228),
+        ] {
+            let got = tip_halo_at(points / radius);
+            assert!((got - want).abs() < 0.01, "{points}: {got} != {want}");
+            // And as drawn: the gradient's stops carry the same fall-off.
+            let mut s = surface(200, 120);
+            {
+                let cr = cairo::Context::new(&s).unwrap();
+                tip_halo(&cr, (40.0, 60.0), radius, Rgba(1.0, 1.0, 1.0, 1.0));
+            }
+            let a = f64::from(pixel(&mut s, (40.0 + points) as i32, 60).3) / 255.0;
+            assert!((a - want).abs() < 0.02, "drawn {points}: {a} != {want}");
+        }
+    }
+
+    /// The sweep is one smooth band: along an arc through it, no pixel
+    /// steps from its neighbour by more than a level or two (180 antialiased
+    /// wedges drew a seam every two degrees).
+    #[test]
+    fn the_sweep_has_no_seams() {
+        let p = Palette::scheme(true);
+        let mut s = surface(400, 400);
+        {
+            let cr = cairo::Context::new(&s).unwrap();
+            sweep(&cr, (200.0, 200.0), 90.0, 2.0, &p);
+        }
+        let mut last: Option<i32> = None;
+        let mut worst = 0;
+        // Through the band's tail, away from its leading edge.
+        for i in 0..200 {
+            let a = (-90.0 + 90.0 + 200.0 + 100.0 * f64::from(i) / 200.0).to_radians();
+            let (x, y) = (200.0 + 110.0 * a.cos(), 200.0 + 110.0 * a.sin());
+            let alpha = i32::from(pixel(&mut s, x as i32, y as i32).3);
+            if let Some(last) = last {
+                worst = worst.max((alpha - last).abs());
+            }
+            last = Some(alpha);
+        }
+        assert!(worst <= 2, "a step of {worst} levels along the band");
+    }
+
     /// Renders the stage's pieces as the Mac probe renders them (the same
     /// sizes, the same clock, at 2x), each step's graphic, and each step's
     /// stage at the first-run window's default size, as raw premultiplied
@@ -1213,6 +1682,21 @@ mod tests {
             write(&format!("orb-{scheme}"), 18, 18, &|cr| {
                 orb(cr, (9.0, 9.0), 18.0, 1.0, &p)
             });
+            // The marker check's stroke alone, in its 44 box, at three trims.
+            for t in [0.3, 0.6, 1.0] {
+                write(&format!("marker-check-{t:?}-{scheme}"), 44, 44, &|cr| {
+                    let line = stage::marker_check::trimmed(t);
+                    cr.move_to(line[0].0, line[0].1);
+                    for point in &line[1..] {
+                        cr.line_to(point.0, point.1);
+                    }
+                    source(cr, p.toggle_on);
+                    cr.set_line_width(stage::marker_check::STROKE_WIDTH);
+                    cr.set_line_cap(cairo::LineCap::Round);
+                    cr.set_line_join(cairo::LineJoin::Round);
+                    let _ = cr.stroke();
+                });
+            }
             for e in [0.5, 1.6, 2.4, 4.5] {
                 let scene = Scene {
                     tools: stage::ToolsSeen {

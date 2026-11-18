@@ -192,7 +192,9 @@ fn present_mode<F>(
         back.set_margin_start(24);
         back.set_margin_bottom(16);
         back.set_visible(false);
-        let intro = super::first_run_screens::welcome(
+        // No stage under this window, so nothing raises Welcome's lines:
+        // they stay in place, as the lifts start.
+        let (intro, _rises) = super::first_run_screens::welcome(
             {
                 let stack = stack.clone();
                 let back = back.clone();

@@ -830,13 +830,16 @@ def render_glyphs_rust(glyphs: list[dict]) -> list[str]:
 # The colours the Mac's animated first run draws its stage with
 # (`FirstRunStage.swift`, `GlassBrandMarkDrawing`): the scene, the glow
 # behind the N and the beams, the tool tiles and their tints, the orbs and
-# the dashed rules. The Linux stage reads them from `brand_tokens::first_run`.
+# the dashed rules, and the marker check's well and stroke
+# (`FirstRunMarkerCheck`). The Linux stage reads them from
+# `brand_tokens::first_run`.
 FIRST_RUN_COLOURS = [
     "sceneBase", "sceneWarm", "firstRunGlow", "firstRunBeam", "firstRunBeamCore",
     "firstRunCard", "firstRunCardSolid", "firstRunTile", "firstRunTileShadow", "firstRunRule",
     "firstRunApprove", "firstRunApproveDeep", "heroInk", "wellFill",
     "textPrimary", "textSecondary", "textTertiary",
     "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode",
+    "tintAccent", "toggleOn",
 ]
 
 

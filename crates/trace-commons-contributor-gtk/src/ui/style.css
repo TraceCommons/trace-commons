@@ -537,6 +537,9 @@ row:selected {
 .tc-thread-title.tc-thread-current {
   font-weight: 600;
   color: @tc_ink;
+  /* The Mac's glow at 0.35 and shadow radius 7: a blur of 14 here, since
+     GTK's radius is twice the deviation and SwiftUI's is about one. */
+  text-shadow: 0 0 14px alpha(@tc_first_run_glow, 0.35);
 }
 .tc-thread-title.tc-thread-passed {
   color: alpha(@tc_ink, 0.88);
@@ -544,4 +547,24 @@ row:selected {
 .tc-thread-back {
   padding: 0;
   min-height: 0;
+}
+
+/* The first run's marker check (`first_run_marker_check`): the check
+   button's own box is cleared and keeps its room, 32 by 30, for the drawn
+   box and the stroke that runs past it; the focus ring stays GTK's. */
+checkbutton.tc-marker-check {
+  padding: 0;
+  border-spacing: 10px;
+}
+checkbutton.tc-marker-check > check {
+  min-width: 32px;
+  min-height: 30px;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: transparent;
+  -gtk-icon-source: none;
 }

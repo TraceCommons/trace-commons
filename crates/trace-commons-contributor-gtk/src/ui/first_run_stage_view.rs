@@ -28,6 +28,7 @@ use gtk::glib;
 
 use super::first_run_stage::{self as stage, Frame};
 use super::first_run_stage_paint::{self as paint, Palette, Scene};
+use super::lift::Lift;
 use crate::first_run::{Sharing, Step, tools::Tools};
 
 /// How long a tile fades in or out between steps.
@@ -50,6 +51,8 @@ struct Moves {
     /// What was last drawn, in the stage's own coordinates.
     hub_drawn: Option<Frame>,
     tiles_drawn: BTreeMap<String, Frame>,
+    /// The tiles last drawn lit (watched, on Tools).
+    lit_drawn: Vec<String>,
 }
 
 struct Inner {
@@ -77,6 +80,8 @@ struct Inner {
     scroller: Option<gtk::Widget>,
     tick: Option<gtk::TickCallbackId>,
     last_frame: i64,
+    /// How many times the stage has been drawn.
+    draws: u64,
 }
 
 pub(super) struct Stage {
@@ -85,6 +90,14 @@ pub(super) struct Stage {
     tools: Rc<RefCell<Tools>>,
     inner: RefCell<Inner>,
     started: Cell<bool>,
+    /// The stage's colours, read once: the first run is dark only.
+    palette: Palette,
+    /// Welcome's lines and when each rises (`WelcomeScreen`'s `Rise`).
+    rises: RefCell<Vec<(Lift, f64)>>,
+    /// The thread's buttons back to a passed step.
+    backs: RefCell<Vec<gtk::Button>>,
+    /// Uses' captions laid out again at the stage's scale.
+    captions: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 fn animations() -> bool {
@@ -129,8 +142,13 @@ impl Stage {
                 scroller: None,
                 tick: None,
                 last_frame: 0,
+                draws: 0,
             }),
             started: Cell::new(false),
+            palette: Palette::scheme(true),
+            rises: RefCell::new(Vec::new()),
+            backs: RefCell::new(Vec::new()),
+            captions: RefCell::new(None),
         });
         let weak = Rc::downgrade(&stage);
         stage.area.set_draw_func(move |_, cr, w, h| {
@@ -169,6 +187,7 @@ impl Stage {
                     if stage.area.is_mapped() {
                         stage.start_ticking();
                     }
+                    stage.raise_lines();
                     stage.area.queue_draw();
                 }
             });
@@ -212,6 +231,64 @@ impl Stage {
         for segment in &inner.segments {
             segment.set_width_request((stage::SEGMENT_WIDTH * scale).round() as i32);
         }
+        drop(inner);
+        let relayout = self.captions.borrow().clone();
+        if let Some(relayout) = relayout {
+            relayout();
+        }
+    }
+
+    /// The scale the canvas is drawn at now.
+    pub(super) fn scale(&self) -> f64 {
+        stage::fit_scale(
+            f64::from(self.area.width().max(1)),
+            f64::from(self.area.height().max(1)),
+        )
+    }
+
+    /// Uses' captions, laid out again by `relayout` when the scale
+    /// changes.
+    pub(super) fn set_captions(&self, relayout: Rc<dyn Fn()>) {
+        *self.captions.borrow_mut() = Some(relayout);
+    }
+
+    /// Something the stage draws changed outside it (Tools found or
+    /// watched a tool): draw again. With animations off nothing else
+    /// would, as no tick runs.
+    pub(super) fn refresh(&self) {
+        self.area.queue_draw();
+    }
+
+    /// Welcome's lines, each with the delay it rises after: hidden and
+    /// lowered until then, unless motion is reduced.
+    pub(super) fn set_rises(&self, rises: Vec<(Lift, f64)>) {
+        *self.rises.borrow_mut() = rises;
+        self.raise_lines();
+    }
+
+    /// Welcome's lines where they are this moment, on Welcome's clock.
+    fn raise_lines(&self) {
+        let reduce = !animations();
+        let elapsed = now() - self.inner.borrow().welcome_at;
+        for (lift, delay) in self.rises.borrow().iter() {
+            lift.set_risen(stage::welcome::risen(elapsed, *delay, reduce));
+        }
+    }
+
+    /// Whether Welcome's lines are still rising.
+    fn lines_rising(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.step == Step::Welcome
+            && !inner.agent
+            && now() - inner.welcome_at <= stage::welcome::RISEN_BY + 0.1
+            && !self.rises.borrow().is_empty()
+    }
+
+    /// The thread's buttons back are offered only while no commit runs.
+    pub(super) fn set_enabled(&self, enabled: bool) {
+        for button in self.backs.borrow().iter() {
+            button.set_sensitive(enabled);
+        }
     }
 
     fn start_ticking(self: &Rc<Self>) {
@@ -224,9 +301,18 @@ impl Stage {
                 return glib::ControlFlow::Break;
             };
             let frame = clock.frame_time();
-            let mut inner = stage.inner.borrow_mut();
-            if frame - inner.last_frame >= FRAME_MICROS {
-                inner.last_frame = frame;
+            let due = {
+                let mut inner = stage.inner.borrow_mut();
+                let due = frame - inner.last_frame >= FRAME_MICROS;
+                if due {
+                    inner.last_frame = frame;
+                }
+                due
+            };
+            if due {
+                if stage.lines_rising() {
+                    stage.raise_lines();
+                }
                 area.queue_draw();
             }
             glib::ControlFlow::Continue
@@ -274,12 +360,27 @@ impl Stage {
             }
         }
         self.rebuild_thread(step, enabled, on_pick);
+        if step == Step::Welcome {
+            self.raise_lines();
+        }
         self.area.queue_draw();
     }
 
-    /// Welcome's agent prompt is up (no N), or gone.
+    /// Welcome's agent prompt is up (no N), or gone. Coming back from it
+    /// replays Welcome, as the Mac's `onAppear` resets its clock.
     pub(super) fn set_agent(&self, agent: bool) {
-        self.inner.borrow_mut().agent = agent;
+        let back = {
+            let mut inner = self.inner.borrow_mut();
+            let back = inner.agent && !agent;
+            inner.agent = agent;
+            if back {
+                inner.welcome_at = now();
+            }
+            back
+        };
+        if back {
+            self.raise_lines();
+        }
         self.area.queue_draw();
     }
 
@@ -303,6 +404,8 @@ impl Stage {
             inner.sharing = sharing;
             inner.sharing_at = now();
         }
+        drop(inner);
+        self.area.queue_draw();
     }
 
     /// Join read whether an account is signed in. A sign-in while Join is
@@ -314,6 +417,8 @@ impl Stage {
             inner.signed_in_at = Some(now());
         }
         inner.join_known = Some(signed);
+        drop(inner);
+        self.area.queue_draw();
     }
 
     /// The steps scroll in `scroller`: the stage follows it, and draws the
@@ -332,6 +437,7 @@ impl Stage {
         while let Some(child) = self.thread.first_child() {
             self.thread.remove(&child);
         }
+        self.backs.borrow_mut().clear();
         let Some(current) = stage::thread_index(step) else {
             self.thread.set_visible(false);
             self.inner.borrow_mut().segments.clear();
@@ -365,6 +471,8 @@ impl Stage {
             label.add_css_class("tc-thread-title");
             if index == current {
                 label.add_css_class("tc-thread-current");
+                // The Mac's `.isSelected` on the current step's title.
+                label.update_state(&[gtk::accessible::State::Selected(Some(true))]);
                 self.thread.append(&label);
             } else if index < current {
                 label.add_css_class("tc-thread-passed");
@@ -376,6 +484,7 @@ impl Stage {
                 let target = *thread_step;
                 button.connect_clicked(move |_| pick(target));
                 self.thread.append(&button);
+                self.backs.borrow_mut().push(button);
             } else {
                 self.thread.append(&label);
             }
@@ -422,9 +531,10 @@ impl Stage {
     fn draw(&self, cr: &gtk::cairo::Context, w: f64, h: f64) {
         let reduce = !animations();
         let at = now();
-        let p = Palette::scheme(true);
+        let p = &self.palette;
         let (tools, discovered) = self.tools_seen();
         let mut inner = self.inner.borrow_mut();
+        inner.draws += 1;
         // The scan runs once per first run, when Tools first has rows.
         if inner.step == Step::Tools && discovered && !inner.scanned && inner.scan_started.is_none()
         {
@@ -441,7 +551,7 @@ impl Stage {
             }
         }
         let time = at;
-        paint::backdrop(cr, w, h, &p, stage::backdrop_phase(time, reduce));
+        paint::backdrop(cr, w, h, p, stage::backdrop_phase(time, reduce));
         let scale = stage::fit_scale(w, h);
 
         // The thread's stretches.
@@ -469,7 +579,7 @@ impl Stage {
                 } else {
                     grown[i]
                 };
-                paint::thread_segment(cr, (f64::from(b.x()), y), width, segment, share, &p);
+                paint::thread_segment(cr, (f64::from(b.x()), y), width, segment, share, p);
             }
         }
 
@@ -487,6 +597,7 @@ impl Stage {
         let Some(bounds) = slot.filter(|_| shown) else {
             inner.moves.hub_drawn = None;
             inner.moves.tiles_drawn.clear();
+            inner.moves.lit_drawn.clear();
             return;
         };
         let _ = cr.save();
@@ -525,7 +636,7 @@ impl Stage {
         let _ = cr.save();
         cr.translate(origin.0, origin.1);
         cr.scale(scale, scale);
-        paint::step_back(cr, step, &scene, &p);
+        paint::step_back(cr, step, &scene, p);
         let _ = cr.restore();
 
         let moving = if reduce {
@@ -547,11 +658,12 @@ impl Stage {
             _ => target,
         };
         let look = paint::hub_look(step, &scene, at - inner.welcome_at);
-        paint::hub(cr, hub, look, time, reduce, 1.0, &p);
+        paint::hub(cr, hub, look, time, reduce, 1.0, p);
         inner.moves.hub_drawn = Some(hub);
 
         // The tiles: moved from the last step, faded in, or fading out.
         let mut drawn = BTreeMap::new();
+        let mut lit_drawn = Vec::new();
         for kind in stage::RING_ORDER {
             let Some((frame, opacity, flash)) = paint::live_tile(step, kind, &scene) else {
                 continue;
@@ -565,19 +677,23 @@ impl Stage {
                 None => (target, opacity * fade_in),
             };
             let lit = step == Step::Tools && scene.tools.watched.iter().any(|w| w == kind);
-            paint::tool_face(cr, frame, kind, lit, alpha, &p);
+            if lit {
+                lit_drawn.push(kind.to_owned());
+            }
+            paint::tool_face(cr, frame, kind, lit, alpha, p);
             if let Some(flash) = flash {
-                paint::tile_flash(cr, frame, flash, &p);
+                paint::tile_flash(cr, frame, flash, p);
             }
             drawn.insert(kind.to_owned(), frame);
         }
         if !reduce && moving < FADE {
             let from = inner.moves.tiles_from.clone();
             for (kind, frame) in from.iter().filter(|(k, _)| !drawn.contains_key(*k)) {
-                paint::tool_face(cr, *frame, kind, false, 1.0 - fade_in, &p);
+                paint::tool_face(cr, *frame, kind, false, 1.0 - fade_in, p);
             }
         }
         inner.moves.tiles_drawn = drawn;
+        inner.moves.lit_drawn = lit_drawn;
         if step == Step::Traces && stage::traces::counted(scene.opened, reduce) >= 1.0 {
             inner.traces_counted = true;
         }
@@ -659,14 +775,15 @@ mod mounted_tests {
         window.set_content(Some(&stage.wrap(&content)));
         let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
         stage.set_step(Step::Welcome, true, pick.clone());
+        // Animations on, whatever the runner's setting, so the tick's
+        // stopping below is not vacuous.
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
         window.present();
         settle(&context, 300);
         assert!(!stage.thread().is_visible());
-        let settings = gtk::Settings::default().unwrap();
-        assert_eq!(
-            stage.inner.borrow().tick.is_some(),
-            settings.is_gtk_enable_animations()
-        );
+        assert!(stage.inner.borrow().tick.is_some(), "ticks while shown");
 
         stack.set_visible_child_name("tools");
         stage.set_step(Step::Tools, true, pick.clone());
@@ -686,16 +803,18 @@ mod mounted_tests {
         // Hidden, it stops; shown, it starts again.
         window.set_visible(false);
         settle(&context, 100);
-        assert!(stage.inner.borrow().tick.is_none());
+        assert!(stage.inner.borrow().tick.is_none(), "no tick while hidden");
+        let draws = stage.inner.borrow().draws;
+        settle(&context, 150);
+        assert_eq!(stage.inner.borrow().draws, draws, "no draws while hidden");
         window.present();
         settle(&context, 100);
-        assert_eq!(
+        assert!(
             stage.inner.borrow().tick.is_some(),
-            settings.is_gtk_enable_animations()
+            "ticks when shown again"
         );
 
         // Animations off: no tick, and Welcome's N drawn whole at once.
-        let previous = settings.is_gtk_enable_animations();
         settings.set_gtk_enable_animations(false);
         settle(&context, 100);
         assert!(stage.inner.borrow().tick.is_none());
@@ -735,5 +854,151 @@ mod mounted_tests {
         drop(data);
         settings.set_gtk_enable_animations(previous);
         window.close();
+    }
+
+    /// With animations off nothing ticks, so a change on Tools must ask
+    /// for its own draw: ticking a tool on the real Tools screen lights its
+    /// tile without the test drawing anything itself.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn a_tool_watched_with_animations_off_is_drawn_lit() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(false);
+        let mut found = Tools::default();
+        found.record_discovery(vec![crate::first_run::tools::Found {
+            source: "codex".into(),
+            path: "/home/x/.codex/sessions".into(),
+            exists: true,
+            session_count: 1,
+            total_bytes: None,
+        }]);
+        let tools = Rc::new(RefCell::new(found));
+        let stage = Stage::new(tools.clone());
+        let window = adw::Window::builder()
+            .default_width(680)
+            .default_height(720)
+            .build();
+        let screen =
+            super::super::first_run_tools::build(tools.clone(), window.upcast_ref(), || {});
+        screen.root.prepend(&stage.slot(Step::Tools));
+        screen.connect_changed({
+            let stage = Rc::downgrade(&stage);
+            move || {
+                if let Some(stage) = stage.upgrade() {
+                    stage.refresh();
+                }
+            }
+        });
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(stage.thread());
+        content.append(&screen.root);
+        window.set_content(Some(&stage.wrap(&content)));
+        stage.set_step(Step::Tools, true, Rc::new(|_| {}));
+        window.present();
+        settle(&context, 300);
+        assert!(stage.inner.borrow().tick.is_none());
+        let draws = stage.inner.borrow().draws;
+        assert!(draws > 0, "drawn once shown");
+        assert!(stage.inner.borrow().moves.lit_drawn.is_empty());
+        let mut pending = vec![screen.root.clone().upcast::<gtk::Widget>()];
+        let mut check = None;
+        while let Some(widget) = pending.pop() {
+            if let Ok(found) = widget.clone().downcast::<gtk::CheckButton>() {
+                check = Some(found);
+                break;
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                pending.push(c);
+            }
+        }
+        check.expect("codex's check").set_active(true);
+        settle(&context, 200);
+        let inner = stage.inner.borrow();
+        assert!(inner.draws > draws, "drawn again after the watch");
+        assert_eq!(inner.moves.lit_drawn, ["codex"]);
+        drop(inner);
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// Welcome's lines rise on Welcome's clock: hidden and 18 points low
+    /// when it opens, in place by 2.56 s; at once with animations off; and
+    /// coming back from the agent prompt starts them again.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn welcome_lines_rise_and_replay_after_the_agent_prompt() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let stage = Stage::new(Rc::new(RefCell::new(Tools::default())));
+        let (welcome, rises) = super::super::first_run_screens::welcome(|| {}, || {});
+        let lifts: Vec<Lift> = rises.iter().map(|(l, _)| l.clone()).collect();
+        welcome.prepend(&stage.slot(Step::Welcome));
+        let window = adw::Window::builder()
+            .default_width(680)
+            .default_height(720)
+            .build();
+        window.set_content(Some(&stage.wrap(&welcome)));
+        stage.set_step(Step::Welcome, true, Rc::new(|_| {}));
+        stage.set_rises(rises);
+        window.present();
+        settle(&context, 200);
+        for lift in &lifts {
+            assert_eq!(lift.opacity(), 0.0, "hidden before its delay");
+            assert_eq!(lift.offset(), 18.0);
+        }
+        settle(&context, 2700);
+        for lift in &lifts {
+            assert_eq!(lift.opacity(), 1.0);
+            assert!(lift.offset().abs() < 1e-9);
+        }
+        // Back from the agent prompt: the clock starts again.
+        stage.set_agent(true);
+        stage.set_agent(false);
+        assert_eq!(lifts[0].opacity(), 0.0);
+        // Animations off: everything in place at once.
+        settings.set_gtk_enable_animations(false);
+        settle(&context, 50);
+        for lift in &lifts {
+            assert_eq!(lift.opacity(), 1.0);
+            assert!(lift.offset().abs() < 1e-9);
+        }
+        stage.set_agent(true);
+        stage.set_agent(false);
+        assert_eq!(lifts[0].opacity(), 1.0, "no replay with animations off");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// The thread's buttons back follow a commit: withdrawn while one
+    /// runs, offered again after.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_threads_way_back_follows_a_commit() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let stage = Stage::new(Rc::new(RefCell::new(Tools::default())));
+        stage.set_step(Step::Traces, true, Rc::new(|_| {}));
+        let backs = stage.backs.borrow().clone();
+        assert_eq!(backs.len(), 2, "Tools and Private AI are behind Traces");
+        stage.set_enabled(false);
+        assert!(backs.iter().all(|b| !b.is_sensitive()));
+        stage.set_enabled(true);
+        assert!(backs.iter().all(|b| b.is_sensitive()));
     }
 }

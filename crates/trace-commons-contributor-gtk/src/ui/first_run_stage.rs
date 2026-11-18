@@ -240,6 +240,54 @@ pub mod welcome {
         (into < SHINE_CROSSING).then(|| super::motion_curve(into / SHINE_CROSSING))
     }
 
+    /// The title's words rise one at a time; a word past the third rises
+    /// with the third.
+    pub const WORD_DELAYS: [f64; 3] = [1.05, 1.14, 1.23];
+    pub const BODY_DELAY: f64 = 1.45;
+    pub const BUTTON_DELAY: f64 = 1.8;
+    pub const RISE_DURATION: f64 = 0.76;
+    /// How far below its place a line starts (`Rise`'s 18 points).
+    pub const RISE_LIFT: f64 = 18.0;
+    /// When the last line has risen: nothing moves after this.
+    pub const RISEN_BY: f64 = BUTTON_DELAY + RISE_DURATION;
+
+    /// The delay of the title's word at `index`.
+    pub fn word_delay(index: usize) -> f64 {
+        WORD_DELAYS[index.min(WORD_DELAYS.len() - 1)]
+    }
+
+    /// How far a line has risen into place (0 hidden and lowered, 1 in
+    /// place), `elapsed` seconds after Welcome opens.
+    pub fn risen(elapsed: f64, delay: f64, reduce_motion: bool) -> f64 {
+        if reduce_motion {
+            return 1.0;
+        }
+        super::burst(elapsed - delay, RISE_DURATION) * 0.98
+            + if elapsed - delay >= RISE_DURATION {
+                0.02
+            } else {
+                0.0
+            }
+    }
+
+    /// The title's words, raised one at a time (split on spaces, as the
+    /// Mac's `words`); each but the last keeps its space.
+    pub fn words(title: &str) -> Vec<String> {
+        let words: Vec<&str> = title.split(' ').filter(|w| !w.is_empty()).collect();
+        let last = words.len().saturating_sub(1);
+        words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                if i < last {
+                    format!("{w} ")
+                } else {
+                    (*w).to_owned()
+                }
+            })
+            .collect()
+    }
+
     /// The glow behind the mark, fading in while it draws.
     pub fn glow(elapsed: f64, reduce_motion: bool) -> f64 {
         if reduce_motion {
@@ -256,6 +304,127 @@ pub mod welcome {
         } else {
             1.0 - (-2.0 * p + 2.0).powi(3) / 2.0
         }
+    }
+}
+
+// ---- Customize opening ---------------------------------------------------
+
+/// Customize opening on Uses (`FirstRunFrame`'s `open`): the graphic and
+/// the title give way and the card rises to the top, along the spatial
+/// spring at 0.76 seconds, fading in as it comes.
+pub mod customize {
+    pub const DURATION: f64 = 0.76;
+
+    /// The card `t` seconds into its rise from `dy` points off its place:
+    /// the drawn offset and the opacity.
+    pub fn slide(dy: f64, t: f64) -> (f64, f64) {
+        if t >= super::SPATIAL_SETTLE {
+            return (0.0, 1.0);
+        }
+        let p = super::spring(t, DURATION, super::SPATIAL_BOUNCE);
+        (dy * (1.0 - p), p.clamp(0.0, 1.0))
+    }
+}
+
+// ---- The marker check ----------------------------------------------------
+
+/// The oversized check drawn like a marker stroke that runs past its box
+/// (`FirstRunMarkerCheckStyle`, Ron 2026-10-22): ticked is Watch, unticked
+/// is Not used. A 22-point rounded box inset 2 in a 26-point frame, and the
+/// stroke in its own 44-point box at (-6, -14) from the frame, trimmed by
+/// length as it draws on (0.34 s) or off (0.16 s).
+pub mod marker_check {
+    use super::Point;
+
+    pub const BOX: f64 = 22.0;
+    pub const BOX_INSET: f64 = 2.0;
+    pub const BOX_RADIUS: f64 = 6.0;
+    pub const BORDER: f64 = 1.5;
+    pub const STROKE_ORIGIN: Point = (-6.0, -14.0);
+    pub const STROKE_WIDTH: f64 = 3.6;
+    pub const ON_DURATION: f64 = 0.34;
+    pub const OFF_DURATION: f64 = 0.16;
+    /// A disabled check is drawn at this opacity.
+    pub const DISABLED: f64 = 0.45;
+
+    /// The stroke in its 44 box (`FirstRunMarkerCheckShape`): a short
+    /// down-stroke, then a flick up and out past the box's corner.
+    pub const START: Point = (11.0, 27.0);
+    pub const CURVES: [[Point; 3]; 2] = [
+        [(13.0, 29.0), (15.5, 32.0), (18.0, 35.0)],
+        [(22.0, 27.5), (28.0, 18.5), (35.0, 12.0)],
+    ];
+
+    /// The stroke flattened into a polyline in its 44 box, fine enough to
+    /// trim by length as SwiftUI's `trim` does.
+    pub fn polyline() -> Vec<Point> {
+        let mut out = vec![START];
+        let mut from = START;
+        for [c1, c2, to] in CURVES {
+            for i in 1..=64 {
+                let t = f64::from(i) / 64.0;
+                let u = 1.0 - t;
+                let x = u * u * u * from.0
+                    + 3.0 * u * u * t * c1.0
+                    + 3.0 * u * t * t * c2.0
+                    + t * t * t * to.0;
+                let y = u * u * u * from.1
+                    + 3.0 * u * u * t * c1.1
+                    + 3.0 * u * t * t * c2.1
+                    + t * t * t * to.1;
+                out.push((x, y));
+            }
+            from = to;
+        }
+        out
+    }
+
+    /// The stroke's first `trim` of its length (0 to 1), as a polyline.
+    pub fn trimmed(trim: f64) -> Vec<Point> {
+        let line = polyline();
+        let lengths: Vec<f64> = line
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+            .collect();
+        let total: f64 = lengths.iter().sum();
+        let mut left = total * trim.clamp(0.0, 1.0);
+        let mut out = vec![line[0]];
+        if left <= 0.0 {
+            return Vec::new();
+        }
+        for (w, len) in line.windows(2).zip(&lengths) {
+            if left >= *len {
+                out.push(w[1]);
+                left -= len;
+            } else {
+                let f = left / len;
+                out.push((
+                    w[0].0 + (w[1].0 - w[0].0) * f,
+                    w[0].1 + (w[1].1 - w[0].1) * f,
+                ));
+                break;
+            }
+        }
+        out
+    }
+
+    /// How much of the stroke is drawn `elapsed` seconds after the box was
+    /// ticked (`on`) or unticked, along the token ease; at once with
+    /// motion reduced, or with no change seen.
+    pub fn trim(on: bool, elapsed: Option<f64>, reduce_motion: bool) -> f64 {
+        let target = if on { 1.0 } else { 0.0 };
+        let Some(elapsed) = elapsed.filter(|_| !reduce_motion) else {
+            return target;
+        };
+        let duration = if on { ON_DURATION } else { OFF_DURATION };
+        let p = super::motion_curve(elapsed / duration);
+        if on { p } else { 1.0 - p }
+    }
+
+    /// Whether the stroke is still moving.
+    pub fn moving(on: bool, elapsed: Option<f64>, reduce_motion: bool) -> bool {
+        let duration = if on { ON_DURATION } else { OFF_DURATION };
+        !reduce_motion && elapsed.is_some_and(|e| e < duration)
     }
 }
 
@@ -579,6 +748,8 @@ pub mod uses {
     pub const MAC_X: f64 = 210.0;
     pub const GATE_X: f64 = 430.0;
     pub const COMMONS_X: f64 = 650.0;
+    /// Each caption's width, centred under its node (`label`).
+    pub const CAPTION_WIDTH: f64 = 160.0;
     pub const HUB: f64 = 52.0;
 
     pub fn period(path: Sharing) -> f64 {
@@ -1361,5 +1532,107 @@ mod tests {
         near!(join.center.0, 430.0 - 70.0);
         near!(join.center.1, 83.0);
         assert_eq!(tile_frame(Step::Welcome, "codex", &tools), None);
+    }
+
+    /// Welcome's lines rise as the Mac's `WelcomeScreenLayout.risen` does:
+    /// the probe's values at each of the Mac's delays.
+    #[test]
+    fn welcome_lines_rise_on_the_macs_clock() {
+        assert_eq!(welcome::WORD_DELAYS, [1.05, 1.14, 1.23]);
+        assert_eq!(welcome::BODY_DELAY, 1.45);
+        assert_eq!(welcome::BUTTON_DELAY, 1.8);
+        assert_eq!(welcome::RISE_DURATION, 0.76);
+        assert_eq!(welcome::RISE_LIFT, 18.0);
+        assert_eq!(welcome::word_delay(0), 1.05);
+        assert_eq!(welcome::word_delay(4), 1.23);
+        for (delay, elapsed, want) in [
+            (1.05, 0.0, 0.0),
+            (1.05, 1.1, 0.398391494),
+            (1.05, 1.3, 1.086348669),
+            (1.05, 1.6, 0.971639245),
+            (1.05, 1.9, 1.0),
+            (1.14, 1.1, 0.0),
+            (1.14, 1.3, 0.982258665),
+            (1.14, 1.6, 0.984463941),
+            (1.23, 1.3, 0.545358733),
+            (1.23, 1.6, 1.026087526),
+            (1.23, 1.9, 0.975321067),
+            (1.45, 1.3, 0.0),
+            (1.45, 1.6, 0.952889079),
+            (1.45, 1.9, 0.987532067),
+            (1.45, 2.1, 0.974260739),
+            (1.45, 2.3, 1.0),
+            (1.8, 1.6, 0.0),
+            (1.8, 1.9, 0.734658265),
+            (1.8, 2.1, 1.070255871),
+            (1.8, 2.3, 0.975837617),
+            (1.8, 2.56, 1.0),
+        ] {
+            near!(welcome::risen(elapsed, delay, false), want);
+        }
+        assert_eq!(welcome::risen(0.0, 1.8, true), 1.0);
+        assert_eq!(
+            welcome::words("Welcome to the app"),
+            ["Welcome ", "to ", "the ", "app"]
+        );
+        assert_eq!(welcome::words("One"), ["One"]);
+    }
+
+    /// The Customize card rises on SwiftUI's own `Spring(duration: 0.76,
+    /// bounce: 0.04)`, sampled by the probe.
+    #[test]
+    fn customize_opens_on_the_macs_spring() {
+        for (t, want) in [
+            (0.1, 0.204190556),
+            (0.2, 0.503962574),
+            (0.3, 0.726084709),
+            (0.45, 0.902599691),
+            (0.6, 0.969627858),
+            (0.9, 0.998025994),
+            (1.2, 0.999979151),
+        ] {
+            let (offset, opacity) = customize::slide(100.0, t);
+            near!(offset, 100.0 * (1.0 - want));
+            near!(opacity, want.min(1.0));
+        }
+        assert_eq!(customize::slide(100.0, 5.0), (0.0, 1.0));
+    }
+
+    /// The marker check's stroke, trimmed by length, ends where SwiftUI's
+    /// `trimmedPath` ends: the probe's points, within 0.15 of a point (the
+    /// largest gap, 0.14 at a 0.4 trim, is SwiftUI measuring its curves a
+    /// little differently; a parametric trim instead misses by 0.45).
+    #[test]
+    fn the_marker_check_trims_by_length_as_the_mac_does() {
+        for (t, want) in [
+            (0.1, (13.611979485, 29.820528030)),
+            (0.25, (17.477706909, 34.373382568)),
+            (0.4, (20.442266464, 30.669713974)),
+            (0.5, (22.585451126, 27.216352463)),
+            (0.75, (28.333211899, 19.231334686)),
+            (0.9, (32.239589691, 14.740882874)),
+            (1.0, (35.0, 12.0)),
+        ] {
+            let end = *marker_check::trimmed(t).last().unwrap();
+            assert!(
+                (end.0 - want.0).hypot(end.1 - want.1) < 0.15,
+                "{t}: {end:?} != {want:?}"
+            );
+        }
+        assert!(marker_check::trimmed(0.0).is_empty());
+        // Ticked draws on over 0.34 s along the token ease; unticked
+        // draws off over 0.16 s; reduced motion and no change are at rest.
+        near!(marker_check::trim(true, Some(0.0), false), 0.0);
+        near!(marker_check::trim(true, Some(0.085), false), 0.767284301);
+        near!(marker_check::trim(true, Some(0.34), false), 1.0);
+        near!(
+            marker_check::trim(false, Some(0.08), false),
+            1.0 - 0.946079462
+        );
+        assert_eq!(marker_check::trim(true, Some(0.0), true), 1.0);
+        assert_eq!(marker_check::trim(false, None, false), 0.0);
+        assert!(marker_check::moving(true, Some(0.2), false));
+        assert!(!marker_check::moving(true, Some(0.4), false));
+        assert!(!marker_check::moving(false, Some(0.1), true));
     }
 }

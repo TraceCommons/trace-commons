@@ -6,6 +6,7 @@
 use adw::prelude::*;
 use trace_commons_contributor::first_run_copy::first_run_copy;
 
+use super::lift::Lift;
 use super::onboarding::body_label;
 use crate::first_run::tools::Found;
 
@@ -33,21 +34,58 @@ pub(super) fn fill(template: &str, key: &str, value: &str) -> String {
 
 /// Welcome: the title, the line under it, Get started, and the agent
 /// prompt's action below it. No Back: nothing comes before it.
-pub(super) fn welcome(on_start: impl Fn() + 'static, on_agent: impl Fn() + 'static) -> gtk::Box {
+///
+/// Each line rises into place on Welcome's clock (`WelcomeScreen`): the
+/// title a word at a time, then the line under it, then the buttons. The
+/// lines and their delays come back for the stage to raise
+/// ([`super::first_run_stage_view::Stage::set_rises`]); the title is one
+/// heading to assistive tech, as the Mac's is.
+pub(super) fn welcome(
+    on_start: impl Fn() + 'static,
+    on_agent: impl Fn() + 'static,
+) -> (gtk::Box, Vec<(Lift, f64)>) {
+    use super::first_run_stage::welcome as layout;
     let copy = first_run_copy();
-    let root = page(copy.welcome.title);
-    root.append(&body_label(copy.welcome.body));
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    root.set_margin_start(32);
+    root.set_margin_end(32);
+    root.set_margin_top(24);
+    root.set_margin_bottom(24);
+    let mut rises = Vec::new();
+    let title = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .accessible_role(gtk::AccessibleRole::Heading)
+        .build();
+    title.update_property(&[gtk::accessible::Property::Label(copy.welcome.title)]);
+    for (index, word) in layout::words(copy.welcome.title).iter().enumerate() {
+        let label = gtk::Label::builder()
+            .label(word.as_str())
+            .accessible_role(gtk::AccessibleRole::Presentation)
+            .build();
+        label.add_css_class("tc-flow-title");
+        let lift = Lift::new(&label);
+        title.append(&lift);
+        rises.push((lift, layout::word_delay(index)));
+    }
+    root.append(&title);
+    let body = Lift::new(&body_label(copy.welcome.body));
+    root.append(&body);
+    rises.push((body, layout::BODY_DELAY));
     let start = gtk::Button::with_label(copy.welcome.start);
     start.add_css_class("suggested-action");
     start.add_css_class("pill");
-    start.set_halign(gtk::Align::Start);
     start.connect_clicked(move |_| on_start());
+    let start = Lift::new(&start);
+    start.set_halign(gtk::Align::Start);
     root.append(&start);
+    rises.push((start, layout::BUTTON_DELAY));
     let agent = gtk::Button::with_label(copy.agent_configuration.action);
-    agent.set_halign(gtk::Align::Start);
     agent.connect_clicked(move |_| on_agent());
+    let agent = Lift::new(&agent);
+    agent.set_halign(gtk::Align::Start);
     root.append(&agent);
-    root
+    rises.push((agent, layout::BUTTON_DELAY));
+    (root, rises)
 }
 
 /// The agent prompt, guidance only: opening or copying it changes nothing.
@@ -166,24 +204,75 @@ pub(super) fn column(child: &impl IsA<gtk::Widget>) -> adw::Clamp {
 
 /// The Uses flow's captions: this machine, the review gate and the
 /// commons, under the stage's flow (`first_run_stage`), which draws the
-/// line, the gate, the orb and the N. Thirds of the column, so each sits
-/// under its node as the Mac's sit under theirs. The gate reads the core's "You review" on Ask and the mode
-/// table's Automatic on Automatic. The Mac's caption under this machine is
-/// "This Mac", which no shared word replaces yet, so it has none here.
-pub(super) fn uses_flow(gate: &str) -> gtk::Box {
+/// line, the gate, the orb and the N. Each is centred under its node, as
+/// the Mac sets each label 160 points wide at x 210, 430 and 650 of its
+/// canvas (`UsesFlow`), at the stage's scale (`scale`). The canvas is
+/// centred on the page, as the stage centres it on the graphic's slot; the
+/// captions take no width of their own, so the outer two may reach past
+/// the column as the Mac's reach past its card. The gate reads the core's
+/// "You review" on Ask and the mode table's Automatic on Automatic.
+pub(super) fn uses_flow(
+    gate: &str,
+    scale: impl Fn() -> f64 + 'static,
+) -> (gtk::Overlay, std::rc::Rc<dyn Fn()>) {
+    use super::first_run_stage::{CANVAS, uses};
     let copy = first_run_copy();
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let captions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    captions.set_homogeneous(true);
-    captions.set_hexpand(true);
+    let root = gtk::Overlay::new();
+    let room = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_child(Some(&room));
+    let mut labels = Vec::new();
     // The Mac's "This Mac", for any computer (owner, 2026-11-17).
-    for text in [copy.uses.this_computer, gate, copy.uses.the_commons] {
-        let label = gtk::Label::new(Some(text));
+    for (text, x) in [
+        (copy.uses.this_computer, uses::MAC_X),
+        (gate, uses::GATE_X),
+        (copy.uses.the_commons, uses::COMMONS_X),
+    ] {
+        let label = gtk::Label::builder()
+            .label(text)
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .build();
         label.add_css_class("tc-meta");
-        captions.append(&label);
+        root.add_overlay(&label);
+        labels.push((label, x));
     }
-    root.append(&captions);
-    root
+    let width = move |scale: f64| (uses::CAPTION_WIDTH * scale).round().max(1.0) as i32;
+    let scale = std::rc::Rc::new(scale);
+    // The room under the captions: as tall as the tallest at its width,
+    // set again whenever the scale changes (`relayout`).
+    let relayout: std::rc::Rc<dyn Fn()> = {
+        let labels: Vec<gtk::Label> = labels.iter().map(|(l, _)| l.clone()).collect();
+        let (scale, room) = (scale.clone(), room.clone());
+        std::rc::Rc::new(move || {
+            let w = width(scale());
+            let tall = labels
+                .iter()
+                .map(|l| l.measure(gtk::Orientation::Vertical, w).1)
+                .max()
+                .unwrap_or(0);
+            if room.height_request() != tall {
+                room.set_height_request(tall);
+            }
+            room.queue_resize();
+        })
+    };
+    relayout();
+    root.connect_get_child_position(move |root, child| {
+        let (label, x) = labels
+            .iter()
+            .find(|(l, _)| l.upcast_ref::<gtk::Widget>() == child)?;
+        let s = scale();
+        let w = width(s);
+        let h = label.measure(gtk::Orientation::Vertical, w).1;
+        let centre = f64::from(root.width()) / 2.0 + (x - CANVAS.0 / 2.0) * s;
+        Some(gtk::gdk::Rectangle::new(
+            (centre - f64::from(w) / 2.0).round() as i32,
+            0,
+            w,
+            h,
+        ))
+    });
+    (root, relayout)
 }
 
 /// Traces: the watched tools' traces counted, and the lines under the
@@ -301,8 +390,16 @@ mod mounted_tests {
         let context = init();
         let _owner = context.acquire().unwrap();
         let copy = first_run_copy();
-        let root = welcome(|| {}, || {});
+        let (root, rises) = welcome(|| {}, || {});
         let labels = buttons(&root);
+        // Every word of the title, the line under it and both buttons rise.
+        let words = super::super::first_run_stage::welcome::words(copy.welcome.title);
+        assert_eq!(rises.len(), words.len() + 3);
+        let delays: Vec<f64> = rises.iter().map(|(_, d)| *d).collect();
+        assert_eq!(&delays[..3], &[1.05, 1.14, 1.23][..words.len().min(3)]);
+        assert_eq!(&delays[words.len()..], &[1.45, 1.8, 1.8]);
+        let heading = root.first_child().unwrap();
+        assert_eq!(heading.accessible_role(), gtk::AccessibleRole::Heading);
         assert!(labels.iter().any(|l| l == copy.welcome.start));
         assert!(labels.iter().any(|l| l == copy.agent_configuration.action));
         assert!(!labels.iter().any(|l| l == copy.frame.continue_button));
@@ -377,7 +474,7 @@ mod mounted_tests {
         let context = init();
         let _owner = context.acquire().unwrap();
         let copy = first_run_copy();
-        let flow = uses_flow(copy.uses.you_review);
+        let (flow, _) = uses_flow(copy.uses.you_review, || 1.0);
         let labels: Vec<String> = descendants(flow.upcast_ref())
             .into_iter()
             .filter_map(|w| w.downcast::<gtk::Label>().ok())
@@ -387,5 +484,139 @@ mod mounted_tests {
         assert!(labels.iter().any(|l| l == copy.uses.the_commons));
         assert!(labels.iter().any(|l| l == copy.uses.this_computer));
         assert!(!labels.iter().any(|l| l.contains("Mac")));
+    }
+
+    fn settle(context: &glib::MainContext, millis: u64) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+        while std::time::Instant::now() < end {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Each Uses caption is centred under its node, at x 210, 430 and 650
+    /// of the canvas centred on the page, at two scales.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_uses_captions_sit_under_their_nodes() {
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let copy = first_run_copy();
+        for (width, scale) in [(900, 1.0), (680, 680.0 / 860.0)] {
+            let (flow, relayout) = uses_flow(copy.uses.you_review, move || scale);
+            let window = gtk::Window::builder().default_width(width).build();
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            page.append(&flow);
+            window.set_child(Some(&page));
+            window.present();
+            relayout();
+            settle(&context, 200);
+            let centre = f64::from(flow.width()) / 2.0;
+            let labels: Vec<gtk::Label> = descendants(flow.upcast_ref())
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::Label>().ok())
+                .collect();
+            for (text, x) in [
+                (copy.uses.this_computer, 210.0),
+                (copy.uses.you_review, 430.0),
+                (copy.uses.the_commons, 650.0),
+            ] {
+                let label = labels.iter().find(|l| l.text() == text).unwrap();
+                let b = label.compute_bounds(&flow).unwrap();
+                let got = f64::from(b.x()) + f64::from(b.width()) / 2.0;
+                let want = centre + (x - 430.0) * scale;
+                assert!(
+                    (got - want).abs() <= 1.0,
+                    "{text} at {width}: {got} != {want}"
+                );
+                assert_eq!(b.width().round() as i32, (160.0 * scale).round() as i32);
+            }
+            assert!(flow.height() > 0, "the captions take their room");
+            window.destroy();
+        }
+    }
+
+    /// The marker check is the real check button, drawn over: its stroke
+    /// ticks only while it moves and only while shown; with animations off
+    /// it does not tick at all.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_marker_check_ticks_only_while_its_stroke_moves() {
+        use super::super::first_run_marker_check::MarkerCheck;
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let mark = MarkerCheck::new(gtk::CheckButton::with_label("x"), None);
+        let window = gtk::Window::new();
+        window.set_child(Some(&mark.root));
+        window.present();
+        settle(&context, 100);
+        assert!(!mark.ticking(), "at rest");
+        assert!(mark.check.has_css_class("tc-marker-check"));
+        mark.check.set_active(true);
+        assert!(mark.ticking(), "drawing on");
+        settle(&context, 500);
+        assert!(!mark.ticking(), "stops once drawn");
+        mark.check.set_active(false);
+        assert!(mark.ticking());
+        window.set_visible(false);
+        settle(&context, 50);
+        assert!(!mark.ticking(), "no tick while hidden");
+        window.present();
+        settings.set_gtk_enable_animations(false);
+        settle(&context, 50);
+        mark.check.set_active(true);
+        assert!(!mark.ticking(), "no tick with animations off");
+        settings.set_gtk_enable_animations(previous);
+        window.destroy();
+    }
+
+    /// The Customize card rises from where Uses' card was: drawn there at
+    /// first, then home, faded in; nothing moves with animations off.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_customize_card_rises_to_its_place() {
+        use super::super::lift::Lift;
+        let context = init();
+        let _owner = context.acquire().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let above = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        above.set_size_request(-1, 200);
+        page.append(&above);
+        let lift = Lift::new(&gtk::Label::new(Some("x")));
+        page.append(&lift);
+        let window = gtk::Window::builder()
+            .default_width(400)
+            .default_height(400)
+            .build();
+        window.set_child(Some(&page));
+        window.present();
+        settle(&context, 100);
+        // The card was 200 points lower; what was above it gives way.
+        above.set_visible(false);
+        lift.slide_from(&page, 200.0);
+        settle(&context, 30);
+        assert!(
+            lift.offset() > 100.0,
+            "starts where it was: {}",
+            lift.offset()
+        );
+        assert!(lift.opacity() < 0.5);
+        settle(&context, 1600);
+        assert!(!lift.sliding());
+        assert_eq!(lift.offset(), 0.0);
+        assert_eq!(lift.opacity(), 1.0);
+        settings.set_gtk_enable_animations(false);
+        lift.slide_from(&page, 200.0);
+        assert!(!lift.sliding());
+        assert_eq!(lift.offset(), 0.0);
+        settings.set_gtk_enable_animations(previous);
+        window.destroy();
     }
 }
