@@ -1915,7 +1915,10 @@ pub(crate) fn undo_reply_confirmed(
 ) -> bool {
     let Ok(value) = reply else { return false };
     if undo.folder.is_some() {
-        value.get("canceled").and_then(serde_json::Value::as_u64).is_some()
+        value
+            .get("canceled")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
     } else {
         value.as_object().is_some_and(|object| {
             object
@@ -2136,10 +2139,18 @@ mod tests {
         let trace = pending_undo(&["a"], None);
         assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 2}))));
         assert!(undo_reply_confirmed(&folder, &Ok(json!({"canceled": 0}))));
-        for bad in [json!({}), json!({"canceled": "2"}), json!({"canceled": -1}), json!(null)] {
+        for bad in [
+            json!({}),
+            json!({"canceled": "2"}),
+            json!({"canceled": -1}),
+            json!(null),
+        ] {
             assert!(!undo_reply_confirmed(&folder, &Ok(bad.clone())), "{bad}");
         }
-        assert!(!undo_reply_confirmed(&folder, &Err("not-cancelable".into())));
+        assert!(!undo_reply_confirmed(
+            &folder,
+            &Err("not-cancelable".into())
+        ));
         assert!(undo_reply_confirmed(&trace, &Ok(json!({"ok": true}))));
         assert!(undo_reply_confirmed(&trace, &Ok(json!({}))));
         assert!(!undo_reply_confirmed(&trace, &Ok(json!(null))));
@@ -2151,7 +2162,10 @@ mod tests {
     #[test]
     fn a_refused_undo_says_the_shared_line() {
         use trace_commons_contributor::preview_copy as words;
-        assert_eq!(undo_refusal_line("not-cancelable"), words::MONITOR_REQUEST_FAILED);
+        assert_eq!(
+            undo_refusal_line("not-cancelable"),
+            words::MONITOR_REQUEST_FAILED
+        );
         assert_eq!(
             undo_refusal_line("witness-review-required"),
             words::MONITOR_NEEDS_PRIVACY_CHECK

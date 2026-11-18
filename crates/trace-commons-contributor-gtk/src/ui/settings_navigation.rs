@@ -301,7 +301,9 @@ mod tests {
         );
         assert_eq!(
             Section::ALL.map(Section::starts_group),
-            [false, true, false, true, false, false, false, true, true, true]
+            [
+                false, true, false, true, false, false, false, true, true, true
+            ]
         );
     }
 

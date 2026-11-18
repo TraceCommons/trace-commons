@@ -67,7 +67,10 @@ fn mounted_sharing_ask_each_time_withdraws_the_grant() {
     );
     let card = &fixture.app.settings.sharing;
     assert!(!card.ask.is_sensitive(), "pressable before the daemon said");
-    grant_answered(&fixture, serde_json::json!({"granted": true, "include_existing": true}));
+    grant_answered(
+        &fixture,
+        serde_json::json!({"granted": true, "include_existing": true}),
+    );
     assert!(card.automatic.is_active());
     card.ask.set_active(true);
     fixture.drive_until(|| !fixture.calls_to("withdraw_automatic_grant").is_empty());
@@ -75,7 +78,10 @@ fn mounted_sharing_ask_each_time_withdraws_the_grant() {
         fixture.calls_to("withdraw_automatic_grant")[0].1,
         serde_json::json!({"return_folders_to_ask": true})
     );
-    assert!(card.automatic.is_active(), "shown changed before the daemon confirmed");
+    assert!(
+        card.automatic.is_active(),
+        "shown changed before the daemon confirmed"
+    );
     fixture.answer("withdraw_automatic_grant", Err("unavailable".into()));
     assert!(card.refusal.is_visible());
     assert_eq!(
@@ -111,7 +117,11 @@ fn mounted_sharing_automatic_asks_about_ask_folders_first() {
     );
     dialog.response("cancel");
     fixture.settle();
-    assert!(fixture.calls_to("grant_automatic_including_existing").is_empty());
+    assert!(
+        fixture
+            .calls_to("grant_automatic_including_existing")
+            .is_empty()
+    );
     assert!(card.ask.is_active());
 }
 
@@ -127,7 +137,11 @@ fn mounted_sharing_automatic_refuses_on_an_unreadable_configuration() {
     fixture.settle();
     assert!(dialogs().is_empty(), "a disclosure drawn on a guess");
     assert!(card.refusal.is_visible());
-    assert!(fixture.calls_to("grant_automatic_including_existing").is_empty());
+    assert!(
+        fixture
+            .calls_to("grant_automatic_including_existing")
+            .is_empty()
+    );
 }
 
 /// Uses after setup: the write starts from the daemon's own list, and a

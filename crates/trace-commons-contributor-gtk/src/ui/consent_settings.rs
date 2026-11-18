@@ -74,7 +74,10 @@ pub(crate) fn ask_each_time_confirmed(reply: &Result<Value, String>) -> bool {
 /// scope, its limit, and that nobody reviews. `None` when the core named no
 /// scrub wording or a line is empty, so the sheet is not drawn on a guess.
 pub(crate) fn grant_lines(copy: &AutomaticGrantCopy) -> Option<Vec<&'static str>> {
-    let scrub = copy.patterns_only.as_ref().or(copy.model_scrubbed.as_ref())?;
+    let scrub = copy
+        .patterns_only
+        .as_ref()
+        .or(copy.model_scrubbed.as_ref())?;
     let lines = vec![scrub.scope, scrub.limit, copy.no_review];
     (!lines.iter().any(|l| l.is_empty()) && !copy.summary.is_empty()).then_some(lines)
 }
@@ -88,7 +91,12 @@ pub(crate) fn next_scopes(
     granted: bool,
 ) -> BTreeSet<String> {
     let mut scopes: BTreeSet<String> = reported.iter().cloned().collect();
-    scopes.extend(options.iter().filter(|o| o.always_on).map(|o| o.name.clone()));
+    scopes.extend(
+        options
+            .iter()
+            .filter(|o| o.always_on)
+            .map(|o| o.name.clone()),
+    );
     if granted {
         scopes.insert(toggling.name.clone());
     } else if !toggling.always_on {
@@ -133,7 +141,6 @@ pub(crate) fn scopes_confirmed(reply: &Result<Value, String>) -> Option<Vec<Stri
 pub(crate) fn consent_refusal_line() -> &'static str {
     trace_commons_contributor::source_copy::source_settings_copy().consent_save_failed
 }
-
 
 // --- The core's copy for a configuration ---------------------------------
 
@@ -194,7 +201,11 @@ impl SharingCard {
         if !uses.settings_sharing_note.is_empty() {
             style::append_caveat(&root, uses.settings_sharing_note);
         }
-        let refusal = gtk::Label::builder().wrap(true).xalign(0.0).visible(false).build();
+        let refusal = gtk::Label::builder()
+            .wrap(true)
+            .xalign(0.0)
+            .visible(false)
+            .build();
         refusal.add_css_class("tc-refused");
         root.append(&refusal);
         let card = Self {
@@ -306,12 +317,10 @@ fn choose(app: &Rc<App>, path: SharingPath) {
                 app.refresh();
             });
         }
-        SharingPath::Automatic => {
-            match first_step(asking_folders(&card.projects.borrow())) {
-                FirstStep::KeepAsks(count) => keep_asks_question(app, count),
-                FirstStep::Disclose { keep_folder_asks } => disclose_scrub(app, keep_folder_asks),
-            }
-        }
+        SharingPath::Automatic => match first_step(asking_folders(&card.projects.borrow())) {
+            FirstStep::KeepAsks(count) => keep_asks_question(app, count),
+            FirstStep::Disclose { keep_folder_asks } => disclose_scrub(app, keep_folder_asks),
+        },
     }
 }
 
@@ -335,7 +344,12 @@ fn keep_asks_question(app: &Rc<App>, count: usize) {
         copy.uses.keep_asks_title
     };
     let dialog = adw::MessageDialog::new(Some(&app.window), Some(title), None);
-    dialog.set_body(&copy.uses.keep_asks_body.replace("{count}", &count.to_string()));
+    dialog.set_body(
+        &copy
+            .uses
+            .keep_asks_body
+            .replace("{count}", &count.to_string()),
+    );
     dialog.add_responses(&[
         ("cancel", copy.frame.cancel),
         ("all", copy.uses.keep_asks_all),
@@ -361,7 +375,10 @@ fn sheet(app: &Rc<App>, title: &str, body: gtk::Box, on_continue: impl Fn() + 's
     let copy = first_run_copy();
     let dialog = adw::MessageDialog::new(Some(&app.window), Some(title), None);
     dialog.set_extra_child(Some(&body));
-    dialog.add_responses(&[("cancel", copy.frame.cancel), ("continue", copy.frame.continue_button)]);
+    dialog.add_responses(&[
+        ("cancel", copy.frame.cancel),
+        ("continue", copy.frame.continue_button),
+    ]);
     dialog.set_close_response("cancel");
     dialog.set_default_response(None);
     dialog.set_response_appearance("continue", adw::ResponseAppearance::Suggested);
@@ -400,26 +417,30 @@ fn disclose_scrub(app: &Rc<App>, keep_folder_asks: bool) {
 }
 
 fn disclose_witness(app: &Rc<App>, keep_folder_asks: bool) {
-    app.call("route_disclosure", serde_json::json!({}), move |app, result| {
-        let Some(facts) = result.ok().filter(|v| {
-            trace_commons_contributor::consent_copy::route_disclosure_for_wire(v).is_some()
-        }) else {
-            refused(app);
-            return;
-        };
-        let panel = crate::disclosure::panel(Some(&facts));
-        let body = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        super::fill_disclosure_rows(&body, &panel.rows);
-        let witness = facts["witness"]["signing_address"]
-            .as_str()
-            .map(str::to_owned);
-        let weak = Rc::downgrade(app);
-        sheet(app, &panel.title, body, move || {
-            if let Some(app) = weak.upgrade() {
-                grant(&app, witness.clone(), keep_folder_asks);
-            }
-        });
-    });
+    app.call(
+        "route_disclosure",
+        serde_json::json!({}),
+        move |app, result| {
+            let Some(facts) = result.ok().filter(|v| {
+                trace_commons_contributor::consent_copy::route_disclosure_for_wire(v).is_some()
+            }) else {
+                refused(app);
+                return;
+            };
+            let panel = crate::disclosure::panel(Some(&facts));
+            let body = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+            super::fill_disclosure_rows(&body, &panel.rows);
+            let witness = facts["witness"]["signing_address"]
+                .as_str()
+                .map(str::to_owned);
+            let weak = Rc::downgrade(app);
+            sheet(app, &panel.title, body, move || {
+                if let Some(app) = weak.upgrade() {
+                    grant(&app, witness.clone(), keep_folder_asks);
+                }
+            });
+        },
+    );
 }
 
 /// Both disclosures seen: the core decides whether the grant may be asked
@@ -493,13 +514,19 @@ impl UsesCard {
         head.append(&heading);
         let refresh = gtk::Button::with_label(shell.settings_refresh);
         refresh.set_tooltip_text(Some(shell.settings_refresh_uses));
-        refresh.update_property(&[gtk::accessible::Property::Label(shell.settings_refresh_uses)]);
+        refresh.update_property(&[gtk::accessible::Property::Label(
+            shell.settings_refresh_uses,
+        )]);
         head.append(&refresh);
         root.append(&head);
         style::append_caveat(&root, words.applies_from_now);
         let rows = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         root.append(&rows);
-        let refusal = gtk::Label::builder().wrap(true).xalign(0.0).visible(false).build();
+        let refusal = gtk::Label::builder()
+            .wrap(true)
+            .xalign(0.0)
+            .visible(false)
+            .build();
         refusal.add_css_class("tc-refused");
         root.append(&refusal);
         Self {
@@ -527,7 +554,11 @@ pub(crate) fn render_uses(app: &Rc<App>) {
     while let Some(child) = card.rows.first_child() {
         card.rows.remove(&child);
     }
-    let (logged_in, granted) = card.reported.borrow().clone().unwrap_or((false, Vec::new()));
+    let (logged_in, granted) = card
+        .reported
+        .borrow()
+        .clone()
+        .unwrap_or((false, Vec::new()));
     let unavailable = !logged_in || card.reported.borrow().is_none();
     let options = card.options.borrow().clone();
     for scope in options.iter().filter(|o| o.always_on) {
@@ -579,23 +610,27 @@ fn toggle_scope(app: &Rc<App>, scope: &ConsentScope, granted: bool) {
     card.busy.set(true);
     // The rows show the daemon's list, not the click, until it answers.
     glib_idle_render(app);
-    app.call("set_consent_scopes", set_scopes_params(&scopes), |app, result| {
-        let card = &app.settings.uses;
-        match scopes_confirmed(&result) {
-            Some(confirmed) => {
-                if let Some((_, list)) = card.reported.borrow_mut().as_mut() {
-                    *list = confirmed;
+    app.call(
+        "set_consent_scopes",
+        set_scopes_params(&scopes),
+        |app, result| {
+            let card = &app.settings.uses;
+            match scopes_confirmed(&result) {
+                Some(confirmed) => {
+                    if let Some((_, list)) = card.reported.borrow_mut().as_mut() {
+                        *list = confirmed;
+                    }
+                }
+                None => {
+                    card.refusal.set_text(consent_refusal_line());
+                    card.refusal.set_visible(true);
                 }
             }
-            None => {
-                card.refusal.set_text(consent_refusal_line());
-                card.refusal.set_visible(true);
-            }
-        }
-        card.busy.set(false);
-        render_uses(app);
-        app.refresh();
-    });
+            card.busy.set(false);
+            render_uses(app);
+            app.refresh();
+        },
+    );
 }
 
 /// Re-render the rows outside the toggle handler that asked, so the check
@@ -664,14 +699,22 @@ mod tests {
     #[test]
     fn automatic_asks_about_ask_folders_first() {
         assert_eq!(first_step(3), FirstStep::KeepAsks(3));
-        assert_eq!(first_step(0), FirstStep::Disclose { keep_folder_asks: true });
+        assert_eq!(
+            first_step(0),
+            FirstStep::Disclose {
+                keep_folder_asks: true
+            }
+        );
     }
 
     #[test]
     fn ask_each_time_is_the_macs_withdrawal() {
         assert_eq!(
             crate::first_run::Action::SetAskEachTime.ipc(),
-            Some(("withdraw_automatic_grant", json!({"return_folders_to_ask": true})))
+            Some((
+                "withdraw_automatic_grant",
+                json!({"return_folders_to_ask": true})
+            ))
         );
         assert!(ask_each_time_confirmed(&Ok(json!({"withdrawn": true}))));
         assert!(ask_each_time_confirmed(&Ok(json!({"withdrawn": false}))));
@@ -700,7 +743,11 @@ mod tests {
     #[test]
     fn the_scrub_sheet_says_the_macs_three_lines() {
         let copy = trace_commons_contributor::consent_copy::automatic_contribution_copy(None);
-        let scrub = copy.patterns_only.clone().or(copy.model_scrubbed.clone()).unwrap();
+        let scrub = copy
+            .patterns_only
+            .clone()
+            .or(copy.model_scrubbed.clone())
+            .unwrap();
         assert_eq!(
             grant_lines(&copy),
             Some(vec![scrub.scope, scrub.limit, copy.no_review])
@@ -730,11 +777,17 @@ mod tests {
 
     #[test]
     fn a_scope_write_starts_from_the_daemons_list() {
-        let options = [scope("contribution", true), scope("training", false), scope("eval", false)];
+        let options = [
+            scope("contribution", true),
+            scope("training", false),
+            scope("eval", false),
+        ];
         let reported = vec!["eval".to_string()];
         assert_eq!(
             next_scopes(&reported, &options, &options[1], true),
-            ["contribution", "eval", "training"].map(String::from).into()
+            ["contribution", "eval", "training"]
+                .map(String::from)
+                .into()
         );
         assert_eq!(
             next_scopes(&reported, &options, &options[2], false),
@@ -772,7 +825,11 @@ mod tests {
             scopes_confirmed(&Ok(json!({"consent_scopes": ["a", "b"]}))),
             Some(vec!["a".to_string(), "b".to_string()])
         );
-        for bad in [json!({}), json!({"consent_scopes": "a"}), json!({"consent_scopes": [1]})] {
+        for bad in [
+            json!({}),
+            json!({"consent_scopes": "a"}),
+            json!({"consent_scopes": [1]}),
+        ] {
             assert_eq!(scopes_confirmed(&Ok(bad)), None);
         }
         assert_eq!(scopes_confirmed(&Err("x".into())), None);

@@ -193,7 +193,14 @@ else
     ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
-    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
+    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
+    ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
+    ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
+    ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
+    ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

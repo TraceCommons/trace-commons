@@ -31,10 +31,16 @@ fn mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon() {
     let calls = fixture.calls_to("cancel");
     assert_eq!(calls.len(), 1, "one cancel for the whole folder");
     assert_eq!(calls[0].1, json!({"project_id": "proj-1"}));
-    assert!(fixture.app.undo.borrow().is_some(), "cleared before the reply");
+    assert!(
+        fixture.app.undo.borrow().is_some(),
+        "cleared before the reply"
+    );
 
     fixture.answer("cancel", Err("not-cancelable".into()));
-    assert!(fixture.app.undo.borrow().is_some(), "a refusal cleared the card");
+    assert!(
+        fixture.app.undo.borrow().is_some(),
+        "a refusal cleared the card"
+    );
 
     fixture.app.queue.undo_undo.emit_clicked();
     fixture.drive_until(|| fixture.calls_to("cancel").len() == 2);
@@ -51,7 +57,10 @@ fn mounted_trace_undo_cancels_by_entry_id() {
     offer(&fixture, None);
     fixture.app.queue.undo_undo.emit_clicked();
     fixture.drive_until(|| !fixture.calls_to("cancel").is_empty());
-    assert_eq!(fixture.calls_to("cancel")[0].1, json!({"entry_id": "entry-a"}));
+    assert_eq!(
+        fixture.calls_to("cancel")[0].1,
+        json!({"entry_id": "entry-a"})
+    );
     fixture.answer("cancel", Ok(json!(null)));
     assert!(fixture.app.undo.borrow().is_some());
     fixture.app.queue.undo_undo.emit_clicked();

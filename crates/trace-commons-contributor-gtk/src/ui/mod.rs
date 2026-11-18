@@ -8,8 +8,8 @@
 pub(crate) mod account_change;
 pub mod balance;
 pub mod community_brand;
-pub mod credential;
 pub(crate) mod consent_settings;
+pub mod credential;
 mod css_contract;
 mod first_run;
 mod first_run_terms;
