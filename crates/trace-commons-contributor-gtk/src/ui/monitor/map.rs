@@ -42,11 +42,14 @@
 //! - The Mac's other map style (the laptop and the library orb, a Settings
 //!   switch) is not drawn: this shell has no such switch.
 //! - A grown coin's glow is a soft radial halo; cairo has no blur filter.
-//! - The Private AI view is drawn empty: its scene is the Private AI slice.
 //! - The legend's memory item and the coins' lock say "this computer"
 //!   (`legend_memory_computer`) where the Mac's say "this Mac".
 //! - The core's line when the map is not current, and the other devices
 //!   on the account, are not drawn: GTK reads neither yet.
+//!
+//! The Private AI view is a second canvas drawing `Scene::private_ai` from
+//! `harness_list`, `tool_destinations` and `status`, with no legend, zoom
+//! or spinner, as the Mac's `PrivateAIFlowMap` does.
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -57,8 +60,8 @@ use gtk::subclass::prelude::*;
 use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
 use super::map_scene::{
-    self, ArcStyle, CommonsGate, Contributions, Lamp, MapGeometry, NodeKind, Point, Scene,
-    ScreenState, Size, ToolStack,
+    self, ArcStyle, CommonsGate, Contributions, HarnessRow, Lamp, MapGeometry, NodeKind, Point,
+    Scene, ScreenState, Size, ToolStack,
 };
 use super::map_transfers;
 use super::station;
@@ -67,7 +70,9 @@ use super::tool_art::{self, Tint};
 use super::traces_tree::{ProjectMode, SourceKind, TracesTree};
 use super::transfer_card;
 use super::transfers::{self, Action, Feed, MapTransfer, Player, Run};
-use crate::model::{GateStatus, HistoryRecord, Project, QueueEntry, Settings, ToolDestinations};
+use crate::model::{
+    GateStatus, HarnessList, HistoryRecord, Project, QueueEntry, Settings, ToolDestinations,
+};
 use crate::ui::App;
 
 /// What the scene is built from, apart from the pane's size.
@@ -80,6 +85,9 @@ pub struct SceneInputs {
     pub selected_tool: Option<String>,
     /// The binoculars' tool: the camera centres on it.
     pub focus_tool: Option<String>,
+    /// Set, the canvas draws the Private AI map from these instead of the
+    /// Traces map.
+    pub private_ai: Option<PrivateAiInputs>,
 }
 
 impl Default for SceneInputs {
@@ -90,6 +98,54 @@ impl Default for SceneInputs {
             contributed: Contributions::unread(),
             selected_tool: None,
             focus_tool: None,
+            private_ai: None,
+        }
+    }
+}
+
+/// What the Private AI map is built from (`PrivateAIFlowMap`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PrivateAiInputs {
+    /// `harness_list`'s rows; `None` while unread or after a failed read.
+    pub harnesses: Option<Vec<HarnessRow>>,
+    /// The core's Private AI state label (`map_scene::private_ai_label`).
+    pub private_ai: Option<String>,
+    /// `tool_destinations`, for which tools are installed and the managed
+    /// routes; `None` after a failed read.
+    pub destinations: Option<ToolDestinations>,
+}
+
+impl SceneInputs {
+    /// The Private AI map's inputs. The Mac draws that map in the default
+    /// `ready` state: the Traces map's gate never holds its arcs still.
+    pub fn private_ai(inputs: PrivateAiInputs) -> Self {
+        Self {
+            gate: CommonsGate::with_state(ScreenState::Ready),
+            private_ai: Some(inputs),
+            ..Self::default()
+        }
+    }
+
+    /// The scene these inputs draw, laid out in `space`.
+    pub fn scene(&self, revealed: &BTreeMap<String, usize>, space: Size) -> Scene {
+        match self.private_ai.as_ref() {
+            Some(private_ai) => Scene::private_ai(
+                private_ai.harnesses.as_deref(),
+                private_ai.private_ai.as_deref(),
+                map_scene::row_sentence,
+                |row| map_scene::harness_state(&row.state),
+                private_ai.destinations.as_ref(),
+                space,
+            )
+            .adding_managed_routes(private_ai.destinations.as_ref()),
+            None => Scene::traces(
+                &self.tree,
+                &self.gate,
+                &self.contributed,
+                self.selected_tool.as_deref(),
+                revealed,
+                space,
+            ),
         }
     }
 }
@@ -485,14 +541,7 @@ mod imp {
             let (width, height) = self.size.get();
             let space = Scene::space_for(Size::new(f64::from(width), f64::from(height)));
             let inputs = self.inputs.borrow();
-            let scene = Scene::traces(
-                &inputs.tree,
-                &inputs.gate,
-                &inputs.contributed,
-                inputs.selected_tool.as_deref(),
-                &self.revealed.borrow(),
-                space,
-            );
+            let scene = inputs.scene(&self.revealed.borrow(), space);
             // The lock's legend item goes with the coins that carry it, as
             // the Mac draws `legend_memory` only with its pile. Here, where
             // every layout passes, not only a change of inputs.
@@ -1591,23 +1640,26 @@ fn draw_mark(
     source(cr, &palette.map.tint(art.tint), alpha);
     match art.logo {
         Some(logo) => logo.fill(cr, (centre.x - side / 2.0, centre.y - side / 2.0), side),
-        None => {
-            cr.select_font_face(
-                "monospace",
-                gtk::cairo::FontSlant::Normal,
-                gtk::cairo::FontWeight::Bold,
-            );
-            cr.set_font_size(size);
-            if let Ok(extents) = cr.text_extents(art.initials) {
-                cr.move_to(
-                    centre.x - extents.x_bearing() - extents.width() / 2.0,
-                    centre.y - extents.y_bearing() - extents.height() / 2.0,
-                );
-                let _ = cr.show_text(art.initials);
-            }
-            cr.new_path();
-        }
+        None => centred_text(cr, art.initials, centre, size, "monospace"),
     }
+}
+
+/// A short bold mark centred on `centre`, in the current source.
+fn centred_text(cr: &gtk::cairo::Context, text: &str, centre: Point, size: f64, family: &str) {
+    cr.select_font_face(
+        family,
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(size);
+    if let Ok(extents) = cr.text_extents(text) {
+        cr.move_to(
+            centre.x - extents.x_bearing() - extents.width() / 2.0,
+            centre.y - extents.y_bearing() - extents.height() / 2.0,
+        );
+        let _ = cr.show_text(text);
+    }
+    cr.new_path();
 }
 
 fn draw_node(
@@ -1685,8 +1737,16 @@ fn draw_node(
             circle(cr, centre, radius);
             source(cr, &palette.ink, 0.12 * dim);
             let _ = cr.fill();
-            if let Some(kind) = tool {
-                draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim);
+            match (tool, map_scene::harness_initials(node)) {
+                (Some(kind), _) => draw_mark(cr, kind, centre, 16.0 * s, 10.0 * s, palette, dim),
+                // A tool with no artwork carries two letters of its name in
+                // the primary ink (`GlassTool.other`), at the map's micro
+                // type.
+                (None, Some(letters)) => {
+                    source(cr, &palette.map.text_primary, dim);
+                    centred_text(cr, &letters, centre, 10.0 * s, "sans-serif");
+                }
+                (None, None) => {}
             }
         }
         NodeKind::Device => {
@@ -2035,6 +2095,9 @@ struct Reads {
     /// The same for `list_projects`: the Mac's Traces store fails its whole
     /// load when either read fails, since a folder's rule comes from it.
     projects: Option<bool>,
+    /// `harness_list`'s rows for the Private AI map; `None` before the
+    /// first answer and after a failed read.
+    harnesses: Option<Vec<HarnessRow>>,
 }
 
 /// The window's transfer player, its feed, and the cards at the map's
@@ -2171,6 +2234,8 @@ impl Transfers {
 pub struct TraceMap {
     pub root: gtk::Box,
     pub canvas: MapCanvas,
+    /// The Private AI view's map.
+    pub private_canvas: MapCanvas,
     /// The Traces / Private AI switch.
     pub traces_view: gtk::ToggleButton,
     pub private_view: gtk::ToggleButton,
@@ -2203,10 +2268,13 @@ impl TraceMap {
         let stage = gtk::Stack::new();
         stage.set_vexpand(true);
         stage.add_named(&canvas, Some("traces"));
-        // The Private AI view is a later slice: an empty field, as the Mac
-        // draws one with no scene.
-        let empty = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        stage.add_named(&empty, Some("private-ai"));
+        // The Private AI view: its own map, named as the switch names it.
+        // It draws nothing while the tool list is unread, as the Mac's.
+        let destination =
+            trace_commons_contributor::private_inference_copy::private_inference_copy().destination;
+        let private_canvas = MapCanvas::new();
+        private_canvas.update_property(&[gtk::accessible::Property::Label(destination)]);
+        stage.add_named(&private_canvas, Some("private-ai"));
         overlay.set_child(Some(&stage));
 
         // Before the first reply the map is empty only because it is
@@ -2230,9 +2298,7 @@ impl TraceMap {
             words.shell.map_views_label,
         )]);
         let traces_view = gtk::ToggleButton::with_label(words.shell.tab_traces);
-        let private_view = gtk::ToggleButton::with_label(
-            trace_commons_contributor::private_inference_copy::private_inference_copy().destination,
-        );
+        let private_view = gtk::ToggleButton::with_label(destination);
         private_view.set_group(Some(&traces_view));
         traces_view.set_active(true);
         switch.append(&traces_view);
@@ -2321,6 +2387,7 @@ impl TraceMap {
         let map = Self {
             root,
             canvas,
+            private_canvas,
             traces_view,
             private_view,
             zoom_out,
@@ -2363,7 +2430,31 @@ impl TraceMap {
         }
         self.stage
             .set_visible_child_name(if traces { "traces" } else { "private-ai" });
+        // The legend, the zoom and the spinner are the Traces map's: the
+        // Mac's Private AI map has none of them.
         self.foot.set_visible(traces);
+        self.spinner
+            .set_visible(traces && self.spinner.is_spinning());
+    }
+
+    /// `harness_list`'s answer, or `None` after a failed or unreadable
+    /// read: the Private AI map then draws no tools as current.
+    pub fn set_harnesses(&self, list: Option<&HarnessList>) {
+        self.reads.borrow_mut().harnesses =
+            list.map(|list| list.harnesses.iter().map(HarnessRow::from_model).collect());
+    }
+
+    /// The Private AI map's inputs from the reads.
+    pub fn private_inputs(&self) -> SceneInputs {
+        let reads = self.reads.borrow();
+        SceneInputs::private_ai(PrivateAiInputs {
+            harnesses: reads.harnesses.clone(),
+            private_ai: map_scene::private_ai_label(
+                reads.destinations.as_ref(),
+                reads.status.as_ref(),
+            ),
+            destinations: reads.destinations.clone(),
+        })
     }
 
     // --- The reads ---------------------------------------------------------
@@ -2430,6 +2521,7 @@ impl TraceMap {
             contributed: Contributions::from_history(history),
             selected_tool: selected_tool.filter(|tool| SourceKind::from_wire(tool).is_some()),
             focus_tool,
+            private_ai: None,
         }
     }
 
@@ -2443,7 +2535,8 @@ impl TraceMap {
         );
         let loading = inputs.gate.state == ScreenState::Loading;
         self.spinner.set_spinning(loading);
-        self.spinner.set_visible(loading);
+        self.spinner
+            .set_visible(loading && self.stage.visible_child_name().as_deref() == Some("traces"));
         if self.canvas.imp().on_select_folder.borrow().is_none() {
             let weak = Rc::downgrade(app);
             self.canvas.connect_select_folder(move |project| {
@@ -2455,6 +2548,7 @@ impl TraceMap {
             });
         }
         self.canvas.set_inputs(inputs);
+        self.private_canvas.set_inputs(self.private_inputs());
         self.observe_transfers(
             &app.entries.borrow(),
             app.history_records.borrow().as_deref(),
@@ -2530,6 +2624,7 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trace_commons_contributor::harness_state::HarnessState;
 
     /// The legend's memory item is the shared copy's word for this
     /// computer, never the Mac's, and only while the tool group is drawn,
@@ -2701,6 +2796,98 @@ mod tests {
         let tint = palette.map.tint(Tint::Claude);
         let tinted = pixels.iter().filter(|p| near_colour(**p, &tint)).count();
         assert!(tinted > 150, "only {tinted} pixels in the Claude tint");
+    }
+
+    fn private_rows() -> Vec<HarnessRow> {
+        ["claude", "cursor"]
+            .iter()
+            .map(|id| HarnessRow {
+                id: (*id).into(),
+                name: if *id == "claude" {
+                    "Claude Code"
+                } else {
+                    "Cursor"
+                }
+                .into(),
+                installed: true,
+                state: "answering".into(),
+            })
+            .collect()
+    }
+
+    /// Private AI inputs draw the Private AI map, in the Mac's default
+    /// `ready` state, with the managed routes after it; the Traces inputs
+    /// draw the Traces map.
+    #[test]
+    fn private_ai_inputs_draw_the_private_ai_map() {
+        let destinations: ToolDestinations = serde_json::from_value(serde_json::json!({
+            "private_ai": "running",
+            "tools": [],
+            "managed_copy": {"title": "Managed"},
+            "managed_sessions": [{"tool": "opencode", "provider": "openai",
+                                  "state": "running", "collection_state": "off"}]
+        }))
+        .unwrap();
+        let inputs = SceneInputs::private_ai(PrivateAiInputs {
+            harnesses: Some(private_rows()),
+            private_ai: Some("running".into()),
+            destinations: Some(destinations.clone()),
+        });
+        assert!(inputs.gate.state.is_healthy());
+        let scene = inputs.scene(&BTreeMap::new(), map_scene::SIZE);
+        let expected = Scene::private_ai(
+            Some(&private_rows()),
+            Some("running"),
+            map_scene::row_sentence,
+            |row| map_scene::harness_state(&row.state),
+            Some(&destinations),
+            map_scene::SIZE,
+        )
+        .adding_managed_routes(Some(&destinations));
+        assert_eq!(scene, expected);
+        assert!(scene.stack.is_none() && scene.flows());
+        assert_eq!(scene.nodes[0].kind, NodeKind::Destination(Lamp::Answering));
+        assert!(
+            scene
+                .nodes
+                .iter()
+                .any(|n| n.id == "managed:opencode:openai")
+        );
+        // Unread, nothing is drawn.
+        let unread = SceneInputs::private_ai(PrivateAiInputs::default());
+        assert!(!unread.scene(&BTreeMap::new(), map_scene::SIZE).draws_map());
+        // The Traces inputs are untouched by it.
+        let traces = SceneInputs::default().scene(&BTreeMap::new(), map_scene::SIZE);
+        assert!(traces.stack.is_some());
+    }
+
+    /// A Private AI tool with no artwork is drawn with two letters of its
+    /// name in the primary ink, never as a blank circle.
+    #[test]
+    fn a_harness_without_artwork_carries_its_initials() {
+        let scene = Scene::private_ai(
+            Some(&private_rows()),
+            Some("running"),
+            |_| None,
+            |_| HarnessState::Answering,
+            None,
+            map_scene::SIZE,
+        );
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 2.0, None, scene.space);
+        let palette = Palette::fixed();
+        let cursor = scene
+            .nodes
+            .iter()
+            .find(|n| n.id == "harness:cursor")
+            .unwrap();
+        let pixels = painted(580, 760, |cr| {
+            draw_node(cr, &scene, cursor, &fit, &palette, false);
+        });
+        let ink = pixels
+            .iter()
+            .filter(|p| near_colour(**p, &palette.map.text_primary))
+            .count();
+        assert!(ink > 20, "only {ink} pixels of initials");
     }
 
     /// Renders the Traces map's drawing (no words: they need a widget's
@@ -2978,11 +3165,38 @@ mod tests {
         assert!(map.root.is_visible());
         assert!(map.canvas.node_buttons().iter().any(|(id, _)| id == "hub"));
 
-        // The Private AI view is a later slice: the switch shows its empty
-        // field and hides the legend and the zoom.
+        // The Private AI view: its own map, with no legend or zoom. Unread,
+        // the tool list draws nothing; read, each tool and the credential.
         map.show_view(MapView::PrivateAi);
         assert!(map.private_view.is_active());
         assert!(!map.foot.is_visible());
+        map.private_canvas.set_inputs(map.private_inputs());
+        settle();
+        assert!(map.private_canvas.node_buttons().is_empty());
+        let list: HarnessList = serde_json::from_value(serde_json::json!({
+            "harnesses": [{"id": "claude", "name": "Claude Code", "installed": true,
+                           "state": "answering"}]
+        }))
+        .unwrap();
+        map.set_harnesses(Some(&list));
+        map.private_canvas.set_inputs(map.private_inputs());
+        settle();
+        let ids: Vec<String> = map
+            .private_canvas
+            .node_buttons()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["destination", "harness:claude"]);
+        assert!(map.private_canvas.scene().flows(), "an answered call flows");
+        assert!(
+            !map.private_canvas.is_ticking(),
+            "with animations off it is drawn still"
+        );
+        map.set_harnesses(None);
+        map.private_canvas.set_inputs(map.private_inputs());
+        settle();
+        assert!(map.private_canvas.node_buttons().is_empty());
         map.show_view(MapView::Traces);
         assert!(map.traces_view.is_active());
         assert!(map.foot.is_visible());

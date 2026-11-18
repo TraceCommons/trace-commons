@@ -773,8 +773,7 @@ impl Shell {
         }
     }
 
-    /// The map pane's view. The Private AI view is a later slice; the pane
-    /// draws an empty field for it.
+    /// The map pane's view: the Traces map or the Private AI map.
     pub fn map_view(&self) -> MapView {
         self.state.map_view.get()
     }
