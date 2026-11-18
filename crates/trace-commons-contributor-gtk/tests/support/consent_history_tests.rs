@@ -163,6 +163,16 @@ fn describe(widget: &gtk::Widget) -> String {
     format!("{}({name})", widget.type_().name())
 }
 
+/// Run the loop for `span`, as the frames between two key presses do: Tab
+/// orders a container's children by where they were laid out.
+fn frames(fixture: &Fixture, span: std::time::Duration) {
+    let until = std::time::Instant::now() + span;
+    while std::time::Instant::now() < until {
+        fixture.context.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Tab forward from the window `presses` times, as GtkWindow's Tab binding
 /// does, and say where focus landed each time.
 fn tab_walk(fixture: &Fixture, presses: usize) -> Vec<gtk::Widget> {
@@ -170,7 +180,7 @@ fn tab_walk(fixture: &Fixture, presses: usize) -> Vec<gtk::Widget> {
     let mut landed = Vec::new();
     for _ in 0..presses {
         window.child_focus(gtk::DirectionType::TabForward);
-        fixture.settle();
+        frames(fixture, std::time::Duration::from_millis(15));
         if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
             landed.push(focus);
         }
@@ -230,8 +240,9 @@ fn mounted_tab_reaches_a_history_folders_records() {
         assert!(std::time::Instant::now() < deadline, "the records drew");
         fixture.context.iteration(false);
     }
+    frames(&fixture, std::time::Duration::from_millis(300));
     let check = |when: &str| {
-        let landed = tab_walk(&fixture, 120);
+        let landed = tab_walk(&fixture, 80);
         let trail: Vec<String> = landed.iter().map(describe).collect();
         for open in opens() {
             assert!(
@@ -254,6 +265,7 @@ fn mounted_tab_reaches_a_history_folders_records() {
         button.emit_clicked();
         fixture.settle();
     }
+    frames(&fixture, std::time::Duration::from_millis(300));
     check("with the notices closed");
 }
 
