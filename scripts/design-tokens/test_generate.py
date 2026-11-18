@@ -130,6 +130,69 @@ class GlassTokensTests(unittest.TestCase):
         with self.assertRaisesRegex(generate.TokenError, "inkSecondary"):
             generate.glass_palette(self.tokens, "dark")
 
+    def test_pane_ground_carries_the_pane_fill(self):
+        # Every Mac pane path paints paneFill over its base (GlassPaneFill),
+        # so the painted ground is paneFill over paneOpaque, and the other
+        # tiers are flattened over that ground, not over the bare base.
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                palette = generate.glass_palette(self.tokens, scheme)
+                base = generate.flat_color(self.tokens, "paneOpaque", scheme)["hex"]
+                ground = generate.opaque_over(generate.flat_fill(self.tokens, "paneFill", scheme), base)
+                self.assertEqual(palette["pane"], ground)
+                self.assertEqual(palette["card"], generate.opaque_over(
+                    generate.flat_fill(self.tokens, "cardFill", scheme), ground))
+        self.assertNotEqual(generate.glass_palette(self.tokens, "dark")["pane"], "#0d1124")
+
+    def test_inactive_window_dims_the_panes(self):
+        # GlassPaneFill's inactiveDim when the window is not key; GTK marks
+        # an unfocused toplevel :backdrop.
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                palette = generate.glass_palette(self.tokens, scheme)
+                dim = generate.flat_color(self.tokens, "inactiveDim", scheme)
+                self.assertEqual(palette["paneInactive"], generate.opaque_over(dim, palette["pane"]))
+                self.assertNotEqual(palette["paneInactive"], palette["pane"])
+                css = generate.render_glass_css(self.tokens, scheme)
+                self.assertIn("@define-color tc_glass_pane_inactive " + palette["paneInactive"] + ";", css)
+                self.assertIn("window.tc-glass-window:backdrop .tc-glass-pane { "
+                              "background-color: @tc_glass_pane_inactive; }", css)
+
+    def test_inactive_pane_keeps_text_readable(self):
+        self.tokens["themes"]["flatDark"]["color"]["inactiveDim"] = {"hex": "#f2f3f8", "alpha": 0.8}
+        with self.assertRaisesRegex(generate.TokenError, "paneInactive"):
+            generate.glass_palette(self.tokens, "dark")
+
+    def test_high_contrast_strokes_only_the_tiers_with_edges(self):
+        # GlassEdgeModifier's increased branch: a tier with edge layers gets
+        # a solid 1pt edgeHighContrast stroke; flat cards have none.
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                palette = generate.glass_palette(self.tokens, scheme)
+                css = generate.render_glass_css(self.tokens, scheme)
+                edge = generate.flat_color(self.tokens, "edgeHighContrast", scheme)
+                self.assertEqual(palette["edgeHighContrast"], generate.css_rgba(edge, "test"))
+                rule = [line for line in css.splitlines() if line.startswith("window.tc-high-contrast")]
+                self.assertEqual(len(rule), 1)
+                for name in ("pane", "popover", "menu", "node-card"):
+                    self.assertIn(f"window.tc-high-contrast .tc-glass-{name}", rule[0])
+                for name in ("card", "card-quiet", "well", "control"):
+                    self.assertNotIn(f".tc-glass-{name},", rule[0] + ",")
+                self.assertIn("border: 1px solid @tc_glass_edge_high_contrast;", rule[0])
+
+    def test_tab_strip_takes_the_rule_and_the_ember_halo(self):
+        # GlassRuleTabs: a 1pt `rule` under the strip and a `tabEmberHalo`
+        # glow under the selected tab's title.
+        for scheme in generate.SCHEMES:
+            with self.subTest(scheme=scheme):
+                palette = generate.glass_palette(self.tokens, scheme)
+                css = generate.render_glass_css(self.tokens, scheme)
+                rule = generate.opaque_over(generate.flat_color(self.tokens, "rule", scheme), palette["pane"])
+                self.assertEqual(palette["rule"], rule)
+                self.assertIn(f"@define-color tc_glass_rule {rule};", css)
+                halo = generate.css_rgba(generate.flat_color(self.tokens, "tabEmberHalo", scheme), "test")
+                self.assertIn(f"@define-color tc_glass_tab_ember_halo {halo};", css)
+
     def test_glyphs_come_from_the_swift_path_data(self):
         glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
         self.assertEqual([g["name"] for g in glyphs],

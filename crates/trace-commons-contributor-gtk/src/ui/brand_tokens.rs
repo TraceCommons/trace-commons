@@ -159,6 +159,10 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_control_hover #dbdee4;
 @define-color tc_glass_row_hover #e8e9ec;
 @define-color tc_glass_tab_ember #056bdc;
+@define-color tc_glass_rule #d5d6d8;
+@define-color tc_glass_tab_ember_halo rgba(5, 107, 220, 0.28);
+@define-color tc_glass_pane_inactive #e8e9ec;
+@define-color tc_glass_edge_high_contrast rgba(29, 29, 31, 0.55);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -168,6 +172,8 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 .tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-high-contrast .tc-glass-pane, window.tc-high-contrast .tc-glass-popover, window.tc-high-contrast .tc-glass-menu, window.tc-high-contrast .tc-glass-node-card { border: 1px solid @tc_glass_edge_high_contrast; }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
@@ -182,25 +188,29 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 "#;
 /// The painted Monitor window's tiers, type roles and inks, dark scheme.
 pub const GLASS_DARK_CSS: &str = r#"
-@define-color tc_glass_pane #0d1124;
-@define-color tc_glass_card #0d1124;
-@define-color tc_glass_card_quiet #0d1124;
-@define-color tc_glass_well #090c19;
-@define-color tc_glass_control #090c19;
+@define-color tc_glass_pane #171b2d;
+@define-color tc_glass_card #14182a;
+@define-color tc_glass_card_quiet #14182a;
+@define-color tc_glass_well #0e111d;
+@define-color tc_glass_control #10131f;
 @define-color tc_glass_control_selected #7ebcff;
-@define-color tc_glass_popover #0b0f22;
-@define-color tc_glass_menu #0b0f22;
-@define-color tc_glass_node_card #0b0f22;
+@define-color tc_glass_popover #0d1124;
+@define-color tc_glass_menu #0d1124;
+@define-color tc_glass_node_card #0d1124;
 @define-color tc_glass_scene #070a1a;
 @define-color tc_glass_ink #f2f3f8;
-@define-color tc_glass_ink_secondary #d7d8df;
+@define-color tc_glass_ink_secondary #d8d9e0;
 @define-color tc_glass_selected_ink #071a2e;
 @define-color tc_glass_toolbar_glyph #e6e6ec;
 @define-color tc_glass_toolbar_glyph_hidden #83838c;
 @define-color tc_glass_toolbar_expanded #7ebcff;
-@define-color tc_glass_control_hover #353842;
-@define-color tc_glass_row_hover #191d2f;
+@define-color tc_glass_control_hover #3b3d47;
+@define-color tc_glass_row_hover #232638;
 @define-color tc_glass_tab_ember #0091fd;
+@define-color tc_glass_rule #333646;
+@define-color tc_glass_tab_ember_halo rgba(0, 145, 253, 0.31);
+@define-color tc_glass_pane_inactive #15192a;
+@define-color tc_glass_edge_high_contrast rgba(242, 242, 244, 0.4);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -210,6 +220,8 @@ pub const GLASS_DARK_CSS: &str = r#"
 .tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-high-contrast .tc-glass-pane, window.tc-high-contrast .tc-glass-popover, window.tc-high-contrast .tc-glass-menu, window.tc-high-contrast .tc-glass-node-card { border: 1px solid @tc_glass_edge_high_contrast; }
 .tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
 .tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
 .tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }

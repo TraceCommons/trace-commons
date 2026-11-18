@@ -575,7 +575,10 @@ def css_shadow(layers: list[dict], where: str) -> str:
 
 def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     """Every opaque colour the painted window uses, in one scheme."""
-    ground = flat_color(tokens, "paneOpaque", scheme)["hex"]
+    # Every Mac pane path paints paneFill over its base (`GlassPaneFill`),
+    # so the painted ground is paneFill over paneOpaque, as Insights' is.
+    ground = opaque_over(flat_fill(tokens, "paneFill", scheme),
+                         flat_color(tokens, "paneOpaque", scheme)["hex"])
     over = lambda entry, under: opaque_over(entry, under)
     fills = {"pane": ground}
     fills["card"] = over(flat_fill(tokens, "cardFill", scheme), ground)
@@ -603,6 +606,21 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
         raise TokenError(f"glass {scheme}: control hover is invisible on the control")
     palette["rowHover"] = over(flat_color(tokens, "rowHover", scheme), ground)
     palette["tabEmber"] = over(flat_color(tokens, "tabEmber", scheme), ground)
+    # The tab strip's 1pt rule, and the halo under the selected tab, which
+    # fades to nothing and so stays translucent (`GlassRuleTabs`).
+    palette["rule"] = over(flat_color(tokens, "rule", scheme), ground)
+    palette["tabEmberHalo"] = css_rgba(flat_color(tokens, "tabEmberHalo", scheme), "tabEmberHalo")
+    # `inactiveDim` over the pane while the window is not key (GTK's
+    # `:backdrop`), as `GlassPaneFill` draws it.
+    palette["paneInactive"] = over(flat_color(tokens, "inactiveDim", scheme), ground)
+    for ink in ("ink", "inkSecondary"):
+        ratio = contrast(palette[ink], palette["paneInactive"])
+        if ratio < 4.5:
+            raise TokenError(f"glass {scheme}: {ink} on paneInactive is {ratio:.2f}:1, under 4.5:1")
+    # The solid stroke a tier with edge layers takes under Increase Contrast
+    # (`GlassEdgeModifier`'s increased branch). Kept translucent: a border
+    # paints over its own tier's fill, which is the ground the Mac strokes on.
+    palette["edgeHighContrast"] = css_rgba(flat_color(tokens, "edgeHighContrast", scheme), "edgeHighContrast")
     for tier in GLASS_TEXT_TIERS:
         for ink in ("ink", "inkSecondary"):
             ratio = contrast(palette[ink], fills[tier])
@@ -625,6 +643,10 @@ GLASS_COLOURS = [
     ("controlHover", "control_hover"),
     ("rowHover", "row_hover"),
     ("tabEmber", "tab_ember"),
+    ("rule", "rule"),
+    ("tabEmberHalo", "tab_ember_halo"),
+    ("paneInactive", "pane_inactive"),
+    ("edgeHighContrast", "edge_high_contrast"),
 ]
 
 
@@ -644,6 +666,11 @@ def render_glass_css(tokens: dict, scheme: str) -> str:
             f"border-radius: {number(radius[radius_token], where)}px; "
             f"box-shadow: {css_shadow(flat_layers(tokens, edge, scheme), where)}; }}"
         )
+    out.append("window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }")
+    stroked = [f"window.tc-high-contrast .tc-glass-{css}" for tier, css, _, edge, _ in GLASS_TIERS
+               if flat_layers(tokens, edge, scheme)]
+    if stroked:
+        out.append(f"{', '.join(stroked)} {{ border: 1px solid @tc_glass_edge_high_contrast; }}")
     for role, entry in tokens["type"].items():
         body = tokens["type"]["body"]
         size = entry["size"] / body["size"]

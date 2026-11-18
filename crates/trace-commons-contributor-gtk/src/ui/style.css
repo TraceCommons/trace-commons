@@ -533,17 +533,24 @@ window.tc-glass-window {
   color: @tc_glass_ink;
 }
 
-/* The tab strip: plain tabs on the pane, the selected one under the
-   tabEmber rule (a 2px line fading to nothing at either end). */
+/* The tab strip (`GlassRuleTabs`): the tabs share the strip's width
+   equally, over a 1pt rule that runs the strip's full width. The title is
+   body type, medium, semibold when selected; the selected tab carries the
+   tabEmber line on the rule (fading to nothing at either end) and the
+   tabEmberHalo glow behind its title, brightest at the rule. */
 .tc-glass-tabs {
   background: none;
-  padding: 0;
+  padding: 0 12px;
   border-radius: 0;
+  border-bottom: 1px solid @tc_glass_rule;
 }
 
 .tc-glass-tabs .tc-tab {
   font-size: 1em;
-  padding: 6px 12px 8px 12px;
+  font-weight: 500;
+  min-height: 38px;
+  padding: 0 12px;
+  margin-bottom: -1px;
   border-radius: 0;
   background-color: transparent;
   background-image: none;
@@ -551,18 +558,28 @@ window.tc-glass-window {
   color: @tc_glass_ink_secondary;
 }
 
+.tc-glass-tabs .tc-tab label {
+  font-weight: 500;
+}
+
 .tc-glass-tabs .tc-tab:hover {
-  background-color: @tc_glass_row_hover;
+  background-color: transparent;
+  color: @tc_glass_ink;
 }
 
 .tc-glass-tabs .tc-tab:checked {
   background-color: transparent;
-  background-image: linear-gradient(to right, transparent, @tc_glass_tab_ember 30%, @tc_glass_tab_ember 70%, transparent);
-  background-size: 100% 2px;
-  background-position: left bottom;
-  background-repeat: no-repeat;
+  background-image: linear-gradient(to right, transparent, @tc_glass_tab_ember 30%, @tc_glass_tab_ember 70%, transparent),
+    radial-gradient(ellipse 55% 100% at 50% 100%, @tc_glass_tab_ember_halo, transparent);
+  background-size: 100% 2px, 100% 100%;
+  background-position: left bottom, center bottom;
+  background-repeat: no-repeat, no-repeat;
   box-shadow: none;
   color: @tc_glass_ink;
+}
+
+.tc-glass-tabs .tc-tab:checked label {
+  font-weight: 600;
 }
 
 /* The toolbar's capsule holds the Graph, Map and Inspector toggles: a glass
@@ -640,6 +657,12 @@ window.tc-glass-window {
    across the cool pane. */
 .tc-glass-pane .tc-notice-backdrop {
   background-color: @tc_glass_pane;
+}
+
+/* ...and dims with the pane while the window is not key (the generated
+   `:backdrop` rule, `inactiveDim`). */
+window.tc-glass-window:backdrop .tc-glass-pane .tc-notice-backdrop {
+  background-color: @tc_glass_pane_inactive;
 }
 
 /* A card behind the front one, peeking out under it

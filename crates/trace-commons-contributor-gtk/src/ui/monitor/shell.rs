@@ -115,6 +115,30 @@ const NOTICE_BACKDROP_CLASS: &str = "tc-notice-backdrop";
 /// alone, not every card nested in it.
 const NOTICE_SURFACE_CLASS: &str = "tc-notice-surface";
 
+/// The window's class while the desktop asks for high contrast. The
+/// generated glass sheet strokes the tiers that carry edge layers under it.
+const HIGH_CONTRAST_CLASS: &str = "tc-high-contrast";
+
+/// Keep the window's high-contrast class in step with the desktop
+/// (`AdwStyleManager:high-contrast`), as the Mac follows Increase Contrast.
+fn follow_high_contrast(window: &adw::ApplicationWindow) {
+    let manager = adw::StyleManager::default();
+    let apply = |window: &adw::ApplicationWindow, on: bool| {
+        if on {
+            window.add_css_class(HIGH_CONTRAST_CLASS);
+        } else {
+            window.remove_css_class(HIGH_CONTRAST_CLASS);
+        }
+    };
+    apply(window, manager.is_high_contrast());
+    let weak = window.downgrade();
+    manager.connect_high_contrast_notify(move |manager| {
+        if let Some(window) = weak.upgrade() {
+            apply(&window, manager.is_high_contrast());
+        }
+    });
+}
+
 /// Puts [`NOTICE_SURFACE_CLASS`] on `card`'s surface while it carries an X
 /// and takes it off everything else in `card`. Changes a class only when it
 /// is wrong, so the card's own class watcher is not woken for nothing.
@@ -314,6 +338,7 @@ impl Shell {
         let words = monitor_screens_copy();
         // The ground the panes sit on, seen in the gaps between them.
         window.add_css_class("tc-glass-window");
+        follow_high_contrast(window);
 
         // --- The toolbar row, which is the title bar --------------------
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, style::space::S);
@@ -376,23 +401,26 @@ impl Shell {
         inference_dot.set_valign(gtk::Align::Center);
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         strip.add_css_class("tc-glass-tabs");
-        strip.set_halign(gtk::Align::Start);
-        strip.set_margin_start(style::space::M);
-        strip.set_margin_end(style::space::M);
+        // The tabs share the strip's width equally (`GlassRuleTabs`), and
+        // the strip's rule runs the pane's width, so it has no side margin.
+        strip.set_homogeneous(true);
+        strip.set_hexpand(true);
         strip.set_margin_top(style::space::S);
         strip.update_property(&[gtk::accessible::Property::Label(words.shell.tabs_label)]);
         let mut tab_buttons: Vec<(Tab, gtk::ToggleButton)> = Vec::new();
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
             let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
             let title = gtk::Label::new(Some(tab.title()));
-            title.add_css_class("tc-type-label");
+            title.add_css_class("tc-type-body");
             content.append(&title);
             match tab {
                 Tab::Traces => content.append(&traces_badge),
                 Tab::Inference => content.append(&inference_dot),
                 Tab::Home | Tab::Insights => {}
             }
+            content.set_halign(gtk::Align::Center);
             let button = gtk::ToggleButton::builder().child(&content).build();
+            button.set_hexpand(true);
             button.add_css_class("tc-tab");
             button.add_css_class("flat");
             // The chord and nothing else, in GTK's own words.
@@ -2492,5 +2520,59 @@ mod tests {
                 .contains("background-color: @tc_glass_pane;"),
             "the stack's ground in a glass pane is not the pane's fill"
         );
+        // While the window is not key the pane dims (`inactiveDim`), and the
+        // stack's ground dims with it, or it would draw a band of the
+        // undimmed fill across the dimmed pane.
+        assert!(
+            rule(
+                css,
+                &format!("window.tc-glass-window:backdrop .tc-glass-pane .{NOTICE_BACKDROP_CLASS}")
+            )
+            .contains("background-color: @tc_glass_pane_inactive;"),
+            "the stack's ground does not follow the dimmed pane"
+        );
+    }
+
+    /// The tab strip is `GlassRuleTabs`: equal tabs across the strip over a
+    /// full-width rule, medium titles that turn semibold when selected, and
+    /// the selected tab's ember line with its halo.
+    #[test]
+    fn the_tab_strip_is_the_macs_rule_tabs() {
+        let css = include_str!("../style.css");
+        let rule = |selector: &str| {
+            css.split(&format!("\n{selector} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("no {selector} rule"))
+                .to_string()
+        };
+        assert!(rule(".tc-glass-tabs").contains("border-bottom: 1px solid @tc_glass_rule;"));
+        assert!(rule(".tc-glass-tabs .tc-tab label").contains("font-weight: 500;"));
+        assert!(rule(".tc-glass-tabs .tc-tab:checked label").contains("font-weight: 600;"));
+        let checked = rule(".tc-glass-tabs .tc-tab:checked");
+        assert!(checked.contains("@tc_glass_tab_ember 30%"));
+        assert!(checked.contains("radial-gradient(") && checked.contains("@tc_glass_tab_ember_halo"));
+        // The strip is laid out to fill: homogeneous, and no left packing.
+        let source = include_str!("shell.rs");
+        let strip = source
+            .split("let strip = gtk::Box::new")
+            .nth(1)
+            .and_then(|rest| rest.split("for (index, tab)").next())
+            .expect("the strip's construction");
+        assert!(strip.contains("strip.set_homogeneous(true);"));
+        assert!(!strip.contains("gtk::Align::Start"));
+    }
+
+    /// Increase Contrast: the window wears the class the generated sheet
+    /// strokes the edged tiers under (`GlassEdgeModifier`'s increased
+    /// branch), and only while the desktop asks for high contrast.
+    #[test]
+    fn high_contrast_is_a_class_on_the_window() {
+        assert_eq!(HIGH_CONTRAST_CLASS, "tc-high-contrast");
+        for sheet in [brand_tokens::GLASS_LIGHT_CSS, brand_tokens::GLASS_DARK_CSS] {
+            assert!(sheet.contains(&format!(
+                "window.{HIGH_CONTRAST_CLASS} .tc-glass-pane"
+            )));
+        }
     }
 }
