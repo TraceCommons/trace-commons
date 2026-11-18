@@ -142,6 +142,9 @@ fn strip(condition: Condition, badge: Option<u64>, mark: Mark) -> Strip {
 }
 
 /// One pixel of a 22px pixmap as (a, r, g, b), straight alpha.
+/// A pixel of the N just inside the halo's gap, off the badge's own gap.
+const PROBE: (usize, usize) = (5, 14);
+
 fn pixel(strip: &Strip, scheme: Scheme, x: usize, y: usize) -> [u8; 4] {
     let (w, h, data) = pixmap(strip, scheme, 22).expect("pixmap");
     assert_eq!((w, h), (22, 22));
@@ -201,6 +204,11 @@ fn the_halo_rings_the_badge_on_the_corner() {
     assert_eq!(pixel(&ready, Scheme::Light, 16, 10)[0], 0);
     // The N's left stem survives.
     assert_eq!(pixel(&ready, Scheme::Light, 5, 11), [255, 0, 0, 0]);
+    // The halo's outer edge keeps the Mac's 2-point gap from the N
+    // (`markOnlyGap + haloReach` past the badge), so it never touches it.
+    let plain = strip(Condition::Live, Some(4), Mark::None);
+    assert_eq!(pixel(&plain, Scheme::Light, PROBE.0, PROBE.1)[0], 255);
+    assert!(pixel(&ready, Scheme::Light, PROBE.0, PROBE.1)[0] < 200);
     // No halo without a badge; pausing keeps it.
     assert!(!slot(&strip(Condition::Live, None, Mark::Ready), 1.0).halo);
     assert!(slot(&strip(Condition::Paused, Some(4), Mark::Ready), 1.0).halo);

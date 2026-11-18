@@ -30,7 +30,8 @@
 //! badge stays on the corner and the cell's edge cuts the halo on its two
 //! outer sides. The mark is cut away under the slot with the Mac's
 //! `markOnlyGap` (2) to spare, as the Mac's badge clears the mark rather
-//! than touching it, or to the halo's outer edge while a halo is drawn. The badge's figure is a hand-drawn pixel face
+//! than touching it, and past the halo's outer edge while a halo is drawn. The
+//! badge's figure is a hand-drawn pixel face
 //! (no font is guaranteed in a tray host), cut out of the badge as the Mac
 //! cuts its figure out.
 
@@ -303,8 +304,13 @@ pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
     // Clear the mark under the slot, with the gap to spare.
     cr.set_operator(cairo::Operator::DestOut);
     if let Some((x, y, w, h)) = slot.badge {
-        // The halo's own outer edge, or the gap past the badge.
-        let out = if slot.halo { HALO_REACH } else { MARK_GAP };
+        // The gap past the badge, and past the halo's outer edge while one
+        // rings it: the Mac's `markOnlyGap + haloReach`.
+        let out = if slot.halo {
+            MARK_GAP + HALO_REACH
+        } else {
+            MARK_GAP
+        };
         capsule(cr, x - out, y - out, w + 2.0 * out, h + 2.0 * out);
         let _ = cr.fill();
     }

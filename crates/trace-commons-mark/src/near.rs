@@ -5,6 +5,10 @@
 //! `macos/Sources/TCDesign/Logos/GlassBrandMark.swift`; the test below reads
 //! that file, so the two cannot drift apart.
 //!
+//! The N is NEAR AI's mark, used under the brand kit's own terms ("Logos you
+//! can use as needed"). It is a trademark and is not covered by this crate's
+//! code licence.
+//!
 //! The app icon is built as the Mac's is (`macos/icons/README.md`): the
 //! kit's tile, a `brand-tile` #0B8FF6 ground with the N in `brand-paper`
 //! #F3F3F2 at the kit's own proportion, 58.5% of the tile's width, centred.

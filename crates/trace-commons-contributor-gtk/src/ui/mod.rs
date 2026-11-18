@@ -720,7 +720,7 @@ impl App {
             Some(status) => (
                 icon::condition(
                     status.decisions_owed,
-                    status.health.last_error_label.is_some(),
+                    status.unhealthy(),
                     status.paused,
                     true,
                     false,

@@ -207,6 +207,21 @@ pub struct WitnessCapacity {
 }
 
 impl Status {
+    /// Whether the health label is a fault to show: the Mac's
+    /// `model.health != nil`. A label whose own card is drawn below
+    /// (`witness-saturated`, the gate-held notice) is not.
+    pub fn unhealthy(&self) -> bool {
+        match self.health.last_error_label.as_deref() {
+            Some(label) => !self.label_shown_below(label),
+            None => false,
+        }
+    }
+
+    fn label_shown_below(&self, label: &str) -> bool {
+        (label == crate::copy::WITNESS_SATURATED_LABEL && self.witness_capacity_line().is_some())
+            || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some())
+    }
+
     /// The health banner's lines, in order: the health label's own
     /// sentence, and sessions waiting on the witness.
     ///
@@ -220,9 +235,7 @@ impl Status {
         if let Some(label) = self.health.last_error_label.as_deref() {
             // And `automatic-contribution-held`, whose card names the folders
             // and says why, drawn beside the banner from its own object.
-            let shown_below = (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
-                || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
-            if !shown_below {
+            if !self.label_shown_below(label) {
                 lines.push(crate::copy::health_sentence(label).to_string());
             }
         }
@@ -1513,6 +1526,47 @@ mod tests {
             .expect("status decodes");
         assert!(old.arming_rewording_notices().is_empty());
         assert!(old.gate_held_notice().is_none());
+    }
+
+    /// The Mac's `model.health != nil`: a label whose own card is drawn
+    /// (`witness-saturated` with sessions waiting, the held gate) is not a
+    /// fault, so the tray's strip stays live; any other label is.
+    #[test]
+    fn a_label_with_its_own_card_is_not_unhealthy() {
+        let status = |value: serde_json::Value| -> Status {
+            serde_json::from_value(value).expect("status decodes")
+        };
+        let witness = |waiting: u64| {
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "witness-saturated", "since": null },
+                "witness_capacity": { "waiting_sessions": waiting },
+            }))
+        };
+        assert!(!witness(3).unhealthy(), "the witness line says it");
+        assert!(
+            witness(0).unhealthy(),
+            "no line below: the label is the fault"
+        );
+        let held = |held_sessions: u64| {
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "automatic-contribution-held", "since": null },
+                "automatic_contribution_held": { "held_sessions": held_sessions,
+                    "reasons": ["admission-evidence-is-per-session"],
+                    "projects": [{ "project_id": "p", "project_label": "api",
+                        "held_sessions": held_sessions }] },
+            }))
+        };
+        assert!(!held(2).unhealthy(), "the held card says it");
+        assert!(
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "token-expired", "since": null },
+            }))
+            .unhealthy()
+        );
+        assert!(!status(serde_json::json!({ "logged_in": true })).unhealthy());
     }
 
     /// The held notice is the core's, and the bare label steps aside for
