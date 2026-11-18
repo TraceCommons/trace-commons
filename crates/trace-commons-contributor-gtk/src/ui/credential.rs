@@ -295,6 +295,7 @@ fn obtain_busy(pending: bool, polling: bool, has_attempt: bool) -> bool {
     pending || polling || has_attempt
 }
 
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn pending(app: &Rc<App>) -> bool {
     app.private_inference.credential.pending.get()
 }
@@ -327,18 +328,6 @@ impl OwnedAttempt {
     }
     fn take(&self) -> Option<String> {
         self.0.borrow_mut().take()
-    }
-}
-
-/// Leave only the ceremony this transient surface started. An absent id must
-/// never become an unqualified cancellation of another account surface.
-pub(super) fn cancel_owned(app: &Rc<App>, attempt: &OwnedAttempt) {
-    if let Some(id) = attempt.take() {
-        app.call(
-            "near_ai_credential_cancel",
-            serde_json::json!({"attempt_id":id}),
-            |app, _| refresh(app),
-        );
     }
 }
 

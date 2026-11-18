@@ -64,12 +64,39 @@ pub fn try_call(
     method: &str,
     params: &serde_json::Value,
 ) -> Result<Option<Response>> {
-    let mut stream = match connect(store) {
-        Some(s) => s,
+    match connect(store) {
+        Some(stream) => call_on(stream, method, params).map(Some),
         // Nothing listening: no daemon is running.
-        None => return Ok(None),
-    };
+        None => Ok(None),
+    }
+}
 
+/// [`try_call`] against a socket named directly rather than through a state
+/// directory: the host link a Flatpak-sandboxed window attaches to
+/// (`daemon::host_link`), whose state directory the sandbox cannot see.
+#[cfg(unix)]
+pub fn try_call_at(
+    sock: &std::path::Path,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<Option<Response>> {
+    match connect_path(sock) {
+        Some(stream) => call_on(stream, method, params).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Whether a daemon is listening on a socket named directly.
+#[cfg(unix)]
+pub fn is_running_at(sock: &std::path::Path) -> bool {
+    connect_path(sock).is_some()
+}
+
+fn call_on(
+    mut stream: PlatformStream,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<Response> {
     // A witness round trip has a 120-second transport budget plus claim minting.
     // Never retry this explicit off-device action after a read timeout.
     #[cfg(unix)]
@@ -103,7 +130,7 @@ pub fn try_call(
     // DRAFT, NEEDS APPROVAL (2026-11-04).
     let response: Response =
         serde_json::from_str(reply.trim()).context("parsing the running app's response")?;
-    Ok(Some(response))
+    Ok(response)
 }
 
 /// Whether a daemon is currently listening on this store's socket.
@@ -149,11 +176,15 @@ pub(crate) type PlatformStream = std::fs::File;
 /// files", which is correct in either case.
 #[cfg(unix)]
 fn connect(store: &ConfigStore) -> Option<std::os::unix::net::UnixStream> {
-    let sock = store.daemon_path(DAEMON_SOCK_FILE);
+    connect_path(&store.daemon_path(DAEMON_SOCK_FILE))
+}
+
+#[cfg(unix)]
+fn connect_path(sock: &std::path::Path) -> Option<std::os::unix::net::UnixStream> {
     if !sock.exists() {
         return None;
     }
-    let stream = std::os::unix::net::UnixStream::connect(&sock).ok()?;
+    let stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT)).ok();
     stream.set_write_timeout(Some(REQUEST_TIMEOUT)).ok();
     Some(stream)
@@ -196,6 +227,37 @@ mod tests {
                 .is_none()
         );
         assert!(!is_running(&store));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_named_directly_answers_like_the_state_directory_one() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("daemon.sock");
+        assert!(
+            try_call_at(&sock, "status", &serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!is_running_at(&sock));
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "status");
+            (&stream)
+                .write_all(b"{\"id\":1,\"result\":{\"ok\":true}}\n")
+                .unwrap();
+        });
+        let response = try_call_at(&sock, "status", &serde_json::json!({}))
+            .unwrap()
+            .expect("a daemon answered");
+        server.join().unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({"ok": true})));
     }
 
     #[test]

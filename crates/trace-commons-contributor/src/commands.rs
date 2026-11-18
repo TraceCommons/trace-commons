@@ -4966,19 +4966,28 @@ pub fn daemon_settings(store: &ConfigStore, set: &[String], json: bool) -> Resul
         let (k, v) = pair
             .split_once('=')
             .with_context(|| format!("expected KEY=VALUE, got {pair}"))?;
-        let value = if let Ok(b) = v.parse::<bool>() {
-            serde_json::Value::Bool(b)
-        } else if let Ok(n) = v.parse::<u64>() {
-            serde_json::Value::from(n)
-        } else {
-            serde_json::Value::String(v.to_string())
-        };
-        params.insert(k.to_string(), value);
+        params.insert(k.to_string(), settings_set_value(k, v));
     }
     let resp = daemon_call(store, "set_settings", serde_json::Value::Object(params))?;
     render(resp, json, |v| {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
     })
+}
+
+/// The JSON `daemon settings --set KEY=VALUE` sends for `value`: a
+/// boolean, a number, or a string. An empty `claude_root` or `codex_root`
+/// sends `null`, which clears the folder (`set_settings`); stored as an
+/// empty string it would name no folder at all.
+fn settings_set_value(key: &str, value: &str) -> serde_json::Value {
+    if value.is_empty() && matches!(key, "claude_root" | "codex_root") {
+        serde_json::Value::Null
+    } else if let Ok(b) = value.parse::<bool>() {
+        serde_json::Value::Bool(b)
+    } else if let Ok(n) = value.parse::<u64>() {
+        serde_json::Value::from(n)
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
 }
 
 pub fn daemon_install(store: &ConfigStore) -> Result<()> {
@@ -5088,6 +5097,24 @@ pub async fn update(store: &ConfigStore, stage_only: bool, json: bool) -> Result
 #[cfg(test)]
 mod daemon_command_tests {
     use super::*;
+
+    /// `--set claude_root=` clears the folder: it sends `null`, which
+    /// `set_settings` takes as a clear, rather than an empty path. Any
+    /// other value is sent as before (#2171 review 2, finding 4).
+    #[test]
+    fn an_empty_root_is_sent_as_a_clear() {
+        use serde_json::json;
+        assert_eq!(settings_set_value("claude_root", ""), json!(null));
+        assert_eq!(settings_set_value("codex_root", ""), json!(null));
+        assert_eq!(
+            settings_set_value("claude_root", "/home/u/.claude"),
+            json!("/home/u/.claude")
+        );
+        assert_eq!(settings_set_value("claude_root", "null"), json!("null"));
+        assert_eq!(settings_set_value("managed_terminal", ""), json!(""));
+        assert_eq!(settings_set_value("scrub_check", "true"), json!(true));
+        assert_eq!(settings_set_value("quiescence_secs", "30"), json!(30));
+    }
 
     #[test]
     fn project_mode_words_parse_to_policy_modes() {

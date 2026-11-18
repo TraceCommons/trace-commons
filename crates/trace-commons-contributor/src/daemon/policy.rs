@@ -1262,6 +1262,32 @@ impl ProjectPolicy {
         }
     }
 
+    /// Count `store_key` as recorded for the grant `grant` because
+    /// `source_key` is: a declared tool home and the store the tool has not
+    /// made inside it yet are one source (owner decision 2026-11-18, "Carry
+    /// the grant over"), so a session written in the store after the grant
+    /// recorded the home arms as one new in the home would. What the home
+    /// held stays on disk. Only for a home just recorded for this grant,
+    /// and only once; returns whether anything changed.
+    pub fn carry_source_record(
+        &mut self,
+        grant: DateTime<Utc>,
+        source_key: &str,
+        store_key: &str,
+    ) -> bool {
+        match self.automatic_grant.as_mut() {
+            Some(g)
+                if g.granted_at == grant
+                    && g.recorded_sources.contains(source_key)
+                    && !g.recorded_sources.contains(store_key) =>
+            {
+                g.recorded_sources.insert(store_key.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the grant arms `project_key` on seeing the session at
     /// `session_path` from `source_key`: a recorded source, a real project
     /// with no entry of its own, and neither the project nor the session on
@@ -2984,6 +3010,35 @@ mod tests {
             !p.record_source(at, late, BTreeSet::new(), BTreeSet::new()),
             "once per source"
         );
+    }
+
+    /// A home's record carries over to the store the tool makes inside it
+    /// (owner decision 2026-11-18): a project new in the store arms, the
+    /// home's history stays on disk. Only from a recorded home, only for
+    /// the grant in force, and only once.
+    #[test]
+    fn a_home_record_carries_over_to_its_store() {
+        let home = "claude-code /h";
+        let store = "claude-code /h/projects";
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-09-25T00:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        assert!(
+            !p.carry_source_record(at, home, store),
+            "not before the home is recorded"
+        );
+        assert!(p.record_source(
+            at,
+            home,
+            set_of(&["/h/-w-old/a.jsonl"]),
+            set_of(&["/w/old"])
+        ));
+        assert!(!p.carry_source_record(t("2026-09-24T00:00:00Z"), home, store));
+        assert!(p.carry_source_record(at, home, store));
+        assert!(!p.carry_source_record(at, home, store), "once");
+        assert!(!p.needs_source_record(at, store));
+        assert!(p.arms_by_default("/w/new", "/h/projects/-w-new/b.jsonl", store));
+        assert!(!p.arms_by_default("/w/old", "/h/projects/-w-old/c.jsonl", store));
     }
 
     /// A pass records only for the grant it read before listing anything, so

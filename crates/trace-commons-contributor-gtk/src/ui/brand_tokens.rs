@@ -646,3 +646,65 @@ pub mod map {
         pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);
     }
 }
+
+/// The first run's stage colours, as the Mac's flat theme draws them: a
+/// hex colour and its alpha; and the motion curve's control points.
+pub mod first_run {
+    pub type Rgba = (&'static str, f64);
+    /// The token ease's cubic Bezier control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#e6eaf1", 1.0);
+        pub const SCENE_WARM: Rgba = ("#f6f7fa", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0070c6", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#9fdcff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#ffffff", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#1d2a4a", 0.14);
+        pub const FIRST_RUN_RULE: Rgba = ("#000000", 0.16);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
+        pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
+        pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
+        pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#070a1a", 1.0);
+        pub const SCENE_WARM: Rgba = ("#11152b", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#49c2ff", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#e2f6ff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#171c33", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#1a2039", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#1b2140", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#02030a", 0.5);
+        pub const FIRST_RUN_RULE: Rgba = ("#ffffff", 0.18);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
+        pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
+        pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
+        pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+    }
+}

@@ -568,5 +568,31 @@ class HeroTokensTests(unittest.TestCase):
         self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
         self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
 
+
+class FirstRunStageTokensTests(unittest.TestCase):
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_first_run_colours_follow_the_flat_theme(self):
+        rendered = "\n".join(generate.render_first_run_rust(self.tokens))
+        # The flat dark scene is the navy the Mac's first run draws on.
+        self.assertIn('pub const SCENE_BASE: Rgba = ("#070a1a", 1.0);', rendered)
+        self.assertIn('pub const SCENE_WARM: Rgba = ("#11152b", 1.0);', rendered)
+        self.assertIn('pub const FIRST_RUN_GLOW: Rgba = ("#0091fd", 1.0);', rendered)
+        self.assertIn('pub const FIRST_RUN_GLOW: Rgba = ("#0070c6", 1.0);', rendered)
+        self.assertIn('pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#02030a", 0.5);', rendered)
+        self.assertIn('pub const FIRST_RUN_RULE: Rgba = ("#ffffff", 0.18);', rendered)
+        self.assertIn('pub const HERO_INK: Rgba = ("#ffffff", 1.0);', rendered)
+        self.assertIn('pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);', rendered)
+        # The marker check's well and stroke (`FirstRunMarkerCheck`).
+        self.assertIn('pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);', rendered)
+        self.assertIn('pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);', rendered)
+        self.assertIn('pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);', rendered)
+
+    def test_first_run_carries_the_motion_curve(self):
+        rendered = "\n".join(generate.render_first_run_rust(self.tokens))
+        self.assertIn("pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];", rendered)
+
+
 if __name__ == '__main__':
     unittest.main()

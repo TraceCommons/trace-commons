@@ -495,7 +495,7 @@ fn sheet_for_window(palette: Option<&omarchy::Palette>, dark: bool, translucent:
 }
 
 /// The painted stylesheet for one scheme ([`stylesheet_for`]).
-fn stylesheet(dark: bool) -> String {
+pub(super) fn stylesheet(dark: bool) -> String {
     stylesheet_for(dark, false)
 }
 
@@ -524,7 +524,8 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     let mut sheet = format!(
-        "{brand}\n{glass}\n{tokens}\n{}\n{insights}\n{}",
+        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}",
+        first_run_glow_css(),
         include_str!("style.css"),
         super::hero_art::css()
     );
@@ -543,6 +544,13 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
         sheet.push_str(&format!("\n{glass}\n{insights}"));
     }
     sheet
+}
+
+/// The first run's glow as a `@define-color` rule. The first run's stage is
+/// dark in either scheme (`stage.rs`), so its glow is the dark scheme's.
+fn first_run_glow_css() -> String {
+    let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
+    format!("@define-color tc_first_run_glow {glow};")
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -602,10 +610,11 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
         palette.tertiary.hex(),
     );
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{scoped}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}",
         define(brand),
         define(glass),
         define(tokens),
+        define(&first_run_glow_css()),
         include_str!("style.css"),
         recolour_insights(insights, palette, dark),
     )
@@ -685,6 +694,8 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_tab_ember_halo" => wash(p.accent_line, 0.31, 0.28),
         "tc_glass_edge_high_contrast" => wash(p.ink, 0.4, 0.55),
         "tc_glass_range_fill" => wash(p.ink, 0.07, 0.07),
+        // The glow behind the first run's current step.
+        "tc_first_run_glow" => hex(p.accent),
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),

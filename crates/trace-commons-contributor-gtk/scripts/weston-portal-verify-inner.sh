@@ -171,7 +171,18 @@ else
   fi
 
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
+  # The background-service dialogs and the Private AI start area's "Set up"
+  # (Flatpak on the host service) are mounted tests with no display
+  # elsewhere in CI.
   for test_name in \
+    ui::service_dialog::tests::mounted_not_installed_dialog_has_the_approved_words_and_buttons \
+    ui::service_dialog::tests::mounted_not_running_dialog_has_start_it_and_the_status_command_on_failure \
+    ui::service_dialog::tests::mounted_install_and_update_dialogs_show_the_status_command_after_their_last_try \
+    ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
+    ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
+    ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
+    ui::service_dialog::tests::mounted_a_narrow_command_fits_and_wraps_only_between_runs \
+    ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
     ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
@@ -243,7 +254,24 @@ else
     ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
     ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
     ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
-    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
+    ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
+    ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
+    ui::first_run_screens::mounted_tests::tools_tick_a_tool_the_daemon_already_watches \
+    ui::first_run_screens::mounted_tests::a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command \
+    ui::first_run_screens::mounted_tests::a_refusal_hides_once_the_daemon_holds_the_refused_tool \
+    ui::first_run_screens::mounted_tests::a_refusal_for_a_held_tool_hides_once_its_declaration_is_written \
+    ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
+    ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
+    ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps \
+    ui::first_run_screens::mounted_tests::the_uses_captions_sit_under_their_nodes \
+    ui::first_run_screens::mounted_tests::the_marker_check_ticks_only_while_its_stroke_moves \
+    ui::first_run_screens::mounted_tests::the_customize_card_rises_to_its_place \
+    ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
+    ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
+    ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
+    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
@@ -267,9 +295,9 @@ else
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::credential::provider_tests::wallet_provider_signals_preserve_pending_and_recover \
+      ui::credential::provider_tests::settings_sign_in_signals_preserve_pending_and_recover \
       -- --exact --ignored --test-threads=1; then
-    fail "wallet provider controls did not preserve pending, failure and retry behavior"
+    fail "Settings sign-in controls did not preserve pending, failure and retry behavior"
   fi
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
