@@ -37,6 +37,7 @@ use trace_commons_contributor::account_contribution::{
     REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
 };
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
+use trace_commons_contributor::preview_copy::monitor_screens_copy;
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
 /// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
@@ -121,6 +122,9 @@ pub struct SettingsView {
     autostart_switch: gtk::Switch,
     /// The Traces map's style: on, the rocket and station.
     map_style_switch: gtk::Switch,
+    /// Home's "Show promotions" (the Mac's General section): off, Home's
+    /// campaign card never shows.
+    pub promotions_switch: gtk::Switch,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -668,6 +672,37 @@ impl SettingsView {
             .body(Section::Startup)
             .append(&super::appearance::settings_card());
 
+        // Home's promotion switch, as the Mac's General section has it: the
+        // core's card heading, the switch and the line under it.
+        let home_words = &monitor_screens_copy().home_history;
+        let promotions_card = style::card(gtk::Orientation::Vertical, space::S);
+        let promotions_heading = gtk::Label::builder()
+            .label(home_words.promotions_title)
+            .xalign(0.0)
+            .build();
+        promotions_heading.add_css_class("heading");
+        promotions_card.append(&promotions_heading);
+        let promotions_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let promotions_label = gtk::Label::builder()
+            .label(home_words.promotions_toggle)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        promotions_label.add_css_class("tc-body");
+        let promotions_switch = gtk::Switch::builder()
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Center)
+            .active(crate::home_cards::HomePrefs::load().shows_promotions)
+            .build();
+        promotions_switch.update_property(&[gtk::accessible::Property::Label(
+            home_words.promotions_toggle,
+        )]);
+        promotions_row.append(&promotions_label);
+        promotions_row.append(&promotions_switch);
+        promotions_card.append(&promotions_row);
+        style::append_meta(&promotions_card, home_words.promotions_caption);
+        sections.body(Section::Startup).append(&promotions_card);
+
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
         // -- and, once opted in, because it is drawn in a different visual
@@ -704,6 +739,7 @@ impl SettingsView {
             autostart_row,
             autostart_switch,
             map_style_switch,
+            promotions_switch,
             background_state: RefCell::new(None),
             background_body,
             public,
@@ -914,6 +950,13 @@ pub fn wire(app: &Rc<App>) {
 
     render_autostart(app);
     render_public(app);
+    let home = Rc::clone(app);
+    app.settings
+        .promotions_switch
+        .connect_state_set(move |_, wanted| {
+            home.home.set_promotions(wanted);
+            gtk::glib::Propagation::Proceed
+        });
     let a = Rc::clone(app);
     app.settings
         .autostart_switch

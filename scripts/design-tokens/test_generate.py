@@ -176,5 +176,45 @@ class GlassTokensTests(unittest.TestCase):
         self.assertEqual(first, generate.render_gtk(self.tokens))
 
 
+class HeroTokensTests(unittest.TestCase):
+    """Home's hero cards on Linux take the Mac's flat values from the JSON."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_grounds_are_the_card_tokens_not_the_map_gradient(self):
+        hero = "\n".join(generate.render_hero_rust(self.tokens))
+        self.assertIn('HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")])', hero)
+        self.assertIn('HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")])', hero)
+        self.assertIn('HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")])', hero)
+        self.assertIn('TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"]', hero)
+        self.assertIn('TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"]', hero)
+
+    def test_a_translucent_or_themed_ground_is_refused(self):
+        self.tokens['gradient']['heroMissions']['stops'][0]['alpha'] = 0.5
+        with self.assertRaisesRegex(generate.TokenError, 'heroMissions'):
+            generate.render_hero_rust(self.tokens)
+
+    def test_a_translucent_ink_is_refused(self):
+        self.tokens['color']['heroInk']['alpha'] = 0.9
+        with self.assertRaisesRegex(generate.TokenError, 'heroInk'):
+            generate.render_hero_rust(self.tokens)
+
+
+    def test_tile_values_are_the_macs(self):
+        rendered = "\n".join(generate.render_tile_rust(self.tokens))
+        # GlassTokens.Size.toolTile / toolTileLarge / toolLogo / toolLogoLarge.
+        for line in ("TOOL_TILE: f64 = 22.0", "TOOL_TILE_LARGE: f64 = 30.0",
+                     "TOOL_LOGO: f64 = 15.0", "TOOL_LOGO_LARGE: f64 = 20.0",
+                     "SPINNER: f64 = 12.0", "SPINNER_STROKE: f64 = 1.5", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6", "SKELETON_DIM: f64 = 0.5"):
+            self.assertIn(f"pub const {line};", rendered)
+        # The flat theme rounds a control at 11, the classic at 8.
+        self.assertIn("pub const RADIUS_CONTROL: f64 = 11.0;", rendered)
+        self.assertIn("pub const RADIUS_TILE: f64 = 6.0;", rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);', rendered)
+        self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
+
 if __name__ == '__main__':
     unittest.main()
