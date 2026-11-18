@@ -273,6 +273,25 @@ writes the sandbox's own settings file, where the portal path is right; if
 that start then attaches to the host daemon instead, the first run opens at
 Tools rather than taking those answers as sent.
 
+Nothing is declared while a switch-over is under way: a reopen queued ahead
+of a declaration replaces the backend first, so until the window has
+recorded the reopen's attachment (`Worker::declaration_target`), where a
+declaration would land is unknown and the screen shows the same "couldn't
+be saved" line.
+
+A document portal below interface version 5 (GNOME 46's) has no
+`GetHostPaths`, so no chooser folder outside the grants can be mapped (owner,
+2026-11-17: "Explain + CLI fallback"). The folder is still refused with the
+existing line. Under it, once the owner approves its words
+(`managed::copy::host_folder`, DRAFT, NEEDS APPROVAL), the Tools screen
+adds a line and a fixed command (`daemon::service::host_folder_command`,
+`daemon settings --set "claude_root=$PWD"` or `codex_root`) to run in a
+terminal opened in that folder, with "Copy command" only; the window never
+runs it and does not know the host path to put in it. Only Claude Code and
+Codex take a bare path there, and only one refused folder at a time gets
+the command. Until approval nothing extra is shown and the portal's version
+is not read.
+
 **Falling back.** A Flatpak window attached over the host link checks every
 5 s; when the link reads `Absent` (no socket answers, no unit marker: the
 host part was uninstalled, or the login's runtime directory was cleared) it
