@@ -1,8 +1,10 @@
 # Windows app, matching the native Mac app
 
-Status: draft for owner review. Nothing here is implemented. Facts about the
-code are cited at `origin/main` 19b42d0d2. Anything not read in source is
-marked unverified.
+Status: draft. The owner took the W0 decisions on 2026-11-18 (see
+"Decisions taken 2026-11-18"); the decisions in W16 and later, and the few
+listed under "Still open", are still to ask. Nothing here is implemented.
+Facts about the code are cited at `origin/main` 19b42d0d2. Anything not
+read in source is marked unverified.
 
 This spec does for the Windows app (`windows/`) what
 [2026-11-16-linux-mac-window-and-map-design.md](2026-11-16-linux-mac-window-and-map-design.md)
@@ -21,13 +23,75 @@ under `crates/trace-commons-contributor/src/` unless they start with
 - Decisions for Windows are asked per slice. Linux's answers are shown as precedent and never assumed.
 - Title bar: the Mac's toolbar row extends into the title bar, with the system caption buttons.
 - Drawing: Win2D (`Microsoft.Graphics.Win2D`, MIT) is an approved new dependency.
-- Font: Segoe UI Variable. It is already the default (`Themes/DesignSystem.xaml:220`).
-- Test box: an Azure Windows Server 2025 machine. There is no Windows 11 licence yet, so Mica is unavailable there.
+- Font: Segoe UI Variable. It is already the default (`Themes/DesignSystem.xaml:220`, `Segoe UI Variable Text, Segoe UI`). Whether Segoe UI Variable is installed on Windows Server 2025 and on Windows 10 22H2 is unverified; if it is missing, text falls back to Segoe UI with no error. Spike S7 records which face resolves on each test machine.
+- Test box: an Azure Windows Server 2025 machine. There is no Windows 11 licence yet. Whether Mica shows there is unverified: the edition, or the remote session turning transparency off, could each prevent it. Spike S7 measures it. See "Test machines".
 - Decoration and motion are parity, not polish. Each item lands in the slice it belongs to.
 - "Trace Commons" is never user-visible. The name comes from `brand.rs`.
 
-Every other choice is listed per slice, as options, under "Owner decisions".
-Where Linux made the same choice, that option is marked "Linux precedent".
+## Decisions taken 2026-11-18
+
+The owner said "Accept all my recommendations" to the W0 decisions. Each
+slice below marks its decision as taken and keeps the options that were
+offered, for the record.
+
+| Decision | Taken | What it means here |
+|---|---|---|
+| G-1 | (a) | The WinUI app in `windows/` is unfrozen for parity work now and becomes the Windows client. Tauri on Windows is retired once WinUI matches the Mac. CLAUDE.md is updated in a separate change. |
+| G-2 | (a) | The Mac look, as close as Windows allows. |
+| G-3 | (a) | The NEAR AI N everywhere: title bar, tray, first-run stage and the MSIX tiles (tiles redrawn in W10). |
+| G-4 | (a) | Slices W16 and later cover the surfaces no slice covered. Their own decisions are still to ask. |
+| G-5 | (a) | `az`-based equivalents of `provision-dev-vm.sh` and `win-exec.sh`; `win-capture.ps1` stays on the box. |
+| W1-D1 | (a) | Captures are made on the test machines only, never uploaded from CI. |
+| W1-D2 | (a) | A new `net8.0-windows` render-test project, run in the `windows contributor app` CI job. |
+| W2-D1 | (a) | History and Mission drafts become Home sub-pages behind a breadcrumb. |
+| W2-D2 | (a) | Settings gets its own window, 780 x 640. |
+| W2-D3 | (a) | The Mac's edge growth: the window grows at its right edge and slides left at the screen edge (spike S2). |
+| W2-D4 | (a) | The Mac's notice stack, X rules and inspector demand. Each card new to Windows still needs its own yes (listed under "Still open"). |
+| W2-D5 | (a) | Ctrl+1 to Ctrl+4 by tab position, Home first; Ctrl+comma for Settings; Ctrl+Shift+M kept for Private AI. Ctrl+5 goes. |
+| W3-D1 | (a) | Tool logos from the Mac's own path data, generated, with the source recorded. |
+| W3-D2 | (a) | The Private AI map view lands in W3 with the Traces view. |
+| W4-D1 | (a) | The Mac's peeking stack for transfer cards. |
+| W5-D1 | (b) | Mica where the system supports it, painted glass as the fallback. Acrylic was not part of the answer. |
+| W5-D2 | (a) | The Mac's own glyph paths exported; each SF Symbol mapped to a Segoe Fluent Icons glyph in one checked-in table. |
+| W5-D3 | (a) | Stock controls re-templated to the Mac's shapes and motion, keeping their automation peers. |
+| W6-D1 | (a) | A map style switch in Settings, as on the Mac. |
+| W7-D1 | (a) | No wallet path in first run. |
+| W7-D2 | (a) | Reuse the "this computer" variants #2177 adds, after it lands. W7 waits on #2177 for those words. |
+| W9-D1 | (a) | The undo-window setting (`ApprovalHoldSeconds`) is removed. |
+| W9-D2 | (a) | Match the Mac's grant flow before W9 ships. Spike S5 still gates W9 shipping. |
+| W9-D3 | (a) | A contribution override is cleared only where the Mac clears it, so it arrives with the tray flyout (W13). |
+| W10-D1 | (a) | All internal ids are kept. |
+| W11-D1 | (a) | Hand-drawn pixel art from own geometry where the Mac samples an SF Symbol. |
+| W11-D2 | (a) | The walkthrough card is left out. |
+| W11-D3 | (a) | The compiled campaign only; no remote feed or image. |
+| W12-D1 | (a) | Mark and badge only in the tray icon; no 24 h bars. |
+| W12-D2 | (a) | The Mac's badge: 99+ cap, figure cut from the mark ink, never red. The 16 px legibility trade-off is recorded under W12. |
+| W12-D3 | (a) | The news ring and idle halo, with the Mac's conditions. |
+| W13-D1 | (a) | Both the tray flyout and the edge rail (off by default). |
+| W14-D1 | (c) | Windows Terminal, plus other terminals each admitted after an argv check. Which terminals is still open. |
+| W14-D2 | (a) | Spike "Show" on Windows. Whether it ships depends on the spike. |
+| W14-D3 | (a) | Per-tool launch buttons, with the per-tool start flow. |
+| W15-D1 | open | Spike S4 runs first. The recommendation, if two daemons do not collide, is (a): no background-service flow. |
+
+Also decided earlier: the title bar is the Mac's toolbar row with the system
+caption buttons; Win2D is approved; the font is Segoe UI Variable.
+
+### Still open
+
+- **W15-D1.** Waits for spike S4. Recommended (a) no background-service flow
+  unless two daemons collide.
+- **Each Mac notice new to Windows** (W2-D4). Each card listed under W2
+  needs its own yes, wording included, before it ships.
+- **Which terminals** join Windows Terminal (W14-D1 (c)), each after an argv
+  check.
+- **Whether "Show" ships** (W14-D2), after the spike.
+- **W10-D2.** The invite protocol's display name (`Package.appxmanifest:92`,
+  "Near.ai invite").
+- **Every decision in W16 and later.**
+- **The Windows 10 floor** (see "Test machines"): the code's minimum
+  platform is 10.0.17763; the matrix's minimum is Windows 10 22H2.
+
+Where Linux made the same choice, an option is marked "Linux precedent".
 That marks history, not a default.
 
 ## Goals
@@ -47,9 +111,8 @@ That marks history, not a default.
   to C#, as Linux ported it to Rust (owner, 2026-11-16).
 - New notices. Re-housing an existing notice is not new. A card the Mac
   shows that Windows lacks today is new on Windows, and is asked card by card.
-- Tauri on Windows. It is not touched.
-- Mac surfaces that no slice covers yet. They are listed below and wait for
-  decision G-4.
+- Tauri on Windows. No parity work goes into it; it is retired once the
+  WinUI app matches (G-1).
 
 ## What the Mac app is, at 19b42d0d2
 
@@ -105,13 +168,24 @@ tables.
   `ExtendsContentIntoTitleBar` and `SetTitleBar` are at
   `MainWindow.xaml.cs:129-132`.
 - **Body.** A 184 px rail and one content column (`MainWindow.xaml:107`).
-  The rail has six entries: Waiting (the default), History, Private
-  inference, Insights, Mission drafts and Settings. "Insights" and "Mission
+  The rail has up to six entries: Waiting (the default), History, Private
+  inference, Insights, Mission drafts and Settings. Mission drafts shows
+  only while `MissionsShown` is set (`:328-329`). "Insights" and "Mission
   drafts" are words written in the XAML (`:327`, `:328`). Panes are
   ContentPresenters (`:898-930`).
 - **Missing.** No map, no inspector, no Home tab, no graph. Settings is a
-  pane. Nothing animates: no Storyboard, Composition animation, gradient,
-  shadow, `SystemBackdrop` or `UISettings` read anywhere in `windows/src`.
+  pane. No app-authored animation: no Storyboard, Composition animation,
+  gradient, shadow, `SystemBackdrop` or `UISettings` read anywhere in
+  `windows/src`. Stock ContentDialog, Expander, ProgressRing and
+  ToggleSwitch still animate on their own.
+- **Timers.** Three: the 10 s poll in `Controls/ManagedSessionsView.cs:20`,
+  a 1 s undo tick that runs only while an undo is live
+  (`ViewModels/MainViewModel.cs:48`, `:150-157`), and a visibility debounce
+  timer (`MainWindow.xaml.cs:98`, `:175`).
+- **Keyboard.** Ctrl+1 Waiting, Ctrl+2 History, Ctrl+3 Private inference,
+  Ctrl+4 Settings, Ctrl+5 Insights (`MainWindow.xaml:44-48`), which is not
+  rail order; Mission drafts has no key. Ctrl+Shift+M toggles Private AI
+  (`:49`), matching the Mac's Cmd-Shift-M.
 - **Notices.** Inline cards above the panes, no X, no overlay. The update
   InfoBar is at `MainWindow.xaml:397-411`; the arming card at `:753`.
 - **First run.** The legacy `OnboardingWindow`: Welcome, Connect, Consent,
@@ -141,7 +215,10 @@ core only through the C ABI (`crates/trace-commons-contributor-ffi`).
 - C# binds 108 (`windows/src/TraceCommons.Interop/NativeMethods.cs`, 110
   `DllImport` lines, two of them Win32). Every binding is one the Swift also
   calls.
-- Nothing compares the C# bindings with the header. W1 adds that test.
+- Nothing compares the C# binding symbols with the header. W1 adds that
+  test. Field-level tests already exist for some tables (for example
+  `ConsentCopyTests.cs:98`, `AccountAttentionTests.cs:140`); W1's test adds
+  to them.
 
 Each slice below sorts its ABI work into four buckets:
 
@@ -152,8 +229,10 @@ Each slice below sorts its ABI work into four buckets:
 | (c) | Bound, but unused or partly decoded | C# decoder only |
 | (d) | A daemon method Windows never sends | C# call and view model; no ABI work |
 
-The daemon dispatches 196 methods
-(`crates/trace-commons-contributor/src/daemon/ipc.rs`). The Mac sends 96
+The daemon dispatches about 200 methods: 200 unique names in the string
+match arms of `crates/trace-commons-contributor/src/daemon/ipc.rs`, counted
+with a grep over lines of the form `"name" =>` and `"a" | "b" =>`. The Mac
+sends 96
 that Windows never sends by name. Three of those already have a Windows
 path: `preview` (`tc_preview_open`), `search_original`
 (`tc_search_original`) and local Insights (`tc_insights_call`).
@@ -187,11 +266,14 @@ Bucket (a) items found:
 - **Offscreen renders.** Win2D draws the map, station, orb, stage, hero art
   and tray mark into an offscreen target. Those renders are diffed against
   the Mac's `ImageRenderer` renders of the same sample, with text masked.
-  These run on Windows only (decision W1-D1, W1-D2), not in the macOS run.
+  They run on Windows only, not in the macOS run: in a new `net8.0-windows`
+  render-test project in the `windows contributor app` CI job (W1-D2 (a),
+  taken).
 - **The gallery.** `scripts/parity/gallery.sh` (on main) pairs captures named
   `<set>-<tab>-<panes>-<appearance>.png`. Windows captures come from the test
-  box through `windows/scripts/win-capture.ps1`, which launches the app in
-  the interactive session.
+  machines only, never from CI (W1-D1 (a), taken), through
+  `windows/scripts/win-capture.ps1`, which launches the app in the
+  interactive session.
 - **Accessibility names.** Each ported surface sets
   `AutomationProperties.Name` from core words. Names are checked on the box
   with the UI Automation client in PowerShell (unverified; a driver library
@@ -199,10 +281,31 @@ Bucket (a) items found:
 - **Tests that fail on a wrong port.** Each new test is run against the old
   or a mutated behaviour first and must fail: a wrong spring, a wrong ring
   order, a halo inset of 3 instead of 2.5.
-- **The test box.** Azure Windows Server 2025. No Mica there. The repo's
-  scripts drive a GCE box only (decision G-5). Never sign in, enroll or share
-  on the box. Clean up after each run, and stop the box when done.
+- **The test machines.** See "Test machines" below. The repo's scripts
+  drive a GCE box only; `az`-based equivalents are added for the Azure box
+  (G-5 (a), taken). Never sign in, enroll or share on a test machine. Clean
+  up after each run, and stop the Azure box when done.
 - **Owner sign-off** is on the gallery, not on test counts.
+
+## Test machines
+
+| Machine | Role | Status | Known limits |
+|---|---|---|---|
+| Azure Windows Server 2025 VM | Build, logic and UI checks; gallery captures during slice work; spikes S1, S2, S3, S7 | in use | No Windows 11 licence. Mica and Acrylic unverified there (S7 logs `MicaController.IsSupported()` and `DesktopAcrylicController.IsSupported()`; those API names are from memory and are checked in S7). GPU and Win2D drawing unverified (S1). Segoe UI Variable and Segoe Fluent Icons presence unverified (S7). Reached over RDP, which may turn transparency off. |
+| Physical Windows 11 PC | The release gate: the final gallery, Mica, motion, DPI and a real launch are signed off here | not yet bought | None known. Until it exists, no slice is called released on Windows. |
+| Windows 11 ARM VM | Optional: an arm64 launch check | optional, not set up | Whether the FFI library and Win2D ship arm64 builds is unverified. |
+| Windows 10 22H2 | The minimum supported OS | not set up | No Mica: the painted fallback (W5-D1 (b)) is what shows. Segoe UI Variable and Segoe Fluent Icons are unverified there, so each needs a fallback (Segoe UI; Segoe MDL2 Assets or exported paths). |
+
+The code's floor is lower than the matrix's: `TargetPlatformMinVersion` is
+10.0.17763.0 (`TraceCommons.App.csproj:6`; Windows 10 1809, from memory), and
+the target framework is `net8.0-windows10.0.19041.0` (`:5`). Whether to
+raise the floor to 22H2 is still open; no code changes for it in this spec.
+The project already builds x86, x64 and ARM64 (`:14-15`); the ARM VM would
+be the first run of the arm64 build.
+
+Each fallback is a gallery row of its own: a capture with Mica and one
+painted, one with Segoe UI Variable and one with Segoe UI, so a missing font
+or material is seen, not silently accepted.
 
 ## Spikes
 
@@ -212,45 +315,59 @@ Bucket (a) items found:
   render offscreen to a PNG for the diffs? Pick the package version from
   this spike, not from memory.
 - **S2. Window growth.** `AppWindow.Resize` and `Move` with an extended
-  title bar, across DPI scales. Feeds W2-D3.
+  title bar, across DPI scales. W2-D3 (a) is taken; this spike says how to
+  build it.
 - **S3. Exec and capture on the Azure box.** How commands reach the box, and
-  whether `win-capture.ps1` works there unchanged. Feeds G-5.
+  whether `win-capture.ps1` works there unchanged. Shapes the `az` scripts
+  of G-5 (a).
 - **S4. Two daemons.** What the CLI's `daemon run` does on Windows while the
   app's in-process daemon runs, and whether both watch the same sessions.
-  Feeds W15-D1.
+  W15-D1 is asked after it.
 - **S5. The arming gate.** Windows arms through `set_project_mode`
   `auto_upload` (`MainWindow.xaml.cs:896-908`). The daemon records the grant
   terms in force, which may be none (`ipc.rs:6040-6044`, `.flatten()`).
   Whether the automatic pass then sends without an account-level grant is
-  not traced. This must be settled before W9-D2 is asked, and before W9
-  ships.
+  not traced. W9-D2 (a) is taken (match the Mac's grant flow); this spike
+  still gates W9 shipping, and says what the existing per-project arming
+  sends until then.
 - **S6. Sample coverage.** Which reads the map, tree, graph, inspector and
   Home need that the recorded sets lack (account devices and the Private AI
   network reads are known gaps).
-- **S7. Motion settings.** `UISettings.AnimationsEnabled` on the box, and
-  the window visibility and minimise events that stop each clock.
+- **S7. Motion, material and fonts on each test machine.**
+  `UISettings.AnimationsEnabled`, and the window visibility and minimise
+  events that stop each clock. Log whether Mica and Acrylic report support
+  (`MicaController.IsSupported()`, `DesktopAcrylicController.IsSupported()`;
+  names from memory, checked here), and which face resolves for Segoe UI
+  Variable and Segoe Fluent Icons. Run it on the Azure box now and on each
+  machine in "Test machines" as it arrives, so the W5-D1 note rests on a
+  measurement.
 
 ### General decisions
 
 These apply across slices.
 
 - **G-1. Unfreeze and which Windows client.** CLAUDE.md still says Windows stays on Tauri, frozen, until macOS ships (#1173 D13). The owner asked to start Windows parity in the WinUI app (`windows/`).
+  - **Taken 2026-11-18: (a).**
   - (a) The WinUI app in `windows/` is unfrozen for parity work now and becomes the Windows client; Tauri on Windows is retired once it matches, as on macOS; CLAUDE.md is updated in a separate change (Linux precedent: GTK unfrozen for development on 2026-11-11, releases off until it catches up)
   - (b) Spec work only for now; slices wait
 - **G-2. Look target.** Match the Mac's look as closely as Windows allows, or keep a Fluent look with the Mac's structure.
+  - **Taken 2026-11-18: (a).**
   - (a) The Mac look, as close as possible (Linux precedent, 2026-11-16)
   - (b) A Fluent look with the Mac's structure
   - Note: The owner's remark that decoration and motion are parity points to (a). Confirm it.
 - **G-3. App mark.** Which mark the app shows in the title bar, the tiles, the tray and the first-run stage. Asked once here; W2, W8 and W12 apply it.
+  - **Taken 2026-11-18: (a), tiles too.**
   - (a) The NEAR AI N everywhere, tiles too (Linux precedent: the N for the app, tray and Flatpak icon, #2186, still open)
   - (b) The N in the app, tray and stage; the Turn stays on the MSIX tiles only
   - (c) Keep the Turn everywhere
-- **G-4. Surfaces no slice covers.** Mac surfaces outside W1-W15 (section "Surfaces no slice covers"), including three Insights decoration items.
+- **G-4. Surfaces no slice covers.** Mac surfaces outside W1-W15 (now section "Slices for the surfaces W1-W15 did not cover"), including three Insights decoration items.
+  - **Taken 2026-11-18: (a): slices W16 and later, below.**
   - (a) Add slices W16 and later for them
   - (b) Fold each into the nearest existing slice
   - (c) Mark some not applicable (only the owner can choose this, per surface)
   - Note: No Linux precedent: the Linux spec left screen content out of scope.
 - **G-5. Tooling for the Azure test box.** The repo's dev-VM scripts drive a GCE Windows Server 2022 box through gcloud and IAP. Nothing drives the Azure Windows Server 2025 box.
+  - **Taken 2026-11-18: (a).**
   - (a) Add `az`-based equivalents of `provision-dev-vm.sh` and `win-exec.sh`, keeping `win-capture.ps1` on the box
   - (b) Drive the box by hand over RDP and run `win-capture.ps1` there
   - Note: No Linux precedent (Linux used GCP desktops).
@@ -258,15 +375,20 @@ These apply across slices.
 ## Slices
 
 Each slice is one PR. W1 to W4 are a stack. W5 can start beside W2. W7 and
-W9 depend on W2. W11 depends on W2 and W5. While a slice is written it runs
+W9 depend on W2. W11 depends on W2 and W5. W16, W17 and W18 depend on the
+Settings window from W2. W19 depends on W2 and W3. W20 depends on W2 and W5.
+W21 depends on W2 and W3. W22 can start after W9. W23 depends on W2 and
+W11. W24 depends on W10. W25 comes last. While a slice is written it runs
 only a compile check. At its end it runs the interop suite, the WinUI build
 (CI or the box), the contributor crate tests for any core change, and fmt
 and clippy.
 
-Decoration rows come from the W0 inventory: 80 items, of which 68 are
-missing, 6 partial, 1 ported and 5 not applicable. Decoration lands in the
-slice it belongs to. It is not deferred. Four items moved from the
-inventory's slice to the first slice that draws them; each says so.
+Decoration rows come from the W0 inventory: 80 items, of which 67 are
+missing, 7 partial, 1 ported and 5 not applicable. (The first draft said 68
+and 6; the clock-driven text refresh is partial, because Windows already
+ticks a 1 s undo count.) Decoration lands in the slice it belongs to. It is
+not deferred. Four items moved from the inventory's slice to the first slice
+that draws them; each says so. The three rows that had no slice are in W20.
 
 ### W1. Samples, gallery and the binding test
 
@@ -300,9 +422,11 @@ No decoration items.
 **Owner decisions:**
 
 - **W1-D1. Where captures run.** Where the Windows half of the gallery is produced.
+  - **Taken 2026-11-18: (a).**
   - (a) On the test box only, never uploaded from CI (Linux precedent)
   - (b) Also as a CI artifact
 - **W1-D2. Render tests in CI.** Win2D pixel tests cannot run in the plain `net8.0` test project on macOS.
+  - **Taken 2026-11-18: (a).**
   - (a) A new `net8.0-windows` render-test project run in the `windows contributor app` job
   - (b) Render tests on the test box only; CI keeps the pure-logic tests
   - Note: Linux precedent: its pixel tests run in the GTK suite and the weston job, so closer to (a).
@@ -310,7 +434,7 @@ No decoration items.
 
 ### W2. Window shell
 
-The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs. Mac notices with no Windows card found in the survey (unverified card by card; each is a new notice on Windows and needs its own yes under W2-D4): a daemon that refused to start, onboarding owed, the attached-daemon limits, first run's last word, a failed or finished action, the traces moving now, the undos, arming rewordings, a consent gate hold, the backlog and idle suggestions, the idle notifications offer, the first-contribution note, Resume while uploads are paused, History's verdict news and verdict notifications offer, and the NEAR AI sign-in card (`Views/Monitor/MonitorNotices.swift:6-25`). Windows today has the update InfoBar, the health banner, the switch-on and grant-void notices, the legacy migration card, the private inference offer, the arming offer and the witness capacity banner.
+The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs. Mac notices with no Windows card found in the survey (unverified card by card; W2-D4 (a) is taken, but each is a new notice on Windows and still needs its own yes, wording included): a daemon that refused to start, onboarding owed, the attached-daemon limits, first run's last word, a failed or finished action, the traces moving now, the undos, arming rewordings, a consent gate hold, the backlog and idle suggestions, the idle notifications offer, the first-contribution note, Resume while uploads are paused, History's verdict news and verdict notifications offer, and the NEAR AI sign-in card (`Views/Monitor/MonitorNotices.swift:6-25`). Windows today has the update InfoBar, the health banner, the switch-on and grant-void notices, the legacy migration card, the private inference offer, the arming offer and the witness capacity banner.
 
 **Mac sources:**
 
@@ -325,9 +449,9 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 
 - `MainWindow.xaml` and `MainWindow.xaml.cs`, rebuilt
 - A pure pane-layout class in `Interop/`
-- `Controls/SettingsView.xaml` hosted in its own window (if W2-D2 a)
+- `Controls/SettingsView.xaml` hosted in its own window, 780 x 640 (W2-D2 (a))
 - `TrayIcon.cs` menu rows and the accelerators, for the four tabs
-- `Controls/HistoryView.xaml`, `MissionDraftsView.xaml` moved (W2-D1)
+- `Controls/HistoryView.xaml`, `MissionDraftsView.xaml` moved to Home sub-pages (W2-D1 (a))
 
 **C ABI:**
 
@@ -346,6 +470,7 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 - Notice stack: peek 8, 3 drawn, 4% narrowing a level, opacity 0.9 and 0.7, spring 0.36/0.86
 - Pane open and close on `Motion.standard` 0.22 s, none with animations off
 - `ShellWordingTests` baseline goes down
+- Keys: Ctrl+1 to Ctrl+4 follow tab position with Home first, Ctrl+comma opens Settings, Ctrl+Shift+M still toggles Private AI, Ctrl+5 is gone
 
 **Decoration in this slice:**
 
@@ -363,30 +488,36 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 **Owner decisions:**
 
 - **W2-D1. Rail destinations.** Where History and Mission drafts go once the rail is replaced by four tabs.
+  - **Taken 2026-11-18: (a).**
   - (a) Home sub-pages behind a breadcrumb, as on the Mac (Linux precedent, #2160)
   - (b) Keep a rail beside the tabs
 - **W2-D2. Settings window.** Settings is a pane on Windows and its own 780x640 window on the Mac.
+  - **Taken 2026-11-18: (a).**
   - (a) Its own window, as on the Mac (Linux precedent)
   - (b) Stay a pane
 - **W2-D3. Window growth at the screen edge.** On the Mac a pane opening grows the window at its right edge and slides it left at the screen edge.
+  - **Taken 2026-11-18: (a).**
   - (a) The Mac's behaviour, with `AppWindow.Resize` and `Move` (spike S2)
   - (b) The window keeps its size and the panes reallocate inside it (Linux precedent: forced by Wayland, not chosen)
 - **W2-D4. Notices and inspector demand.** Windows stacks inline cards above the pane with no X. The Mac lays a peeking stack over the tab and opens the inspector on demand.
+  - **Taken 2026-11-18: (a). Each card new to Windows still needs its own yes.**
   - (a) Both as on the Mac: the overlay stack with its X rules, and the inspector opening itself on the Mac's demand keys (Linux precedent: decision 1, "all three approved")
   - (b) Re-house the existing cards only; the inspector opens on selection only
   - Note: Either way, a card the Mac shows that Windows lacks today is a new notice on Windows (copy guide rule 9). The spec lists those cards under W2; each needs its own yes.
-- **W2-D5. Keyboard map.** Windows has Ctrl+1 to Ctrl+5 in rail order (`MainWindow.xaml:44-48`). The Mac has Cmd-1 to Cmd-4 by tab position and Cmd-, for Settings.
+- **W2-D5. Keyboard map.** Windows binds Ctrl+1 Waiting, Ctrl+2 History, Ctrl+3 Private inference, Ctrl+4 Settings and Ctrl+5 Insights (`MainWindow.xaml:44-48`), which is not rail order, and Mission drafts has no key. Windows already has Ctrl+Shift+M for Private AI (`:49`), matching the Mac's Cmd-Shift-M (`TraceCommonsAppMain.swift:295-296`); it is kept either way. The Mac has Cmd-1 to Cmd-4 by tab position and Cmd-, for Settings.
+  - **Taken 2026-11-18: (a), and Ctrl+Shift+M is kept.**
   - (a) Ctrl+1 to Ctrl+4 by tab position, Home first, and Ctrl+, for Settings (Linux precedent: `<Control>comma` at `crates/trace-commons-contributor-gtk/src/ui/shortcuts.rs:44`)
-  - (b) Keep the rail-order keys
+  - (b) Keep the current keys
 - Also applies: G-3 (the mark in the title bar).
 
 ### W3. Traces map and tree
 
-Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and motion are drawn.
+Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and motion are drawn. The Private AI map view lands here too (W3-D2 (a), taken): `PrivateAIFlowMap` (`MonitorWindowView.swift:1053-1085`) builds `FlowMapScene.privateAI` (`FlowMapScene.swift:645`) from the harness list, `tool_destinations` and the Private AI state. Spike S6 names the reads the recorded samples lack for it (account devices and the Private AI network reads are known gaps); W3 records them before its map tests can pin that view.
 
 **Mac sources:**
 
-- `Views/Monitor/FlowMapScene.swift`, `FlowMapView.swift`, `MapToolPile.swift`
+- `Views/Monitor/FlowMapScene.swift` (including `privateAI` at `:645`), `FlowMapView.swift`, `MapToolPile.swift`
+- `Views/MonitorWindowView.swift:1053-1085` (`PrivateAIFlowMap`)
 - `Views/Monitor/TracesTree.swift`, `TracesViews.swift`, `TracesStore.swift`
 - `TracesInspectorHost.swift`, `SummaryInspector.swift`, `ToolFolderInspectors.swift`
 - `TCDesign/Logos/GlassLogoPaths.swift`, `GlassToolLogo.swift`, `SVGPathData.swift`
@@ -402,6 +533,7 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 **C ABI:**
 
 - (b) `tc_monitor_traces_copy_json` (shared with W2)
+- (b) `tc_residual_secret_line_text`, the line for secrets found and left (Mac: `TraceCommonsApp/Views/Monitor/TracesStore.swift:568`)
 - (d) `tool_destinations`, `keep`, `list_kept`, `undo_keep`, `history_detail`, `include_past_sessions`, `list_past_sessions`
 
 **Tests that pin the Mac:**
@@ -410,6 +542,7 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 - Folder column at 30%, 10 folders then "+N" revealing 6; piles at 50%; hub at 72%
 - An arc flows only for an auto-upload folder, gate open, sessions bound for the commons
 - Arc dash 5/5; flowing dash 4/8 at width x1.3, 18 pt/s
+- The Private AI scene against a sample with harnesses and destinations; nothing drawn as current when the harness read failed
 
 **Decoration in this slice:**
 
@@ -425,9 +558,11 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 **Owner decisions:**
 
 - **W3-D1. Tool logos.** The map coins, tool tiles, first-run ring and launch art draw tool logos.
+  - **Taken 2026-11-18: (a).**
   - (a) The Mac's own path data from `GlassLogoPaths.swift`, generated, with its source recorded (Linux precedent: logos allowed "as needed", #2182)
   - (b) Initials only
 - **W3-D2. Private AI map view.** The map's second view reads devices, harnesses and destinations.
+  - **Taken 2026-11-18: (a).**
   - (a) In W3 with the Traces view
   - (b) A follow-up slice after W4 (Linux precedent: slice 7 of its spec)
 
@@ -463,6 +598,7 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 **Owner decisions:**
 
 - **W4-D1. Transfer cards at the map foot.** How transfer cards stack while another tab is showing.
+  - **Taken 2026-11-18: (a).**
   - (a) The Mac's peeking stack
   - (b) A short column, newest nearest the legend (Linux precedent on main: `crates/trace-commons-contributor-gtk/src/ui/monitor/transfer_card.rs:16-17`, after #2187 merged)
 
@@ -507,7 +643,7 @@ W5 is the enabler: motion tokens and the clock stop land before any animated ite
 | Hover washes | TCDesign/Styling/GlassHover.swift:24-42; GlassStyle.swift:342-347; GlassTokens.swift:150 controlOnSelectionHover; onHover in 25+ places (HomeViews.swift:1161, TracesViews.swift:1415, Surfaces.swift:173, Navigation.swift:134) | grep PointerEntered\|PointerExited: 0 lines; only stock control visual states | missing | medium, S |  |  |
 | Press wash and scale | TCDesign/Styling/GlassPress.swift:33 GlassPressStyle, :108 pressed wash, :116/:127 fast animation; 15 uses in the app (first GetStartedCard.swift:164) | animation greps 0 (Z1); stock pressed states only | missing | low, S |  |  |
 | Motion tokens and curves | TCDesign/Styling/GlassMotion.swift:4-47 (curve, fast, standard, spatial, expressive); GlassTokens.swift:692-703 | generate.py:52 emits only SHELL_ROLES colours; no motion keys in Themes/DesignSystem.xaml; animation greps 0 (Z1) | missing | high, M | fast 0.15, standard 0.22, slow 0.3, reveal 0.18, slide 0.25, curve (0.2, 0.8, 0.2, 1), spin 0.8, pulse 1.6 (GlassTokens.swift:693-703); spatial spring 0.9 s bounce 0.04 (GlassMotion.swift:40), expressive 0.78 s bounce 0.32 (:47) |  |
-| Reduce motion and the hidden-window clock stop | TCDesign/Components/AnimationTimeline.swift:4-32 GlassAnimationTimeline (pauses unless the window is visible); GlassMotion.swift:17 systemReducesMotion | grep UISettings over windows/src: 0 lines; the only timer is the 10 s poll in Controls/ManagedSessionsView.cs:20 | missing | high, S |  |  |
+| Reduce motion and the hidden-window clock stop | TCDesign/Components/AnimationTimeline.swift:4-32 GlassAnimationTimeline (pauses unless the window is visible); GlassMotion.swift:17 systemReducesMotion | grep UISettings over windows/src: 0 lines; three timers (10 s poll Controls/ManagedSessionsView.cs:20, 1 s undo tick ViewModels/MainViewModel.cs:48 and :150-157, visibility debounce MainWindow.xaml.cs:98 and :175), none stopped by an animation setting | missing | high, S |  |  |
 | Status dot with halo and ring options | TCDesign/Components/Indicators.swift:4-31 GlassStatusDot (halo ink 0.08 line 2; ring status @0.25 line 3); 5 app uses (HomeViews.swift:815) | a plain 7 px Ellipse for Private inference working (MainWindow.xaml:307-310), no halo or ring | partial | low, S |  |  |
 | Mac glyph set (GlassGlyph paths) | TCDesign/Components/Glyphs.swift:8 GlassGlyph, :95 GlassGlyphView (Controls.swift:273, 538, 623) | Segoe FontIcon glyphs (13 lines in 6 files) and hand-drawn 16 px Canvas icons in MainWindow.xaml | missing | medium, M |  | W5-D2 |
 | Warning glyph | TCDesign/Components/Feedback.swift:115 GlassWarningGlyph, :141 shape; PrivateAISection.swift:211 | hand-drawn warning triangle Canvas (MainWindow.xaml:453-463, :571-581) and FontIcon E7BA: own geometry, not the Mac's | partial | low, S |  | W5-D2 |
@@ -524,15 +660,18 @@ W5 is the enabler: motion tokens and the clock stop land before any animated ite
 **Owner decisions:**
 
 - **W5-D1. Glass material.** The Mac draws Liquid Glass under its panes. Windows has an opaque window.
+  - **Taken 2026-11-18: (b), Mica only; painted fallback.**
   - (a) Painted glass only, from the flat tokens
   - (b) Mica or Acrylic where the system supports it, with a painted fallback (Linux precedent: the owner chose real blur where the compositor allows, painted elsewhere; what landed paints only)
-  - Note: Mica is unavailable on the Server 2025 test box, so (b) cannot be checked there; Acrylic support there is unverified.
-- **W5-D2. Glyphs and icons.** The Mac draws its own `GlassGlyph` paths (`TCDesign/Components/Glyphs.swift:8`) and about 30 SF Symbols, which are Apple-only. Windows uses Segoe `FontIcon` glyphs and hand-drawn Canvas icons.
+  - Note: Whether Mica shows on the Server 2025 box is unverified; spike S7 logs it. Windows 10 22H2 has no Mica (from memory), so the painted fallback is what it shows. The physical Windows 11 PC is where Mica is signed off.
+- **W5-D2. Glyphs and icons.** The Mac draws its own `GlassGlyph` paths (`TCDesign/Components/Glyphs.swift:8`) and at least 35 SF Symbols (35 distinct literal `systemName:` and `systemImage:` names outside the Gallery, plus any built at runtime), which are Apple-only. Windows uses Segoe `FontIcon` glyphs and hand-drawn Canvas icons.
+  - **Taken 2026-11-18: (a).**
   - (a) Export the Mac's own glyph paths, and map each SF Symbol to a Segoe Fluent Icons glyph in one checked-in table (Linux precedent: own glyph paths exported; stock Adwaita symbolic icons in a table for SF Symbols)
   - (b) Segoe Fluent Icons for everything, in one table
   - (c) Own glyph paths, and hand-drawn lookalikes for the SF Symbols
-  - Note: Whether Segoe Fluent Icons is present on Server 2025 is unverified; Segoe MDL2 Assets is the older font.
+  - Note: Whether Segoe Fluent Icons is present on Server 2025 and on Windows 10 22H2 is unverified (spike S7); Segoe MDL2 Assets is the older font. The table names a fallback for each glyph.
 - **W5-D3. Stock controls.** Windows uses stock ToggleSwitch, CheckBox, Expander, ProgressRing and ContentDialog. The Mac draws its own switch, checkbox, chevron, spinner and modal, with motion.
+  - **Taken 2026-11-18: (a).**
   - (a) Re-template the stock controls to the Mac's shapes and motion, keeping their automation peers
   - (b) Keep WinUI's stock controls and their own motion
   - Note: No Linux precedent recorded here.
@@ -573,6 +712,7 @@ W5 is the enabler: motion tokens and the clock stop land before any animated ite
 **Owner decisions:**
 
 - **W6-D1. Map style switch.** The Mac offers a rocket style (station) and a standard style (orb).
+  - **Taken 2026-11-18: (a).**
   - (a) A switch in Settings, as on the Mac
   - (b) Rocket style only
   - Note: No Linux precedent recorded here.
@@ -598,7 +738,8 @@ Replaces the legacy `OnboardingWindow` with the Mac's steps: welcome, tools, use
 - (c) the whole `tc_first_run_copy_json` (today only `agent_configuration`, `AgentConfigurationCopy.cs:19`)
 - (b) `tc_terms_document_json`, `tc_first_run_estimate_line`, `tc_describe_folder`, `tc_install_guides_json`, `tc_cli_tool_json`
 - (d) `first_run_copy`, `terms_accept`, `list_past_sessions`, `include_past_sessions`, `managed_tool_setup`, `set_private_ai`, `automatic_grant`, `grant_automatic_including_existing`
-- (a) non-Mac device words (W7-D2)
+- (d) the join and account steps: `invite_lookup` (`TraceCommonsApp/DaemonClient+FirstRun.swift:80`), `account_invite_redeem` and `account_contribution_status` (`DaemonClient.swift:154-157`, called at `AppModel.swift:313-315`), `near_ai_account_sign_in` (`DaemonClient.swift:124`, called at `AppModel.swift:4004`)
+- (a) non-Mac device words (W7-D2 (a): the "this computer" variants from #2177, after it lands)
 
 **Tests that pin the Mac:**
 
@@ -615,9 +756,11 @@ Replaces the legacy `OnboardingWindow` with the Mac's steps: welcome, tools, use
 **Owner decisions:**
 
 - **W7-D1. Wallet sign-in in first run.** The guide says Linux dropped the Mac's wallet sign-in from first run. At 19b42d0d2 the Mac's first run signs in to NEAR AI through the browser, where a wallet can be the method (`TCShellCore/FirstRun/FirstRunPlan.swift:41`); no separate wallet step was found under `Views/FirstRun/`. Which part Linux dropped is unverified here.
+  - **Taken 2026-11-18: (a).**
   - (a) Drop the wallet path from first run (Linux precedent, #2177)
   - (b) Keep whatever the Mac's sign-in offers
 - **W7-D2. Device words for first run and projects.** First-run and project words exist only as "this Mac" (`first_run_copy.rs:618`, `:634`, `:672`, `:731`; `project_copy.rs:173`).
+  - **Taken 2026-11-18: (a), after #2177 lands.**
   - (a) Reuse the "this computer" variants #2177 adds, after it lands (Linux precedent)
   - (b) New "this PC" variants (new words, each needing approval)
 
@@ -678,7 +821,7 @@ Gated by spike S5. Nothing more permissive than the Mac.
 
 **Windows files:**
 
-- `Controls/SettingsView.xaml` (consent scopes `:214-259`, undo window `:279`)
+- `Controls/SettingsView.xaml` (consent scopes `:214-259`; the undo window `:279` is removed, W9-D1 (a))
 - `MainWindow.xaml.cs:896-908` (arming accept)
 - `Controls/PreviewSheet.xaml`, `PreviewWindow.cs`, `Controls/WithdrawDialog.cs`
 - `MainViewModel` undo
@@ -695,6 +838,7 @@ Gated by spike S5. Nothing more permissive than the Mac.
 - A reply that does not confirm the write leaves the old state
 - Bulk plan, confirm and stale
 - Never is absolute
+- No `ApprovalHoldSeconds` control remains in Settings
 
 **Decoration in this slice:**
 
@@ -703,13 +847,16 @@ No decoration items.
 **Owner decisions:**
 
 - **W9-D1. Undo-window setting.** `ApprovalHoldSeconds` (`Controls/SettingsView.xaml:279`) exists on Windows only and can be set low.
+  - **Taken 2026-11-18: (a).**
   - (a) Remove it (Linux precedent, #2179)
   - (b) Keep it
 - **W9-D2. Arming without an account grant.** Windows arms a folder by sending `set_project_mode` `auto_upload` from the arming card and never sends the automatic-grant family.
+  - **Taken 2026-11-18: (a). Spike S5 still gates W9 shipping.**
   - (a) Match the Mac's grant flow before W9 ships (Linux precedent: "match the mac", #2179)
   - (b) Keep per-project arming as it is
   - Note: Spike S5 traces what the daemon then sends; it runs before this is asked.
 - **W9-D3. Where an override is cleared.** The Mac clears a contribution override from its menu-bar panel (`TraceCommonsApp/Views/Monitor/MenuPanelStore.swift:177`, `:199`), after a confirmation. Windows sends neither `set_contribution_override` nor `clear_contribution_override`. Whether the Mac offers a clear anywhere else was not checked.
+  - **Taken 2026-11-18: (a).**
   - (a) Clear only where the Mac clears, so it arrives with the tray flyout (W13-D1) (Linux precedent: "match the mac", #2179)
   - (b) Also add a clear control in Settings
 
@@ -725,6 +872,7 @@ No decoration items.
 
 - Every "Near.ai" literal, including `MainWindow.xaml:29`, `:97`, `OnboardingWindow.xaml:27`, `:33`, `Controls/SettingsView.xaml:208`
 - `windows/packaging/Package.appxmanifest:32`, `:75`, `:92`, `:109`
+- The MSIX tiles in `windows/packaging/Assets`, redrawn with the NEAR AI N (G-3 (a), tiles too)
 
 **C ABI:**
 
@@ -732,7 +880,7 @@ No decoration items.
 
 **Tests that pin the Mac:**
 
-- The manifest's display names equal `APP_NAME`
+- The manifest's app-name display names (`Package.appxmanifest:32` `<DisplayName>`, `:75` `DisplayName`, `:109` the startup task's `DisplayName`) equal `APP_NAME`. The invite protocol's `<uap:DisplayName>Near.ai invite</uap:DisplayName>` (`:92`) is not the app name and is excluded until W10-D2 is answered.
 - No "Near.ai" literal in shell source
 - `NoCommonsNameTests` stays green
 
@@ -742,7 +890,12 @@ No decoration items.
 
 **Owner decisions:**
 
+- **W10-D2. The invite protocol's display name.** `Package.appxmanifest:92` is "Near.ai invite", the name Windows shows for the `tracecommons` protocol. `APP_NAME` is "Near AI Gateway" (`brand.rs:28-35`). Still open.
+  - (a) `APP_NAME` alone, no new words
+  - (b) A core word such as "<APP_NAME> invite" (a new copy item, needing approval)
+  - (c) Leave the literal as it is for now, excluded from the test
 - **W10-D1. Internal ids.** The package name `Iqlusion.TraceCommons`, the `tracecommons` protocol, `TraceCommons.exe`, the Run value name and the install folder.
+  - **Taken 2026-11-18: (a).**
   - (a) Keep all of them (Linux precedent, #2184)
   - (b) Rename some, with a migration
 
@@ -778,17 +931,20 @@ No decoration items.
 | Coin burst on balance arrival | TCDesign/Components/CoinBurst.swift:14 (timeline :135, Canvas :136); BalanceArrivalFlourish.swift:48-53 | No Home tab. | missing | medium, M | 44 coins, 1.7 s, spill 120, still at 0.45, drag 3.4, gravity 50, squash 0.72, fade from 0.55, flash 0.28 s r 46, golds #FFE58A/#F5B921/#C58A12/#8F5E0A (CoinBurst.swift:30-56) |  |
 | Balance count-up | TraceCommonsApp/Views/Monitor/BalanceArrivalFlourish.swift:36-39; HomeViews.swift:1821 | No Home tab. | missing | medium, S | 24 frames x 50 ms, reduce-motion hold 1.6 s (BalanceArrivalFlourish.swift:36-39) |  |
 | Home Insights graphic (bars with fade and shadow) | TraceCommonsApp/Views/Monitor/HomeInsightsVisual.swift:16, :76 gradient, :83 shadow | No Home tab. | missing | medium, S | ink 0.95 to 0.45 gradient (:76); shadow black @0.2 r 12 y 8 (:83) |  |
-| Remote campaign image on the campaign hero | TCShellCore/PrivateAICampaign.swift:13 imageURL; PrivateAICampaignClient.swift:42; PrivateAICampaignStore.swift:77; HomeViews.swift:140 | No Home tab. | missing | low, M |  | W11-D3 |
+| Remote campaign image on the campaign hero | TCShellCore/PrivateAICampaign.swift:13 imageURL; PrivateAICampaignClient.swift:42; PrivateAICampaignStore.swift:77; HomeViews.swift:140 | No Home tab. | missing | low, M |  | W11-D3 (a): not ported; the compiled campaign only |
 
 **Owner decisions:**
 
 - **W11-D1. Art where the Mac samples an SF Symbol.** Hero cards draw pixel art sampled from SF Symbols.
+  - **Taken 2026-11-18: (a).**
   - (a) Hand-drawn pixel art from own geometry (Linux precedent, #2187)
   - (b) Leave those cards without art
 - **W11-D2. Walkthrough card.** A closable card on Home.
+  - **Taken 2026-11-18: (a).**
   - (a) Leave it out (Linux precedent, #2187)
   - (b) Port it, under the notice rule
 - **W11-D3. Remote campaign feed and image.** The Mac fetches a campaign feed and its image.
+  - **Taken 2026-11-18: (a).**
   - (a) The compiled campaign only (Linux precedent, #2187: GTK has no HTTP client)
   - (b) Fetch the feed and image as the Mac does
 
@@ -818,7 +974,7 @@ No decoration items.
 
 | Item | Mac source | Windows today | Status | Weight | Numbers to pin | Decision |
 |---|---|---|---|---|---|---|
-| Menu-bar strip: N plus 24 h bars on a centre line | TCDesign/Components/MenuBarPanel.swift:316 GlassMenuBarStrip (doc :297-315, Canvas :532, cut-out :575); 10 refs in the app | Turn raster tray icon; dot for Attention and Unhealthy only (`TrayIcon.cs:625-647`); count in the tooltip. | missing | high, M | height 22, mark 14, gap 4, bar 1, step gap 1, graph 17, centre line 1 (MenuBarPanel.swift:475-493); bars only once a few days of data exist (doc :307-308) | W12-D1 |
+| Menu-bar strip: N plus 24 h bars on a centre line | TCDesign/Components/MenuBarPanel.swift:316 GlassMenuBarStrip (doc :297-315, Canvas :532, cut-out :575); 10 refs in the app | Turn raster tray icon; dot for Attention and Unhealthy only (`TrayIcon.cs:625-647`); count in the tooltip. | missing | high, M | height 22, mark 14, gap 4, bar 1, step gap 1, graph 17, centre line 1 (MenuBarPanel.swift:475-493); bars only once a few days of data exist (doc :307-308) | W12-D1 (a): the mark ports, the bars are not ported by decision |
 | Tray badge (count, 99+, figure cut out of the mark ink) | TCDesign/Components/MenuBarPanel.swift:302-310 (doc), :460-464 | Turn raster tray icon; dot for Attention and Unhealthy only (`TrayIcon.cs:625-647`); count in the tooltip. | missing | high, S | badge 11, glyph 7, inset 2.5, lift = halo reach (MenuBarPanel.swift:460-463); 99+ past 99 (doc :303-304); never red (doc :309-310) | W12-D2 |
 | Tray news ring and idle halo | TCDesign/Components/MenuBarPanel.swift:338-346 (Mark), :389 shownMark, :470-472 | Turn raster tray icon; dot for Attention and Unhealthy only (`TrayIcon.cs:625-647`); count in the tooltip. | missing | medium, S | halo inset 2.5, line 2, reach = inset + line/2 (MenuBarPanel.swift:470-472) | W12-D3 |
 | Tray attention mark | TCDesign/Components/MenuBarPanel.swift:319-334 Condition (attention, unavailable) | Turn raster tray icon; dot for Attention and Unhealthy only (`TrayIcon.cs:625-647`); count in the tooltip. Classic purple, not the flat blue. | partial | medium, S |  |  |
@@ -826,13 +982,17 @@ No decoration items.
 **Owner decisions:**
 
 - **W12-D1. Tray icon content.** The Mac's menu-bar strip is the mark plus 24 h bars; a Windows tray icon is a small square.
+  - **Taken 2026-11-18: (a).**
   - (a) Mark and badge only
   - (b) Try the bars in the tray icon
   - Note: Linux precedent (#2186) ported the mark, badge, ring and halo; whether it drew the bars is not recorded here.
 - **W12-D2. Tray badge.** Windows shows a dot and puts the count in the tooltip.
+  - **Taken 2026-11-18: (a).**
   - (a) The Mac's badge, 99+ cap, figure cut from the mark ink, never red (Linux precedent, #2186)
   - (b) Keep the dot and tooltip count
+  - Note: the earlier Windows reason against a badge is recorded at `TrayIcon.cs:629-633`: "a 16px tray icon cannot carry two legible digits, so the count lives in the tooltip". The Mac's badge is 11 pt on a 22 pt item (`MenuBarPanel.swift:460`, `:475`). At 100% scaling a 16 px icon gives the badge about 8 px. W12 keeps the count in the tooltip as well, and its gallery rows show the badge at 100%, 150% and 200% scaling so the owner sees the trade-off.
 - **W12-D3. Tray news ring and idle halo.**
+  - **Taken 2026-11-18: (a).**
   - (a) Port them with the Mac's conditions (Linux precedent, #2186)
   - (b) Badge only
 - Also applies: G-3 (the mark in the tray).
@@ -853,6 +1013,7 @@ No decoration items.
 
 - (b) `tc_private_inference_runtime_word`
 - (c) edge-rail words from the monitor screens table
+- (d) `set_contribution_override`, `clear_contribution_override` (listed under W9): the override clear arrives here (W9-D3 (a)), from the flyout, after the Mac's confirmation (`MenuPanelStore.swift:177`, `:199`)
 
 **Tests that pin the Mac:**
 
@@ -870,6 +1031,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W13-D1. Tray flyout and edge rail.** The Mac has a glass popover from the menu bar and an edge rail (off by default).
+  - **Taken 2026-11-18: (a).**
   - (a) Both (Linux precedent: "approve both", #2188 open)
   - (b) The flyout only
   - (c) Neither; keep the native popup menu
@@ -906,14 +1068,17 @@ No decoration items.
 **Owner decisions:**
 
 - **W14-D1. Terminals.** Windows offers Windows Terminal only (`terminal.rs:73`).
+  - **Taken 2026-11-18: (c). Which terminals is still open.**
   - (a) Windows Terminal only
   - (b) Add the PowerShell console host
   - (c) Add others after an argv check
   - Note: Linux precedent: four terminals added (#2170), each from an argv vector.
 - **W14-D2. "Show" (raise a running session).**
+  - **Taken 2026-11-18: (a). Whether it ships depends on the spike.**
   - (a) Spike it on Windows
   - (b) Leave it Mac-only (Linux precedent: Wayland gave no safe way)
 - **W14-D3. Per-tool launch buttons.** The Mac has a launch button per tool, with its logo. That is a new per-tool start flow, not only decoration.
+  - **Taken 2026-11-18: (a).**
   - (a) Port it with the per-tool flow
   - (b) Leave it out (Linux precedent, #2187)
 
@@ -930,6 +1095,7 @@ No decoration items.
 **C ABI:**
 
 - (b) `tc_daemon_attach`, `tc_attach_copy`, `tc_subscribe_with_accepts`
+- (b) `tc_resolve_state_dir`, `tc_state_dir_override_refused_line` (Mac: `TraceCommonsApp/DaemonHost.swift`, `TCShellCore/StateDirectory.swift`)
 - (a) service dialog words, which are not on main
 
 **Tests that pin the Mac:**
@@ -944,6 +1110,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W15-D1. Background service.** The Windows app is not sandboxed and hosts the daemon in-process.
+  - **Open.** Spike S4 runs first. Recommended: (a), no background-service flow, unless two daemons collide.
   - (a) No background-service flow on Windows
   - (b) A CLI-owned daemon the app attaches to, with dialogs approved for Windows
   - Note: Linux precedent: (b), "Flatpak = host daemon" (#2171), forced by the sandbox. Spike S4 runs first.
@@ -961,43 +1128,426 @@ The Mac does not ship these, so they are not ported. Listed so a later Mac chang
 | Unused indicator components | TCDesign/Components/MenuBarPanel.swift:34 GlassStatePill, :207 GlassDayGraph; Navigation.swift:514 GlassStepProgress | 0 references outside their own files and the gallery at 19b42d0d2 |
 
 
-## Surfaces no slice covers
+## Slices for the surfaces W1-W15 did not cover
 
-These Mac surfaces have no slice in W1-W15. Each waits for decision G-4.
-None is marked not applicable here.
+G-4 (a) is taken: these Mac surfaces get slices W16 to W25. The W0 survey
+listed them as "Surfaces no slice covers". Their decisions are still to ask:
+each is written as options, with no recommendation, and none is taken.
 
-- **Settings sections:** account and devices, payouts, referrals, saved
-  accounts, notifications and nudges, Insights settings, tools as on the Mac
-  (CLI tool row, managed favourites), updates, compute and appearance.
-  ABI: bucket (b) `tc_account_devices_copy_json`, `tc_payout_link_copy_json`,
-  `tc_referral_copy_json`, the ten `tc_compute_*` exports and others; bucket
-  (d) the `account_device_*`, `payout_link_*` and `referral_*` methods.
-- **The Private AI tab body:** activity, calls, call proof, spend
-  organisation and the campaign card (`Views/Monitor/InferenceViews.swift`).
-  Bucket (d) `inference_activity`, `inference_calls`, `inference_call_proof`,
-  `near_ai_spend_organizations`.
-- **Insights:** benchmarks, skills, skill learning, the breakdown inspector,
-  submitted traces and sent-traces training (`Views/InsightsView.swift:205-207`).
-  Bucket (b) `tc_insights_copy_json`, `tc_skill_learning_copy` and others.
-- **History:** the detail inspector (`Views/Monitor/HistoryInspector.swift`)
-  and public-run publishing. Bucket (d) `history_detail`,
-  `publish_public_run`.
-- **Preview sheet:** turns, unsure spans and the redaction summary. Bucket
-  (b) `tc_preview_turns_json`, `tc_redaction_summary_json`.
-- **Missions,** a Home sub-page (`Views/Monitor/MissionsViews.swift`).
-- **The About window** (`Views/AboutWindowView.swift`).
-- **Keyboard and accessibility names,** as acceptance items across every
-  slice. The Mac sets `accessibilityLabel` at 155 sites; Windows sets
-  `AutomationProperties` at 40.
+Every slice from W2 on also carries the keyboard and accessibility-name
+acceptance line: every control it adds is reachable by keyboard and named
+from core words. W25 audits the whole app against it at the end.
 
-Decoration with no slice:
+### W16. Settings: account, devices, payouts and referrals
+
+The Account group of the Mac's Settings (`Views/SettingsSections.swift:12-79`:
+account, payouts, referrals). Lands in the Settings window from W2 (W2-D2 (a)).
+
+**Mac sources:**
+
+- `Views/Settings/AccountSection.swift` (set-up-again copy `:156-359`), `AccountLoginChangeViews.swift`
+- `Views/AccountDevicesView.swift`, `TCShellCore/AccountDevicesSurface.swift`
+- `Views/PayoutLinkView.swift`, `Views/Settings/PayoutsSection.swift`, `TCShellCore/PayoutLinkSurface.swift`
+- `Views/Settings/ReferralsSection.swift`, `TCShellCore/ReferralSurface.swift`
+- `TraceCommonsApp/DaemonClient+NativeIdentity.swift` (account session, sign-in, sign-out)
+
+**Windows files:**
+
+- `Controls/SettingsView.xaml` account area. Its comment at `:168-171` says "This shell has no payouts section"; only the "payouts need a NEAR AI login" line exists (`:179`).
+- `ViewModels/ContributorSettingsViewModel.cs`, `Controls/AccountLoginChangeDialog.cs`, `Interop/AccountLoginChange.cs`
+- New interop surfaces for devices, payouts and referrals in `Interop/`
+
+**C ABI:**
+
+- (b) `tc_account_devices_copy_json`, `tc_payout_link_copy_json`, `tc_referral_copy_json`, `tc_referral_code_display`, `tc_set_up_again_copy_json`
+- (d) `account_devices_list`, `account_device_code_mint`, `account_device_code_status`, `account_device_rename`, `account_device_revoke`
+- (d) `payout_link_start`, `payout_link_confirm`, `payout_link_orgs`, `payout_link_unlink`, `payout_rails_status`
+- (d) `referral_status`, `referral_apply`, `referral_codes_list`, `referral_codes_create`, `referral_codes_disable`
+- (d) `account_session_status`, `account_sign_in`, `account_sign_out`
+
+**Tests that pin the Mac:**
+
+- Section order and the six groups from `SettingsSections.swift:12-79`
+- Payouts and Referrals are not drawn before onboarding (`availableBeforeOnboarding`)
+- Each daemon reply settles against the action pressed; a refused write leaves the old state
+- A failed read shows a dash, never 0
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W16-D1. Settings section list.** The Mac lists 19 sections in 6 groups, with a hairline between groups and no group headings.
+  - (a) The Mac's list, order and groups
+  - (b) Windows' current Settings layout, with the missing sections added
+  - Note: No Linux precedent recorded here.
+- **W16-D2. Payouts and referrals.** Windows has neither section today.
+  - (a) Both, as on the Mac
+  - (b) Payouts only
+  - (c) Neither yet; the existing "payouts need a NEAR AI login" line stays
+- **W16-D3. Device codes.** The Mac mints a code to add another device and lists, renames and revokes devices.
+  - (a) All of it, as on the Mac
+  - (b) List, rename and revoke only; no minting from Windows
+
+### W17. Settings: tools, saved accounts, Insights switches, notifications, startup, updates and general
+
+The Capture, Private AI and App groups of the Mac's Settings, less what W9
+(consent, projects) and W19 (Private AI) carry.
+
+**Mac sources:**
+
+- `Views/Settings/ToolsSection.swift`, `CliToolRow.swift`, `ManagedFavoritesCard.swift`, `ManagedCLIOptionsSection.swift`
+- `Views/Settings/SavedAccountsSection.swift`
+- `Views/Settings/InsightsSettingsCard.swift`, `NudgeSettingsSection.swift`, `SubscriptionUsageSettingsSection.swift`
+- `Views/Settings/StartupSection.swift` (`NotificationsSection` `:74`, `UpdatesSection` `:180`)
+- `Views/Settings/GeneralSection.swift` (appearance, the edge rail switch, the map style and promotions; doc `:5-9`)
+
+**Windows files:**
+
+- `Controls/SettingsView.xaml` (start at sign-in `:208`, the notification interval `:293`), `ViewModels/ContributorSettingsViewModel.cs`
+- `Controls/ManagedSessionsView.cs` (already sends `managed_account_add`, `_remove`, `_rename`, `_reconnect`, `_set_key`)
+- `AppUpdater.cs`, `RunAtLogin.cs`, `StartupRegistration.cs`
+
+**C ABI:**
+
+- (b) `tc_cli_tool_json` (shared with W7)
+- (a) appearance words: the Mac's "Appearance" is a Swift literal (`Views/SettingsSections.swift:193`), and `appearance_copy` is not on main
+- (d) `managed_cli_options_set`, `managed_folder_settings_get`, `managed_folder_settings_reset`, `managed_model_favorite_set`, `set_managed_herdr` (Mac: `AppModel.swift`)
+- (d) `managed_account_verify` (Mac: `SavedAccountsSection.swift`)
+- (d) `set_notifications_enabled`, `set_notify_kind`, `set_suggestions_enabled` (Mac: `TCShellCore/DataContract/LiveDaemonClient.swift`)
+- Shared: `subscription_usage` (W11), `set_menu_bar_mark_enabled` (W12), the map style switch (W6-D1 (a)), the edge rail switch (W13)
+
+**Tests that pin the Mac:**
+
+- Each switch writes, then reads back; a refused write leaves the old state
+- The appearance choice applies at once and is kept for the next launch
+- `ShellWordingTests` baseline goes down
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W17-D1. Appearance choice.** The Mac offers Light, Dark or the system's. Its words are not in the core.
+  - (a) Port it, after core words are added (new words, each needing approval)
+  - (b) Follow the system only
+- **W17-D2. Notification kinds.** The Mac switches notifications per kind (`set_notify_kind`). Windows has one interval setting. A kind Windows does not notify today is a new notice on Windows.
+  - (a) Port the switches; each kind new to Windows is asked separately
+  - (b) Keep Windows' interval setting only
+- **W17-D3. Updates section.** Windows has its own updater (`AppUpdater.cs`) and the update InfoBar (`MainWindow.xaml:397-411`).
+  - (a) The Mac's Updates section and words, driving the Windows updater
+  - (b) Keep Windows' update surface as it is
+- **W17-D4. Managed CLI options and `herdr`.** What `set_managed_herdr` controls on Windows is unverified.
+  - (a) Port the CLI options; `herdr` only after a check that it applies on Windows
+  - (b) Leave the managed CLI options Mac-only for now
+
+### W18. Settings: compute
+
+The Mac's Compute section. The Settings window's body draws nothing for it
+(`Views/Settings/GlassSettingsContent.swift:36`, `case .compute: EmptyView()`);
+`ComputeView` is drawn in the Settings modal (`Views/Monitor/SettingsModal.swift:211`).
+
+**Mac sources:**
+
+- `Views/ComputeView.swift`, `TCBridge/TCCompute.swift`
+- `Views/Monitor/SettingsModal.swift:211`
+
+**Windows files:**
+
+- A new compute section in the Settings window
+- A compute surface in `Interop/`
+
+**C ABI:**
+
+- (b) the nine `tc_compute_*` exports: `tc_compute_open`, `tc_compute_open_local`, `tc_compute_status_json`, `tc_compute_command_json`, `tc_compute_copy_json`, `tc_compute_resource_begin_json`, `tc_compute_resource_event_json`, `tc_compute_shutdown`, `tc_compute_free`
+
+**Tests that pin the Mac:**
+
+- The allowance field accepts only a whole number above zero (`ComputeView.swift` doc)
+- The handle from `tc_compute_open` or `tc_compute_open_local` is freed with `tc_compute_free` when its owner goes away, as `TCBridge/TCCompute.swift` does (`deinit` `:54`, free `:159`)
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W18-D1. Compute on Windows.**
+  - (a) Port the section as on the Mac
+  - (b) Leave it out until a Windows compute use is asked for
+  - Note: No Linux precedent recorded here.
+
+### W19. The Private AI tab body
+
+The Inference tab. W3 carries the Private AI map view; this slice carries the
+tab body and its inspector.
+
+**Mac sources:**
+
+- `Views/Monitor/InferenceViews.swift` (`InferenceTabView` `:18`, `PrivateAIGuideCard` `:386`, `PrivateAIInspectorView` `:419`), `InferenceStore.swift`, `InferenceAccount.swift`
+- `Views/Monitor/SpendOrganizationPrompt.swift`, `Views/Settings/SpendOrganizationCard.swift`, `Views/Settings/PrivateAISection.swift`
+- `TCShellCore/CredentialSurface.swift` (`near_ai_credential_migrate` `:171`)
+- `AppModel.swift:2447` (`probe_routing`)
+
+**Windows files:**
+
+- `Controls/PrivateInferenceView.xaml`, `ViewModels/PrivateInferenceViewModel.cs`
+- `Interop/PrivateInferenceCopy.cs`, `NearAiCredentialSurface.cs`, `NearAiBalanceSurface.cs`, `NearAiFunding.cs`
+- The routing override in `Controls/SettingsView.xaml` (`:419-496`)
+
+**C ABI:**
+
+- (b) `tc_inference_connection_copy_json`
+- (d) `inference_summary`, `inference_activity`, `inference_calls`, `inference_call_proof`
+- (d) `near_ai_spend_organizations`, `near_ai_spend_organization_select`, `near_ai_credential_migrate`, `probe_routing`
+
+**Tests that pin the Mac:**
+
+- Activity and calls from the samples (spike S6 names the missing Private AI reads)
+- A call proof shows only what the core verified; a failed read shows a dash
+- Each daemon reply settles against the action pressed
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W19-D1. Tab body.** Windows has a Private inference pane of its own.
+  - (a) The Mac's tab body and inspector replace it
+  - (b) Keep Windows' pane and add the missing reads to it
+- **W19-D2. Spend organisation prompt.** The Mac asks for a spend organisation (`SpendOrganizationPrompt.swift`). On Windows that prompt would be new.
+  - (a) Port the prompt, under the notice rule (its own yes)
+  - (b) The Settings card only
+
+### W20. Insights
+
+**Mac sources:**
+
+- `Views/InsightsView.swift` (`:205-207`), `InsightsOverviewTab.swift`, `InsightsPatternsTab.swift`, `InsightsBenchmarksTab.swift`, `InsightsBreakdownInspector.swift`
+- `Views/InsightsSkillsTab.swift`, `InsightsSkillsHomeView.swift`, `InsightsSkillsCover.swift`, `SkillLearningView.swift`, `SkillsCreatorFollowButton.swift`
+- `Views/InsightsUsageCards.swift`, `InsightsTokensByDay.swift`, `InsightsSubscriptionsCard.swift`, `InsightsCreditViews.swift`, `InsightsWorkViews.swift`, `InsightsGetStarted.swift`
+- `Views/SentTracesTrainingViews.swift`, `TCShellCore/SentTracesTrainingSurface.swift`
+- `TraceCommonsApp/DaemonClient+SkillLearning.swift`
+
+**Windows files:**
+
+- `Controls/InsightsView.xaml`, `InsightsView.xaml.cs`
+- `Interop/LocalInsights.cs` (`tc_insights_call`), `InsightsSummary.cs`, `InsightsAnalytics.cs`, `InsightCards.cs`, `InsightEpisodes.cs`
+
+**C ABI:**
+
+- (b) `tc_insights_copy_json`, `tc_skill_learning_copy`, `tc_skill_learning_error_line`, `tc_skill_draft_validate`, `tc_sent_traces_training_copy_json`
+- (d) `insights_benchmarks`, `insights_skills`, `insights_skills_follow`, `insights_submitted`, `insights_model_answers`
+- (d) `skill_candidate`, `skill_evaluate`, `skill_review`, `skill_install_plan`, `skill_install_commit`, `skill_install_rollback`, `skill_install_status`
+- (d) `model_training_consent_status`, `model_training_consent_grant`
+- `insights_week` and `insights_session_drill`: the Mac sends these to the daemon. Windows already reads `week_overview` and `session_drill` locally through `tc_insights_call` (`LocalInsightsOperation`, `crates/trace-commons-contributor-insights/src/insights/service.rs:472`). See W20-D1.
+- Shared: `insights_glance` (W11)
+
+**Tests that pin the Mac:**
+
+- Tabs and their order from `InsightsView.swift`
+- Skill install plan, commit and rollback settle against the daemon's replies; a refused commit leaves nothing installed
+- Sent-traces training consent: nothing preselected; no grant sent without the action
+- The clock-driven refresh periods: 60 s, 30 s and 1 s (row below)
+
+**Decoration in this slice:**
+
+Moved here from the W0 inventory's G-4 rows.
 
 | Item | Mac source | Windows today | Status | Weight | Numbers to pin | Decision |
 |---|---|---|---|---|---|---|
-| Skill cover art | TraceCommonsApp/Views/InsightsSkillsCover.swift:175 gradient, :179 Canvas SkillCoverArt, :199 text shadow | gradient greps 0 (Z2); grep -i skill in Controls/InsightsView.xaml: 0 lines | missing | medium, M |  | G-4 |
-| Insights bars grow and numbers roll | TraceCommonsApp/Views/InsightsSkillsHomeView.swift:196 expand, :343-344 and :372-373 numericText, :440-443 hover, :472-495 grow | static Rectangle bars (Controls/InsightsView.xaml:57-58, 119-120, 136, 189, 282-283); animation greps 0 (Z1) | missing | medium, S |  | G-4 |
-| Clock-driven text refresh | TraceCommonsApp/Views/InsightsUsageCards.swift:45 (60 s), BalanceRow.swift:82 (30 s), Monitor/InspectorPrompts.swift:190 (1 s) | only DispatcherTimer is the 10 s poll in Controls/ManagedSessionsView.cs:20 | missing | low, S |  | G-4 |
+| Skill cover art | TraceCommonsApp/Views/InsightsSkillsCover.swift:175 gradient, :179 Canvas SkillCoverArt, :199 text shadow | gradient greps 0 (Z2); grep -i skill in Controls/InsightsView.xaml: 0 lines | missing | medium, M |  |  |
+| Insights bars grow and numbers roll | TraceCommonsApp/Views/InsightsSkillsHomeView.swift:196 expand, :343-344 and :372-373 numericText, :440-443 hover, :472-495 grow | static Rectangle bars (Controls/InsightsView.xaml:57-58, 119-120, 136, 189, 282-283); animation greps 0 (Z1) | missing | medium, S |  |  |
+| Clock-driven text refresh. Spans Insights usage (60 s), the balance row (30 s) and the inspector prompt (1 s); each surface's slice adopts W5's shared clock, and this slice lands the shared refresh. | TraceCommonsApp/Views/InsightsUsageCards.swift:45 (60 s), BalanceRow.swift:82 (30 s), Monitor/InspectorPrompts.swift:190 (1 s) | the 1 s undo count already ticks (ViewModels/MainViewModel.cs:48, :150-157); no 60 s or 30 s text refresh; the other timers are the 10 s poll (Controls/ManagedSessionsView.cs:20) and the visibility debounce (MainWindow.xaml.cs:98) | partial | low, S | 60 s, 30 s, 1 s (cited lines) |  |
 
+**Owner decisions:**
+
+- **W20-D1. Week and drill reads.** The Mac asks the daemon; Windows computes them locally.
+  - (a) Send the daemon methods the Mac sends
+  - (b) Keep the local `tc_insights_call` reads
+- **W20-D2. Skill install.** The Mac plans, installs, reviews and rolls back skills in a tool's folder.
+  - (a) All of it, as on the Mac
+  - (b) Browse and follow only; no install from Windows
+- **W20-D3. Sent-traces training consent.** A consent surface new to Windows.
+  - (a) Port it with the Mac's flow, nothing preselected
+  - (b) Leave it Mac-only for now
+
+### W21. History detail and public runs
+
+History is a Home sub-page from W2 (W2-D1 (a)).
+
+**Mac sources:**
+
+- `Views/Monitor/HistoryInspector.swift`, `Views/HistoryView.swift`, `Views/SessionDetailView.swift`
+- `TCBridge/TCPublicRun.swift`
+- `TraceCommonsApp/DaemonClient.swift` (`publish_public_run`, `unpublish_public_run`)
+
+**Windows files:**
+
+- `Controls/HistoryView.xaml`, `HistoryView.xaml.cs`, `ViewModels/HistoryRecordViewModel.cs`
+- `Interop/HistoryCopy.cs`, `HistoryProtocol.cs`
+- The inspector pane from W2
+
+**C ABI:**
+
+- (b) `tc_public_run_copy`, `tc_public_run_error_line`, `tc_public_run_validate_editor`, `tc_session_detail_error_line`
+- (d) `publish_public_run`, `unpublish_public_run`
+- Shared: `history_detail` (W3)
+
+**Tests that pin the Mac:**
+
+- The detail inspector against the samples; a failed read shows a dash
+- The editor is validated by `tc_public_run_validate_editor`, not by C#
+- Unpublish returns the run to its earlier state; a refused publish leaves it private
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W21-D1. Public runs.**
+  - (a) Publish and unpublish, as on the Mac
+  - (b) The detail inspector only; no publishing from Windows
+
+### W22. Preview sheet
+
+**Mac sources:**
+
+- `Views/PreviewSheet.swift` (Cmd-F `:228`), `Views/SessionSendDisclosureView.swift`, `Views/ScrubbingCaveat.swift`
+
+**Windows files:**
+
+- `Controls/PreviewSheet.xaml`, `PreviewSheet.xaml.cs`, `PreviewWindow.cs`
+- `ViewModels/PreviewSheetViewModel.cs`, `Interop/PreviewSummary.cs`
+
+**C ABI:**
+
+- (b) `tc_preview_turns_json`, `tc_redaction_summary_json`
+- (d) `preview_unsure_spans`
+- Windows already opens the preview (`tc_preview_open`) and searches the original (`tc_search_original`)
+
+**Tests that pin the Mac:**
+
+- Turns and unsure spans from the samples
+- The redaction summary's counts match the core's
+- Find opens from the keyboard
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W22-D1. Find in the preview.** The Mac has Cmd-F (`PreviewSheet.swift:228`).
+  - (a) Ctrl+F, as on the Mac
+  - (b) No find key
+- **W22-D2. Unsure spans.**
+  - (a) Mark them in the text, as on the Mac
+  - (b) A count in the summary only
+
+### W23. Missions
+
+A Home sub-page (W2-D1 (a)). Depends on W2 and W11.
+
+**Mac sources:**
+
+- `Views/Monitor/MissionsViews.swift`, `Views/MissionDraftsView.swift`
+
+**Windows files:**
+
+- `Controls/MissionDraftsView.xaml`, `MissionDraftsView.xaml.cs`, `Interop/MissionDrafts.cs`
+
+**C ABI:**
+
+- Shared: `mission_catalogue`, `activity_missions_catalogue`, `activity_missions_status` (W11)
+
+**Tests that pin the Mac:**
+
+- Missions against the samples; a failed read shows a dash, never 0
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W23-D1. Missions and Mission drafts.** Windows has a Mission drafts page; the Mac has a Missions sub-page.
+  - (a) The Mac's Missions page replaces Mission drafts
+  - (b) Both, side by side under Home
+
+### W24. About window
+
+**Mac sources:**
+
+- `Views/AboutWindowView.swift:10` (icon 96 x 96, name, the version with its build, a Copy button, the copyright)
+- `TraceCommonsAppMain.swift:173` (the window), `:422` (the menu item)
+
+**Windows files:**
+
+- A new About window
+- `PackageIdentity.cs` for the version (whether it exposes the version and build is unverified)
+
+**C ABI:**
+
+- (c) `about_app` from `tc_monitor_screens_copy_json` ("About " plus the app name, `preview_copy.rs:1591`)
+- The Copy button's word is `SettingsLegacyWords.copy` on the Mac; whether it is a core word is unverified. If not, it is bucket (a).
+
+**Tests that pin the Mac:**
+
+- The version line is "<version> (<build>)", or the version alone when the build is missing or the same (`AboutLines.line`)
+- Copy puts exactly the shown line on the clipboard
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W24-D1. Where About opens.** The Mac opens it from the app menu.
+  - (a) A tray menu row and a row in Settings
+  - (b) Settings only
+
+### W25. Keyboard and accessibility audit
+
+The cross-cutting acceptance items, checked across the whole app after W24.
+The Mac sets `accessibilityLabel` at 155 sites; Windows sets
+`AutomationProperties` at 40.
+
+**Mac sources:**
+
+- Every `accessibilityLabel` site in `macos/Sources/TraceCommonsApp`
+- `TraceCommonsAppMain.swift:291-303`, `:435` (keys)
+
+**Windows files:**
+
+- Every XAML file and code-built control
+- A test that reads XAML as text (beside the existing ones in `TraceCommons.Interop.Tests.csproj:163-178`)
+
+**C ABI:**
+
+- None beyond the slices. Every name comes from words they bind.
+
+**Tests that pin the Mac:**
+
+- Every interactive element in XAML has `AutomationProperties.Name` bound to a core word
+- Every tab, toolbar toggle, map node and notice is reachable by keyboard, checked on the test box with the UI Automation client
+
+**Decoration in this slice:**
+
+No decoration items.
+
+**Owner decisions:**
+
+- **W25-D1. UI Automation driver.**
+  - (a) The UI Automation client from PowerShell, no new dependency
+  - (b) A driver library (a new dependency, needing approval)
+- **W25-D2. The credential-store self-check.** `tc_credential_store_self_check` checks the Mac code signature's keychain entitlements (`TCBridge/TCCredentialStore.swift:12-14`, called at `TraceCommonsApp/SelfTest.swift:56`).
+  - (a) A Windows self-check for its own credential store
+  - (b) Not applicable on Windows
 
 ## Corrections to the guide (#2190)
 
@@ -1010,7 +1560,7 @@ Checked at 19b42d0d2:
   baseline is 40 files and 337 sentences.
 - The MSIX manifest has four "Near.ai" literals (`Package.appxmanifest:32`,
   `:75`, `:92`, `:109`), not one.
-- The rail has six entries, not four.
+- The rail has up to six entries, not four (Mission drafts shows only while `MissionsShown` is set).
 - Most of the Linux stack has landed: shell, map, transfers, look, Home
   decoration and brand. #2177, #2171 and #2185 have not.
 - `scripts/parity/gallery.sh` is on main.
@@ -1026,10 +1576,19 @@ Checked at 19b42d0d2:
 - **`ShellWordingTests`.** Moving words to the core lowers the baseline
   (`ShellWordingTests.cs:192`). No new words are authored in the shell.
 - **`NoCommonsNameTests`** (`NoCommonsNameTests.cs:45`) stays green; W10
-  adds a test that the manifest's display names equal `APP_NAME`.
+  adds a test that the manifest's app-name display names (`:32`, `:75`,
+  `:109`) equal `APP_NAME`. The invite protocol's name (`:92`) waits on
+  W10-D2.
+- **The undo-window setting** (`ApprovalHoldSeconds`,
+  `Controls/SettingsView.xaml:279`) is removed (W9-D1 (a)), with whatever
+  reads it.
 - **Tests that read XAML as text** (`TraceCommons.Interop.Tests.csproj:163-178`)
   move with `MainWindow.xaml` and `SettingsView.xaml`.
-- **Keyboard accelerators** (`MainWindow.xaml:44-49`) change with the tabs.
+- **Keyboard accelerators** (`MainWindow.xaml:44-49`) change with the tabs:
+  Ctrl+1 to Ctrl+4 by tab position, Ctrl+comma for Settings, Ctrl+5 gone,
+  Ctrl+Shift+M kept (W2-D5 (a)).
+- **Tauri on Windows** is retired once the WinUI app matches (G-1 (a)).
+  CLAUDE.md is updated in a separate change.
 - **The tray menu rows** change with the tabs and W13.
 - **`XamlCommentSyntaxTests`** still forbids `--` in XAML comments.
 - **The named-pipe ACL step** is rerun whenever the daemon's IPC hosting is
@@ -1048,47 +1607,45 @@ Checked at 19b42d0d2:
   Mac's. Nothing is preselected. A failed read shows a dash, never 0.
 - No new words authored in the shell. No new notices without approval.
 - "Trace Commons" appears nowhere a user can see.
-- The interop suite, the `windows contributor app` job, the contributor
-  crate tests, fmt and clippy pass. A final run on the test box is recorded.
+- The interop suite, the `windows contributor app` job (with the new
+  render-test project), the contributor crate tests, fmt and clippy pass.
+- A run on the Azure Server 2025 box is recorded for each slice. The release
+  gate is a final run on a physical Windows 11 PC, which is not yet bought;
+  until then nothing is called released on Windows. Windows 10 22H2 shows
+  the painted and font fallbacks correctly.
 
 ## Owner decisions
 
-All pending decisions, by slice. Each slice above repeats its own.
+**Taken 2026-11-18** (see "Decisions taken 2026-11-18" for each answer):
+G-1 to G-5; W1-D1, W1-D2; W2-D1 to W2-D5; W3-D1, W3-D2; W4-D1; W5-D1 to
+W5-D3; W6-D1; W7-D1, W7-D2; W9-D1 to W9-D3; W10-D1; W11-D1 to W11-D3;
+W12-D1 to W12-D3; W13-D1; W14-D1 to W14-D3.
 
-- G-1 (General): Unfreeze and which Windows client
-- G-2 (General): Look target
-- G-3 (General): App mark
-- G-4 (General): Surfaces no slice covers
-- G-5 (General): Tooling for the Azure test box
-- W1-D1 (W1): Where captures run
-- W1-D2 (W1): Render tests in CI
-- W2-D1 (W2): Rail destinations
-- W2-D2 (W2): Settings window
-- W2-D3 (W2): Window growth at the screen edge
-- W2-D4 (W2): Notices and inspector demand
-- W2-D5 (W2): Keyboard map
-- W3-D1 (W3): Tool logos
-- W3-D2 (W3): Private AI map view
-- W4-D1 (W4): Transfer cards at the map foot
-- W5-D1 (W5): Glass material
-- W5-D2 (W5): Glyphs and icons
-- W5-D3 (W5): Stock controls
-- W6-D1 (W6): Map style switch
-- W7-D1 (W7): Wallet sign-in in first run
-- W7-D2 (W7): Device words for first run and projects
-- W9-D1 (W9): Undo-window setting
-- W9-D2 (W9): Arming without an account grant
-- W9-D3 (W9): Where an override is cleared
-- W10-D1 (W10): Internal ids
-- W11-D1 (W11): Art where the Mac samples an SF Symbol
-- W11-D2 (W11): Walkthrough card
-- W11-D3 (W11): Remote campaign feed and image
-- W12-D1 (W12): Tray icon content
-- W12-D2 (W12): Tray badge
-- W12-D3 (W12): Tray news ring and idle halo
-- W13-D1 (W13): Tray flyout and edge rail
-- W14-D1 (W14): Terminals
-- W14-D2 (W14): "Show" (raise a running session)
-- W14-D3 (W14): Per-tool launch buttons
-- W15-D1 (W15): Background service
+**Still to ask:**
 
+- W15-D1 (W15): Background service, after spike S4 (recommended (a))
+- W2-D4 follow-ups: each Mac notice new to Windows, card by card
+- W14-D1 follow-up: which terminals join Windows Terminal
+- W14-D2 follow-up: whether "Show" ships, after the spike
+- W10-D2 (W10): The invite protocol's display name
+- The Windows 10 floor: 10.0.17763 in code against 22H2 in the matrix
+- W16-D1 (W16): Settings section list
+- W16-D2 (W16): Payouts and referrals
+- W16-D3 (W16): Device codes
+- W17-D1 (W17): Appearance choice
+- W17-D2 (W17): Notification kinds
+- W17-D3 (W17): Updates section
+- W17-D4 (W17): Managed CLI options and `herdr`
+- W18-D1 (W18): Compute on Windows
+- W19-D1 (W19): Tab body
+- W19-D2 (W19): Spend organisation prompt
+- W20-D1 (W20): Week and drill reads
+- W20-D2 (W20): Skill install
+- W20-D3 (W20): Sent-traces training consent
+- W21-D1 (W21): Public runs
+- W22-D1 (W22): Find in the preview
+- W22-D2 (W22): Unsure spans
+- W23-D1 (W23): Missions and Mission drafts
+- W24-D1 (W24): Where About opens
+- W25-D1 (W25): UI Automation driver
+- W25-D2 (W25): The credential-store self-check
