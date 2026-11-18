@@ -862,3 +862,211 @@ window.tc-glass-window:backdrop .tc-glass-pane .tc-notice-backdrop {
 stackswitcher.tc-compact-switcher > button.text-button {
   min-width: 0;
 }
+
+/* --- The Traces tab's folder list (`monitor::traces_list`) -----------
+   `GlassListRow` as the Traces tree draws it: a row at least
+   `size.listRow` (40) high on the control radius, the hover fill under the
+   pointer and the selection's fill and ink on the selected row; the title
+   in body (semibold for a folder, medium for a trace) over a caption
+   sub-line in the tertiary ink, amber or green when flagged; a 22 tile on
+   the tile radius, `ink(0.1)` for a tool and `tileFolder` for a folder;
+   the Submit pill a glass control `size.submitPill` (24) high with 10 of
+   padding, its disabled form at 0.55 (`disabledSubmit`) in `statusOff`.
+   `GlassTabHeading` is bodyStrong, its round buttons `controlLarge` (28). */
+.tc-tree-heading {
+  font-weight: 600;
+  color: @tc_glass_ink;
+  min-height: 28px;
+}
+
+.tc-tree-round {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+}
+
+window.tc-glass-window:backdrop .tc-tree-round {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-round:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-columns .tc-tree-column {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-tree-row {
+  border-radius: 11px;
+  min-height: 40px;
+}
+
+.tc-tree-row-folder {
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+.tc-tree-row-session {
+  padding-left: 26px;
+  padding-right: 6px;
+}
+
+.tc-tree-row:hover {
+  background-color: @tc_glass_row_hover;
+}
+
+.tc-tree-row.tc-tree-row-selected,
+.tc-tree-row.tc-tree-row-selected:hover {
+  background-color: @tc_glass_control_selected;
+}
+
+.tc-tree-title-folder {
+  font-weight: 600;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-title-session {
+  font-weight: 500;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-row-off .tc-tree-title-session {
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-tree-row-off .tc-tree-tile {
+  opacity: 0.6;
+}
+
+.tc-tree-sub {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-tree-sub-ask {
+  color: @tc_glass_status_ask;
+}
+
+.tc-tree-sub-on {
+  color: @tc_glass_status_on;
+}
+
+.tc-tree-row-selected .tc-tree-title-folder,
+.tc-tree-row-selected .tc-tree-title-session,
+.tc-tree-row-selected .tc-tree-sub,
+.tc-tree-row-selected .tc-tree-sub-ask,
+.tc-tree-row-selected .tc-tree-sub-on,
+.tc-tree-row-selected .tc-tree-chevron {
+  color: @tc_glass_selected_ink;
+}
+
+.tc-tree-chevron {
+  min-width: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: @tc_glass_status_off;
+  -gtk-icon-size: 10px;
+}
+
+.tc-tree-tile {
+  border-radius: 6px;
+  background-color: alpha(@tc_glass_ink, 0.1);
+  color: @tc_glass_ink;
+}
+
+.tc-tree-tile-folder {
+  border-radius: 6px;
+  background-color: @tc_glass_tile_folder;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-tile-initials {
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.tc-tree-submit {
+  min-height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+  font-weight: 500;
+}
+
+window.tc-glass-window:backdrop .tc-tree-submit {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-split-menu > button {
+  min-height: 24px;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+}
+
+window.tc-glass-window:backdrop .tc-tree-split-menu > button {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-split .tc-tree-submit {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.tc-tree-split-menu > button {
+  padding: 0 6px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.tc-tree-submit:hover,
+.tc-tree-split-menu > button:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-submit:disabled {
+  opacity: 0.55;
+  color: @tc_glass_status_off;
+}
+
+.tc-tree-kebab > button {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-kebab > button:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-row-selected .tc-tree-kebab > button {
+  color: @tc_glass_selected_ink;
+}
+
+.tc-tree-switch {
+  min-width: 38px;
+}
+
+.tc-tree-menu-current {
+  font-weight: 600;
+}

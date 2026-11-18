@@ -54,15 +54,15 @@ fn least(widget: &impl IsA<gtk::Widget>) -> i32 {
     widget.measure(gtk::Orientation::Horizontal, -1).0
 }
 
-/// Every shown `tc-card` under `root`, outermost first.
-fn collect_cards(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+/// Every shown folder-list row under `root`, in drawing order.
+fn collect_rows(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
     let mut child = root.first_child();
     while let Some(widget) = child {
         if widget.is_visible() {
-            if widget.has_css_class("tc-card") {
+            if widget.has_css_class("tc-tree-row") {
                 found.push(widget.clone());
             } else {
-                collect_cards(&widget, found);
+                collect_rows(&widget, found);
             }
         }
         child = widget.next_sibling();
@@ -164,40 +164,43 @@ fn every_hosted_screen_fits_the_440_main_pane() {
     settle(&context);
     check("history with a community panel");
     // Laid out, not only measured (fix pass 3): every button in each folder
-    // card is drawn inside its card, and no card runs under the next. On
-    // GTK 4.14 "Submit as…" hung over a card's foot and "Never" was not
-    // drawn.
+    // row is drawn inside its row, and no row runs under the next. On
+    // GTK 4.14 the folder cards' "Submit as…" hung over a card's foot and
+    // "Never" was not drawn.
     shell.pick_tab(super::Tab::Traces);
     settle(&context);
     let traces: gtk::Widget = shell
         .content
         .child_by_name("queue")
         .expect("the Traces tab");
-    let mut cards = Vec::new();
-    collect_cards(&traces, &mut cards);
-    assert!(!cards.is_empty(), "no folder card is drawn");
-    let mut buttons = 0;
-    for (index, card) in cards.iter().enumerate() {
-        buttons += count_buttons(card);
-        let outside = crate::ui::wrap_row::buttons_outside(card, card);
-        assert!(outside.is_empty(), "folder card {index}: {outside:?}");
-        if let Some(next) = cards.get(index + 1)
-            && next.parent() == card.parent()
-        {
-            let this = card.compute_bounds(&traces).expect("placed");
-            let below = next.compute_bounds(&traces).expect("placed");
-            assert!(
-                this.y() + this.height() <= below.y() + 0.5,
-                "folder card {index} {this:?} runs under the next {below:?}"
-            );
+    let laid_out = |what: &str| {
+        let mut rows = Vec::new();
+        collect_rows(&traces, &mut rows);
+        assert!(!rows.is_empty(), "{what}: no folder row is drawn");
+        let mut buttons = 0;
+        for (index, row) in rows.iter().enumerate() {
+            buttons += count_buttons(row);
+            let outside = crate::ui::wrap_row::buttons_outside(row, row);
+            assert!(outside.is_empty(), "{what}: row {index}: {outside:?}");
+            if let Some(next) = rows.get(index + 1) {
+                let this = row.compute_bounds(&traces).expect("placed");
+                let below = next.compute_bounds(&traces).expect("placed");
+                assert!(
+                    this.y() + this.height() <= below.y() + 0.5,
+                    "{what}: row {index} {this:?} runs under the next {below:?}"
+                );
+            }
         }
-    }
-    assert!(buttons >= 3, "the folder cards draw {buttons} buttons");
+        buttons
+    };
+    let buttons = laid_out("folders");
+    assert!(buttons >= 3, "the folder rows draw {buttons} buttons");
 
-    // A folder opened: its sessions, each with its facts and actions.
-    *app.queue_location.borrow_mut() = crate::queue_folders::Location::Project("p1".into());
+    // A folder opened: its traces under it, each with its Submit and menu.
+    app.queue.expanded.borrow_mut().insert("p1".into());
     crate::ui::queue::render(&app);
     settle(&context);
+    laid_out("a folder's sessions");
     check("a folder's sessions");
 
     // Every notice card, shown over its tab, fits with its X inside it.

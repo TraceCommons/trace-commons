@@ -43,6 +43,10 @@ mod tests {
             include_str!("monitor/graph_footer.rs"),
         ),
         ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
+        (
+            "monitor/traces_list.rs",
+            include_str!("monitor/traces_list.rs"),
+        ),
         ("monitor/map.rs", include_str!("monitor/map.rs")),
         (
             "monitor/transfer_card.rs",

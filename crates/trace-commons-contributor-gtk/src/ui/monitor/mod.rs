@@ -10,8 +10,8 @@
 //! The pure rules (`pane_layout`, `tabs`, `demand`, `graph_model`,
 //! `notices`, `prefs`, `traces_tree`, `map_scene`, `transfers`) build no
 //! widget and are tested without a display. `three_pane`, `graph_footer`,
-//! `inspector`, `map`, `map_transfers`, `transfer_card` and `shell` are
-//! the widgets and their drawing.
+//! `inspector`, `map`, `map_transfers`, `transfer_card`, `traces_list`
+//! and `shell` are the widgets and their drawing.
 
 pub mod demand;
 pub mod glass_paint;
@@ -29,6 +29,7 @@ pub mod shell;
 pub mod summary;
 pub mod tabs;
 pub mod three_pane;
+pub mod traces_list;
 pub mod traces_tree;
 pub mod transfer_card;
 pub mod transfers;

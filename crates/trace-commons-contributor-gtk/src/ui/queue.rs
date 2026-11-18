@@ -46,7 +46,8 @@ const METRIC_GAP: i32 = 24;
 // TODO(tokens): promote to `style::space` when style.rs is next opened.
 const CONTENT_GAP: i32 = 14;
 
-use super::monitor::inspector;
+use super::monitor::traces_tree::{ProjectMode, TracesTree};
+use super::monitor::{inspector, traces_list};
 
 pub struct QueueView {
     pub root: gtk::Box,
@@ -80,17 +81,25 @@ pub struct QueueView {
     undo_held: gtk::Label,
     undo_undo: gtk::Button,
     undo_let_it_send: gtk::Button,
-    heading: gtk::Label,
     open_history: gtk::Button,
+    /// The folders opened, by project id: every folder starts closed (the
+    /// Mac's `expanded = []`), and one opens when a trace in it is
+    /// selected from elsewhere (`traces_list::revealing`).
+    pub(crate) expanded: RefCell<std::collections::HashSet<String>>,
+    /// The selection last revealed, so a folder closed over a selected
+    /// trace stays closed until the selection moves (the Mac's
+    /// `revealed`).
+    revealed: RefCell<inspector::Selection>,
     /// The certificate-held section: heading, then either the sessions a
     /// certificate is held for or the sentence saying there are none yet.
     ///
     /// Rebuilt with the queue rather than persisted, because its contents
     /// are a filter over the same rows.
     certificates: gtk::Box,
+    /// The folder list: a row per folder, and the traces of the open ones
+    /// (`monitor::traces_list`).
     list: gtk::Box,
     disclosure: gtk::Box,
-    week: gtk::Box,
     empty: adw::StatusPage,
     /// Exposed so `App` can debounce a scroll settle against this same
     /// viewport -- see `App::schedule_visible_preview_update`.
@@ -107,15 +116,30 @@ impl QueueView {
     pub fn new() -> Self {
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(CONTENT_GAP)
+            .spacing(traces_list::size::ROW_GAP)
+            .focusable(true)
             .build();
+        list.update_property(&[gtk::accessible::Property::Label(
+            trace_commons_contributor::preview_copy::monitor_traces_copy()
+                .tree
+                .tree_label,
+        )]);
 
         // A reading column. Trust copy is read, not skimmed, and a sentence
         // that runs the full width of a maximised window is a sentence
         // nobody finishes. It also keeps a card's two actions within one
         // eye movement of each other.
-        let heading = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        heading.add_css_class("tc-screen-title");
+        // The tab's heading, in the core's words (`GlassTabHeading`).
+        let heading = gtk::Label::builder()
+            .label(
+                trace_commons_contributor::preview_copy::monitor_traces_copy()
+                    .tree
+                    .tree_title,
+            )
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        heading.add_css_class("tc-tree-heading");
 
         let undo_headline = gtk::Label::builder().xalign(0.0).wrap(true).build();
         undo_headline.add_css_class("tc-card-title");
@@ -131,7 +155,8 @@ impl QueueView {
         let disclaimer = style::caveat(copy::STANDING_DISCLAIMER);
 
         let disclosure = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let week = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        let certificates = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        certificates.set_margin_top(space::M);
 
         let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -142,11 +167,16 @@ impl QueueView {
             .margin_end(space::XL)
             .build();
         // History is the Traces tab's other page, behind the breadcrumb
-        // (owner, 2026-10-12 on the Mac). The word is the breadcrumb's own.
-        let history = gtk::Button::with_label(
-            trace_commons_contributor::preview_copy::monitor_screens_copy().history,
-        );
-        history.add_css_class("tc-quiet");
+        // (owner, 2026-10-12 on the Mac): a round button at the heading's
+        // end (`GlassRoundButton`), named in the core's words, in the stock
+        // symbolic icon for the Mac's clock.arrow.circlepath.
+        let history = gtk::Button::from_icon_name("document-open-recent-symbolic");
+        let open_history = trace_commons_contributor::preview_copy::monitor_traces_copy()
+            .tree
+            .open_history;
+        history.update_property(&[gtk::accessible::Property::Label(open_history)]);
+        history.set_tooltip_text(Some(open_history));
+        history.add_css_class("tc-tree-round");
         history.set_halign(gtk::Align::End);
         history.set_valign(gtk::Align::Center);
         heading.set_hexpand(true);
@@ -154,10 +184,15 @@ impl QueueView {
         heading_row.append(&heading);
         heading_row.append(&history);
         column.append(&heading_row);
+        // The column titles over the rows (`TracesColumnTitles`).
+        column.append(&traces_list::column_titles_widget());
         column.append(&list);
+        // The certificate section, the scrubbing disclaimer and the traces
+        // no longer waiting stay under the folders: the Mac's tree has no
+        // place for them, and they say what the rows alone do not.
+        column.append(&certificates);
         column.append(&disclaimer);
         column.append(&disclosure);
-        column.append(&week);
 
         let clamp = adw::Clamp::builder()
             .maximum_size(super::COLUMN_MAX)
@@ -287,15 +322,10 @@ impl QueueView {
             steps.append(&label);
         }
         first_contribution.set_child(Some(&steps));
-        let certificates = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        certificates.set_margin_start(space::XL);
-        certificates.set_margin_end(space::XL);
-        certificates.set_margin_top(space::M);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
         root.append(&first_contribution);
-        root.append(&certificates);
         root.append(&empty);
         root.append(&scroller);
 
@@ -313,11 +343,11 @@ impl QueueView {
             undo_held,
             undo_undo,
             undo_let_it_send,
-            heading,
+            expanded: RefCell::new(std::collections::HashSet::new()),
+            revealed: RefCell::new(inspector::Selection::None),
             certificates,
             list,
             disclosure,
-            week,
             empty,
             scroller,
         }
@@ -440,6 +470,41 @@ pub fn wire(app: &Rc<App>) {
     // the preview-scheduler design -- so a settle a quarter-second after the
     // last movement is early enough to matter and late enough to be one
     // call, not hundreds.
+    // The folder list is one stop for the keyboard (the Mac's tree is one
+    // focusable list): the arrow keys move the selection through the rows
+    // as drawn, and Return opens the selected trace's review sheet.
+    let keys = gtk::EventControllerKey::new();
+    let weak = Rc::downgrade(app);
+    keys.connect_key_pressed(move |_, key, _, _| {
+        let Some(app) = weak.upgrade() else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let current = app.shell.inspector.selection();
+        let down = match key {
+            gtk::gdk::Key::Down => true,
+            gtk::gdk::Key::Up => false,
+            gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
+                return match current {
+                    inspector::Selection::Session(id) => {
+                        super::preview::open_entry(&app, &id);
+                        gtk::glib::Propagation::Stop
+                    }
+                    _ => gtk::glib::Propagation::Proceed,
+                };
+            }
+            _ => return gtk::glib::Propagation::Proceed,
+        };
+        let tree = TracesTree::build(&app.entries.borrow(), &app.projects.borrow(), None);
+        let rows = traces_list::visible_rows(&tree, &app.queue.expanded.borrow());
+        if let Some(next) = traces_list::moved(&current, down, &rows) {
+            app.shell.select(&app, next);
+            render(&app);
+            app.queue.list.grab_focus();
+        }
+        gtk::glib::Propagation::Stop
+    });
+    view.list.add_controller(keys);
+
     let app_for_scroll = Rc::clone(app);
     view.scroller
         .vadjustment()
@@ -482,7 +547,6 @@ pub fn render(app: &Rc<App>) {
         .set_visible(app.rollup.borrow().all_time.total() == 0);
     clear(&view.list);
     clear(&view.disclosure);
-    clear(&view.week);
     // Rebuilt below alongside `view.list`: every row is redrawn from
     // scratch each render, so the old widgets in here are already gone.
     app.card_widgets.borrow_mut().clear();
@@ -492,9 +556,12 @@ pub fn render(app: &Rc<App>) {
     // The certificate section filters the same rows, and `certificate::held`
     // takes a slice so it can be tested without a window.
     let pending_owned: Vec<QueueEntry> = pending.iter().map(|e| (*e).clone()).collect();
-    view.empty.set_visible(pending.is_empty());
-    view.scroller.set_visible(!pending.is_empty());
-    view.heading.set_text(&copy::waiting_heading(pending.len()));
+    // The folders the core lists, ignored ones left out, newest waiting
+    // trace first (`TracesTree.build`): a folder with nothing waiting is
+    // still a row, so the list is empty only when there are no folders.
+    let tree = TracesTree::build(&entries, &app.projects.borrow(), None);
+    view.empty.set_visible(tree.folders.is_empty());
+    view.scroller.set_visible(!tree.folders.is_empty());
 
     // Grouped by project, in the order each project's first entry appears.
     // Each entry keeps the index it had in the flat `pending` list --
@@ -550,34 +617,41 @@ pub fn render(app: &Rc<App>) {
         }
     }
 
-    let folders = crate::queue_folders::group(&pending);
-    // Resolved on every render rather than mutated on every queue change: a
-    // folder can be pulled out from under the person standing in it by an
-    // approval or by a background upload finishing, and the only thing that
-    // has to be true is that what is drawn matches what exists now.
-    let here = crate::queue_folders::resolve(&app.queue_location.borrow(), &folders);
-    *app.queue_location.borrow_mut() = here.clone();
-
-    match &here {
-        crate::queue_folders::Location::Root => {
-            for folder in &folders {
-                view.list.append(&folder_row(app, folder));
-            }
+    // The selection, revealed once when it moves (`reveal`): a trace
+    // selected from elsewhere opens its folder.
+    let selection = app.shell.inspector.selection();
+    if *view.revealed.borrow() != selection {
+        let open = traces_list::revealing(&selection, &tree, &view.expanded.borrow());
+        *view.expanded.borrow_mut() = open;
+        *view.revealed.borrow_mut() = selection.clone();
+    }
+    let expanded = view.expanded.borrow().clone();
+    for folder in &tree.folders {
+        let open = expanded.contains(&folder.id);
+        view.list.append(&traces_list::folder_row(
+            app,
+            folder,
+            open,
+            selection == inspector::Selection::Folder(folder.id.clone()),
+        ));
+        if !open {
+            continue;
         }
-        crate::queue_folders::Location::Project(id) => {
-            if let Some(folder) = folders.iter().find(|f| &f.project_id == id) {
-                view.list.append(&folder_heading(app, folder));
-                for (index, entry) in &folder.members {
-                    let widget = row(app, entry, *index);
-                    // Kept so a scroll settle can ask each widget its own
-                    // bounds against the scroller -- see
-                    // `App::schedule_visible_preview_update`.
-                    app.card_widgets
-                        .borrow_mut()
-                        .insert(entry.entry_id.clone(), widget.clone());
-                    view.list.append(&widget);
-                }
-            }
+        let off = folder.mode == Some(ProjectMode::Ignore);
+        for entry in &folder.sessions {
+            let widget = traces_list::session_row(
+                app,
+                entry,
+                off,
+                selection == inspector::Selection::Session(entry.entry_id.clone()),
+            );
+            // Kept so a scroll settle can ask each row its own bounds
+            // against the scroller -- see
+            // `App::schedule_visible_preview_update`.
+            app.card_widgets
+                .borrow_mut()
+                .insert(entry.entry_id.clone(), widget.clone());
+            view.list.append(&widget);
         }
     }
 
@@ -615,7 +689,6 @@ pub fn render(app: &Rc<App>) {
         view.disclosure.append(&expander);
     }
 
-    render_week(app);
     render_undo(app);
 
     // The set of cards just changed -- new rows, or none at all yet
@@ -623,77 +696,6 @@ pub fn render(app: &Rc<App>) {
     // a chance to allocate them, rather than trusting whatever was visible
     // before this render.
     app.schedule_visible_preview_update();
-}
-
-/// The week band: three figures, and the same three tones they carry
-/// everywhere else in this window.
-fn render_week(app: &Rc<App>) {
-    let view = &app.queue;
-    let rollup = app.rollup.borrow();
-
-    view.week.append(&style::section(copy::THIS_WEEK));
-    // Three figures side by side where they fit, and fewer to a line in a
-    // narrow pane (the Monitor's main pane is 440), as Home's tiles.
-    let cards = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .min_children_per_line(1)
-        .max_children_per_line(3)
-        .column_spacing(space::M as u32)
-        .row_spacing(space::M as u32)
-        .homogeneous(true)
-        .build();
-    // The core's Contributed figure (accepted plus waiting to be scored),
-    // the one every shell shows under this word. `submitted` alone is only
-    // the waiting part of it.
-    style::grid_append(
-        &cards,
-        &stat_card(Tone::Clear, copy::CONTRIBUTED, rollup.week.contributed),
-    );
-    style::grid_append(
-        &cards,
-        &stat_card(
-            Tone::Held,
-            copy::QUARANTINE_HEADING,
-            rollup.week.quarantined,
-        ),
-    );
-    // All time, not this week: "in the commons" is a standing total, and a
-    // weekly slice of it would read as the commons shrinking every Monday.
-    style::grid_append(
-        &cards,
-        &stat_card(
-            Tone::Neutral,
-            copy::HISTORY_IN_THE_COMMONS,
-            rollup.all_time.accepted,
-        ),
-    );
-    view.week.append(&cards);
-}
-
-fn stat_card(tone: Tone, label: &str, value: u32) -> gtk::Box {
-    let card = style::card(gtk::Orientation::Vertical, space::XS);
-    card.set_hexpand(true);
-
-    let head = gtk::Box::new(gtk::Orientation::Horizontal, space::XXS);
-    let glyph = gtk::Label::new(Some(tone.glyph()));
-    glyph.add_css_class(match tone {
-        // The held clock takes the mark's blue rather than the text blue:
-        // it is a glyph, not a sentence.
-        Tone::Held => "tc-icon-held",
-        other => other.css(),
-    });
-    head.append(&glyph);
-    head.append(&style::eyebrow(label));
-    card.append(&head);
-
-    let figure = gtk::Label::builder()
-        // The core's grouping ("1,234"), as every shell draws a count.
-        .label(copy::count_figure(u64::from(value)))
-        .xalign(0.0)
-        .build();
-    figure.add_css_class("tc-figure");
-    card.append(&figure);
-    card
 }
 
 /// Show or hide the undo bar, and move its elapsed figure.
@@ -955,7 +957,7 @@ enum CardPreview<'a> {
 /// the opening prompt, the inset manifest block with the two actions in it,
 /// and nothing else -- so a person reading a column of them can stop reading
 /// and start scanning.
-fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
+pub(crate) fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     let card = style::card(gtk::Orientation::Vertical, space::S);
 
     let preview = app.previews.borrow().get(&entry.entry_id).cloned();
@@ -1341,37 +1343,12 @@ fn manifest_block(
     look.connect_clicked(move |_| super::preview::open(&app_for_look, index));
 
     let app_for_skip = Rc::clone(app);
-    let entry_id = entry.entry_id.clone();
-    skip.connect_clicked(move |_| {
-        let entry_id = entry_id.clone();
-        app_for_skip.call(
-            "dismiss",
-            serde_json::json!({ "entry_id": entry_id }),
-            move |app, result| {
-                if result.is_ok() {
-                    // Its card on the Traces map, found among the traces
-                    // the map listed before this reload drops it.
-                    app.note_dismissed(&entry_id);
-                    app.refresh();
-                }
-            },
-        );
-    });
+    let entry_for_skip = entry.clone();
+    skip.connect_clicked(move |_| dismiss_entry(&app_for_skip, &entry_for_skip));
 
     let app_for_submit = Rc::clone(app);
-    let entry_id = entry.entry_id.clone();
-    let project_label = entry.project_label.clone();
-    submit.connect_clicked(move |_| {
-        // A queue row's `Submit` never asked the verdict question -- that
-        // lives in the preview sheet -- so this call always omits `outcome`.
-        submit_and_toast(
-            &app_for_submit,
-            approve_params(ApproveTarget::Entry(entry_id.clone()), None, None),
-            project_label.clone(),
-            vec![entry_id.clone()],
-            None,
-        );
-    });
+    let entry_for_submit = entry.clone();
+    submit.connect_clicked(move |_| submit_entry(&app_for_submit, &entry_for_submit));
 
     block
 }
@@ -1410,7 +1387,7 @@ pub(super) fn group_candidates(app: &Rc<App>, project_id: &str) -> Vec<String> {
 /// `eligibility::tests::a_group_submit_never_sends_by_project_id_directly`
 /// still holds it -- the rule is that no bulk control reaches `approve`
 /// around `submit_group`.
-fn submit_group(
+pub(crate) fn submit_group(
     app: &Rc<App>,
     project_id: &str,
     project_label: &str,
@@ -1439,293 +1416,61 @@ fn submit_group(
     );
 }
 
-/// The head of a folder's sessions: the way back, and which folder this is.
-///
-/// The back control is a flat button rather than a header-bar arrow because
-/// this drill-in lives inside one page of the view stack -- the window's
-/// header bar belongs to the switcher, and putting a second navigation
-/// affordance up there would make "back" ambiguous.
-fn folder_heading(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widget {
-    let bar = style::card(gtk::Orientation::Horizontal, space::M);
-    bar.set_valign(gtk::Align::Center);
-
-    let back = gtk::Button::with_label(copy::ALL_FOLDERS);
-    back.add_css_class("flat");
-    let app_for_back = Rc::clone(app);
-    back.connect_clicked(move |_| {
-        *app_for_back.queue_location.borrow_mut() = crate::queue_folders::Location::Root;
-        render(&app_for_back);
-    });
-    bar.append(&back);
-
-    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
-    naming.set_hexpand(true);
-    let heading = gtk::Label::builder()
-        .label(&folder.project_label)
-        .xalign(0.0)
-        .wrap(true)
-        .build();
-    heading.add_css_class("tc-card-title");
-    naming.append(&heading);
-    if !folder.project_path.is_empty() {
-        let path = gtk::Label::builder()
-            .label(&folder.project_path)
-            .xalign(0.0)
-            .ellipsize(gtk::pango::EllipsizeMode::Start)
-            .build();
-        path.add_css_class("tc-meta");
-        naming.append(&path);
+/// A folder opened or closed by its chevron (the Mac's `toggle`).
+pub(crate) fn toggle_folder(app: &Rc<App>, project_id: &str) {
+    {
+        let mut open = app.queue.expanded.borrow_mut();
+        if !open.remove(project_id) {
+            open.insert(project_id.to_string());
+        }
     }
-    bar.append(&naming);
-
-    bar.upcast()
+    render(app);
 }
 
-/// One folder in the queue's top level: a project, its folder, what is
-/// waiting in it, and the two things that can be done to the whole project
-/// without opening it.
-///
-/// The label is the row's largest text with the path beneath it, because the
-/// question a contributor is answering at this level is "which repository is
-/// this", and a basename cannot answer it when two checkouts share one.
-///
-/// The row itself is a button into the folder. `Submit all` calls `approve`
-/// with `project_id` rather than enumerating this project's entry ids
-/// itself: the daemon is what decides which entries that selects, exactly
-/// once, and this shell does not keep its own copy of that rule.
-/// `Ignore project` calls `set_project_mode` the same way -- see `set_mode`
-/// in `ui/settings.rs`.
-fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widget {
-    let project_id = folder.project_id.as_str();
-    let project_label = folder.project_label.as_str();
-    let waiting = folder.members.len();
-
-    // The folder's name and count, then its actions under them, wrapping
-    // in a narrow pane: in one line they made the row wider than the
-    // Monitor's 440 main pane.
-    let bar = style::card(gtk::Orientation::Vertical, space::S);
-    let actions = style::wrap_row(space::S);
-
-    // What names the folder, and what says how much is in it. Both live
-    // inside the button that opens it; the project-wide actions sit outside,
-    // as siblings, so no button is ever nested in another.
-    let opener = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
-    opener.set_hexpand(true);
-
-    // The label over the path, as one column, so the name is what is read
-    // first and the path is what disambiguates it.
-    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
-    naming.set_hexpand(true);
-    let heading = gtk::Label::builder()
-        .label(project_label)
-        .xalign(0.0)
-        .wrap(true)
-        .build();
-    heading.add_css_class("tc-card-title");
-    naming.append(&heading);
-    if !folder.project_path.is_empty() {
-        let path = gtk::Label::builder()
-            .label(&folder.project_path)
-            .xalign(0.0)
-            // Ellipsized at the START: the tail of a path is what tells two
-            // checkouts apart, and the head is the part every row shares.
-            .ellipsize(gtk::pango::EllipsizeMode::Start)
-            .build();
-        path.add_css_class("tc-meta");
-        naming.append(&path);
-    }
-
-    // What a group submit will leave behind, said BEFORE the press.
-    //
-    // A button reading "Submit all" over a folder showing five rows that
-    // sends three, with nothing explaining the gap, is the same small
-    // dishonesty the rest of this surface removes. The sentence is the
-    // shared crate's -- it says HOW MANY and not why, because the reason a
-    // particular session cannot be sent is that row's own sentence one
-    // level in, and a summary here would be a summary of up to thirteen
-    // different reasons.
-    //
-    // The empty string for zero draws nothing, which is also the whole of
-    // the invited contributor's case: their rows carry no eligibility field,
-    // every one of them is sendable, and the gap is zero.
-    //
-    // `saturating_sub` because the count is a difference between two
-    // numbers this shell did not compute together. It cannot go negative
-    // today -- the eligible set is a subset of the members -- and if it ever
-    // did, the honest answer is the one zero already gives: say nothing.
-    // The daemon's own count of what a group submit would send, beside the
-    // total from the rows on screen. Only the FILTER's answer comes off the
-    // wire: the header's total must agree with what the contributor can
-    // count, and the filter's answer must agree with the call that applies
-    // it.
-    let contributable = crate::eligibility::group_contributable(&app.projects.borrow(), project_id);
-    let withheld = copy::group_withheld_line(
-        (waiting as u64).saturating_sub(contributable.unwrap_or(waiting as u64)),
+/// One trace's `Submit` from its row: one click that builds, pins and
+/// approves it, then the toast and the undo bar. It never asked the
+/// verdict question -- that lives in the preview sheet -- so it never
+/// sends `outcome`.
+pub(crate) fn submit_entry(app: &Rc<App>, entry: &QueueEntry) {
+    submit_and_toast(
+        app,
+        approve_params(ApproveTarget::Entry(entry.entry_id.clone()), None, None),
+        entry.project_label.clone(),
+        vec![entry.entry_id.clone()],
+        None,
     );
-    if !withheld.is_empty() {
-        let line = style::caveat(&withheld);
-        line.add_css_class("tc-attention");
-        naming.append(&line);
-    }
-    opener.append(&naming);
+}
 
-    let summary = gtk::Label::new(Some(&copy::folder_summary(waiting, folder.bytes)));
-    summary.add_css_class("tc-meta");
-    summary.set_valign(gtk::Align::Center);
-    opener.append(&summary);
+/// Dismiss one trace: the row's Not this one and the folder list's
+/// Dismiss trace both come here.
+pub(crate) fn dismiss_entry(app: &Rc<App>, entry: &QueueEntry) {
+    let entry_id = entry.entry_id.clone();
+    app.call(
+        "dismiss",
+        serde_json::json!({ "entry_id": entry_id }),
+        move |app, result| {
+            if result.is_ok() {
+                // Its card on the Traces map, found among the traces
+                // the map listed before this reload drops it.
+                app.note_dismissed(&entry_id);
+                app.refresh();
+            }
+        },
+    );
+}
 
-    // Opening the folder. A flat button around the naming column rather than
-    // a gesture on the whole row: `Submit all`, `Submit all as...` and
-    // `Ignore project` all sit in this same row, and a row-wide gesture
-    // would have to compete with them for the click.
-    let open = gtk::Button::builder().child(&opener).build();
-    open.add_css_class("flat");
-    open.set_hexpand(true);
-    let app_for_open = Rc::clone(app);
-    let id_for_open = project_id.to_string();
-    open.connect_clicked(move |_| {
-        *app_for_open.queue_location.borrow_mut() =
-            crate::queue_folders::Location::Project(id_for_open.clone());
-        app_for_open.shell.select(
-            &app_for_open,
-            inspector::Selection::Folder(id_for_open.clone()),
-        );
-        render(&app_for_open);
-    });
-    bar.append(&open);
-    bar.append(&actions);
-
-    {
-        // Shown at every count, including one. The old rule hid it at one
-        // because the row's own `Submit` was on the same screen and did the
-        // same thing. Under drill-in that row is a level down, so hiding this
-        // would mean opening a folder to do the thing the folder is offering.
-        // The rule expired with the layout it was written for.
-        let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
-        submit_all.add_css_class("suggested-action");
-        submit_all.add_css_class("tc-primary");
-        submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
-
-        // Both group controls take the gate, or neither should.
-        //
-        // A group with nothing sendable in it must not offer a control that
-        // sends nothing: a press with no visible consequence is the same
-        // defect as a press that is refused, minus the error message. The
-        // verdict menu is the trap -- it is a SECOND ROUTE TO THE SAME CALL,
-        // and a live one sitting beside a disabled button is worse than
-        // either alone, because the disabled button is what tells a
-        // contributor the group cannot be sent.
-        //
-        // **Nothing sendable means no control at all**, the same rule an
-        // ineligible row follows. It used to be drawn and disabled, on the
-        // argument that a folder with no button reads as broken. That
-        // argument was answered by the withheld line below: the folder now
-        // SAYS why it is offering nothing, so the control has nothing left
-        // to communicate and a dead button is just a dead button.
-        //
-        // Counted off this group's own rows rather than `list_projects`'s
-        // `contributable_count`. The queue view builds its folders from the
-        // entries it already holds -- it never fetches project rows -- so
-        // reading the count from a second source would be a second source
-        // that can disagree with the rows on screen. The numbers are the
-        // same by construction: `offers_send` and the daemon's
-        // `contributable_in_a_group` both admit `eligible` alone, and both
-        // admit everything when the evidence flag is off, which is the
-        // absent-field case.
-        // **Asked, not decided.** Whether a group offers a send control is
-        // the same branch table the row control comes from, and the arm it
-        // would get wrong is the absent one: a shell passing `0` for a
-        // missing `contributable_count` would refuse the control to an
-        // invited contributor whose sessions are all perfectly sendable.
-        // `None` carries the absence, exactly as a negative does across the
-        // C ABI that macOS and Windows reach this through.
-        let sendable = crate::eligibility::group_offers_send(waiting as u64, contributable);
-        if sendable {
-            style::wrap_append(&actions, &submit_all);
-        }
-
-        let app_for_submit = Rc::clone(app);
-        let project_id_for_submit = project_id.to_string();
-        let project_label_for_submit = project_label.to_string();
-        submit_all.connect_clicked(move |_| {
-            // `Submit all` means ALL ELIGIBLE, never all -- see
-            // `submit_group`, which reads the queue fresh at click time and
-            // decides between the one `project_id` call and a per-entry
-            // fan-out. It never asked the verdict question, so no `outcome`
-            // goes with it.
-            submit_group(
-                &app_for_submit,
-                &project_id_for_submit,
-                &project_label_for_submit,
-                None,
-            );
-        });
-
-        // The opt-in path for answering the verdict question once for the
-        // whole group. `Submit all` above is untouched and still sends no
-        // `outcome` -- this is a separate control beside it, not a
-        // confirmation step in front of it, so the common one-click path
-        // never gets slower. See `copy::SUBMIT_ALL_AS`.
-        let submit_all_as = gtk::MenuButton::builder()
-            .label(copy::SUBMIT_ALL_AS)
-            .tooltip_text(copy::SUBMIT_ALL_AS_TOOLTIP)
-            .build();
-        submit_all_as.add_css_class("tc-chip");
-
-        let verdict_popover_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(space::XXS)
-            .build();
-        for (label, verdict) in [
-            (copy::VERDICT_WORKED, "worked"),
-            (copy::VERDICT_PARTLY, "partly"),
-            (copy::VERDICT_FAILED, "failed"),
-        ] {
-            let item = gtk::Button::with_label(label);
-            item.add_css_class("flat");
-            verdict_popover_box.append(&item);
-
-            let app_for_item = Rc::clone(app);
-            let project_id_for_item = project_id.to_string();
-            let project_label_for_item = project_label.to_string();
-            let submit_all_as_for_item = submit_all_as.clone();
-            item.connect_clicked(move |_| {
-                submit_all_as_for_item.popdown();
-                // The same rule as the plain `Submit all` above, through the
-                // same function: a verdict answered once for a group must
-                // not become a way to send the rows that button correctly
-                // withheld. A bulk verdict never carries a correction --
-                // one written for a group would describe sessions it was
-                // not written about, and the daemon refuses the combination
-                // outright -- and `submit_group` sends none.
-                submit_group(
-                    &app_for_item,
-                    &project_id_for_item,
-                    &project_label_for_item,
-                    Some(verdict),
-                );
-            });
-        }
-        let verdict_popover = gtk::Popover::builder().child(&verdict_popover_box).build();
-        submit_all_as.set_popover(Some(&verdict_popover));
-        // The same answer, not a second computation. `Submit all as...` is
-        // a second route to the same call, and a live one beside an absent
-        // button would offer exactly what the missing button withheld.
-        if sendable {
-            style::wrap_append(&actions, &submit_all_as);
-        }
-    }
-
-    let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);
-    ignore.add_css_class("tc-chip");
-    ignore.set_tooltip_text(Some(copy::IGNORE_PROJECT_TOOLTIP));
-    style::wrap_append(&actions, &ignore);
-
+/// Ignore a folder with traces waiting: asked first, naming the count, as
+/// `set_project_mode` then drops them. Only the destructive answer sends.
+pub(crate) fn confirm_ignore(
+    app: &Rc<App>,
+    project_id: &str,
+    project_label: &str,
+    pending_count: usize,
+) {
     let app_for_ignore = Rc::clone(app);
     let project_id_for_ignore = project_id.to_string();
     let project_label_for_ignore = project_label.to_string();
-    let pending_count = waiting;
-    ignore.connect_clicked(move |_| {
+    {
         let dialog = adw::MessageDialog::new(
             Some(&app_for_ignore.window),
             Some(&copy::ignore_project_title(&project_label_for_ignore)),
@@ -1780,9 +1525,7 @@ fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widg
             );
         });
         dialog.present();
-    });
-
-    bar.upcast()
+    }
 }
 
 /// One call to `approve`, rendered through `crate::toast` and, when it

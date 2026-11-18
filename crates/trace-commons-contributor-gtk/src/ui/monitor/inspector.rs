@@ -5,7 +5,7 @@
 //! from the Queue page, where it was the end child of a `gtk::Paned`; the
 //! window's inspector pane hosts it now (`monitor::shell`). As on the Mac,
 //! it never closes itself: a selection that has gone is the summary.
-use crate::model::{QueueEntry, human_when};
+use crate::model::QueueEntry;
 use crate::ui::{App, style};
 use adw::prelude::*;
 use std::{cell::RefCell, rc::Rc};
@@ -31,6 +31,23 @@ impl Selection {
                     Self::None => false,
                 });
         if exists { self.clone() } else { Self::None }
+    }
+
+    /// As `resolve`, and a folder the core lists that the folder list
+    /// draws (any mode but Ignore) stays selected with nothing waiting.
+    pub(super) fn resolve_listed(
+        &self,
+        entries: &[QueueEntry],
+        projects: &[crate::model::Project],
+    ) -> Self {
+        if let Self::Folder(id) = self
+            && projects
+                .iter()
+                .any(|project| &project.project_id == id && project.mode != "ignore")
+        {
+            return self.clone();
+        }
+        self.resolve(entries)
     }
 }
 
@@ -83,7 +100,8 @@ impl Inspector {
 
     pub fn render(&self, app: &Rc<App>) {
         let entries = app.entries.borrow();
-        let selected = self.selected.borrow().resolve(&entries);
+        let projects = app.projects.borrow();
+        let selected = self.selected.borrow().resolve_listed(&entries, &projects);
         *self.selected.borrow_mut() = selected.clone();
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
@@ -127,60 +145,26 @@ impl Inspector {
                 else {
                     return;
                 };
-                self.content.append(&heading(&entry.project_label));
                 self.content.append(&body(
                     words
                         .inspector
                         .session_of
                         .replace("{tool}", entry.agent_label()),
                 ));
+                // The trace's review, as the folder list's row once drew it
+                // (the Mac's review card lives here too): what would leave,
+                // what scrubbing took out and left in, its attestation and
+                // eligibility in the core's sentences, and Look inside,
+                // Not this one and Submit under the same rules. Opened by
+                // its place in the flat pending list, which the preview
+                // sheet derives the same way.
+                let index = entries
+                    .iter()
+                    .filter(|entry| entry.state == "pending")
+                    .position(|entry| entry.entry_id == id)
+                    .unwrap_or_default();
                 self.content
-                    .append(&caption(human_when(entry.discovered_at)));
-                self.content.append(&body(words.session_review.heading));
-                let previews = app.previews.borrow();
-                if let Some(preview) = previews.get(&id) {
-                    let opening = if preview.opening_prompt.trim().is_empty() {
-                        words.session_review.no_opening_prompt
-                    } else {
-                        &preview.opening_prompt
-                    };
-                    self.content.append(&body(opening));
-                    let facts = gtk::Box::new(gtk::Orientation::Vertical, tokens::LINE_GAP);
-                    facts.add_css_class("tc-insights-card");
-                    facts.append(&body(
-                        words
-                            .session_review
-                            .events
-                            .replace("{count}", &preview.event_count.to_string()),
-                    ));
-                    facts.append(&body(words.session_review.redacted_payload.replace(
-                        "{size}",
-                        &crate::model::human_bytes(preview.would_send_bytes),
-                    )));
-                    facts.append(&caption(crate::copy::REMOVED_BY_PATTERN));
-                    facts.append(&body(crate::redaction_labels::line(
-                        &preview.redactions,
-                        &preview.redactions_distinct,
-                    )));
-                    self.content.append(&facts);
-                } else if app.previews_too_large.borrow().contains_key(&id) {
-                    self.content
-                        .append(&body(crate::copy::TOO_LARGE_OPENING_LINE));
-                } else {
-                    self.content.append(&body(crate::copy::CHECKING));
-                }
-                let look = gtk::Button::with_label(words.session_review.look_inside);
-                look.update_property(&[gtk::accessible::Property::Label(&format!(
-                    "{} — {}",
-                    words.session_review.look_inside, entry.project_label
-                ))]);
-                let weak = Rc::downgrade(app);
-                look.connect_clicked(move |_| {
-                    if let Some(app) = weak.upgrade() {
-                        crate::ui::preview::open_entry(&app, &id);
-                    }
-                });
-                self.content.append(&look);
+                    .append(&crate::ui::queue::row(app, entry, index));
             }
             Selection::Folder(id) => {
                 let pending: Vec<_> = entries
@@ -189,6 +173,14 @@ impl Inspector {
                     .collect();
                 let folders = crate::queue_folders::group(&pending);
                 let Some(folder) = folders.iter().find(|folder| folder.project_id == id) else {
+                    // A listed folder with nothing waiting.
+                    if let Some(project) = projects.iter().find(|p| p.project_id == id) {
+                        self.content.append(&heading(&project.project_label));
+                        self.content.append(&body(words.inspector.project_details));
+                        if !project.project_path.is_empty() {
+                            self.content.append(&body(&project.project_path));
+                        }
+                    }
                     return;
                 };
                 self.content.append(&heading(&folder.project_label));
@@ -215,13 +207,6 @@ fn body(text: impl AsRef<str>) -> gtk::Label {
 fn heading(text: impl AsRef<str>) -> gtk::Label {
     let label = body(text);
     label.add_css_class("heading");
-    label
-}
-
-fn caption(text: impl AsRef<str>) -> gtk::Label {
-    let label = body(text);
-    label.add_css_class("caption");
-    label.add_css_class("dim-label");
     label
 }
 
@@ -257,6 +242,38 @@ mod tests {
         assert_eq!(
             selection.resolve(&[entry("a", "p", "approved")]),
             Selection::None
+        );
+    }
+
+    /// The folder list draws every folder the core lists, waiting traces
+    /// or not, so selecting an idle one keeps it (the Mac's
+    /// `TracesTree.resolve`); an ignored folder, which the list leaves
+    /// out, and one the core does not list, fall back to the summary.
+    #[test]
+    fn an_idle_listed_folder_stays_selected() {
+        let project = |id: &str, mode: &str| -> crate::model::Project {
+            serde_json::from_value(serde_json::json!({
+                "project_id": id, "project_label": id, "mode": mode
+            }))
+            .unwrap()
+        };
+        let projects = [project("idle", "notify_only"), project("quiet", "ignore")];
+        let idle = Selection::Folder("idle".into());
+        assert_eq!(idle.resolve_listed(&[], &projects), idle);
+        assert_eq!(
+            Selection::Folder("quiet".into()).resolve_listed(&[], &projects),
+            Selection::None
+        );
+        assert_eq!(
+            Selection::Folder("gone".into()).resolve_listed(&[], &projects),
+            Selection::None
+        );
+        // A trace still resolves only while it waits.
+        let session = Selection::Session("a".into());
+        assert_eq!(session.resolve_listed(&[], &projects), Selection::None);
+        assert_eq!(
+            session.resolve_listed(&[entry("a", "idle", "pending")], &projects),
+            session
         );
     }
 

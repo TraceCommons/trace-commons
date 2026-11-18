@@ -165,6 +165,11 @@ else
     fail "first-run Insights created contributor state"
   fi
 
+  # Offscreen renders a mounted test writes for review, when the job asks.
+  if [ -n "${TC_RENDER_DIR:-}" ]; then
+    mkdir -p "$TC_RENDER_DIR"
+  fi
+
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   for test_name in \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
@@ -201,6 +206,8 @@ else
     ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
     ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
