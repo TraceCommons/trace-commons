@@ -152,7 +152,10 @@ impl Fixture {
                 // Settings' sharing choice and Uses; refused, they stay
                 // unpicked and empty.
                 | "automatic_grant"
-                | "consent_options" => {
+                | "consent_options"
+                // Settings' bulk change asks which modes it may set;
+                // refused, its menu offers nothing.
+                | "plan_project_modes" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),
