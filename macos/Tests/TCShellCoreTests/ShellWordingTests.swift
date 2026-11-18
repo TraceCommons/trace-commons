@@ -113,7 +113,6 @@ final class ShellWordingTests: XCTestCase {
         // K3 (#1173): the copy tables that used to be written here.
         "TCBridge/TCCoreCopy.swift",
         "TCShellCore/AutomaticGrantCopy.swift",
-        "TCShellCore/PrivacyScanCopy.swift",
         "TCShellCore/ProjectArmingCopy.swift",
         "TCShellCore/ProjectIgnoreCopy.swift",
         "TCShellCore/QuitPrompt.swift",

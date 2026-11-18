@@ -262,7 +262,6 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
     /// Every `set_settings`-era method this shell issues, in the spelling
     /// the daemon's `METHODS` list uses.
     private static let expected = [
-        "acknowledge_near_ai_notice",
         "approve",
         "arming_suggestion",
         "cancel",
@@ -303,7 +302,6 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         // Each of these fails to decode against the empty result the
         // recording daemon answers with. That is deliberate and irrelevant:
         // the call was made, which is the whole subject of this test.
-        try? client.acknowledgeNearAINotice()
         _ = try? client.approve(entryID: "e")
         _ = try? client.armingSuggestion()
         try? client.cancel(entryID: "e")
@@ -348,7 +346,7 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         // The daemon's own list, transcribed from
         // `crates/trace-commons-contributor/src/daemon/ipc.rs`'s `METHODS`.
         let advertised: Set<String> = [
-            "acknowledge_near_ai_notice", "approve", "cancel", "clear_public_profile",
+            "approve", "cancel", "clear_public_profile",
             "consent_options", "discover_routing", "dismiss", "arming_suggestion",
             "decline_arming", "enroll", "get_public_profile", "get_settings", "hello",
             "history_rollup", "list_audit", "list_history", "list_pending", "list_projects",

@@ -27,7 +27,6 @@ use trace_commons_contributor::daemon::health::LABEL_CANARY_FAILED;
 use trace_commons_contributor::daemon::ipc::{self, DaemonShared};
 use trace_commons_contributor::daemon::policy::ProjectMode;
 use trace_commons_contributor::daemon::queue::QueueState;
-use trace_commons_contributor::envelope::NearAiSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
 
 async fn spawn(router: Router) -> String {
@@ -92,14 +91,32 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
-        Self::build(false).await
+        Self::build().await
     }
 
-    async fn with_broken_privacy_filter() -> Self {
-        Self::build(true).await
+    /// A harness whose sessions in `project` go through a privacy filter that
+    /// fails the batch canary. The client attaches no filter of its own; this
+    /// one stands in for an environment-attached filter, keyed to a project
+    /// directory no other test uses.
+    async fn with_broken_privacy_filter(project: &str) -> Self {
+        let filter_base = spawn(noop_privacy_filter()).await;
+        trace_commons_contributor::envelope::test_filter_hook::attach_for_cwd(
+            format!("/Users/testuser/code/{project}"),
+            Arc::new(
+                trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
+                    filter_base,
+                    "openai/privacy-filter".to_string(),
+                    "test-key".to_string(),
+                    std::time::Duration::from_millis(10_000),
+                    1024 * 1024,
+                )
+                .unwrap(),
+            ),
+        );
+        Self::build().await
     }
 
-    async fn build(broken_filter: bool) -> Self {
+    async fn build() -> Self {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(received.clone())).await;
@@ -123,7 +140,6 @@ impl Harness {
                 user_subject: "alice".into(),
                 device_key_id: device.device_key_id,
                 consent_scopes: vec!["debugging_evaluation".into()],
-                pii_filter: broken_filter.then(|| "near-ai".to_string()),
                 allowed_hosts: Some("127.0.0.1".into()),
                 display_handle: None,
                 public_bio: None,
@@ -135,13 +151,6 @@ impl Harness {
         let claude_root = dir.path().join("projects");
         std::fs::create_dir_all(&claude_root).unwrap();
         let shared = Arc::new(DaemonShared::load(store).unwrap());
-        // Spawned before the lock is taken: holding a std MutexGuard across
-        // an await is a real hazard, not a lint to silence.
-        let filter_base = if broken_filter {
-            Some(spawn(noop_privacy_filter()).await)
-        } else {
-            None
-        };
         {
             let mut s = shared.settings.lock().unwrap();
             s.claude_source = Some(
@@ -154,18 +163,6 @@ impl Harness {
                     path: dir.path().join("codex"),
                 },
             );
-            if let Some(base_url) = filter_base {
-                s.near_ai = Some(NearAiSettings {
-                    api_key: "test-key".into(),
-                    base_url: Some(base_url),
-                    model: None,
-                });
-            }
-        }
-        if broken_filter {
-            // The notice gate is a separate precondition; acknowledge it so
-            // the canary is what the pass actually trips on.
-            shared.store.ensure_near_ai_notice_shown().unwrap();
         }
         Self {
             _dir: dir,
@@ -293,9 +290,12 @@ async fn a_privacy_filter_canary_failure_sets_the_health_label_that_suspends_exp
     // continued, health said "ok", `blocks_expiry()` was false, and the
     // fourteen-day clock ran straight through a filter outage -- discarding
     // pending traces as "expired-without-decision" that nobody declined.
-    let h = Harness::with_broken_privacy_filter().await;
-    h.opt_in("myproj");
-    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+    let h = Harness::with_broken_privacy_filter("canary-outage-expiry").await;
+    h.opt_in("canary-outage-expiry");
+    h.write_session(
+        "canary-outage-expiry",
+        "11111111-1111-1111-1111-111111111111",
+    );
     h.discover().await;
 
     let err = h.upload_pass().await.unwrap_err();
@@ -323,9 +323,12 @@ async fn a_canary_abort_still_persists_the_passs_own_mutations() {
     // trailing `if changed { save }` entirely -- so the pass's queue and
     // state mutations, and the health label itself, were thrown away with
     // it.
-    let h = Harness::with_broken_privacy_filter().await;
-    h.opt_in("myproj");
-    h.write_session("myproj", "22222222-2222-2222-2222-222222222222");
+    let h = Harness::with_broken_privacy_filter("canary-outage-persist").await;
+    h.opt_in("canary-outage-persist");
+    h.write_session(
+        "canary-outage-persist",
+        "22222222-2222-2222-2222-222222222222",
+    );
     h.discover().await;
 
     assert!(h.upload_pass().await.is_err());
@@ -461,7 +464,6 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id,
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: Some("127.0.0.1".into()),
             display_handle: None,
             public_bio: None,
@@ -825,7 +827,7 @@ async fn an_envelope_determining_change_after_approval_revokes_the_approval() {
     // guard verified the input; it never verified the artifact, so the
     // upload went out under configuration the contributor never saw.
     //
-    // `pii_filter` is the change here rather than the consent scopes,
+    // The tenant is the change here rather than the consent scopes,
     // precisely because the pre-existing `approved_scopes` guard already
     // covers scopes and would mask the gap.
     let h = Harness::new().await;

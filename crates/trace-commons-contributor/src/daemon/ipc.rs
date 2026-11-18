@@ -385,7 +385,6 @@ pub const METHODS: &[&str] = &[
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
     "legacy_invite_migrate",
-    "acknowledge_near_ai_notice",
     "approve",
     "automatic_grant",
     "grant_automatic",
@@ -581,7 +580,6 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_settings",
     "consent_options",
     "set_consent_scopes",
-    "acknowledge_near_ai_notice",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
     "acknowledge_arming_rewordings",
@@ -4521,7 +4519,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "consent_options" => Response::ok(req.id, enroll::consent_options()),
         "set_consent_scopes" => enroll::handle_set_consent_scopes(shared, req),
-        "acknowledge_near_ai_notice" => enroll::handle_acknowledge_near_ai_notice(shared, req),
         "list_history" => {
             let limit = req
                 .params
@@ -5664,7 +5661,7 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
 // a void raised between the shell drawing and the contributor pressing the
 // button would be cleared unseen, which is the silent void R6 forbids.
 //
-// Audited, like `acknowledge_near_ai_notice`, because it asserts on the
+// Audited, like `set_consent_scopes`, because it asserts on the
 // caller's word that someone was shown something. The audit goes first: a
 // notice cleared with no record of who cleared it is the worse failure, and
 // an acknowledgement that cannot be recorded leaves the notice showing.
@@ -6204,7 +6201,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     }
 
     // The audit entry goes down FIRST, before anything is armed,
-    // the way `acknowledge_near_ai_notice` does it.
+    // the way `acknowledge_grant_voids` does it.
     //
     // The reverse order looked equivalent and was not. It saved the
     // policy, then appended, then on an append failure restored the
@@ -7839,11 +7836,12 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // every call site expresses "unknown" the same way, and the
     // uploader treats it as "re-ask" -- fail-closed.
     let inputs = cfg.as_ref().map(|c| {
-        let (near_ai, attested_bodies) = {
-            let s = shared.settings.lock().expect("settings lock");
-            (s.near_ai.clone(), s.ironwire_attested_bodies)
-        };
-        super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
+        let attested_bodies = shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .ironwire_attested_bodies;
+        super::preview::input_fingerprint(c, attested_bodies)
     });
     // Whether a GROUP-level selector filters to what can actually be sent.
     //
@@ -8875,7 +8873,6 @@ async fn handle_witness_preview_request_inner(
     };
     let token_generation = shared.token_review_generation.load(Ordering::Acquire);
     let initial_settings = shared.settings.lock().expect("settings lock").clone();
-    let near_ai = initial_settings.near_ai.clone();
     let bodies = initial_settings.ironwire_attested_bodies;
     let roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&roots);
@@ -8901,7 +8898,6 @@ async fn handle_witness_preview_request_inner(
     let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
-        near_ai,
         source,
         &session_ref,
         super::preview::WitnessPreviewOptions {
@@ -8943,11 +8939,8 @@ async fn handle_witness_preview_request_inner(
         _ => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-stale"),
     };
     let settings = shared.settings.lock().expect("settings lock");
-    let fingerprint = super::preview::input_fingerprint(
-        &current_cfg,
-        settings.near_ai.as_ref(),
-        settings.ironwire_attested_bodies,
-    );
+    let fingerprint =
+        super::preview::input_fingerprint(&current_cfg, settings.ironwire_attested_bodies);
     if *settings != initial_settings
         || fingerprint != review.summary.input_fingerprint
         || source
@@ -9024,10 +9017,6 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
-    let near_ai = {
-        let s = shared.settings.lock().expect("settings lock");
-        s.near_ai.clone()
-    };
     let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
@@ -9044,7 +9033,6 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     match super::preview::build_preview_card(
         &shared.store,
         cfg.as_ref(),
-        near_ai,
         attested_bodies,
         source,
         &session_ref,
@@ -9153,12 +9141,13 @@ fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_js
 /// unenrolled preview -- holds either way.
 pub(crate) fn preview_config_fingerprint(shared: &DaemonShared) -> String {
     let cfg = shared.store.load_config().ok().flatten();
-    let (near_ai, attested_bodies) = {
-        let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.ironwire_attested_bodies)
-    };
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
     match cfg {
-        Some(c) => super::preview::input_fingerprint(&c, near_ai.as_ref(), attested_bodies),
+        Some(c) => super::preview::input_fingerprint(&c, attested_bodies),
         None => "unenrolled".to_string(),
     }
 }
@@ -9267,10 +9256,11 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let (near_ai, attested_bodies) = {
-        let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.ironwire_attested_bodies)
-    };
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
     let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
@@ -9299,7 +9289,6 @@ async fn build_and_pin_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
             &shared.store,
-            near_ai,
             &transcript,
             session_ref.size_bytes,
             attested_bodies,
@@ -9322,7 +9311,6 @@ async fn build_and_pin_preview(
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
         cfg,
-        near_ai,
         source,
         &session_ref,
         correction,
@@ -10032,16 +10020,20 @@ fn envelope_is_for_enrollment(
             )
 }
 
-/// Settings as returned over IPC: the privacy-filter credential is reported
-/// as present or absent, never echoed.
+/// Settings as returned over IPC, with every credential left out.
+///
+/// `near_ai_configured` reported whether the retired client-side NEAR AI
+/// second scan had a credential. It stays on the wire as a constant `false`:
+/// the macOS and GTK shells decode it as a required field, and every older
+/// shell gates its scan step on it, so `false` turns that step off
+/// everywhere. A credential an older build left in the settings file is
+/// never read and never crosses the socket.
 pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        let configured = s.near_ai.is_some();
-        obj.remove("near_ai");
         obj.insert(
             "near_ai_configured".to_string(),
-            serde_json::Value::Bool(configured),
+            serde_json::Value::Bool(false),
         );
         // The inference credential is a second, different credential in the
         // same document -- see `DaemonSettings::near_ai_inference` -- and gets
@@ -11374,7 +11366,6 @@ mod tests {
         let (_, _, envelope) = super::super::preview::build_preview_with_correction(
             &s.store,
             Some(&cfg),
-            None,
             source,
             &reference,
             None,
@@ -11395,7 +11386,7 @@ mod tests {
         let artifact = super::super::approved_envelope::WitnessReviewArtifact::new(
             response,
             entry.session_hash,
-            super::super::preview::input_fingerprint(&cfg, None, false),
+            super::super::preview::input_fingerprint(&cfg, false),
             None,
             None,
             None,
@@ -11405,7 +11396,6 @@ mod tests {
             &artifact,
             &cfg,
             &s.store,
-            None,
             &transcript,
             reference.size_bytes,
             false,
@@ -13170,7 +13160,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -14512,7 +14501,7 @@ mod tests {
                 assert_eq!(entry.approved_scopes.as_ref(), Some(&cfg.consent_scopes));
                 assert_eq!(
                     entry.approved_inputs.as_deref(),
-                    Some(super::super::preview::input_fingerprint(&cfg, None, false).as_str())
+                    Some(super::super::preview::input_fingerprint(&cfg, false).as_str())
                 );
                 assert!(
                     entry.previewed_envelope_digest.is_none(),
@@ -16439,17 +16428,31 @@ mod tests {
     }
 
     #[test]
-    fn settings_never_echo_the_privacy_filter_credential() {
-        let s = shared();
-        s.settings.lock().unwrap().near_ai = Some(crate::envelope::NearAiSettings {
-            api_key: "super-secret-key".into(),
-            base_url: None,
-            model: None,
+    fn a_retired_scan_credential_never_crosses_and_reads_as_not_configured() {
+        // A settings file an older build wrote, still holding the retired
+        // second scan's credential.
+        let (_d, store) = temp_store();
+        let mut legacy =
+            serde_json::to_value(crate::daemon::settings::DaemonSettings::default()).unwrap();
+        legacy["near_ai"] = serde_json::json!({
+            "api_key": "super-secret-key",
+            "base_url": null,
+            "model": null,
         });
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+        let s = DaemonShared::load(store).unwrap();
         let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
-        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        let result = r.result.unwrap();
+        let body = serde_json::to_string(&result).unwrap();
         assert!(!body.contains("super-secret-key"), "{body}");
-        assert!(body.contains("near_ai_configured"));
+        assert!(result.get("near_ai").is_none(), "{body}");
+        // Still on the wire, for the shells that decode it, and always off.
+        assert_eq!(result["near_ai_configured"], false);
     }
 
     /// The ceremony is reachable over the socket, and forgetting says what it
@@ -19933,22 +19936,23 @@ mod tests {
         seed_entry_in_state(s, QueueState::Approved)
     }
 
+    /// The retired NEAR AI notice's acknowledge method is gone: an older
+    /// shell calling it gets the ordinary unknown-method answer, and nothing
+    /// is recorded.
     #[test]
-    fn acknowledging_the_near_ai_notice_clears_the_blocking_health_label() {
-        // Without this an app-only contributor (never touching the CLI,
-        // which shows the same notice on stdout) is stuck forever.
+    fn the_retired_notice_acknowledgement_is_an_unknown_method() {
         let s = shared();
-        s.health.lock().unwrap().fail(
-            crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-            Utc::now(),
-        );
         let r = handle_request(
             &s,
             &req("acknowledge_near_ai_notice", serde_json::json!({})),
         );
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(s.store.near_ai_notice_shown());
-        assert!(s.health.lock().unwrap().ok());
+        let err = r.error.expect("an unknown method");
+        assert_eq!(err.code, ERR_UNKNOWN_METHOD);
+        let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
+        assert!(
+            r.result.unwrap()["entries"].as_array().unwrap().is_empty(),
+            "a retired method writes no audit row"
+        );
     }
 
     #[test]
@@ -20151,7 +20155,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -20166,10 +20169,6 @@ mod tests {
                 serde_json::json!({"scopes": ["model_training"]}),
             ),
         );
-        handle_request(
-            &s,
-            &req("acknowledge_near_ai_notice", serde_json::json!({})),
-        );
 
         let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
         let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
@@ -20179,10 +20178,6 @@ mod tests {
             .collect();
         assert!(
             actions.contains(&"consent-scopes-changed".to_string()),
-            "{actions:?}"
-        );
-        assert!(
-            actions.contains(&"near-ai-notice-acknowledged".to_string()),
             "{actions:?}"
         );
     }
@@ -22858,10 +22853,11 @@ mod tests {
 
             let unhealthy = live();
             seed_backlog(&unhealthy, NUDGE_BACKLOG_THRESHOLD);
-            unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(
                 nudge_of(&unhealthy),
                 serde_json::json!({
@@ -24815,18 +24811,20 @@ mod tests {
 
             let unhealthy = live();
             land_verdicts(&unhealthy, 1, 0, at);
-            unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(mark_of(&unhealthy).0, "unknown");
 
             let idle_unhealthy = live();
             seed_idle(&idle_unhealthy, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
-            idle_unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            idle_unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(mark_of(&idle_unhealthy).0, "unknown");
         }
 

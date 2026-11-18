@@ -11,8 +11,6 @@
 //! silently falling back to deterministic-only redaction.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -20,14 +18,13 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use trace_commons_protocol::onboarding::user_subject_hash;
-use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
-    IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
-    RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TaskSuccess,
-    TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope, TraceContributionError,
-    TraceContributionEventType, TraceRedactor, ValueMetadata, run_privacy_filter_canary,
-    synthetic_privacy_filter_canary_text, synthetic_privacy_filter_canary_values,
+    IronclawTraceMetadata, OutcomeMetadata, RawTraceContribution, RawTraceContributionEvent,
+    ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TaskSuccess, TokenCounts, TraceAllowedUse,
+    TraceChannel, TraceContributionEnvelope, TraceContributionError, TraceContributionEventType,
+    TraceRedactor, ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
+    synthetic_privacy_filter_canary_values,
 };
 
 use crate::config::ContributorConfig;
@@ -59,83 +56,82 @@ pub(crate) fn clamp_envelope_limit(limit: usize) -> usize {
     limit.min(MAX_ENVELOPE_BYTES)
 }
 
-/// NEAR AI privacy-filter backend settings. Constructed from env by
-/// `near_ai_settings_from_env`, or injected directly by callers/tests so
-/// tests never have to touch process env (`set_var`/`remove_var` are
-/// `unsafe` in edition 2024 and racy under parallel test execution).
-/// `PartialEq` and the serde impls exist so the daemon can persist these in
-/// its 0600 settings file: a service-managed daemon has no shell environment
-/// to read them from.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NearAiSettings {
-    pub api_key: String,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
+/// Build the `DeterministicTraceRedactor` an upload, preview or check uses.
+///
+/// Local scrubbing always runs. The redactor may additionally attach the
+/// privacy filter `TRACE_PRIVACY_FILTER_BACKEND` names (protocol-crate
+/// contract, fail-closed on misconfiguration) -- `sidecar` or `self-hosted`.
+/// `near-ai` is the retired client-side NEAR AI second scan: it is ignored,
+/// logged once, and the redactor scrubs locally only, so no message text is
+/// sent to a NEAR AI classifier from this client. The config's retired
+/// `pii_filter` key is not read at all (see `crate::retired_second_scan`).
+pub fn build_redactor(transcript_cwd: Option<&str>) -> Result<DeterministicTraceRedactor> {
+    build_redactor_with_env(transcript_cwd, |k| std::env::var(k).ok())
 }
 
-/// Read-only NEAR AI settings lookup from the process environment. Never
-/// mutates the environment.
-pub fn near_ai_settings_from_env() -> Option<NearAiSettings> {
-    let api_key = std::env::var("TRACE_NEAR_AI_PRIVACY_API_KEY")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())?;
-    let base_url = std::env::var("TRACE_NEAR_AI_PRIVACY_BASE_URL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    let model = std::env::var("TRACE_NEAR_AI_PRIVACY_MODEL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    Some(NearAiSettings {
-        api_key,
-        base_url,
-        model,
-    })
-}
-
-/// Build a `DeterministicTraceRedactor` configured per `cfg`, with explicit
-/// `near_ai` settings rather than reading the environment. Tests use this
-/// entry point so they never touch process env.
-///
-/// Fail-closed: if `cfg.pii_filter == Some("near-ai")` and `near_ai` is
-/// `None`, this refuses (never silently downgrades to deterministic-only).
-/// Any other `pii_filter` value is refused as `"unknown-pii-filter"`.
-///
-/// Note: the underlying `DeterministicTraceRedactor::new` may additionally
-/// attach an env-configured filter via `TRACE_PRIVACY_FILTER_BACKEND`
-/// (protocol-crate contract, fail-closed on misconfig), so `cfg.pii_filter`
-/// is not the sole filter source.
-pub fn build_redactor_with(
-    cfg: &ContributorConfig,
+/// [`build_redactor`] with the environment read through `get`, so tests
+/// never touch process env (`set_var`/`remove_var` are `unsafe` in edition
+/// 2024 and racy under parallel test execution).
+pub(crate) fn build_redactor_with_env(
     transcript_cwd: Option<&str>,
-    near_ai: Option<NearAiSettings>,
+    get: impl Fn(&str) -> Option<String>,
 ) -> Result<DeterministicTraceRedactor> {
     let known_path_prefixes = known_path_prefixes(transcript_cwd);
+    if crate::retired_second_scan::env_names_it_with(get) {
+        crate::retired_second_scan::note_ignored();
+        return Ok(DeterministicTraceRedactor::deterministic_only(
+            known_path_prefixes,
+        ));
+    }
     let redactor = DeterministicTraceRedactor::new(known_path_prefixes)
         .map_err(|_| anyhow::anyhow!("redactor-config-error"))?;
+    #[cfg(any(test, feature = "test-credential-store"))]
+    if let Some(adapter) = test_filter_hook::for_cwd(transcript_cwd) {
+        return Ok(redactor.with_privacy_filter(
+            adapter,
+            trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::SelfHosted,
+        ));
+    }
+    Ok(redactor)
+}
 
-    match cfg.pii_filter.as_deref() {
-        None => Ok(redactor),
-        Some("near-ai") => {
-            let settings = near_ai
-                .ok_or_else(|| anyhow::anyhow!("near-ai-privacy-filter-requires-settings"))?;
-            let adapter = NearAiPrivacyFilterAdapter::new(
-                settings
-                    .base_url
-                    .unwrap_or_else(|| crate::channel::NEAR_AI_PRIVACY_FILTER_BASE.to_string()),
-                settings
-                    .model
-                    .unwrap_or_else(|| "openai/privacy-filter".to_string()),
-                settings.api_key,
-                Duration::from_millis(10_000),
-                1024 * 1024,
-            )
-            .map_err(|_| anyhow::anyhow!("near-ai-adapter-config-error"))?;
-            Ok(redactor.with_privacy_filter(Arc::new(adapter), PrivacyFilterBackendTag::NearAi))
-        }
-        Some(_) => Err(anyhow::anyhow!("unknown-pii-filter")),
+/// Attach a privacy filter to the redactor built for one transcript
+/// directory, tests only.
+///
+/// The client attaches no filter of its own any more; the only route to one
+/// is the environment (`sidecar`, `self-hosted`), which a test cannot set
+/// without racing every other test in the process. Some invariants still
+/// need a filter in the loop -- approved bytes go out verbatim even when the
+/// redaction does not repeat itself, and a transient filter failure uploads
+/// nothing -- so a test registers one here, keyed by a transcript `cwd` no
+/// other test uses. Compiled out of every shipped build: the feature is
+/// never enabled in a release.
+#[cfg(any(test, feature = "test-credential-store"))]
+pub mod test_filter_hook {
+    use std::sync::{Arc, Mutex};
+
+    use trace_commons_protocol::trace_contribution::PrivacyFilterAdapter;
+
+    type Hooks = Vec<(String, Arc<dyn PrivacyFilterAdapter>)>;
+    static HOOKS: Mutex<Hooks> = Mutex::new(Vec::new());
+
+    /// Attach `adapter` to every redactor built for a transcript whose
+    /// `cwd` is exactly `cwd`, for the rest of the process.
+    pub fn attach_for_cwd(cwd: impl Into<String>, adapter: Arc<dyn PrivacyFilterAdapter>) {
+        let cwd = cwd.into();
+        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.retain(|(c, _)| *c != cwd);
+        hooks.push((cwd, adapter));
+    }
+
+    pub(crate) fn for_cwd(cwd: Option<&str>) -> Option<Arc<dyn PrivacyFilterAdapter>> {
+        let cwd = cwd?;
+        HOOKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(c, _)| c == cwd)
+            .map(|(_, a)| a.clone())
     }
 }
 
@@ -157,15 +153,6 @@ fn known_path_prefixes(transcript_cwd: Option<&str>) -> Vec<String> {
         known_path_prefixes.push(cwd.to_string());
     }
     known_path_prefixes
-}
-
-/// Production entry point: thin wrapper over `build_redactor_with` that
-/// reads NEAR AI settings from the environment.
-pub fn build_redactor(
-    cfg: &ContributorConfig,
-    transcript_cwd: Option<&str>,
-) -> Result<DeterministicTraceRedactor> {
-    build_redactor_with(cfg, transcript_cwd, near_ai_settings_from_env())
 }
 
 /// Run the synthetic privacy-filter canary text through `redactor` and
@@ -202,7 +189,7 @@ pub fn canary_self_test(redactor: &DeterministicTraceRedactor) -> Result<()> {
 }
 
 /// Once-per-batch precondition, extended to also exercise any privacy-filter
-/// backend attached to `redactor` (NEAR AI, sidecar, ...).
+/// backend attached to `redactor` (sidecar, self-hosted, ...).
 ///
 /// `canary_self_test` only checks the deterministic pass (the email/path
 /// shaped canary values it is responsible for). A well-formed no-op filter
@@ -1256,6 +1243,11 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag;
+
     #[tokio::test]
     async fn native_identity_survives_envelope_and_redaction() {
         let mut transcript = fixture_transcript();
@@ -1420,7 +1412,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: "sha256:00".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -1625,29 +1616,26 @@ mod tests {
     }
 
     #[test]
-    fn near_ai_filter_fails_closed_without_key() {
-        let mut cfg = test_config();
-        cfg.pii_filter = Some("near-ai".into());
-        // No settings injected: must refuse, never downgrade to deterministic-only.
-        assert!(build_redactor_with(&cfg, None, None).is_err());
-    }
-
-    #[test]
-    fn unknown_pii_filter_fails_closed() {
-        let mut cfg = test_config();
-        cfg.pii_filter = Some("bogus".into());
-        // DeterministicTraceRedactor is not Debug, so unwrap_err() is
-        // unavailable; match on the error branch instead.
-        match build_redactor_with(&cfg, None, None) {
-            Err(err) => assert!(err.to_string().contains("unknown-pii-filter")),
-            Ok(_) => panic!("unknown pii_filter must fail closed"),
+    fn the_retired_near_ai_backend_builds_a_local_only_redactor() {
+        // `TRACE_PRIVACY_FILTER_BACKEND=near-ai` attached the retired client
+        // scan. It is ignored: no filter is attached, and no credential is
+        // needed for the build to succeed.
+        for value in ["near-ai", " near-ai\n"] {
+            let redactor = build_redactor_with_env(None, |k| {
+                (k == crate::retired_second_scan::ENV_BACKEND).then(|| value.to_string())
+            })
+            .unwrap_or_else(|_| panic!("{value:?} must build, local only"));
+            assert!(redactor.attached_privacy_filter().is_none(), "{value:?}");
+            assert!(
+                !redactor.pipeline_version().contains("near-ai"),
+                "{}",
+                redactor.pipeline_version()
+            );
         }
     }
 
-    /// Spans back every occurrence of `bob@example.com` (used by
-    /// `near_ai_filter_redacts_via_mock_endpoint`) and every canary email
-    /// value the redaction canary sends through (used by the canary tests
-    /// below), so one realistic classifier stub covers both. Matches how a
+    /// Spans back every canary value the redaction canary sends through, so
+    /// an attached filter behind it passes the batch canary. Matches how a
     /// real NEAR AI privacy-filter deployment would flag these categories --
     /// unlike a no-op filter, which always returns an empty span list.
     fn realistic_classify_router() -> axum::Router {
@@ -1657,7 +1645,6 @@ mod tests {
             post(|Json(req): Json<serde_json::Value>| async move {
                 let input = req["input"].as_str().unwrap_or_default().to_string();
                 let targets: &[(&str, &str)] = &[
-                    ("bob@example.com", "private_email"),
                     ("trace-canary.person@example.invalid", "private_email"),
                     ("tc_canary_secret_0123456789abcdef", "secret"),
                     ("/tmp/trace_canary_private/path.txt", "private_url"),
@@ -1692,66 +1679,47 @@ mod tests {
         )
     }
 
-    async fn spawn_near_ai_mock(router: axum::Router) -> String {
+    async fn spawn_classifier_mock(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         base
     }
 
-    fn near_ai_redactor(base_url: String) -> DeterministicTraceRedactor {
-        let mut cfg = test_config();
-        cfg.pii_filter = Some("near-ai".into());
-        build_redactor_with(
-            &cfg,
-            Some("/Users/testuser/code/myproj"),
-            Some(NearAiSettings {
-                api_key: "test-key".into(),
-                base_url: Some(base_url),
-                model: None,
-            }),
+    /// A redactor with an HTTP classifier attached directly. The client no
+    /// longer attaches one from its own settings, but the batch canary is
+    /// generic over whatever filter is attached (a sidecar or self-hosted
+    /// one from the environment), so it is exercised against one here.
+    fn redactor_with_attached_filter(base_url: String) -> DeterministicTraceRedactor {
+        use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            base_url,
+            "openai/privacy-filter".to_string(),
+            "test-key".to_string(),
+            Duration::from_millis(10_000),
+            1024 * 1024,
         )
-        .unwrap()
+        .unwrap();
+        DeterministicTraceRedactor::deterministic_only(known_path_prefixes(Some(
+            "/Users/testuser/code/myproj",
+        )))
+        .with_privacy_filter(Arc::new(adapter), PrivacyFilterBackendTag::SelfHosted)
     }
 
     #[tokio::test]
-    async fn near_ai_filter_redacts_via_mock_endpoint() {
-        let base = spawn_near_ai_mock(realistic_classify_router()).await;
-
-        let mut t = fixture_transcript();
-        t.events.push(crate::source::SessionEvent {
-            served_by: None,
-            kind: crate::source::SessionEventKind::User,
-            timestamp: None,
-            content: Some("please email bob@example.com about this".into()),
-            structured: serde_json::Value::Null,
-            tool_name: None,
-            token_counts: None,
-            tool_call_id: None,
-            success: None,
-        });
-        let cfg = test_config();
-        let redactor = near_ai_redactor(base);
-        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
-        let json = serde_json::to_string(&envelope).unwrap();
-        assert!(!json.contains("bob@example.com"));
-    }
-
-    #[tokio::test]
-    async fn canary_self_test_async_passes_for_realistic_near_ai_filter() {
-        let base = spawn_near_ai_mock(realistic_classify_router()).await;
-        let redactor = near_ai_redactor(base);
+    async fn canary_self_test_async_passes_for_a_realistic_attached_filter() {
+        let base = spawn_classifier_mock(realistic_classify_router()).await;
+        let redactor = redactor_with_attached_filter(base);
         canary_self_test_async(&redactor).await.unwrap();
     }
 
     #[tokio::test]
-    async fn canary_self_test_async_fails_closed_for_noop_near_ai_filter() {
+    async fn canary_self_test_async_fails_closed_for_a_noop_attached_filter() {
         // A no-op filter (always empty spans) must not be able to pass the
         // batch canary just because the deterministic pass alone happens to
         // strip the values it is responsible for.
-        let base = spawn_near_ai_mock(noop_classify_router()).await;
-        let redactor = near_ai_redactor(base);
+        let base = spawn_classifier_mock(noop_classify_router()).await;
+        let redactor = redactor_with_attached_filter(base);
         let err = canary_self_test_async(&redactor).await.unwrap_err();
         assert!(err.to_string().contains("privacy-filter-canary-failed"));
     }

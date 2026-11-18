@@ -22,11 +22,11 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, config_allowlist};
 use crate::envelope::{
-    MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
-    build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor_with,
+    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_deterministic_preview_redactor,
+    build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor,
     canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
-    near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
-    raw_contribution_size_ok, redact_to_envelope,
+    parse_scope_names, parse_use_names, raw_contribution_size, raw_contribution_size_ok,
+    redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -153,8 +153,6 @@ pub struct SubmitPreconditionFailure(pub &'static str);
 /// The canary planted a known secret and the configured filter did not
 /// remove it. Nothing may be sent through that filter.
 pub const PRECONDITION_CANARY_FAILED: &str = "privacy-filter-canary-failed";
-/// The NEAR AI first-use notice could not be recorded as shown.
-pub const PRECONDITION_NEAR_AI_NOTICE_UNRECORDED: &str = "near-ai-notice-not-acknowledged";
 /// No usable device identity, so nothing can be signed.
 pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
 /// Upstream classifier outage after its own retries. The daemon may retry
@@ -425,7 +423,6 @@ pub enum ReceiptShipped {
 #[derive(Default)]
 pub struct SubmitOptions {
     pub dry_run: bool,
-    pub pii_filter: Option<String>,
     /// Drop model reasoning from every session in this run before envelope
     /// construction. Reasoning is included by default.
     pub no_reasoning: bool,
@@ -793,7 +790,7 @@ pub async fn submit_sessions_with_progress(
     let mut contexts = Vec::with_capacity(lanes);
     for _ in 0..lanes {
         contexts.push(crate::daemon::run_blocking(|| {
-            SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
+            SubmitContext::new(store, cfg, opts)
         })?);
     }
     let lanes: Vec<_> = contexts
@@ -929,10 +926,6 @@ pub(crate) enum WitnessForPin {
 /// one for the life of the process and feeds it a session at a time, so a
 /// background upload takes byte-for-byte the same path as an interactive one
 /// rather than a parallel reimplementation of it.
-///
-/// `near_ai` is supplied by the caller rather than read from the environment,
-/// because a daemon started by a service manager inherits none of the user's
-/// shell environment.
 pub struct SubmitContext<'a> {
     store: &'a ConfigStore,
     cfg: &'a ContributorConfig,
@@ -942,8 +935,6 @@ pub struct SubmitContext<'a> {
     issuer: IssuerClient,
     claim: Option<ClaimToken>,
     canary_checked: bool,
-    near_ai_notice_recorded: bool,
-    near_ai: Option<NearAiSettings>,
     receipts: Vec<Receipt>,
     /// The server verdicts the history cache holds, read once here like
     /// `receipts` (see [`crate::daemon::history::reported_verdicts`]). Only a
@@ -1064,9 +1055,8 @@ impl<'a> SubmitContext<'a> {
         store: &'a ConfigStore,
         cfg: &'a ContributorConfig,
         opts: &'a SubmitOptions,
-        near_ai: Option<NearAiSettings>,
     ) -> Result<Self> {
-        let effective_cfg = effective_config(cfg, opts);
+        let effective_cfg = cfg.clone();
         let device = if opts.unenrolled_preview {
             None
         } else if opts.dry_run {
@@ -1101,8 +1091,6 @@ impl<'a> SubmitContext<'a> {
             issuer,
             claim: None,
             canary_checked: false,
-            near_ai_notice_recorded: false,
-            near_ai,
             receipts,
             verdicts,
             canary_runs: 0,
@@ -1161,9 +1149,10 @@ impl<'a> SubmitContext<'a> {
     /// is not the session file.
     ///
     /// An earlier version of this took a *digest* and refused when the
-    /// rebuilt envelope did not match it. That is correct and unusable: the
-    /// pilot runs `pii_filter = "near-ai"`, an LLM-backed filter does not
-    /// return identical spans for identical text, and so every previewed
+    /// rebuilt envelope did not match it. That is correct and unusable
+    /// whenever a redaction step does not reproduce itself -- the pilot then
+    /// ran an LLM-backed client-side filter (since retired), which does not
+    /// return identical spans for identical text -- and so every previewed
     /// entry was refused, re-offered, previewed again, and refused again --
     /// the primary consent path never completed. Handing the pipeline the
     /// approved bytes removes the divergence instead of detecting it: what
@@ -1335,12 +1324,8 @@ impl<'a> SubmitContext<'a> {
         if envelope.submission_id != crate::source::submission_id_for(&transcript.session_hash) {
             anyhow::bail!("witness-review-source-mismatch");
         }
-        let redactor = build_redactor_with(
-            &self.effective_cfg,
-            transcript.cwd.as_deref(),
-            self.near_ai.clone(),
-        )
-        .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
+        let redactor = build_redactor(transcript.cwd.as_deref())
+            .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
         if residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?.is_some() {
             anyhow::bail!("secret-leak-detected");
         }
@@ -1478,12 +1463,8 @@ impl<'a> SubmitContext<'a> {
         if envelope.submission_id != crate::source::submission_id_for(&transcript.session_hash) {
             anyhow::bail!("witness-review-source-mismatch");
         }
-        let redactor = build_redactor_with(
-            &self.effective_cfg,
-            transcript.cwd.as_deref(),
-            self.near_ai.clone(),
-        )
-        .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
+        let redactor = build_redactor(transcript.cwd.as_deref())
+            .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
         if residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?.is_some() {
             anyhow::bail!("secret-leak-detected");
         }
@@ -1496,11 +1477,6 @@ impl<'a> SubmitContext<'a> {
     /// describes what actually determines the envelope.
     pub fn effective_cfg(&self) -> &ContributorConfig {
         &self.effective_cfg
-    }
-
-    /// The NEAR AI privacy-filter settings in force, if any.
-    pub fn near_ai(&self) -> Option<&NearAiSettings> {
-        self.near_ai.as_ref()
     }
 
     /// Redact and submit one session, loading it from `source` first.
@@ -1927,11 +1903,7 @@ impl<'a> SubmitContext<'a> {
                 &transcript.session_hash,
             )));
         };
-        let redactor = match build_redactor_with(
-            &self.effective_cfg,
-            transcript.cwd.as_deref(),
-            self.near_ai.clone(),
-        ) {
+        let redactor = match build_redactor(transcript.cwd.as_deref()) {
             Ok(r) => r,
             Err(_) => {
                 return Ok(WitnessForPin::Outcome(refused(
@@ -2234,11 +2206,7 @@ impl<'a> SubmitContext<'a> {
         let redactor = if opts.unenrolled_preview {
             build_deterministic_preview_redactor(transcript.cwd.as_deref())
         } else {
-            match build_redactor_with(
-                &self.effective_cfg,
-                transcript.cwd.as_deref(),
-                self.near_ai.clone(),
-            ) {
+            match build_redactor(transcript.cwd.as_deref()) {
                 Ok(r) => r,
                 Err(_) => {
                     return Ok(refused("pii-filter-unavailable", &transcript.session_hash));
@@ -2380,15 +2348,6 @@ impl<'a> SubmitContext<'a> {
                 }
             }
         };
-
-        if !self.near_ai_notice_recorded
-            && self.effective_cfg.pii_filter.as_deref() == Some("near-ai")
-        {
-            self.store
-                .ensure_near_ai_notice_shown()
-                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED))?;
-            self.near_ai_notice_recorded = true;
-        }
 
         let size = match envelope_size_ok(&envelope, envelope_limit) {
             Ok(s) => s,
@@ -3275,17 +3234,6 @@ fn residual_scan_error_outcome(
         )));
     }
     Err(error)
-}
-
-/// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
-fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> ContributorConfig {
-    let mut c = cfg.clone();
-    if opts.unenrolled_preview {
-        c.pii_filter = None;
-    } else if opts.pii_filter.is_some() {
-        c.pii_filter = opts.pii_filter.clone();
-    }
-    c
 }
 
 async fn mint_claim(
@@ -4224,7 +4172,6 @@ mod tests {
     fn review_options() -> SubmitOptions {
         SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
@@ -4263,7 +4210,7 @@ mod tests {
             signing_address: signer,
             expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
         });
-        let fingerprint = crate::daemon::preview::input_fingerprint(cfg, None, false);
+        let fingerprint = crate::daemon::preview::input_fingerprint(cfg, false);
         let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
             response,
             transcript.session_hash.clone(),
@@ -4291,7 +4238,7 @@ mod tests {
             original.response().envelope_bytes.clone(),
             &anchor,
         );
-        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, false);
         let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
             response.clone(),
             transcript.session_hash.clone(),
@@ -4367,7 +4314,7 @@ mod tests {
             )
             .unwrap();
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         context
             .use_approved_witness(restored.response().clone())
             .unwrap();
@@ -4442,10 +4389,10 @@ mod tests {
         };
         publish(&document);
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         // Also model a concurrent queued operation that has not loaded the
         // first operation's eventual receipt. Policy must still be rechecked.
-        let mut concurrent = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut concurrent = SubmitContext::new(&store, &cfg, &opts).unwrap();
         context
             .use_approved_witness(artifact.response().clone())
             .unwrap();
@@ -4487,7 +4434,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
-        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, false);
         artifact
             .validate(
                 &cfg,
@@ -4505,7 +4452,7 @@ mod tests {
             .unwrap();
         assert_eq!(artifact.digest().unwrap(), restored.digest().unwrap());
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         context
             .use_approved_witness(restored.response().clone())
             .unwrap();
@@ -4542,7 +4489,7 @@ mod tests {
         let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         context
             .use_approved_witness(artifact.response().clone())
             .unwrap();
@@ -4569,7 +4516,7 @@ mod tests {
         let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         context
             .use_approved_witness(artifact.response().clone())
             .unwrap();
@@ -4589,7 +4536,7 @@ mod tests {
             &device.device_key_id,
         );
         let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
-        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, false);
         assert!(
             artifact
                 .validate(
@@ -4951,7 +4898,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device_key_id.into(),
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -5018,24 +4964,47 @@ mod tests {
         let ingest = spawn(stub_ingest(uploads.clone())).await;
         let (_dir, store) = crate::config::tests_support::temp_store();
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        cfg.pii_filter = Some("near-ai".into());
-        let near_ai = NearAiSettings {
-            api_key: "test-key".into(),
-            base_url: Some(classifier),
-            model: None,
-        };
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        // The client attaches no filter of its own; this one stands in for
+        // an environment-attached (sidecar or self-hosted) filter, keyed to a
+        // transcript directory no other test uses.
+        let cwd = "/Users/testuser/code/transient-filter-failure";
+        crate::envelope::test_filter_hook::attach_for_cwd(
+            cwd,
+            std::sync::Arc::new(
+                trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
+                    classifier,
+                    "openai/privacy-filter".to_string(),
+                    "test-key".to_string(),
+                    std::time::Duration::from_millis(10_000),
+                    1024 * 1024,
+                )
+                .unwrap(),
+            ),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let project = root
+            .path()
+            .join("-Users-testuser-code-transient-filter-failure");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("9c9c9c9c-9c9c-9c9c-9c9c-9c9c9c9c9c9c.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser please\"}},\
+                 \"cwd\":\"{cwd}\",\"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"9c9c9c9c-9c9c-9c9c-9c9c-9c9c9c9c9c9c\",\"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        let source = crate::source::claude_code::ClaudeCodeSource::new(root.path().to_path_buf());
+        let reference = source.discover().unwrap().remove(0);
         let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, Some(near_ai)).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         // Model an already-passed canary so this test reaches the per-session
         // classifier failure, rather than the separate canary precondition.
         context.canary_checked = true;
-        let (source, reference) = fixture_selection().remove(0);
 
-        let outcome = context
-            .submit_one(source.as_ref(), &reference)
-            .await
-            .unwrap();
+        let outcome = context.submit_one(&source, &reference).await.unwrap();
 
         assert!(
             matches!(outcome, SubmitOutcome::Failed { reason_label } if reason_label == "privacy-filter-transient"),
@@ -5059,7 +5028,7 @@ mod tests {
         let redactor = if unenrolled_preview {
             build_deterministic_preview_redactor(transcript.cwd.as_deref())
         } else {
-            build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap()
+            build_redactor(transcript.cwd.as_deref()).unwrap()
         };
         let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
@@ -5093,7 +5062,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: "sha256:enrolled".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -5549,7 +5517,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
 
@@ -5626,7 +5594,7 @@ mod tests {
             "the fixture must actually differ, or this test proves nothing"
         );
 
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let outcome = ctx.submit_loaded(verified).await.unwrap();
         assert!(
             matches!(outcome, SubmitOutcome::Submitted { .. }),
@@ -5665,7 +5633,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.set_upload_provenance(false, Some("worked".to_string()));
         let (source, session_ref) = fixture_selection().remove(0);
 
@@ -5699,7 +5667,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.set_upload_provenance(true, None);
         let (source, session_ref) = fixture_selection().remove(0);
 
@@ -5735,7 +5703,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
 
         let trajectory_dir = tempfile::tempdir().unwrap();
         write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
@@ -5776,7 +5744,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (source, session_ref) = fixture_selection().remove(0);
 
         let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
@@ -5814,7 +5782,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
 
@@ -6112,32 +6080,6 @@ mod tests {
         assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn failed_filter_construction_does_not_write_notice_marker() {
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        assert!(!store.dir().join("near-ai-notice-shown").exists());
-
-        let opts = SubmitOptions {
-            dry_run: true,
-            pii_filter: Some("near-ai".to_string()),
-            ..Default::default()
-        };
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(matches!(
-            &outcomes[0],
-            SubmitOutcome::Refused { reason_label, .. }
-                if reason_label == "pii-filter-unavailable"
-        ));
-        assert!(!store.dir().join("near-ai-notice-shown").exists());
     }
 
     /// Grants strictly less than requested: config asks for
@@ -6973,7 +6915,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
         ctx.submit_one(source.as_ref(), session_ref).await.unwrap()
@@ -7098,7 +7040,7 @@ mod tests {
             cfg.witness.as_mut().unwrap().admission_evidence = true;
             cfg.inference_receipt_endpoint = None;
             let options = review_options();
-            let mut context = SubmitContext::new(&store, &cfg, &options, None).unwrap();
+            let mut context = SubmitContext::new(&store, &cfg, &options).unwrap();
             context.witness_override = Some((
                 witnessed,
                 InferenceAttestationRecord::uncertified(inference_record::REASON_NO_ATTESTED_CALL),
@@ -7153,14 +7095,13 @@ mod tests {
         });
         let opts = SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut context = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let selection = fixture_selection();
         let (source, reference) = &selection[0];
         let mut transcript = source.load(reference).unwrap();
@@ -7198,14 +7139,13 @@ mod tests {
         cfg.witness = Some(settings.clone());
         let opts = SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let selection = fixture_selection();
         let (source, reference) = &selection[0];
         let transcript = source.load(reference).unwrap();
@@ -7316,7 +7256,7 @@ mod tests {
                 url: format!("http://{witness_address}"),
                 ..pinned_witness()
             };
-            let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
             ctx.receipt_override = Some(stand_in_receipt());
             labels.push(
                 ctx.witness_envelope(&settings, raw.clone(), Some(&call), &token, Utc::now())
@@ -7353,7 +7293,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (call, _dir) = receipt_fixture_call();
 
         assert!(
@@ -7387,7 +7327,7 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (call, _dir) = receipt_fixture_call();
 
         assert!(
@@ -7466,14 +7406,14 @@ mod tests {
             machine_readable: true,
             ..Default::default()
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
 
         // An envelope built locally, as the previous release's preview would
         // have left in the queue.
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
         let transcript = source.load(session_ref).unwrap();
-        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let redactor = build_redactor(transcript.cwd.as_deref()).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
         let approved = redact_to_envelope(&redactor, raw).await.unwrap();
         ctx.use_approved_envelope(Some(approved));
@@ -7498,7 +7438,6 @@ mod tests {
             "user_subject": "alice",
             "device_key_id": "device-1",
             "consent_scopes": ["debugging_evaluation"],
-            "pii_filter": serde_json::Value::Null,
             "allowed_hosts": serde_json::Value::Null,
         });
         let cfg: ContributorConfig = serde_json::from_value(previous_release)
@@ -7548,7 +7487,7 @@ mod tests {
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
         let transcript = source.load(session_ref).unwrap();
-        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let redactor = build_redactor(transcript.cwd.as_deref()).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
         let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
 
@@ -7799,7 +7738,7 @@ mod tests {
             state: crate::daemon::queue::QueueState::Approved,
             approved_unattended: true,
             approved_scopes: Some(cfg.consent_scopes.clone()),
-            approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None, false)),
+            approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, false)),
             ..Default::default()
         }
     }
@@ -7838,7 +7777,7 @@ mod tests {
         assert!(!opts.dry_run);
         let mut state = crate::daemon::state::DaemonState::new();
         let mut health = crate::daemon::health::HealthState::default();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let decision = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             Uploader {
@@ -8030,7 +7969,7 @@ mod tests {
         let opts = review_options();
         let mut state = crate::daemon::state::DaemonState::new();
         let mut health = crate::daemon::health::HealthState::default();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.witness_refusals
             .lock()
             .unwrap()
@@ -8075,7 +8014,7 @@ mod tests {
         let opts = review_options();
         let mut state = crate::daemon::state::DaemonState::new();
         let mut health = crate::daemon::health::HealthState::default();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.witness_refusals
             .lock()
             .unwrap()
@@ -8117,7 +8056,7 @@ mod tests {
         let mut state = crate::daemon::state::DaemonState::new();
         let mut health = crate::daemon::health::HealthState::default();
 
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.witness_override = Some((
             witnessed.clone(),
             InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
@@ -8174,7 +8113,7 @@ mod tests {
 
         // No stand-in this time: had the upload not used the pinned review,
         // it would have tried a witness that does not exist and refused.
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let decision = Uploader {
             ctx: &mut ctx,
             store: &store,
@@ -8351,7 +8290,7 @@ mod tests {
         let mut state = crate::daemon::state::DaemonState::new();
         let mut health = crate::daemon::health::HealthState::default();
 
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         ctx.witness_override = Some((
             witnessed.clone(),
             InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
@@ -8788,7 +8727,7 @@ mod tests {
         let selection = fixture_selection();
         let (source, session_ref) = &selection[0];
         let transcript = source.load(session_ref).unwrap();
-        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let redactor = build_redactor(transcript.cwd.as_deref()).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
         redact_to_envelope(&redactor, raw).await.unwrap()
     }

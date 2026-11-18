@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn the_local_route_shows_its_filter_and_no_witness() {
         let facts = serde_json::json!({
-            "route": "local", "witness": null, "local_filter": "near_ai",
+            "route": "local", "witness": null, "local_filter": "sidecar",
             "receipts": {"endpoint_configured": false, "check_attestation": false},
             "attested_bodies": false,
         });
@@ -338,7 +338,7 @@ mod tests {
             texts(&rows),
             vec![
                 consent_copy::DISCLOSURE_ROUTE_LOCAL,
-                consent_copy::DISCLOSURE_LOCAL_FILTER_NEAR_AI
+                consent_copy::DISCLOSURE_LOCAL_FILTER_SIDECAR
             ]
         );
     }

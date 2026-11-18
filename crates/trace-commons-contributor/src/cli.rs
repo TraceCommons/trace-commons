@@ -206,8 +206,10 @@ enum Command {
         /// Run the full pipeline but upload nothing
         #[arg(long)]
         dry_run: bool,
-        /// PII filter backend: near-ai (requires TRACE_NEAR_AI_PRIVACY_API_KEY)
-        #[arg(long)]
+        /// Retired with the client-side NEAR AI second scan. Accepted so an
+        /// older script still runs, and ignored: uploads are scrubbed locally
+        /// only, and the daemon log notes it once.
+        #[arg(long, hide = true)]
         pii_filter: Option<String>,
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
         #[arg(long)]
@@ -759,6 +761,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             outcome,
             invite,
         } => {
+            if pii_filter.is_some() {
+                crate::retired_second_scan::note_ignored();
+            }
             let sel = commands::SubmitSelection {
                 all,
                 since: since.as_deref(),
@@ -767,7 +772,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 yes,
                 pick,
                 dry_run,
-                pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
                 attest_out: attest_out.as_deref(),
                 attest_post: attest_post.as_deref(),
