@@ -6,7 +6,6 @@ import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { profileKeys } from "../../profile/public";
 import { settingsKeys } from "../../settings/public";
 import {
-  acknowledgeNearAiNotice,
   enrollWithInvite,
   getAutomaticGrant,
   getConsentOptions,
@@ -86,12 +85,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       ]);
     },
   });
-  const privacyMutation = useMutation({
-    mutationFn: async (scan: boolean) => {
-      if (scan) await acknowledgeNearAiNotice();
-    },
-    onSuccess: invalidateAccount,
-  });
   const invalidateGrant = () =>
     queryClient.invalidateQueries({
       queryKey: onboardingKeys.automaticGrant(core.scope),
@@ -147,7 +140,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
   const state =
     enrollMutation.isPending ||
     consentMutation.isPending ||
-    privacyMutation.isPending ||
     grantMutation.isPending ||
     withdrawMutation.isPending
       ? "busy"
@@ -156,7 +148,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
         : optionsQuery.isError ||
             enrollMutation.isError ||
             consentMutation.isError ||
-            privacyMutation.isError ||
             grantMutation.isError ||
             withdrawMutation.isError
           ? "error"
@@ -167,15 +158,13 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       ? "Enrollment failed. Check invite link and allowed issuer configuration."
       : consentMutation.isError
         ? "Consent choices were not saved. Nothing proceeds until the app confirms them."
-        : privacyMutation.isError
-          ? "Privacy-scan choice was not saved."
-          : grantMutation.isError
-            ? "Automatic contributing was not turned on. Nothing changed."
-            : withdrawMutation.isError
-              ? "Automatic contributing was not turned off. Try again here or from Settings, under Automatic contributing."
-              : withdrawMutation.data === "still_granted"
-                ? "Automatic contributing is still on. Try again here or from Settings, under Automatic contributing."
-                : null;
+        : grantMutation.isError
+          ? "Automatic contributing was not turned on. Nothing changed."
+          : withdrawMutation.isError
+            ? "Automatic contributing was not turned off. Try again here or from Settings, under Automatic contributing."
+            : withdrawMutation.data === "still_granted"
+              ? "Automatic contributing is still on. Try again here or from Settings, under Automatic contributing."
+              : null;
   const startRoots = () => {
     startMutation.reset();
     setStep("roots");
@@ -252,14 +241,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     setPrivacyIncluded(showPrivacy);
     setStep(showPrivacy ? "privacy" : afterPrivacy(path));
   };
-  const savePrivacy = async (scan: boolean) => {
-    try {
-      await privacyMutation.mutateAsync(scan);
-      setStep(afterPrivacy(progress.path));
-    } catch {
-      // The mutation state supplies the existing error copy.
-    }
-  };
   const acknowledgeScrubDisclosure = () => {
     setProgress((current) => ({ ...current, scrubDisclosureSeen: true }));
     setStep("disclosure_witness");
@@ -317,7 +298,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     saveConsent,
     declineScopes,
     choosePath,
-    savePrivacy,
     acknowledgeScrubDisclosure,
     acknowledgeWitnessDisclosure,
     grant,
@@ -333,7 +313,6 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     optionsQuery,
     enrollMutation,
     consentMutation,
-    privacyMutation,
     grantMutation,
   };
 }

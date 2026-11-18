@@ -34,7 +34,7 @@ private final class KeyDaemon: DaemonCalling {
                 return """
                     {"id":1,"result":{"quiescence_secs":45,"digest_interval_secs":3600,\
                     "local_notifications":true,"queue_ttl_days":14,"max_queue_entries":500,\
-                    "max_uploads_per_day":100,"near_ai_configured":\(state.signedIn),\
+                    "max_uploads_per_day":100,"near_ai_configured":false,\
                     "claude_root_configured":true,"codex_root_configured":true,\
                     "private_inference":true,"private_inference_offer_seen":true,\
                     "private_inference_state":{"state":"\(label)","port":4000}}}

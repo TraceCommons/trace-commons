@@ -107,6 +107,12 @@ machine without an explicit standing opt-in.
 - A local PII sidecar (such as OpenAI Privacy Filter) may only contribute *safe
   summaries*: redacted text, allow-listed label counts, and warnings. It must
   never serialize original text or raw detected-span contents.
+- The contributor client sends no message text to a NEAR AI classifier. Its
+  optional client-side NEAR AI second scan (`pii_filter = "near-ai"`, a
+  `near_ai` daemon credential, or `TRACE_PRIVACY_FILTER_BACKEND=near-ai` on
+  the client) was retired in 2026-11: an old setting is ignored and logged
+  once, and traces upload with local scrubbing only. Server-side and witness
+  classifiers are separate and unaffected.
 
 Redaction preserves useful within-trace structure rather than flattening
 everything to one token: stable placeholders like `<PRIVATE_EMAIL_1>` and

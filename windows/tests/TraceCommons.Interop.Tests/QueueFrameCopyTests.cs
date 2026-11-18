@@ -33,7 +33,6 @@ public class HealthCopyTests
         "not-logged-in",
         "pii-filter-unavailable",
         "privacy-filter-canary-failed",
-        "near-ai-notice-not-acknowledged",
         "claim-mint-failed",
         "ingest-unreachable",
         "queue-full",
@@ -58,7 +57,6 @@ public class HealthCopyTests
             "not-logged-in" => ("Not connected.", false),
             "pii-filter-unavailable" => ("Waiting on the privacy scan.", false),
             "privacy-filter-canary-failed" => ("Privacy scan failed its self-test.", false),
-            "near-ai-notice-not-acknowledged" => ("One thing to confirm.", true),
             "claim-mint-failed" or "ingest-unreachable" => ("Can't reach the upload server.", false),
             "queue-full" => ("Near.ai has stopped queuing new traces", true),
             "a-label-nobody-has-written-yet" => ("Contributions on hold.", false),
@@ -129,9 +127,6 @@ public class HealthCopyTests
             case "not-logged-in":
                 Assert.Equal("Reconnect", action);
                 break;
-            case "near-ai-notice-not-acknowledged":
-                Assert.Equal("Review and confirm", action);
-                break;
             default:
                 Assert.Null(action);
                 break;
@@ -146,13 +141,6 @@ public class HealthCopyTests
     [Fact]
     public void TheQuotedBannersAreTranscribedNotParaphrased()
     {
-        HealthCopy nearAi = HealthCopy.ForLabel("near-ai-notice-not-acknowledged")!;
-        Assert.Equal("One thing to confirm.", nearAi.Title);
-        Assert.Equal(
-            "You chose the extra privacy scan, which sends message text to NEAR AI. "
-            + "Confirm you're OK with that and contributions resume.",
-            nearAi.Detail);
-
         HealthCopy notConnected = HealthCopy.ForLabel("not-logged-in")!;
         Assert.Equal("Not connected.", notConnected.Title);
         Assert.Equal("", notConnected.Detail);

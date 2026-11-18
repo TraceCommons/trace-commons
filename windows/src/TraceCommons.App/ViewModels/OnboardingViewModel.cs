@@ -66,8 +66,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     private bool _inviteFailed;
     private string _projectNotice = string.Empty;
     private bool _isBusy;
-    private bool _scanOffered;
-    private bool _useNearAiScan;
     private string? _tenantId;
 
     public OnboardingViewModel(DaemonHost host, OnboardingState state)
@@ -121,7 +119,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             Raise(nameof(IsWelcome));
             Raise(nameof(IsConnect));
             Raise(nameof(IsConsent));
-            Raise(nameof(IsScan));
             Raise(nameof(IsWatch));
             Raise(nameof(IsDone));
         }
@@ -268,7 +265,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     public bool IsWelcome => Step == OnboardingStep.Welcome;
     public bool IsConnect => Step == OnboardingStep.Connect;
     public bool IsConsent => Step == OnboardingStep.Consent;
-    public bool IsScan => Step == OnboardingStep.Scan;
     public bool IsWatch => Step == OnboardingStep.Watch;
     public bool IsDone => Step == OnboardingStep.Done;
 
@@ -361,23 +357,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             Raise(nameof(CanUseInvite));
             Raise(nameof(CanUseWallet));
         }
-    }
-
-    /// <summary>
-    /// Whether the operator offers the second scanner, from
-    /// <c>get_settings</c>. Screen 4 is skipped when they do not, rather than
-    /// offering a choice between one option and an option that does not exist.
-    /// </summary>
-    public bool ScanOffered
-    {
-        get => _scanOffered;
-        private set => Set(ref _scanOffered, value);
-    }
-
-    public bool UseNearAiScan
-    {
-        get => _useNearAiScan;
-        set => Set(ref _useNearAiScan, value);
     }
 
     public ObservableCollection<ProjectViewModel> Projects { get; } = new();
@@ -502,14 +481,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Credit.Add(row);
             }
         }
-
-        DaemonResponse settings = await _host
-            .CallAsync(DaemonProtocol.Methods.GetSettings)
-            .ConfigureAwait(true);
-
-        ScanOffered = settings.Result is JsonElement element
-                      && element.TryGetProperty("near_ai_configured", out JsonElement configured)
-                      && configured.ValueKind == JsonValueKind.True;
     }
 
     /// <summary>
@@ -540,32 +511,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         await _host
             .CallAsync(DaemonProtocol.Methods.SetConsentScopes, payload)
             .ConfigureAwait(true);
-
-        if (ScanOffered)
-        {
-            Step = OnboardingStep.Scan;
-            return;
-        }
-
-        await LoadProjectsAsync().ConfigureAwait(true);
-        Step = OnboardingStep.Watch;
-    }
-
-    /// <summary>
-    /// Records the second-scanner choice and moves on.
-    /// </summary>
-    public async Task ConfirmScanAsync()
-    {
-        if (UseNearAiScan)
-        {
-            // Without this call the daemon refuses the filter forever and the
-            // contributor experiences unexplained paralysis. It is the only
-            // way an app-only contributor clears the notice, because they
-            // never see the CLI's stdout version of it.
-            await _host
-                .CallAsync(DaemonProtocol.Methods.AcknowledgeNearAiNotice)
-                .ConfigureAwait(true);
-        }
 
         await LoadProjectsAsync().ConfigureAwait(true);
         Step = OnboardingStep.Watch;
@@ -732,7 +677,6 @@ public enum OnboardingStep
     Welcome,
     Connect,
     Consent,
-    Scan,
     Watch,
     Done,
 }

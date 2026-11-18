@@ -212,7 +212,8 @@ else
     ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
     ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
     ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
-    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces; do
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

@@ -914,8 +914,6 @@ pub const NOT_CONNECTED: &str = "Not connected";
 // the words live in `trace_commons_contributor::source_copy` and this
 // shell re-exports the one definition.
 pub use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
-pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
-pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 
 // --- Settings: how it behaves --------------------------------------------
 //
@@ -1250,10 +1248,6 @@ pub fn health_sentence(label: &str) -> &'static str {
         "not-logged-in" => "Not connected.",
         "pii-filter-unavailable" => "Waiting on the privacy scan.",
         "privacy-filter-canary-failed" => "Privacy scan failed its self-test.",
-        "near-ai-notice-not-acknowledged" => {
-            "One thing to confirm. You chose the extra privacy scan, which sends message text to \
-             NEAR AI. Confirm you're OK with that and contributions resume."
-        }
         "claim-mint-failed" | "ingest-unreachable" => "Can't reach the upload server.",
         "queue-full" => {
             concat!(
@@ -1346,7 +1340,6 @@ mod witness_busy_retry_tests {
 pub fn health_action(label: &str) -> Option<&'static str> {
     match label {
         "not-logged-in" => Some("Reconnect"),
-        "near-ai-notice-not-acknowledged" => Some("Review and confirm"),
         _ => None,
     }
 }
@@ -1508,16 +1501,6 @@ pub const ONBOARD_CONSENT_ALWAYS: &str = "Always included";
 pub const ONBOARD_CONSENT_OPTIONAL: &str = "Optional — each one lets your traces do more";
 pub const ONBOARD_CONSENT_CREDIT: &str = "Credit";
 pub const ONBOARD_ALWAYS_ON_TAG: &str = "always on";
-
-// The scan screen's words live in `trace_commons_contributor::privacy_scan_copy`,
-// where the Tauri shell's recovery prompt reads the same disclosure.
-// COPY-MIGRATED-BEGIN
-pub use trace_commons_contributor::privacy_scan_copy::{
-    DISCLOSURE as ONBOARD_SCAN_DISCLOSURE, LOCAL_ALWAYS as ONBOARD_SCAN_LOCAL_ALWAYS,
-    LOCAL_ONLY as ONBOARD_SCAN_LOCAL_ONLY, OFFER as ONBOARD_SCAN_OFFER,
-    TITLE as ONBOARD_SCAN_TITLE, WITH_NEAR as ONBOARD_SCAN_WITH_NEAR,
-};
-// COPY-MIGRATED-END
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 
@@ -2487,7 +2470,6 @@ mod tests {
             "not-logged-in",
             "pii-filter-unavailable",
             "privacy-filter-canary-failed",
-            "near-ai-notice-not-acknowledged",
             "claim-mint-failed",
             "ingest-unreachable",
             "queue-full",
