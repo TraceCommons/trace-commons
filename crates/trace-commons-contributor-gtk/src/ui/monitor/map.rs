@@ -4227,11 +4227,16 @@ mod tests {
         map.canvas.set_run(None);
         settle();
         assert!(map.canvas.is_ticking(), "the station turns at rest");
-        map.canvas.set_visible(false);
+        // Hidden as its pane is collapsed: the whole map, not the canvas
+        // alone, which the view stack would answer by showing the Private
+        // AI canvas in its place and keeping it there.
+        map.root.set_visible(false);
         settle();
+        assert!(!map.canvas.is_mapped());
         assert!(!map.canvas.is_ticking(), "a hidden map's clock stops");
-        map.canvas.set_visible(true);
-        settle();
+        map.root.set_visible(true);
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.is_mapped());
         assert!(map.canvas.is_ticking(), "shown again, it runs");
 
         // Reduced motion: the clock stops and no run is drawn; the card
