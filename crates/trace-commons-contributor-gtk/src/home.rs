@@ -3,13 +3,16 @@ use crate::model::Status;
 
 /// Keep field presence for Home even when an older daemon omits this count.
 /// The existing History model defaults legacy counters for its own surface.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Rollup {
     #[serde(default)]
     pub all_time: Option<ContributionCount>,
+    /// Credit not yet settled, drawn only beside the commons' condition.
+    #[serde(default)]
+    pub credit_pending: Option<f32>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ContributionCount {
     #[serde(default)]
     pub contributed: Option<u32>,

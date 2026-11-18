@@ -153,7 +153,7 @@ fn pill(glyph: &str, name: &str) -> gtk::Button {
 
 /// Which series a legend cell or a dot stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Series {
+pub(super) enum Series {
     Shared,
     Kept,
 }
@@ -202,7 +202,7 @@ fn legend_dot(series: Series) -> gtk::DrawingArea {
 
 /// `GlassLegendCell`: a capsule well, the dot and the word on the left and
 /// the figure on the right, semibold and tabular.
-fn legend_cell(word: &str, series: Series) -> (gtk::Box, gtk::Label) {
+pub(super) fn legend_cell(word: &str, series: Series) -> (gtk::Box, gtk::Label) {
     let cell = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     cell.add_css_class("tc-glass-well");
     cell.add_css_class("tc-graph-legend-cell");

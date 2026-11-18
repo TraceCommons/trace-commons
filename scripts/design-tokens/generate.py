@@ -648,6 +648,10 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     # capsule's ink(0.07) fill, which stays translucent over the pane.
     for token in ("graphFocusOn", "graphFocusIdle", "graphFocusOff"):
         palette[token] = over(flat_color(tokens, token, scheme), ground)
+    # The summary's decision-line glyphs (`SummaryDecisionLine`): a
+    # status's text colour, or the tertiary ink with no status.
+    for token in ("statusOnText", "statusAskText", "textTertiary"):
+        palette[token] = over(flat_color(tokens, token, scheme), ground)
     ink = flat_color(tokens, "ink", scheme)
     palette["rangeFill"] = css_rgba({"hex": ink["hex"], "alpha": 0.07}, "rangeFill")
     # The solid stroke a tier with edge layers takes under Increase Contrast
@@ -684,6 +688,9 @@ GLASS_COLOURS = [
     ("graphFocusIdle", "graph_focus_idle"),
     ("graphFocusOff", "graph_focus_off"),
     ("rangeFill", "range_fill"),
+    ("statusOnText", "status_on_text"),
+    ("statusAskText", "status_ask_text"),
+    ("textTertiary", "ink_tertiary"),
 ]
 
 

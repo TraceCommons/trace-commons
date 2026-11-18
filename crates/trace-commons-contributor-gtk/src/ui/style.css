@@ -714,6 +714,51 @@ window.tc-glass-window:backdrop .tc-graph-pill:checked {
   opacity: 0.45;
 }
 
+/* --- The inspector's summary (`monitor::summary`) -------------------
+   `SummaryInspector`: a bold heading over a tertiary sub line, quiet
+   cards (`GlassCard(quiet:)`, 10 by 12) for Decisions and Statistics, and
+   the safeguards on a card (12 by 14). A decision line's glyph takes its
+   status's text colour, or the tertiary ink with none. The cards are
+   glass tiers, so an unfocused window dims them with the pane. */
+.tc-summary-section {
+  padding: 10px 12px;
+}
+
+.tc-summary-card {
+  padding: 12px 14px;
+}
+
+.tc-summary-title {
+  font-weight: 700;
+  color: @tc_glass_ink;
+}
+
+.tc-summary-section-title,
+.tc-summary-stat-title {
+  font-weight: 600;
+  color: @tc_glass_ink;
+}
+
+.tc-summary-ink {
+  color: @tc_glass_ink;
+}
+
+.tc-summary-secondary {
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-summary-tertiary {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-summary-on {
+  color: @tc_glass_status_on_text;
+}
+
+.tc-summary-ask {
+  color: @tc_glass_status_ask_text;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */

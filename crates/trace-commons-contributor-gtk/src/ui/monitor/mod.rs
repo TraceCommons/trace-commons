@@ -26,6 +26,7 @@ pub mod notices;
 pub mod pane_layout;
 pub mod prefs;
 pub mod shell;
+pub mod summary;
 pub mod tabs;
 pub mod three_pane;
 pub mod traces_tree;

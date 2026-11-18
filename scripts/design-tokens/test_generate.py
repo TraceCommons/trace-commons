@@ -288,6 +288,20 @@ class GlassTokensTests(unittest.TestCase):
                 # The range capsule's fill (MonitorShell.swift:255).
                 self.assertIn(f"@define-color tc_glass_range_fill {range_fill};", css)
 
+    def test_summary_glyph_inks_are_the_macs_text_tones(self):
+        # SummaryDecisionLine: a glyph in its status's text colour
+        # (statusOnText :60, statusAskText :62), or textTertiary (:34)
+        # with no status; flat theme, flattened over the pane.
+        for scheme, (on, ask, tertiary) in (
+            ("light", ("#0b4628", "#573403", "#3d3d43")),
+            ("dark", ("#acedbc", "#ffd585", "#cfd0d8")),
+        ):
+            with self.subTest(scheme=scheme):
+                css = generate.render_glass_css(self.tokens, scheme)
+                self.assertIn(f"@define-color tc_glass_status_on_text {on};", css)
+                self.assertIn(f"@define-color tc_glass_status_ask_text {ask};", css)
+                self.assertIn(f"@define-color tc_glass_ink_tertiary {tertiary};", css)
+
     def test_glyphs_come_from_the_swift_path_data(self):
         glyphs = generate.parse_glyphs(generate.GLYPHS.read_text())
         self.assertEqual([g["name"] for g in glyphs],

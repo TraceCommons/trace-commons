@@ -91,12 +91,21 @@ impl Inspector {
         let words = trace_commons_contributor::preview_copy::monitor_traces_copy();
         if selected == Selection::None {
             // Nothing selected is the summary, never an empty pane.
-            let screens = trace_commons_contributor::preview_copy::monitor_screens_copy();
-            self.content.append(&heading(screens.summary));
-            let counts = crate::home::Counts::from_answers(app.status.borrow().as_ref(), None);
-            self.content.append(&caption(screens.waiting));
-            self.content
-                .append(&body(crate::home::figure(counts.waiting)));
+            let inputs = super::summary::Inputs {
+                status: app.status.borrow().clone(),
+                loaded: app.shell.map.pending_read(),
+                pending: entries
+                    .iter()
+                    .filter(|entry| entry.state == "pending")
+                    .cloned()
+                    .collect(),
+                projects: app.projects.borrow().clone(),
+                rollup: app.summary_rollup.borrow().clone(),
+                condition: app.credit_condition.borrow().clone(),
+                history: app.history_records.borrow().clone(),
+                watched: app.shell.map.watched_tools(),
+            };
+            self.content.append(&super::summary::view(&inputs));
             return;
         }
         let close = gtk::Button::with_label(crate::copy::CLOSE);
