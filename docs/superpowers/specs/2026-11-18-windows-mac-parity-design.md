@@ -291,7 +291,7 @@ Bucket (a) items found:
 
 | Machine | Role | Status | Known limits |
 |---|---|---|---|
-| Azure Windows Server 2025 VM | Build, logic and UI checks; gallery captures during slice work; spikes S1, S2, S3, S7 | in use | No Windows 11 licence. Mica and Acrylic unverified there (S7 logs `MicaController.IsSupported()` and `DesktopAcrylicController.IsSupported()`; those API names are from memory and are checked in S7). GPU and Win2D drawing unverified (S1). Segoe UI Variable and Segoe Fluent Icons presence unverified (S7). Reached over RDP, which may turn transparency off. |
+| Azure Windows Server 2025 VM | Build, logic and UI checks; gallery captures during slice work; spikes S1, S2, S3, S7 | being provisioned | No Windows 11 licence. Mica and Acrylic unverified there (S7 logs `MicaController.IsSupported()` and `DesktopAcrylicController.IsSupported()`; those API names are from memory and are checked in S7). GPU and Win2D drawing unverified (S1). Segoe UI Variable and Segoe Fluent Icons presence unverified (S7). How it is reached is settled by S3; if over RDP, the session may turn transparency off. |
 | Physical Windows 11 PC | The release gate: the final gallery, Mica, motion, DPI and a real launch are signed off here | not yet bought | None known. Until it exists, no slice is called released on Windows. |
 | Windows 11 ARM VM | Optional: an arm64 launch check | optional, not set up | Whether the FFI library and Win2D ship arm64 builds is unverified. |
 | Windows 10 22H2 | The minimum supported OS | not set up | No Mica: the painted fallback (W5-D1 (b)) is what shows. Segoe UI Variable and Segoe Fluent Icons are unverified there, so each needs a fallback (Segoe UI; Segoe MDL2 Assets or exported paths). |
@@ -354,8 +354,8 @@ These apply across slices.
   - **Taken 2026-11-18: (a).**
   - (a) The Mac look, as close as possible (Linux precedent, 2026-11-16)
   - (b) A Fluent look with the Mac's structure
-  - Note: The owner's remark that decoration and motion are parity points to (a). Confirm it.
-- **G-3. App mark.** Which mark the app shows in the title bar, the tiles, the tray and the first-run stage. Asked once here; W2, W8 and W12 apply it.
+  - Note: The owner's remark that decoration and motion are parity pointed to (a); the owner confirmed (a) on 2026-11-18.
+- **G-3. App mark.** Which mark the app shows in the title bar, the tiles, the tray and the first-run stage. Asked once here; W2, W8 and W12 apply it, and W10 redraws the MSIX tiles.
   - **Taken 2026-11-18: (a), tiles too.**
   - (a) The NEAR AI N everywhere, tiles too (Linux precedent: the N for the app, tray and Flatpak icon, #2186, still open)
   - (b) The N in the app, tray and stage; the Turn stays on the MSIX tiles only
@@ -403,6 +403,8 @@ that draws them; each says so. The three rows that had no slice are in W20.
 - A debug-only sample client in `Interop/`, chosen by `TRACE_COMMONS_SAMPLE`
 - A capture driver run through `windows/scripts/win-capture.ps1`
 - Gallery naming for `scripts/parity/gallery.sh`
+- A new `net8.0-windows` render-test project under `windows/tests/`, and its step in the `windows contributor app` CI job (W1-D2 (a))
+- `az`-based equivalents of `provision-dev-vm.sh` and `win-exec.sh` (G-5 (a)), shaped by spike S3
 
 **C ABI:**
 
@@ -854,7 +856,7 @@ No decoration items.
   - **Taken 2026-11-18: (a). Spike S5 still gates W9 shipping.**
   - (a) Match the Mac's grant flow before W9 ships (Linux precedent: "match the mac", #2179)
   - (b) Keep per-project arming as it is
-  - Note: Spike S5 traces what the daemon then sends; it runs before this is asked.
+  - Note: Spike S5 traces what the daemon then sends. It was meant to run before this was asked; with (a) taken, it still gates W9 shipping.
 - **W9-D3. Where an override is cleared.** The Mac clears a contribution override from its menu-bar panel (`TraceCommonsApp/Views/Monitor/MenuPanelStore.swift:177`, `:199`), after a confirmation. Windows sends neither `set_contribution_override` nor `clear_contribution_override`. Whether the Mac offers a clear anywhere else was not checked.
   - **Taken 2026-11-18: (a).**
   - (a) Clear only where the Mac clears, so it arrives with the tray flyout (W13-D1) (Linux precedent: "match the mac", #2179)
@@ -892,7 +894,7 @@ No decoration items.
 
 - **W10-D2. The invite protocol's display name.** `Package.appxmanifest:92` is "Near.ai invite", the name Windows shows for the `tracecommons` protocol. `APP_NAME` is "Near AI Gateway" (`brand.rs:28-35`). Still open.
   - (a) `APP_NAME` alone, no new words
-  - (b) A core word such as "<APP_NAME> invite" (a new copy item, needing approval)
+  - (b) A core word such as `<APP_NAME> invite` (a new copy item, needing approval)
   - (c) Leave the literal as it is for now, excluded from the test
 - **W10-D1. Internal ids.** The package name `Iqlusion.TraceCommons`, the `tracecommons` protocol, `TraceCommons.exe`, the Run value name and the install folder.
   - **Taken 2026-11-18: (a).**
@@ -990,7 +992,7 @@ No decoration items.
   - **Taken 2026-11-18: (a).**
   - (a) The Mac's badge, 99+ cap, figure cut from the mark ink, never red (Linux precedent, #2186)
   - (b) Keep the dot and tooltip count
-  - Note: the earlier Windows reason against a badge is recorded at `TrayIcon.cs:629-633`: "a 16px tray icon cannot carry two legible digits, so the count lives in the tooltip". The Mac's badge is 11 pt on a 22 pt item (`MenuBarPanel.swift:460`, `:475`). At 100% scaling a 16 px icon gives the badge about 8 px. W12 keeps the count in the tooltip as well, and its gallery rows show the badge at 100%, 150% and 200% scaling so the owner sees the trade-off.
+  - Note: the earlier Windows reason against a badge is recorded at `TrayIcon.cs:629-633`: "a 16px tray icon cannot carry two legible digits, so the count lives in the tooltip". The Mac's badge is 11 pt on a 22 pt item (`MenuBarPanel.swift:460`, `:475`). At 100% scaling a 16 px icon gives the badge about 8 px. Proposed, not yet agreed: W12 also keeps the count in the tooltip, and its gallery rows show the badge at 100%, 150% and 200% scaling so the owner sees the trade-off.
 - **W12-D3. Tray news ring and idle halo.**
   - **Taken 2026-11-18: (a).**
   - (a) Port them with the Mac's conditions (Linux precedent, #2186)
@@ -1143,6 +1145,14 @@ from core words. W25 audits the whole app against it at the end.
 The Account group of the Mac's Settings (`Views/SettingsSections.swift:12-79`:
 account, payouts, referrals). Lands in the Settings window from W2 (W2-D2 (a)).
 
+Five of the Mac's 19 sections have no slice of their own: watching, watched
+folders, public profile, changes and witness. Windows has counterparts for
+some today (the witness at `Controls/SettingsView.xaml:814`, the public
+profile through `get_public_profile`, the session roots window); whether
+they match the Mac is unverified. They move into the Settings window with
+W2. W16-D1 (a) would put them in the Mac's order; porting their Mac layout
+is still to be asked.
+
 **Mac sources:**
 
 - `Views/Settings/AccountSection.swift` (set-up-again copy `:156-359`), `AccountLoginChangeViews.swift`
@@ -1245,9 +1255,11 @@ No decoration items.
 
 ### W18. Settings: compute
 
-The Mac's Compute section. The Settings window's body draws nothing for it
-(`Views/Settings/GlassSettingsContent.swift:36`, `case .compute: EmptyView()`);
-`ComputeView` is drawn in the Settings modal (`Views/Monitor/SettingsModal.swift:211`).
+The Mac's Compute section. The Settings window draws it: `SettingsModal`
+is the body of the Settings window, "Compute included"
+(`Views/Monitor/SettingsModal.swift:5-13`), and draws `ComputeView` itself
+(`:211`). The shared section body draws nothing for `.compute`
+(`Views/Settings/GlassSettingsContent.swift:36`, `case .compute: EmptyView()`).
 
 **Mac sources:**
 
@@ -1498,7 +1510,7 @@ No decoration items.
 
 **Tests that pin the Mac:**
 
-- The version line is "<version> (<build>)", or the version alone when the build is missing or the same (`AboutLines.line`)
+- The version line is `<version> (<build>)`, or the version alone when the build is missing or the same (`AboutLines.line`)
 - Copy puts exactly the shown line on the clipboard
 
 **Decoration in this slice:**
