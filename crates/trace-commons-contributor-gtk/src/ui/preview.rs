@@ -125,6 +125,10 @@ struct Sheet {
     /// tab. A person who is deciding should not have to go back to a tab to
     /// re-read what the payload was.
     manifest_slot: gtk::Box,
+    /// Why this trace is held for a person, and how unsure the scrubber
+    /// was (the Mac review card's reasons and `unsure` row). Refilled on
+    /// every `load`; nothing of one trace's survives into the next.
+    pub(crate) held_slot: gtk::Box,
 
     /// The two counts the tab strip carries: how many turns are in the
     /// trace, and how many permissions the contribution would run under.
@@ -273,6 +277,10 @@ impl Sheet {
         let manifest_slot = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .build();
+        let held_slot = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XXS)
+            .build();
 
         // Green, a padlock's worth of words, and a glyph -- the status of
         // the whole sheet, said before anything asks for a decision.
@@ -295,6 +303,7 @@ impl Sheet {
         sheet_header.set_margin_end(space::L);
         sheet_header.append(&identity);
         sheet_header.append(&manifest_slot);
+        sheet_header.append(&held_slot);
         sheet_header.append(&status_row);
 
         let stack = gtk::Stack::builder()
@@ -706,6 +715,7 @@ impl Sheet {
             identity_agent,
             identity_when,
             manifest_slot,
+            held_slot,
             count_whats_in_it,
             count_permissions,
             search_entry: search_entry.clone(),
@@ -1035,7 +1045,12 @@ impl Sheet {
     fn load(self: &Rc<Self>) {
         let request = self.epoch.begin();
         *self.body.borrow_mut() = None;
-        for container in [&self.permissions, &self.whats_in_it, &self.removed_summary] {
+        for container in [
+            &self.permissions,
+            &self.whats_in_it,
+            &self.removed_summary,
+            &self.held_slot,
+        ] {
             while let Some(child) = container.first_child() {
                 container.remove(&child);
             }
@@ -1060,6 +1075,7 @@ impl Sheet {
         ));
         self.identity_when
             .set_text(&human_when(entry.discovered_at));
+        super::queue::append_held_facts(&self.held_slot, entry);
         // A new entry is a new decision, and nothing about the previous
         // one may carry into it: the pin is dropped here and only set again
         // by a preview that actually came back for THIS entry. The verdict

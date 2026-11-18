@@ -1281,22 +1281,7 @@ fn manifest_block(
     // word for it, why, and how much the scrubber was unsure of. Such a
     // trace is looked at first; its row offers no Submit
     // (`eligibility::offers_send`).
-    {
-        let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
-        if crate::eligibility::is_held(entry) || crate::eligibility::held_for_review(entry) {
-            let held = style::caveat(traces.held);
-            held.add_css_class(Tone::Attention.css());
-            facts.append(&held);
-        }
-        for line in crate::eligibility::held_reason_lines(entry) {
-            facts.append(&style::caveat(line));
-        }
-        if let Some(unsure) = entry.unsure_spans {
-            let line = style::caveat(format!("{}: {unsure}", traces.unsure));
-            line.add_css_class("tc-tertiary");
-            facts.append(&line);
-        }
-    }
+    append_held_facts(&facts, entry);
     block.append(&facts);
 
     let actions = style::wrap_row(space::S);
@@ -1934,6 +1919,37 @@ pub(crate) fn arming_refusal_line(method: &str) -> &'static str {
     }
 }
 
+/// What a held trace says, in order: the core's held word, each
+/// second-look reason in the core's sentences, and the unsure-span count.
+/// The queue row and the preview sheet both draw it, as the Mac's row flag
+/// and review card do (`SessionReviewCard`'s reasons and `unsure` row).
+pub(crate) fn held_fact_texts(entry: &QueueEntry) -> (Option<String>, Vec<String>, Option<String>) {
+    let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
+    let held = (crate::eligibility::is_held(entry) || crate::eligibility::held_for_review(entry))
+        .then(|| traces.held.to_string());
+    let unsure = entry
+        .unsure_spans
+        .map(|count| format!("{}: {count}", traces.unsure));
+    (held, crate::eligibility::held_reason_lines(entry), unsure)
+}
+
+pub(crate) fn append_held_facts(container: &gtk::Box, entry: &QueueEntry) {
+    let (held, reasons, unsure) = held_fact_texts(entry);
+    if let Some(held) = held {
+        let held = style::caveat(held);
+        held.add_css_class(Tone::Attention.css());
+        container.append(&held);
+    }
+    for line in reasons {
+        container.append(&style::caveat(line));
+    }
+    if let Some(unsure) = unsure {
+        let line = style::caveat(unsure);
+        line.add_css_class("tc-tertiary");
+        container.append(&line);
+    }
+}
+
 /// The Mac's dismiss confirmation (`dismissBody`): when the trace was
 /// found, and its size.
 pub(crate) fn dismiss_body(entry: &QueueEntry) -> String {
@@ -2484,6 +2500,33 @@ mod tests {
         assert!(body.starts_with("\u{2014} \u{00b7} 2 KB."), "{body}");
         assert!(template.contains("{when}") && template.contains("{size}"));
         assert!(!body.contains('{'));
+    }
+
+    /// A held trace's facts, as the row and the preview sheet both say
+    /// them: the held word, the reasons in the core's sentences, then the
+    /// unsure count; nothing for a trace that is not held.
+    #[test]
+    fn a_held_trace_says_why_and_how_unsure() {
+        let traces = trace_commons_contributor::preview_copy::monitor_traces_copy();
+        let held: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e", "project_id": "p", "project_label": "proj",
+            "state": "pending", "reason_label": "second-look-review-required",
+            "second_look": ["looks-unsure"],
+            "second_look_lines": ["The scrubber was unsure about some of it."],
+            "unsure_spans": 2,
+        }))
+        .unwrap();
+        let (word, reasons, unsure) = held_fact_texts(&held);
+        assert_eq!(word.as_deref(), Some(traces.held));
+        assert_eq!(reasons, ["The scrubber was unsure about some of it."]);
+        assert_eq!(unsure, Some(format!("{}: 2", traces.unsure)));
+        let plain: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e", "project_id": "p", "project_label": "proj", "state": "pending",
+        }))
+        .unwrap();
+        assert_eq!(held_fact_texts(&plain), (None, Vec::new(), None));
+        // The sheet draws the same facts as the row.
+        assert!(include_str!("preview.rs").contains("append_held_facts(&self.held_slot, entry)"));
     }
 
     /// A refused Undo says the shared Traces line, never a GTK sentence.
