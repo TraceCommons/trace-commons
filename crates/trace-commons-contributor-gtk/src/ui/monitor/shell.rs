@@ -3939,9 +3939,14 @@ mod tests {
             let mac_off = mac_flat("toggleOff", dark);
             for (window, on, off, width, height, inset, kind) in &kinds {
                 let (width, height, inset) = (*width, *height, *inset);
-                // Raised, so the compositor gives it frames: a window
-                // under another gets none, and keeps the style it had
-                // before the scheme changed (a light knob in dark).
+                // Alone on screen, so the compositor gives it frames: a
+                // window under another gets none, and keeps the style it
+                // had before the scheme changed (a light knob in dark).
+                for (other, ..) in &kinds {
+                    if other != window {
+                        other.set_visible(false);
+                    }
+                }
                 window.present();
                 for unfocused in [false, true] {
                     if unfocused {
