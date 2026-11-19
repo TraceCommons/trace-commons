@@ -56,7 +56,12 @@ mod tests {
     #[test]
     fn the_json_names_every_field() {
         let json = serde_json::to_value(settings_general_copy()).unwrap();
-        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(keys.len(), 5);
         for key in ["general", "appearance", "light", "dark", "system"] {
             assert!(keys.contains(&key), "{key}");
