@@ -70,6 +70,10 @@ struct PrivateAISettingsPanels: View {
                 // The standard tool settings below are global; managed
                 // launches never edit them.
                 ManagedGlobalSettingsHeader()
+                    // The flag-gated rows below (Claude Desktop) read the
+                    // app's flag snapshot; re-read it whenever the panel
+                    // opens rather than trusting the startup read.
+                    .onAppear { model.refreshFeatureFlags() }
                 GlassCard {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         PrivateAIPanelHeader(

@@ -47,6 +47,16 @@ enum GlassLogoPaths {
         ]
     )
 
+    /// NEAR AI Red SandBox's ring, traced cell by cell from the splash in
+    /// nearai/nearai-red-sandbox's README (docs/assets/sandbox-splash.gif):
+    /// a 12x12 pixel mark, its red arc and dark ring drawn as one tint.
+    static let redTeam = GlassLogoArtwork(
+        viewBox: CGRect(x: 0, y: 0, width: 12, height: 12),
+        paths: [
+            "M4,0h4v1h-4zM3,1h5v1h-5zM2,2h8v1h-8zM2,3h2v1h-2zM6,3h5v1h-5zM0,4h4v1h-4zM9,4h3v1h-3zM0,5h4v1h-4zM9,5h3v1h-3zM0,6h3v1h-3zM8,6h4v1h-4zM0,7h3v1h-3zM8,7h4v1h-4zM1,8h5v1h-5zM8,8h2v1h-2zM2,9h8v1h-8zM4,10h5v1h-5zM4,11h4v1h-4z",
+        ]
+    )
+
     static let theia = GlassLogoArtwork(
         viewBox: CGRect(x: 0, y: 0, width: 64, height: 64),
         paths: [
