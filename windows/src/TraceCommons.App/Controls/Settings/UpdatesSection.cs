@@ -17,35 +17,22 @@ namespace TraceCommons.App.Controls.Settings;
 /// </summary>
 public sealed class UpdatesSection : UserControl
 {
-    private readonly Action _checkNow;
     private readonly UpdateCheckClock _checks;
     private readonly bool _packaged;
     private readonly string _version;
 
+    /// <summary>
+    /// The last-check line, updated in place so a check never rebuilds the
+    /// card under the focused Check Now button.
+    /// </summary>
+    private readonly TextBlock _lastChecked;
+
     public UpdatesSection(Action checkNow, UpdateCheckClock checks)
     {
         IsTabStop = false;
-        _checkNow = checkNow;
         _checks = checks;
         _packaged = PackageIdentity.IsPackaged();
         _version = CurrentVersion(_packaged);
-        _checks.Changed += Draw;
-        Unloaded += (_, _) => _checks.Changed -= Draw;
-        Loaded += (_, _) =>
-        {
-            _checks.Changed -= Draw;
-            _checks.Changed += Draw;
-            Draw();
-        };
-        Draw();
-    }
-
-    /// <summary>
-    /// Draws the card again, so the last-check line's relative time is read
-    /// against the clock now (the window is kept and shown again).
-    /// </summary>
-    public void Draw()
-    {
         UpdatesCard card = UpdatesCard.Live(_packaged, _version, _checks.LastCompleted);
 
         var body = new StackPanel { Spacing = 12 };
@@ -64,10 +51,8 @@ public sealed class UpdatesSection : UserControl
             body.Children.Add(new ContentControl { IsTabStop = false, Content = SettingsCards.GlassChip(tag, muted: !card.TagOn) });
         }
 
-        if (card.LastChecked is { } lastChecked)
-        {
-            body.Children.Add(SettingsCards.Caption(lastChecked));
-        }
+        _lastChecked = SettingsCards.Caption(string.Empty);
+        body.Children.Add(_lastChecked);
 
         if (card.Caption is { } caption)
         {
@@ -76,11 +61,33 @@ public sealed class UpdatesSection : UserControl
 
         if (card.CheckNow is { } word)
         {
-            Button check = SettingsCards.Button(word, (_, _) => _checkNow());
+            Button check = SettingsCards.Button(word, (_, _) => checkNow());
             body.Children.Add(SettingsCards.Row(check));
         }
 
         Content = SettingsCards.Card(MonitorShellCopy.Shell("updates_eyebrow"), body);
+
+        _checks.Changed += Draw;
+        Unloaded += (_, _) => _checks.Changed -= Draw;
+        Loaded += (_, _) =>
+        {
+            _checks.Changed -= Draw;
+            _checks.Changed += Draw;
+            Draw();
+        };
+        Draw();
+    }
+
+    /// <summary>
+    /// Sets the last-check line from the clock now: hidden before a check
+    /// has completed this run, and read against the time now when the kept
+    /// window is shown again.
+    /// </summary>
+    public void Draw()
+    {
+        string? line = UpdatesCard.Live(_packaged, _version, _checks.LastCompleted).LastChecked;
+        _lastChecked.Text = line ?? string.Empty;
+        _lastChecked.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>

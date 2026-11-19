@@ -127,7 +127,8 @@ public class UpdatesCardTests
         Assert.Contains("_settingsView?.RefreshUpdates();", window);
 
         string section = ShellSource("TraceCommons.App/Controls/Settings/UpdatesSection.cs");
-        Assert.Contains("UpdatesCard.Live(_packaged, _version, _checks.LastCompleted)", section);
+        Assert.Contains("UpdatesCard.Live(_packaged, _version, _checks.LastCompleted).LastChecked", section);
+        Assert.Contains("_lastChecked.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;", section);
         Assert.Contains("_checks.Changed += Draw;", section);
     }
 
