@@ -161,6 +161,11 @@ final class DaemonClient: Sendable {
         try call("status", as: DaemonStatus.self)
     }
 
+    func completeSetup(expectedScope: String) throws -> Bool {
+        struct Completion: Decodable { let complete: Bool }
+        return try call("complete_setup", params: ["expected_scope": expectedScope], as: Completion.self).complete
+    }
+
     /// `terms_accept`: records that the person accepted `terms` and lifts
     /// the terms hold when it was the version owed. Returns whether a hold
     /// is still in force. Throws the daemon's `Failure`, whose `message` is

@@ -81,6 +81,11 @@
       terminal you pick, and uses the contributor service when it is
       installed outside the sandbox.</p>
     -->
+    <release version="1.0.11" date="2026-11-19">
+      <description>
+        <p>Gateway for macOS can resume setup with an already connected NEAR AI account.</p>
+      </description>
+    </release>
     <release version="1.0.10" date="2026-11-18">
       <description>
         <p>Fixed a launch error when opening a managed Codex session without choosing a folder.</p>

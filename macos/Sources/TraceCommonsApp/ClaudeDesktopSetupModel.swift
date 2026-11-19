@@ -115,9 +115,14 @@ final class ClaudeDesktopSetupModel {
         let token = presentation
         defer { busy = false }
         let client = client
-        let result = await Task.detached(priority: .utility) {
-            try? client.claudeDesktopStatus()
+        let read = await Task.detached(priority: .utility) {
+            Result { try client.claudeDesktopStatus() }
         }.value
+        let result = try? read.get()
+        switch read {
+        case .success(let s): if s.state != status?.state { FeatureBreadcrumb.claudeDesktopStatus(s.state.rawValue) }
+        case .failure(let error): FeatureBreadcrumb.claudeDesktopFailed(error)
+        }
         guard !Task.isCancelled, isEnabled, presentation == token else { return }
         guard let result else {
             close()
