@@ -67,33 +67,52 @@ final class ClaudeDesktopSurfaceTests: XCTestCase {
     }
 }
 
-/// The Private AI tab's notice offering Claude Desktop setup.
+/// The Private AI tab's Claude Desktop card: an offer while it is not set
+/// up, and its status with Disconnect while it is.
 final class ClaudeDesktopPromptTests: XCTestCase {
-    private func status(_ state: String, promptCopy: Bool = true) throws -> ClaudeDesktopStatus {
+    private func status(_ state: String, observed: Bool = false, model: String? = nil,
+                        promptCopy: Bool = true) throws -> ClaudeDesktopStatus {
         var copy = Dictionary(uniqueKeysWithValues: ClaudeDesktopStatus.copyKeys.map { ($0, $0) })
         if promptCopy { for key in ClaudeDesktopStatus.promptCopyKeys { copy[key] = key } }
-        let fields: [String: Any] = ["state": state, "observed": false, "copy": copy]
+        var fields: [String: Any] = ["state": state, "observed": observed, "copy": copy]
+        fields["model"] = model
         return try JSONDecoder().decode(ClaudeDesktopStatus.self, from: JSONSerialization.data(withJSONObject: fields))
     }
 
-    func testShownOnlyWhileInstalledFlaggedUndismissedAndNotSetUp() throws {
-        let off = try status("disconnected")
-        XCTAssertTrue(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: off))
-        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: false, desktopInstalled: true, dismissed: false, status: off))
-        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: false, dismissed: false, status: off))
-        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: true, status: off))
-        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: nil))
+    private func mode(featureOn: Bool = true, installed: Bool = true, dismissed: Bool = false,
+                      _ status: ClaudeDesktopStatus?) -> ClaudeDesktopPrompt.Mode {
+        ClaudeDesktopPrompt.mode(featureOn: featureOn, desktopInstalled: installed, dismissed: dismissed, status: status)
     }
 
-    func testNotShownOnceSetUpOrWhenSetupCannotRun() throws {
-        for state in ["ready", "observed", "unavailable", "sign_in_required", "disabled", "later_state"] {
-            XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false,
-                                                     status: try status(state)), state)
+    func testOfferedOnlyWhileInstalledFlaggedUndismissedAndNotSetUp() throws {
+        let off = try status("disconnected")
+        XCTAssertEqual(mode(off), .offer)
+        XCTAssertEqual(mode(featureOn: false, off), .hidden)
+        XCTAssertEqual(mode(installed: false, off), .hidden)
+        XCTAssertEqual(mode(dismissed: true, off), .hidden)
+        XCTAssertEqual(mode(nil), .hidden)
+    }
+
+    func testASetUpConnectionShowsItsStatusWithDisconnect() throws {
+        for set in [try status("ready", model: "main"), try status("observed", observed: true, model: "main")] {
+            XCTAssertEqual(mode(set), .connected)
+            // Dismissing the offer, or Claude Desktop since removed, never
+            // hides a live connection's way to turn it off.
+            XCTAssertEqual(mode(dismissed: true, set), .connected)
+            XCTAssertEqual(mode(installed: false, set), .connected)
+            XCTAssertTrue(set.canDisconnect)
+        }
+        XCTAssertEqual(mode(featureOn: false, try status("ready", model: "main")), .hidden)
+    }
+
+    func testNothingWhenSetupCannotRunHere() throws {
+        for state in ["unavailable", "sign_in_required", "disabled", "later_state"] {
+            XCTAssertEqual(mode(try status(state)), .hidden, state)
         }
     }
 
-    func testADaemonWithoutThePromptWordsDrawsNoPrompt() throws {
-        let status = try status("disconnected", promptCopy: false)
-        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: status))
+    func testADaemonWithoutThePromptWordsMakesNoOffer() throws {
+        XCTAssertEqual(mode(try status("disconnected", promptCopy: false)), .hidden)
+        XCTAssertEqual(mode(try status("ready", model: "main", promptCopy: false)), .connected)
     }
 }
