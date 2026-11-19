@@ -370,7 +370,7 @@ pub(crate) fn finalize_outcome(
 /// Run a Red Team managed session through `rts::launch::run`.
 #[cfg(target_os = "macos")]
 pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<RunOutcome> {
-    let spec = spec_for(store, context, None)?;
+    let spec = spec_for(store, context, context.initial_prompt.clone())?;
     let outcome = tokio::task::spawn_blocking(move || rts::launch::run(spec))
         .await
         .map_err(|e| anyhow::anyhow!("red-team session task failed: {e}"))?

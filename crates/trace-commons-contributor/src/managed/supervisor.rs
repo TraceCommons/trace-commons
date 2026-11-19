@@ -283,6 +283,11 @@ async fn run_native(
     if opencode.is_some() && !login {
         command.args(&context.cli_options);
     }
+    if !login
+        && let Some(prompt) = context.initial_prompt.as_deref()
+    {
+        command.args(initial_prompt_args(row.tool, prompt));
+    }
     if opencode.is_none() {
         match row.connection {
             ConnectionKind::Subscription => {}
@@ -580,6 +585,23 @@ fn resume_for(
         None
     };
     Ok(Some(Resume { root, codex_thread }))
+}
+
+/// Command-line arguments that pass an initial prompt to `tool`.
+///
+/// Verified against each pinned tool's `--help` output:
+/// - `claude --help`: `Usage: claude [options] [command] [prompt]` -> `["--", prompt]`
+/// - `codex --help`: `Usage: codex [OPTIONS] [PROMPT]` -> `["--", prompt]`
+/// - `opencode --help`: `--prompt string  Prompt to use` -> `["--prompt", prompt]`
+/// - `red_team`: passed via `LaunchSpec.initial_prompt`, not argv.
+pub fn initial_prompt_args(tool: super::ToolId, prompt: &str) -> Vec<String> {
+    match tool {
+        super::ToolId::Claude | super::ToolId::Codex => {
+            vec!["--".to_owned(), prompt.to_owned()]
+        }
+        super::ToolId::Opencode => vec!["--prompt".to_owned(), prompt.to_owned()],
+        super::ToolId::RedTeam => Vec::new(),
+    }
 }
 
 /// Arguments straight after the tool's executable, before any option:

@@ -687,7 +687,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
         Command::Launch(args) => {
-            let code = crate::managed::cli::launch(&store, args).await?;
+            let code = crate::managed::cli::launch(&store, args, cli.json).await?;
             std::process::exit(code);
         }
         Command::Accounts { action } => {

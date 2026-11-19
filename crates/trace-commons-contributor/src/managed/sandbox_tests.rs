@@ -215,6 +215,7 @@ fn inputs_are_remembered_per_folder_and_hosts_are_not() {
                     cpus: None,
                     memory_mib: None,
                 }),
+                initial_prompt: None,
             }),
         },
     );

@@ -465,6 +465,7 @@ impl ManagedService {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
+            initial_prompt: None,
                     },
                     sign_in,
                 )
@@ -837,6 +838,7 @@ impl ManagedService {
                     resume_of: None,
                     background_model: None,
                     sandbox: None,
+            initial_prompt: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -2518,6 +2520,7 @@ mod tests {
             model: None,
             collect_traces: false,
             sandbox: None,
+            initial_prompt: None,
         })
     }
 
@@ -2600,6 +2603,7 @@ mod tests {
                     model: None,
                     collect_traces: false,
                     sandbox: None,
+            initial_prompt: None,
                 }),
                 false,
             )
@@ -4781,6 +4785,7 @@ mod tests {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
+            initial_prompt: None,
                     },
                     &f.account,
                 )
@@ -4988,6 +4993,7 @@ mod tests {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
+            initial_prompt: None,
                     },
                     &f.account,
                 )

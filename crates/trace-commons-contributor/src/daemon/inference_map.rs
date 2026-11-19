@@ -1932,6 +1932,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let run = |sessions: &mut crate::managed::sessions::SessionRegistry,
                    request: LaunchRequest| {

@@ -110,6 +110,9 @@ pub struct LaunchRequest {
     /// launches. Refused on every other tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<super::sandbox::SandboxSettings>,
+    /// Optional initial prompt handed to the tool on launch (at most 64 KiB UTF-8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +244,9 @@ pub struct LaunchContext {
     /// never passed into OpenCode or the guest VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub red_team_key: Option<super::secrets::RedactedSecret>,
+    /// Optional initial prompt handed to the tool on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1252,6 +1258,7 @@ impl SessionRegistry {
         let coding = entry.request.purpose == LaunchPurpose::Coding;
         let resume_of = entry.request.resume_of;
         let sandbox = entry.request.sandbox.clone();
+        let initial_prompt = entry.request.initial_prompt.clone();
         self.commit(next)?;
         // The launch has happened; failing to record it only shows the
         // first-launch explanation again, so it never fails the launch.
@@ -1269,6 +1276,7 @@ impl SessionRegistry {
             resume_of,
             sandbox,
             red_team_key: None,
+            initial_prompt,
         })
     }
 
@@ -1731,6 +1739,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let id = registry
             .prepare(request.clone(), &sign_in)
@@ -1765,6 +1774,7 @@ mod tests {
                     keep_saved_model: false,
                     background_model: None,
             sandbox: None,
+            initial_prompt: None,
                     ..again
                 },
                 &sign_in,
@@ -1805,6 +1815,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let agent = "---\nname: a\nmodel: anthropic/claude-opus-5-5\n---\n";
 
@@ -1867,6 +1878,7 @@ mod tests {
             resume_of: None,
             background_model: Some("z-ai/glm-5.3-flash".into()),
             sandbox: None,
+            initial_prompt: None,
         };
         let id = registry
             .prepare(request.clone(), &sign_in)
@@ -1907,6 +1919,7 @@ mod tests {
                 LaunchRequest {
                     background_model: None,
             sandbox: None,
+            initial_prompt: None,
                     ..again.clone()
                 },
                 &sign_in,
@@ -1965,6 +1978,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
         assert_eq!(
@@ -2044,6 +2058,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         }
     }
 
@@ -2241,6 +2256,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let launch = registry.prepare(request, &account).unwrap();
         let mut value = serde_json::to_value(&registry.data).unwrap();
@@ -2281,6 +2297,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         };
         let launch = registry.prepare(request.clone(), &account).unwrap();
         registry.data.entries[0].ticket_expires = Utc::now() - Duration::seconds(1);
@@ -2326,6 +2343,7 @@ mod tests {
             resume_of: None,
             background_model: None,
             sandbox: None,
+            initial_prompt: None,
         }
     }
 

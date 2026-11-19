@@ -76,6 +76,7 @@ fn red_team_launch_request(
         cli_options: None,
         resume_of: None,
         sandbox: None,
+            initial_prompt: None,
     })
 }
 

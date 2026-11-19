@@ -42,7 +42,34 @@ pub struct LaunchArgs {
     /// Override this folder's saved CLI options; an empty string clears them.
     #[arg(long, allow_hyphen_values = true)]
     pub cli_options: Option<String>,
+    /// Input file or directory copied into `/in` inside a Red Team sandbox (repeatable).
+    #[arg(long = "input")]
+    pub inputs: Vec<PathBuf>,
+    /// Network allowlist entry for a Red Team sandbox (repeatable).
+    #[arg(long = "allow-host")]
+    pub allow_hosts: Vec<String>,
+    /// Allow standard package registries inside a Red Team sandbox.
+    #[arg(long)]
+    pub packages: bool,
+    /// Guest vCPU count for a Red Team sandbox.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// Guest memory size for a Red Team sandbox (e.g. `4096` or `4G`).
+    #[arg(long)]
+    pub memory: Option<String>,
+    /// Initial prompt text (UTF-8, at most 64 KiB) for any managed tool.
+    #[arg(long, conflicts_with = "prompt_file")]
+    pub prompt: Option<String>,
+    /// Read the initial prompt from a UTF-8 file (at most 64 KiB).
+    #[arg(long, conflicts_with = "prompt")]
+    pub prompt_file: Option<PathBuf>,
+    /// Open the prepared session in a new terminal window and print its session ID.
+    #[arg(long)]
+    pub new_terminal: bool,
 }
+
+/// Maximum UTF-8 byte length of `--prompt` / `--prompt-file`.
+pub const MAX_INITIAL_PROMPT_BYTES: usize = 64 * 1024;
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
@@ -103,6 +130,8 @@ pub struct Snapshot {
     pub sign_in_accounts: Vec<AccountView>,
     pub defaults: Vec<Selection>,
     pub generations: std::collections::BTreeMap<ToolId, Generation>,
+    #[serde(default)]
+    pub tools: Vec<Value>,
 }
 
 pub fn call<T: DeserializeOwned>(
@@ -113,7 +142,7 @@ pub fn call<T: DeserializeOwned>(
     let response =
         client::try_call(store, method, &params)?.ok_or(ManagedError::DaemonUnavailable)?;
     if let Some(error) = response.error {
-        return Err(refusal(&error.code));
+        return Err(render_refusal(&error.code, &error.message));
     }
     Ok(serde_json::from_value(
         response.result.ok_or(ManagedError::InvalidRequest)?,
@@ -122,7 +151,12 @@ pub fn call<T: DeserializeOwned>(
 
 /// The error for a daemon refusal labelled `code`: its label, except for a
 /// refusal whose sentence tells the person what to change.
+#[cfg(test)]
 fn refusal(code: &str) -> anyhow::Error {
+    render_refusal(code, code)
+}
+
+pub fn render_refusal(code: &str, message: &str) -> anyhow::Error {
     if code == super::DAEMON_UPDATE_REQUIRED_LABEL {
         return ManagedError::DaemonUpdateRequired.into();
     }
@@ -132,7 +166,104 @@ fn refusal(code: &str) -> anyhow::Error {
     if code == super::PROJECT_SETS_AUTO_MODE_SERVER_LABEL {
         return ManagedError::ProjectSetsAutoModeServer.into();
     }
+    if code == super::RED_TEAM_UNAVAILABLE_LABEL {
+        return ManagedError::RedTeamUnavailable.into();
+    }
+    if code == super::RED_TEAM_NEEDS_NEAR_AI_LABEL {
+        return ManagedError::RedTeamNeedsNearAi.into();
+    }
+    if code == super::SANDBOX_INPUT_REFUSED_LABEL || code == super::SANDBOX_HOST_REFUSED_LABEL {
+        return anyhow::anyhow!("{message}");
+    }
     anyhow::anyhow!("{code}")
+}
+
+/// Parse `--memory` (`N`, `NM`, `NG`, at least 64 MiB).
+pub fn parse_memory_mib(raw: &str) -> anyhow::Result<u32> {
+    let (digits, scale) = match raw.as_bytes().last() {
+        Some(b'G' | b'g') => (&raw[..raw.len() - 1], 1024u32),
+        Some(b'M' | b'm') => (&raw[..raw.len() - 1], 1u32),
+        _ => (raw, 1u32),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        anyhow::bail!("--memory must be a whole number of MiB or end in M or G: {raw}");
+    }
+    let mib = digits
+        .parse::<u32>()
+        .ok()
+        .and_then(|n| n.checked_mul(scale))
+        .ok_or_else(|| anyhow::anyhow!("--memory value out of range: {raw}"))?;
+    if mib < 64 {
+        anyhow::bail!("--memory must be at least 64 MiB: {raw}");
+    }
+    Ok(mib)
+}
+
+/// Read and validate `--prompt` or `--prompt-file` (UTF-8, at most 64 KiB).
+pub fn resolve_initial_prompt(
+    prompt: Option<String>,
+    prompt_file: Option<&std::path::Path>,
+) -> anyhow::Result<Option<String>> {
+    if prompt.is_some() && prompt_file.is_some() {
+        anyhow::bail!("--prompt and --prompt-file cannot be used together");
+    }
+    if let Some(text) = prompt {
+        if text.len() > MAX_INITIAL_PROMPT_BYTES {
+            anyhow::bail!(
+                "--prompt exceeds the {} KiB limit",
+                MAX_INITIAL_PROMPT_BYTES / 1024
+            );
+        }
+        return Ok(Some(text));
+    }
+    if let Some(path) = prompt_file {
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("cannot read --prompt-file {}: {e}", path.display()))?;
+        if bytes.len() > MAX_INITIAL_PROMPT_BYTES {
+            anyhow::bail!(
+                "--prompt-file {} exceeds the {} KiB limit",
+                path.display(),
+                MAX_INITIAL_PROMPT_BYTES / 1024
+            );
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            anyhow::anyhow!("--prompt-file {} must be valid UTF-8", path.display())
+        })?;
+        return Ok(Some(text));
+    }
+    Ok(None)
+}
+
+/// Validate CLI launch options before contacting the daemon.
+pub fn validate_launch_args(
+    args: &LaunchArgs,
+) -> anyhow::Result<(Option<super::sandbox::SandboxSettings>, Option<String>)> {
+    let has_red_team_opts = !args.inputs.is_empty()
+        || !args.allow_hosts.is_empty()
+        || args.packages
+        || args.cpus.is_some()
+        || args.memory.is_some();
+    if args.tool != ToolId::RedTeam && has_red_team_opts {
+        anyhow::bail!("these options apply only to red-team");
+    }
+    let initial_prompt = resolve_initial_prompt(args.prompt.clone(), args.prompt_file.as_deref())?;
+    let sandbox = if args.tool == ToolId::RedTeam && has_red_team_opts {
+        let memory_mib = args
+            .memory
+            .as_deref()
+            .map(parse_memory_mib)
+            .transpose()?;
+        Some(super::sandbox::SandboxSettings {
+            inputs: args.inputs.clone(),
+            allow_hosts: args.allow_hosts.clone(),
+            packages: args.packages,
+            cpus: args.cpus,
+            memory_mib,
+        })
+    } else {
+        None
+    };
+    Ok((sandbox, initial_prompt))
 }
 
 /// Whether `--connection asked` admits an account on `connection`. The
@@ -252,9 +383,33 @@ fn agrees(answer: &str) -> bool {
     )
 }
 
-pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32> {
+pub async fn launch(
+    store: &ConfigStore,
+    args: LaunchArgs,
+    json_output: bool,
+) -> anyhow::Result<i32> {
     use std::io::IsTerminal;
+    launch_with_tty(store, args, json_output, std::io::stdin().is_terminal()).await
+}
+
+pub async fn launch_with_tty(
+    store: &ConfigStore,
+    args: LaunchArgs,
+    json_output: bool,
+    interactive: bool,
+) -> anyhow::Result<i32> {
+    let (sandbox, initial_prompt) = validate_launch_args(&args)?;
+    if !args.new_terminal && !interactive {
+        anyhow::bail!(
+            "managed launch requires an interactive terminal (pass --new-terminal to open one)"
+        );
+    }
     let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    if args.tool == ToolId::RedTeam
+        && !snapshot.tools.iter().any(|t| t["tool"] == "red_team")
+    {
+        return Err(ManagedError::RedTeamUnavailable.into());
+    }
     let resolved = |snapshot: &Snapshot| {
         resolve(
             snapshot,
@@ -265,7 +420,7 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
     };
     let account = match resolved(&snapshot) {
         Err(ManagedError::NearAiSignInRequired) => {
-            if !std::io::stdin().is_terminal() {
+            if !interactive {
                 anyhow::bail!(SIGN_IN_NEEDED);
             }
             eprint!("{SIGN_IN_QUESTION}");
@@ -294,9 +449,6 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         }
         other => other?,
     };
-    if !std::io::stdin().is_terminal() {
-        anyhow::bail!("managed launch requires an interactive terminal");
-    }
     let cwd = std::fs::canonicalize(args.cwd.unwrap_or(std::env::current_dir()?))?;
     let expected_generation = snapshot
         .generations
@@ -345,9 +497,24 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         keep_saved_model: false,
         resume_of: None,
         background_model: None,
-        sandbox: None,
+        sandbox,
+        initial_prompt,
     };
     let prepared: PreparedLaunch = call(store, "managed_launch_prepare", json!(request))?;
+    if args.new_terminal {
+        let ticket = prepared.ticket.ok_or(ManagedError::LaunchUnknown)?;
+        let _opened: Value = call(
+            store,
+            "managed_terminal_launch",
+            json!({"session_id": prepared.session_id, "ticket": ticket}),
+        )?;
+        if json_output {
+            println!("{}", json!({"session_id": prepared.session_id}));
+        } else {
+            println!("{}", prepared.session_id);
+        }
+        return Ok(0);
+    }
     super::supervisor::redeem_and_run(store, prepared).await
 }
 
@@ -565,6 +732,7 @@ mod tests {
             },
             defaults: Vec::new(),
             generations: Default::default(),
+            tools: Vec::new(),
         }
     }
 

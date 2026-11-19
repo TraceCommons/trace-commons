@@ -54,6 +54,7 @@ fn test_context(cwd: &Path, inputs: Vec<PathBuf>, key: &str) -> LaunchContext {
             memory_mib: None,
         }),
         red_team_key: Some(RedactedSecret::new(key.to_owned())),
+        initial_prompt: None,
     }
 }
 
@@ -131,6 +132,7 @@ fn redeem_returns_the_key_only_for_red_team() {
                     cli_options: None,
                     resume_of: None,
                     sandbox: None,
+            initial_prompt: None,
                 }),
             },
         )
@@ -200,6 +202,7 @@ fn redeem_returns_the_key_only_for_red_team() {
                     cli_options: None,
                     resume_of: None,
                     sandbox: None,
+            initial_prompt: None,
                 }),
             },
         )
