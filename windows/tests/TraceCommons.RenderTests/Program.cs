@@ -108,7 +108,7 @@ public static class Program
 }
 
 /// <summary>The render tests. Each returns its measured numbers or throws.</summary>
-public static class RenderChecks
+public static partial class RenderChecks
 {
     /// <summary>
     /// The title bar's N, drawn with Win2D from <see cref="NearMarkPath.Unit"/>
