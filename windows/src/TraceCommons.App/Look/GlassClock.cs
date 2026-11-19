@@ -37,7 +37,7 @@ internal sealed class GlassClock
             () =>
             {
                 CompositionTarget.Rendering -= OnFrame;
-                LookTrace.Write($"clock: stop {owner.GetType().Name} shown={_core.Shown} window={WindowClocks.Windows.MayTick(owner.XamlRoot)} paused={_core.Paused}");
+                LookTrace.Write($"clock: stop {owner.GetType().Name} shown={_core!.Shown} window={WindowClocks.Windows.MayTick(owner.XamlRoot)} paused={_core!.Paused}");
             },
             draw,
             () => Now);
