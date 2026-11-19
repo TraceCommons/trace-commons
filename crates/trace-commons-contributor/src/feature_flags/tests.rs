@@ -2,17 +2,13 @@ use super::*;
 use chrono::{Duration, TimeZone};
 
 #[test]
-fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
+fn skills_is_live_default_off_and_remotely_supported_in_nonproduction() {
     let registry = registry().unwrap();
     let definition = &registry.flags["insights_skills"];
     assert!(!definition.default);
     assert_eq!(definition.class, FlagClass::Product);
     assert_eq!(definition.timing, Timing::Live);
-    for env in [
-        Environment::Production,
-        Environment::Staging,
-        Environment::Testing,
-    ] {
+    for env in [Environment::Staging, Environment::Testing] {
         // The shipped profile validates, which needs a pinned signing key.
         let shipped = profile_for_environment(env).unwrap();
         registry.validate(&shipped).unwrap();
@@ -53,6 +49,61 @@ fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
         assert!(blocked.snapshot().flags["insights_skills"].capability_blocked);
     }
 }
+#[test]
+fn production_blocks_skills_red_team_and_desktop_overrides() {
+    let flags = [
+        "insights_skills",
+        "red_team_sessions",
+        "claude_desktop_private_ai",
+    ];
+    let registry = registry().unwrap();
+    let profile =
+        super::test_signing::pin(profile_for_environment(Environment::Production).unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let enables: BTreeMap<_, _> = flags.into_iter().map(|id| (id.to_owned(), true)).collect();
+    let local =
+        local::LocalOverrides::new(dir.path(), &profile.digest().unwrap(), profile.environment);
+    local.save(&enables).unwrap();
+    let environment = serde_json::to_string(&enables).unwrap();
+    let runtime = Runtime::open_with_environment(
+        registry,
+        profile,
+        dir.path(),
+        now(),
+        Some(&environment),
+        true,
+    )
+    .unwrap();
+    let initial = runtime.snapshot();
+    assert!(runtime.local_overrides_unreadable());
+    assert_eq!(
+        initial.environment_variable_error.as_deref(),
+        Some("feature-environment-override-unavailable")
+    );
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "environment": "production",
+        "revision": 1,
+        "issued_at": now(),
+        "expires_at": now() + Duration::hours(1),
+        "flags": enables,
+    }))
+    .unwrap();
+    runtime.accept(&sign(&manifest), now()).unwrap();
+    let remote = runtime.snapshot();
+    assert_eq!(remote.source, "remote");
+    for id in flags {
+        assert!(!initial.is_enabled(id), "{id}");
+        assert!(!initial.local_override_allowed[id], "{id}");
+        assert!(
+            runtime.set_local_override(id, Some(true), now()).is_err(),
+            "{id}"
+        );
+        assert!(!remote.is_enabled(id), "{id}");
+        assert!(remote.flags[id].capability_blocked, "{id}");
+    }
+}
+
 pub(super) fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000, 0).unwrap()
 }
@@ -157,11 +208,7 @@ fn desktop_ships_disabled_in_each_capable_environment() {
             .required_capabilities
             .contains("claude_desktop_private_ai_v1")
     );
-    for environment in [
-        Environment::Production,
-        Environment::Staging,
-        Environment::Testing,
-    ] {
+    for environment in [Environment::Staging, Environment::Testing] {
         let profile = profile_for_environment(environment).unwrap();
         registry.validate(&profile).unwrap();
         assert!(
