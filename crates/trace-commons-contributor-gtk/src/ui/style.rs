@@ -437,6 +437,9 @@ pub fn install() {
     // The Appearance choice. With Standard -- the default -- this changes
     // nothing above.
     super::appearance::start();
+
+    // The Mac's modal fade and scrim, on every confirmation the shell raises.
+    super::modal_motion::install();
 }
 
 thread_local! {
@@ -521,10 +524,11 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     let mut sheet = format!(
-        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}",
+        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}\n{}",
         first_run_glow_css(),
         include_str!("style.css"),
-        super::hero_art::css()
+        super::hero_art::css(),
+        super::motion_css::css(dark)
     );
     if translucent {
         let (glass, insights) = if dark {
@@ -547,7 +551,26 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
 /// dark in either scheme (`stage.rs`), so its glow is the dark scheme's.
 fn first_run_glow_css() -> String {
     let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
-    format!("@define-color tc_first_run_glow {glow};")
+    format!(
+        "@define-color tc_first_run_glow {glow};\n{}",
+        first_run_controls_css()
+    )
+}
+
+/// The first run's own controls' colours (`FirstRunSegmented`,
+/// `FirstRunSwitch`, Join's chosen card), from the same dark scheme.
+fn first_run_controls_css() -> String {
+    use brand_tokens::first_run::dark as t;
+    [
+        ("tc_first_run_toggle_on", t::TOGGLE_ON),
+        ("tc_first_run_text_on_accent", t::TEXT_ON_ACCENT),
+        ("tc_first_run_well", t::WELL_FILL),
+        ("tc_first_run_control_hover", t::FIRST_RUN_CONTROL_HOVER),
+    ]
+    .iter()
+    .map(|(name, (hex, alpha))| format!("@define-color {name} alpha({hex}, {alpha});"))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -607,13 +630,14 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
         palette.tertiary.hex(),
     );
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}\n{}",
         define(brand),
         define(glass),
         define(tokens),
         define(&first_run_glow_css()),
         include_str!("style.css"),
         recolour_insights(insights, palette, dark),
+        super::motion_css::css(dark),
     )
 }
 
@@ -716,6 +740,12 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
             let omarchy::Rgb(r, g, b) = p.ink;
             Some(format!("rgba({r}, {g}, {b}, 0.28)"))
         }
+        // The first run's own controls: the switch and pill's on, its ink,
+        // the pill's well and hover.
+        "tc_first_run_toggle_on" => hex(p.accent),
+        "tc_first_run_text_on_accent" => hex(p.on_accent),
+        "tc_first_run_well" => hex(p.inset),
+        "tc_first_run_control_hover" => hex(p.control_hover),
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),

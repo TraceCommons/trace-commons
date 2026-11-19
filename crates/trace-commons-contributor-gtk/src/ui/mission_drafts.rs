@@ -131,7 +131,8 @@ impl MissionDraftsView {
         let choose = gtk::Button::with_label(copy("choose_file"));
         let import = gtk::Button::with_label(copy("import"));
         import.set_sensitive(false);
-        let refresh = gtk::Button::with_label(copy("refresh"));
+        // The word and the icon that turns (`GlassRefreshButton`).
+        let (refresh, _) = super::glass_feedback::refresh_pill(copy("refresh"), copy("refresh"));
         controls.append(&choose);
         controls.append(&import);
         controls.append(&refresh);
