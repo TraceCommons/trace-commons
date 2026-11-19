@@ -139,6 +139,23 @@ public sealed class FirstRunStagePainter : IDisposable
         _sweep = SweepImage(rc);
     }
 
+    /// <summary>
+    /// A dashed stroke as the Mac's <c>StrokeStyle(dash:dashPhase:)</c>
+    /// draws it: CoreGraphics dashes in points and its phase, converted to
+    /// Direct2D's stroke widths, with the Mac's cap on each dash. Win2D's
+    /// own default dash cap is square, which lengthens every dash by the
+    /// stroke's width (measured on the test box: a 4 pt dash under phase -8
+    /// started 6 pt along, not 8); the Mac's default is butt.
+    /// </summary>
+    public static CanvasStrokeStyle Dashes(IReadOnlyList<double> dash, double width, double phase = 0, bool round = false) => new()
+    {
+        CustomDashStyle = DashFlow.Direct2DDashes(dash, width),
+        DashOffset = DashFlow.Direct2DOffset(phase, width),
+        DashCap = round ? CanvasCapStyle.Round : CanvasCapStyle.Flat,
+        StartCap = round ? CanvasCapStyle.Round : CanvasCapStyle.Flat,
+        EndCap = round ? CanvasCapStyle.Round : CanvasCapStyle.Flat,
+    };
+
     // ---- The scene ---------------------------------------------------------
 
     /// <summary>FirstRunBackdrop (FirstRunStage.swift:109-149), dark only.</summary>
@@ -367,7 +384,7 @@ public sealed class FirstRunStagePainter : IDisposable
             ringScale = 1;
         }
 
-        using (var dash = new CanvasStrokeStyle { CustomDashStyle = DashFlow.Direct2DDashes(ToolsRing.RingDash, ToolsRing.RingLine) })
+        using (var dash = Dashes(ToolsRing.RingDash, ToolsRing.RingLine))
         using (ds.CreateLayer((float)ToolsRing.RingOpacity(elapsed)))
         {
             Matrix3x2 saved = ds.Transform;
@@ -479,14 +496,7 @@ public sealed class FirstRunStagePainter : IDisposable
                     new CanvasGradientStop { Position = 0.6f, Color = Argb(core, 0.45) },
                     new CanvasGradientStop { Position = 1, Color = Argb(core, 0) },
                 }) { StartPoint = V(from), EndPoint = V(to) };
-                using var dash = new CanvasStrokeStyle
-                {
-                    StartCap = CanvasCapStyle.Round,
-                    EndCap = CanvasCapStyle.Round,
-                    DashCap = CanvasCapStyle.Round,
-                    CustomDashStyle = DashFlow.Direct2DDashes(ToolsRing.BeamDash, ToolsRing.BeamPulseWidth),
-                    DashOffset = DashFlow.Direct2DOffset(ToolsRing.BeamDashPhase(time, reduce), ToolsRing.BeamPulseWidth),
-                };
+                using CanvasStrokeStyle dash = Dashes(ToolsRing.BeamDash, ToolsRing.BeamPulseWidth, ToolsRing.BeamDashPhase(time, reduce), round: true);
                 inner.DrawLine(V(from), V(to), pulses, (float)ToolsRing.BeamPulseWidth, dash);
             });
             Layer(7, 0.4, inner => inner.FillCircle(V(from), 13, Argb(beam)));
@@ -563,11 +573,7 @@ public sealed class FirstRunStagePainter : IDisposable
         double time = FirstRunStageLayout.AtRate(now, FirstRunMotion.LayerInterval(StageLayer.PrivateAI, false));
         var hub = new StagePoint(PrivateAIDiagram.HubX, PrivateAIDiagram.HubY + top);
         double phase = PrivateAIDiagram.DashPhase(time, reduce);
-        using var dash = new CanvasStrokeStyle
-        {
-            CustomDashStyle = DashFlow.Direct2DDashes(PrivateAIDiagram.Dash, PrivateAIDiagram.Line),
-            DashOffset = DashFlow.Direct2DOffset(phase, PrivateAIDiagram.Line),
-        };
+        using CanvasStrokeStyle dash = Dashes(PrivateAIDiagram.Dash, PrivateAIDiagram.Line, phase);
         Color glow = Argb(FirstRunTokens.FirstRunGlow);
         IReadOnlyList<string> tools = model.Connectable;
         for (int i = 0; i < tools.Count; i++)
@@ -608,7 +614,7 @@ public sealed class FirstRunStagePainter : IDisposable
         double counted = TracesGraphic.Counted(elapsed, reduce);
         var center = new StagePoint(TracesGraphic.CenterX, TracesGraphic.CenterY + top);
         IReadOnlyList<string> rows = model.Watched;
-        using var dash = new CanvasStrokeStyle { CustomDashStyle = DashFlow.Direct2DDashes(new[] { 2.0, 5.0 }, 1.5) };
+        using var dash = Dashes(new[] { 2.0, 5.0 }, 1.5);
         for (int i = 0; i < rows.Count; i++)
         {
             double y = TracesGraphic.RowY(i, rows.Count, center.Y);
@@ -687,7 +693,7 @@ public sealed class FirstRunStagePainter : IDisposable
         SharingPath path = model.Sharing;
         double? t = reduce ? null : UsesFlow.Loop(path, elapsed);
         double y = UsesFlow.LineY + top;
-        using (var dash = new CanvasStrokeStyle { CustomDashStyle = DashFlow.Direct2DDashes(new[] { 4.0, 6.0 }, 2) })
+        using (var dash = Dashes(new[] { 4.0, 6.0 }, 2))
         {
             ds.DrawLine(V(UsesFlow.LineStart, y), V(UsesFlow.LineEnd, y), Argb(FirstRunTokens.FirstRunRule), 2, dash);
         }
@@ -753,7 +759,7 @@ public sealed class FirstRunStagePainter : IDisposable
         double turn = UsesFlow.CommonsTurn(elapsed, reduce);
         saved = ds.Transform;
         ds.Transform = Matrix3x2.CreateRotation((float)(turn * Math.PI / 180), V(commons)) * saved;
-        using (var dash = new CanvasStrokeStyle { CustomDashStyle = DashFlow.Direct2DDashes(new[] { 3.0, 4.0 }, 1) })
+        using (var dash = Dashes(new[] { 3.0, 4.0 }, 1))
         {
             ds.DrawCircle(V(commons), 45.5f, Argb(FirstRunTokens.FirstRunRule), 1, dash);
         }
@@ -805,7 +811,7 @@ public sealed class FirstRunStagePainter : IDisposable
         var c = new StagePoint(FirstRunStageLayout.CanvasWidth / 2, JoinOrbit.Box / 2 + top);
         Matrix3x2 saved = ds.Transform;
         ds.Transform = Matrix3x2.CreateRotation((float)(JoinOrbit.Turn(time, reduce) * Math.PI / 180), V(c)) * saved;
-        using (var dash = new CanvasStrokeStyle { CustomDashStyle = DashFlow.Direct2DDashes(JoinOrbit.RingDash, 1) })
+        using (var dash = Dashes(JoinOrbit.RingDash, 1))
         {
             ds.DrawCircle(V(c), (float)(JoinOrbit.Ring / 2 - 0.5), Argb(FirstRunTokens.FirstRunRule), 1, dash);
         }

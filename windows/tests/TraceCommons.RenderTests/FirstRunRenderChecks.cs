@@ -19,7 +19,8 @@ public static partial class RenderChecks
     /// Mac's <c>dashPhase: -flow</c> (ToolsScreen.swift:574,
     /// PrivateAIScreen.swift:97) the dashes move forward along the line, from
     /// its start to its end. Draws one dashed line at flow 0 and flow 8 and
-    /// finds the first dash's left edge in each.
+    /// finds the first dash's left edge in each. Red before the stage set
+    /// butt dash caps: Win2D's default square cap put it 6 along, not 8.
     /// </summary>
     [RenderTest]
     public static string FirstRunDashesMoveForwardUnderANegativePhase(CanvasDevice device, string outDir)
@@ -32,11 +33,8 @@ public static partial class RenderChecks
             using (CanvasDrawingSession ds = target.CreateDrawingSession())
             {
                 ds.Clear(Color.FromArgb(0, 0, 0, 0));
-                using var style = new CanvasStrokeStyle
-                {
-                    CustomDashStyle = DashFlow.Direct2DDashes(dash, width),
-                    DashOffset = DashFlow.Direct2DOffset(-flow, width),
-                };
+                // The stage's own stroke style (butt dashes, as the Mac's default).
+                using CanvasStrokeStyle style = FirstRunStagePainter.Dashes(dash, width, -flow);
                 ds.DrawLine(new Vector2(10, 10), new Vector2(210, 10), Color.FromArgb(255, 255, 255, 255), (float)width, style);
             }
 
