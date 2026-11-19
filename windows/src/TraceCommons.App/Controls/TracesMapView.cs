@@ -117,6 +117,63 @@ public sealed partial class TracesMapView : UserControl
     /// <summary>A folder node was clicked: its project id (FlowMapView.swift:24-26).</summary>
     public event Action<string>? FolderSelected;
 
+    /// <summary>The transfer cards changed: one arrived, closed or passed its hold.</summary>
+    public event Action? TransfersChanged;
+
+    /// <summary>
+    /// The map's foot above the legend and zoom, where the transfer cards
+    /// ride while another tab than Traces is shown (FlowMapView.swift:166-187).
+    /// The window fills it.
+    /// </summary>
+    public Grid TransferFoot { get; } = new() { MaxWidth = MapGeometry.TransferCardWidth, HorizontalAlignment = HorizontalAlignment.Center };
+
+    /// <summary>The transfer cards, oldest first; the last is in front (<c>MapTransferPlayer.cards</c>).</summary>
+    public IReadOnlyList<MapTransfer> TransferCards => _player.Cards;
+
+    /// <summary>Whether the map shows the Traces view, the only one that carries the cards (FlowMapView.swift:176).</summary>
+    public bool ShowsTraces => _view == MapView.Traces;
+
+    /// <summary>A card's X: that card alone goes (MapTransfers.swift:280-283).</summary>
+    public void CloseTransfer(string id) => _player.Close(id);
+
+    /// <summary>The folder's name on the map, for a transfer that carries none (FlowMapView.swift:180-182).</summary>
+    public string? FolderLabel(string folder) =>
+        _scene.Nodes.FirstOrDefault(n => n.Id == "folder:" + folder)?.Label;
+
+    private DispatcherQueueTimer? _holdTimer;
+
+    /// <summary>
+    /// Wakes once at the player's next deadline, so a card passes its hold
+    /// while the map's own clock is stopped (pane closed, motion off); a
+    /// one-shot per deadline, never a frame clock.
+    /// </summary>
+    private void ScheduleHold()
+    {
+        _holdTimer?.Stop();
+        if (_player.NextDeadline is not { } deadline)
+        {
+            return;
+        }
+
+        _holdTimer ??= CreateHoldTimer();
+        _holdTimer.Interval = TimeSpan.FromSeconds(Math.Max(deadline - Now, MapMotion.TransferFrameInterval));
+        _holdTimer.Start();
+    }
+
+    private DispatcherQueueTimer CreateHoldTimer()
+    {
+        DispatcherQueueTimer timer = DispatcherQueue.CreateTimer();
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) =>
+        {
+            if (!_player.Tick(Now))
+            {
+                ScheduleHold();
+            }
+        };
+        return timer;
+    }
+
     public TracesMapView()
     {
         IsTabStop = false;
@@ -153,6 +210,8 @@ public sealed partial class TracesMapView : UserControl
         footRow.Children.Add(_legend);
         Grid.SetColumn(zoom, 1);
         footRow.Children.Add(zoom);
+        _foot.Spacing = 12;
+        _foot.Children.Add(TransferFoot);
         _foot.Children.Add(footRow);
         _foot.VerticalAlignment = VerticalAlignment.Bottom;
         _foot.Margin = new Thickness(14);
@@ -186,7 +245,7 @@ public sealed partial class TracesMapView : UserControl
         _root.SizeChanged += (_, _) => Rebuild();
         Content = _root;
 
-        _player.Changed += () => { Rebuild(); Kick(); };
+        _player.Changed += () => { Rebuild(); Kick(); ScheduleHold(); TransfersChanged?.Invoke(); };
         // Reduce motion followed live where the system reports changes
         // (Windows 10 2004 and later); elsewhere on activation and on every tick.
         if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
@@ -301,6 +360,7 @@ public sealed partial class TracesMapView : UserControl
         _tracesView.IsChecked = view == MapView.Traces;
         _privateView.IsChecked = view == MapView.PrivateAI;
         Rebuild();
+        TransfersChanged?.Invoke();
     }
 
     private void Zoom(double delta)

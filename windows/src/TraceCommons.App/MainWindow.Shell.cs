@@ -316,6 +316,7 @@ public sealed partial class MainWindow
         RenderBreadcrumb();
         RefreshNotices();
         FollowTabOnMap(_at.Tab);
+        RefreshMapTransfers();
         ApplyPaneAvailability();
     }
 
@@ -917,13 +918,14 @@ public sealed partial class MainWindow
         if (ViewModel.HasUndo) yield return (NoticeCatalog.Undo(ViewModel.UndoEntryIds), UndoCard);
         if (ViewModel.HasPrivateInferenceOffer) yield return (NoticeCatalog.PrivateAIOffer, PrivateAIOfferCard);
         if (ViewModel.HasNotice) yield return (NoticeCatalog.ActionNotice, ActionNoticeCard);
+        foreach ((NoticeKind Kind, FrameworkElement Card) transfer in TransferNotices()) yield return transfer;
     }
 
     private static IEnumerable<FrameworkElement> AllCards(MainWindow w) => new FrameworkElement[]
     {
         w.UpdateCard, w.LegacyNoticeCard, w.LegacyOfferCard, w.FirstContributionCard, w.ArmingOfferCard,
         w.RewordingCards, w.VoidCards, w.GateHeldCard, w.WitnessCard, w.HealthCard, w.UndoCard,
-        w.PrivateAIOfferCard, w.ActionNoticeCard,
+        w.PrivateAIOfferCard, w.ActionNoticeCard, w._transferNotice,
     };
 
     /// <summary>
@@ -972,6 +974,7 @@ public sealed partial class MainWindow
             return;
         }
 
+        ShowTransferNotice(front);
         frontCard.Visibility = Visibility.Visible;
         Canvas.SetZIndex(frontCard, 1);
         if (frontChanged)
@@ -1190,6 +1193,9 @@ public sealed partial class MainWindow
                 break;
             case "private-ai-offer":
                 OnDeclinePrivateInference(sender, e);
+                break;
+            case string id when NoticeCatalog.IsTransfer(id):
+                _map?.CloseTransfer(NoticeCatalog.TransferId(id));
                 break;
             default:
                 _closedNotices.Add(front.Id);
