@@ -120,19 +120,25 @@ public sealed class HistoryDetailInspector : UserControl
             return;
         }
 
+        // With a detail held, a reload touches only the reading line, so the
+        // editor keeps its caret, its draft and the pane its scroll; the page
+        // is rebuilt only when what the daemon said has changed.
+        SessionDetail? held = CurrentDetail;
         _loading = true;
         _state.ReadStarted();
-        Render();
+        RefreshStatus();
         DaemonResponse response = await _host
             .CallAsync(DaemonProtocol.Methods.HistoryDetail, PublicRunEditor.SubmissionParams(Record.SubmissionId))
             .ConfigureAwait(true);
         _loading = false;
+        string? raw = null;
         if (response.IsError || response.Result is not JsonElement result)
         {
             _state.ReadFailed(response.Error?.Message);
         }
         else if (SessionDetail.Parse(result) is { } detail)
         {
+            raw = result.GetRawText();
             SetDetail(detail);
         }
         else
@@ -140,11 +146,79 @@ public sealed class HistoryDetailInspector : UserControl
             _state.ReadFailed("session-detail-unavailable");
         }
 
-        Render();
+        if (held is not null && CurrentDetail is null)
+        {
+            // The account ended or changed under the read: nothing it typed
+            // or chose stays (the Mac drops the editor with the detail).
+            ResetEditor();
+        }
+
+        bool unchanged = held is not null && CurrentDetail is not null
+            && (raw is null || raw == _lastRaw);
+        if (raw is not null)
+        {
+            _lastRaw = raw;
+        }
+
+        if (unchanged && _statusSlot is not null)
+        {
+            RefreshStatus();
+        }
+        else
+        {
+            Render();
+        }
+    }
+
+    private string? _lastRaw;
+    private StackPanel? _statusSlot;
+
+    private void ResetEditor()
+    {
+        _configured = false;
+        _editingPublished = false;
+        _reviewDraft = null;
+        _title = _outcome = _workflow = _source = string.Empty;
+        _includeCorrection = false;
+        _permission = null;
+        _evidence = new HashSet<string>(StringComparer.Ordinal);
+        _lastRaw = null;
+    }
+
+    /// <summary>The reading line, or the failed read with Retry, in its own slot.</summary>
+    private void RefreshStatus()
+    {
+        if (_statusSlot is null || Copy is not { } copy)
+        {
+            Render();
+            return;
+        }
+
+        _statusSlot.Children.Clear();
+        if (_loading)
+        {
+            _statusSlot.Children.Add(Caption(copy["reading_record"], "TcInkSecondaryBrush"));
+        }
+        else if (_state.ReadError is { } error)
+        {
+            var notice = Card();
+            var inner = new StackPanel { Spacing = 8 };
+            inner.Children.Add(Text(error, "TcBodyTextStyle", "TcStatusOutsideTextBrush"));
+            Button retry = ActionButton(copy["retry_read"], primary: false);
+            retry.Click += async (_, _) => await LoadAsync();
+            inner.Children.Add(retry);
+            notice.Child = inner;
+            _statusSlot.Children.Add(notice);
+        }
     }
 
     private void SetDetail(SessionDetail detail)
     {
+        if (CurrentDetail?.OwnerScopeSha256 is { } previous && detail.OwnerScopeSha256 is { } scope && previous != scope)
+        {
+            ResetEditor();
+        }
+
         int? before = CurrentDetail?.Publication?.Version;
         _state.ReadSucceeded(detail);
         if (detail.Publication is not null && detail.Publication.Version != before)
@@ -176,6 +250,7 @@ public sealed class HistoryDetailInspector : UserControl
         _evidenceBoxes.Clear();
         _problemLine = null;
         _reviewButton = null;
+        _statusSlot = null;
 
         PublicRunCopy? copy = Copy;
         _root.Children.Add(Summary(copy));
@@ -196,21 +271,9 @@ public sealed class HistoryDetailInspector : UserControl
         heading.Children.Add(Caption($"{Record.ProjectLabel} · {Record.SubmittedText}", "TcInkSecondaryBrush"));
         _root.Children.Add(heading);
 
-        if (_loading)
-        {
-            _root.Children.Add(Caption(copy["reading_record"], "TcInkSecondaryBrush"));
-        }
-        else if (_state.ReadError is { } error)
-        {
-            var notice = Card();
-            var inner = new StackPanel { Spacing = 8 };
-            inner.Children.Add(Text(error, "TcBodyTextStyle", "TcStatusOutsideTextBrush"));
-            Button retry = ActionButton(copy["retry_read"], primary: false);
-            retry.Click += async (_, _) => await LoadAsync();
-            inner.Children.Add(retry);
-            notice.Child = inner;
-            _root.Children.Add(notice);
-        }
+        _statusSlot = new StackPanel();
+        _root.Children.Add(_statusSlot);
+        RefreshStatus();
 
         if (CurrentDetail is { } detail)
         {
