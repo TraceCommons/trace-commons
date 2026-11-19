@@ -518,8 +518,7 @@ impl GraphFooter {
         }
         self.bars.set_size_request(-1, height);
         self.bars.set_vexpand(false);
-        self.root.set_transition_duration(0);
-        self.root.set_reveal_child(true);
+        self.root.open_now();
     }
 
     /// Draws the graph from new data. The range and the period stay where
@@ -953,6 +952,19 @@ impl Drawer {
             },
             || {},
         );
+    }
+
+    /// Open at once, with no movement (the edge rail's compact graph).
+    pub fn open_now(&self) {
+        let imp = self.imp();
+        imp.open.set(true);
+        imp.driver.stop();
+        self.apply(1.0);
+    }
+
+    /// Whether it is moving now.
+    pub fn is_moving(&self) -> bool {
+        self.imp().driver.is_running()
     }
 
     /// Whether it is open, or opening.

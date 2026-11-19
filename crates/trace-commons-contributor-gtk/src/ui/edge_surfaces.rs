@@ -2015,7 +2015,7 @@ mod tests {
         let graph = GraphFooter::new();
         graph.compact(geometry::GRAPH_HEIGHT);
         assert!(graph.root.reveals_child());
-        assert_eq!(graph.root.transition_duration(), 0);
+        assert!(!graph.root.is_moving() && graph.root.fraction() == 1.0);
         // The focus pill sits in the row of controls, which is hidden.
         let controls = graph.focus.parent().expect("the controls' row");
         assert!(!controls.is_visible());
