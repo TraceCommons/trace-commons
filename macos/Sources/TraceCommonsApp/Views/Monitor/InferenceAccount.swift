@@ -79,6 +79,7 @@ struct PrivateAISettingsPanels: View {
                         .helpIfAny(copy.harnessesPrecedenceTooltip)
                         HarnessListSection(copy: copy, titled: false)
                         ClaudeDesktopSettingsRow(closeLabel: MonitorWords.close)
+                        RedTeamSettingsRow()
                     }
                 }
                 PrivateAISwitchCard(

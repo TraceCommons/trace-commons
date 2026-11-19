@@ -26,13 +26,35 @@ final class RedTeamSetupTests: XCTestCase {
         return try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
     }
 
-    func testAnUninstalledRedTeamRuntimeIsOfferedForInstall() throws {
-        XCTAssertEqual(try snapshot(redTeam: false).missingInstallTools.map(\.tool), ["red_team"])
+    /// The NEAR AI card's install links stay the coding tools'; Red Team is
+    /// set up from Settings (owner, 2026-11-19).
+    func testTheNearAICardOffersNoRedTeamInstall() throws {
+        for redTeam in [false, true, nil] as [Bool?] {
+            XCTAssertEqual(try snapshot(redTeam: redTeam).missingInstallTools.map(\.tool), [])
+        }
     }
 
-    func testAnInstalledOrAbsentRedTeamRowOffersNoInstall() throws {
-        XCTAssertEqual(try snapshot(redTeam: true).missingInstallTools.map(\.tool), [])
-        XCTAssertEqual(try snapshot(redTeam: nil).missingInstallTools.map(\.tool), [])
+    func testRedTeamSetupFollowsTheDaemonsRow() throws {
+        XCTAssertEqual(try snapshot(redTeam: false).redTeamSetup, .notInstalled)
+        XCTAssertEqual(try snapshot(redTeam: true).redTeamSetup, .installed)
+        XCTAssertNil(try snapshot(redTeam: nil).redTeamSetup)
+    }
+
+    /// The Private AI tab's card: offered while the runtime is not
+    /// installed and the card was not dismissed; never once installed or
+    /// with the flag off (no row).
+    func testTheSetupCardIsOfferedOnlyUntilInstalledOrDismissed() throws {
+        XCTAssertTrue(RedTeamSetupCard.offered(setup: try snapshot(redTeam: false).redTeamSetup, dismissed: false))
+        XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: false).redTeamSetup, dismissed: true))
+        XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: true).redTeamSetup, dismissed: false))
+        XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: nil).redTeamSetup, dismissed: false))
+    }
+
+    func testTheTabCardAndSettingsRowAreDrawn() throws {
+        let tab = try GlassSurfaceRulesTests.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(tab.contains("RedTeamSetupPrompt(onOpenSettings: onOpenSettings)"))
+        let settings = try GlassSurfaceRulesTests.text("Views/Monitor/InferenceAccount.swift")
+        XCTAssertTrue(settings.contains("ClaudeDesktopSettingsRow(closeLabel: MonitorWords.close)\n                        RedTeamSettingsRow()"))
     }
 
     func testInstallingRedTeamSendsOnlyTheInstallAction() async throws {

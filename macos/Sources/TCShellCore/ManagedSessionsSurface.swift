@@ -986,15 +986,21 @@ public extension ManagedSnapshot {
 
     /// Explicitly reported missing tools, in the same order as launch buttons.
     /// An older daemon without availability rows cannot establish absence.
-    /// Red Team comes last, and only while the daemon reports its row (the
-    /// flag is on) with the runtime not yet installed.
+    /// Red Team is not one: it is set up from Settings (`redTeamSetup`).
     var missingInstallTools: [ManagedToolAvailability] {
-        (ManagedSurface.supportedTools + ["red_team"]).compactMap { tool in
+        ManagedSurface.supportedTools.compactMap { tool in
             tools?.first { $0.tool == tool && !$0.installed }
         }
     }
 
     var setupTools: [String] { ManagedSurface.setupTools(tools) }
+
+    /// Red Team's runtime, from the daemon's `red_team` row; nil while the
+    /// daemon sends none (the flag is off, or an older daemon).
+    var redTeamSetup: RedTeamSetup? {
+        guard let row = tools?.first(where: { $0.tool == "red_team" }) else { return nil }
+        return row.installed ? .installed : .notInstalled
+    }
     var needsToolInstallation: Bool {
         guard let tools else { return false }
         return !tools.contains { ManagedSurface.supportedTools.contains($0.tool) && $0.installed }
@@ -1135,5 +1141,20 @@ public struct ManagedCLIOptionsDrafts: Equatable, Sendable {
 
     public mutating func saved(tool: String, options: String) {
         if values[tool] == options { values.removeValue(forKey: tool) }
+    }
+}
+
+/// Whether Red Team's runtime is installed in `<config>/red-team/runtime`.
+public enum RedTeamSetup: Equatable, Sendable { case notInstalled, installed }
+
+/// The Private AI tab's Red Team setup card: offered while the runtime is
+/// not installed, until dismissed. Setup itself lives in Settings' Red
+/// Team row; once installed, Start Red Team joins the NEAR AI card.
+public enum RedTeamSetupCard {
+    /// The `UserDefaults` key holding the card's dismissal.
+    public static let dismissedKey = "redTeamSetupCardDismissed"
+
+    public static func offered(setup: RedTeamSetup?, dismissed: Bool) -> Bool {
+        setup == .notInstalled && !dismissed
     }
 }

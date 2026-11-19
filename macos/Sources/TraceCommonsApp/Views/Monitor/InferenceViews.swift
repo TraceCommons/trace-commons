@@ -82,6 +82,9 @@ struct InferenceTabView: View {
                 // up, and, while it is set up, its status with Disconnect
                 // (owner requests, 2026-11-19); otherwise draws nothing.
                 ClaudeDesktopSetupPrompt(onOpenSettings: onOpenSettings)
+                // Only while Red Team's runtime is not installed and the card
+                // was not dismissed (owner, 2026-11-19); otherwise nothing.
+                RedTeamSetupPrompt(onOpenSettings: onOpenSettings)
                 ManagedSessionsSection()
                 ledgerSections
                 InferenceBalanceSection()
