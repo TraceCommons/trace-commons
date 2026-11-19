@@ -230,7 +230,7 @@ public sealed partial class TracesMapView : UserControl
     }
 
     /// <summary>The map's style (Settings, General; TracesMapStyle.swift): it changes at once.</summary>
-    public TracesMapStyle Style
+    public TracesMapStyle MapStyle
     {
         get => _style;
         set
@@ -248,6 +248,20 @@ public sealed partial class TracesMapView : UserControl
         set
         {
             _selectedTool = value;
+            Rebuild();
+        }
+    }
+
+    /// <summary>
+    /// The tool the map is focused on, scaled 1.6 times about it
+    /// (FlowMapView.swift:20-22; the Mac's binoculars in the graph footer).
+    /// </summary>
+    public string? FocusTool
+    {
+        get => _focusTool;
+        set
+        {
+            _focusTool = value;
             Rebuild();
         }
     }
