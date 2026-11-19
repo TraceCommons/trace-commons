@@ -16,6 +16,8 @@
 
     <Grid x:Name="Root" RequestedTheme="Dark">
         <canvas:CanvasControl x:Name="Stage" IsTabStop="False" AutomationProperties.AccessibilityView="Raw" />
+        <!-- The window's drag strip: the Mac hides the title bar and the stage runs under the window's buttons. -->
+        <Grid x:Name="DragStrip" Height="32" VerticalAlignment="Top" Background="Transparent" AutomationProperties.AccessibilityView="Raw" />
         <Grid x:Name="Design" HorizontalAlignment="Center" VerticalAlignment="Center">
             <Grid.RenderTransform>
                 <ScaleTransform x:Name="DesignScale" ScaleX="1" ScaleY="1" />

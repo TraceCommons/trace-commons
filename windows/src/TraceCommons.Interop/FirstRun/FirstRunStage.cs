@@ -26,6 +26,13 @@ public static class FirstRunStageLayout
     public const double CanvasWidth = 860, CanvasHeight = 760;
 
     /// <summary>
+    /// The smallest first-run window, in client units: the Mac's
+    /// <c>FirstRunProgress.minimumSize</c> (FirstRunViews.swift:122). Below the
+    /// canvas the stage scales down to fit.
+    /// </summary>
+    public const double MinimumWidth = 760, MinimumHeight = 640;
+
+    /// <summary>
     /// The scale the canvas is drawn at in a host: never larger than the
     /// design (<c>FirstRunStageFit</c>, OnboardingCoordinatorView.swift:209-222).
     /// </summary>
@@ -307,6 +314,15 @@ public static class WelcomeMotion
 
         return drawn;
     }
+
+    /// <summary>
+    /// A word of <see cref="Words"/> as a XAML TextBlock shows it: without its
+    /// space. A TextBlock does not measure trailing white space, a no-break
+    /// space included, so the words ran together ("WelcometoNear", box
+    /// tc-win-az3, 2026-11-19); the window lays the space out as the gap
+    /// between the words instead, a space's width at the title's font.
+    /// </summary>
+    public static string Shown(string word) => word.TrimEnd(' ');
 }
 
 /// <summary>

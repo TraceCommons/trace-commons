@@ -25,6 +25,15 @@ public class FirstRunStageTests
         Assert.True(Math.Abs(expected - actual) < tolerance, $"expected {expected}, got {actual}");
 
     [Fact]
+    public void TheWindowOpensAtTheCanvasAndShrinksToTheMacsMinimum()
+    {
+        // TraceCommonsAppMain.swift:151 defaultSize(860, 760); FirstRunViews.swift:122 minimumSize (760, 640).
+        Assert.Equal((860.0, 760.0), (FirstRunStageLayout.CanvasWidth, FirstRunStageLayout.CanvasHeight));
+        Assert.Equal((760.0, 640.0), (FirstRunStageLayout.MinimumWidth, FirstRunStageLayout.MinimumHeight));
+        Assert.Equal(640.0 / 760.0, FirstRunStageLayout.FitScale(FirstRunStageLayout.MinimumWidth, FirstRunStageLayout.MinimumHeight), 9);
+    }
+
+    [Fact]
     public void TheTokenCurveSampledForAValueIsTheMacs()
     {
         // GlassMotionCurve.value (WelcomeScreen.swift:65-84).
@@ -122,6 +131,9 @@ public class FirstRunStageTests
         Near(44.0 / 26, WelcomeMotion.HeroScale);
         // Split as Swift's split(separator: " "): empty pieces dropped.
         Assert.Equal(new[] { "Welcome ", "to ", "Near ", "AI" }, WelcomeMotion.Words("Welcome to  Near AI"));
+        // A TextBlock does not measure a trailing space: the word is shown
+        // without it, and the space is the gap between the words.
+        Assert.Equal(new[] { "Welcome", "to", "Near", "AI" }, WelcomeMotion.Words("Welcome to  Near AI").Select(WelcomeMotion.Shown));
         Assert.Equal((0.0, 18.0), WelcomeMotion.Rise(0));
     }
 

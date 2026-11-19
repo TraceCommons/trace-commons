@@ -118,8 +118,17 @@ public sealed partial class FirstRunWindow : Window
         _model.Changed += OnModelChanged;
 
         Stage.Draw += OnDraw;
+        // Where the step's graphic sits once laid out, and again whenever the
+        // step's words reflow: a measure queued at the step change ran before
+        // layout and read 0, drawing Welcome's N at the window's top edge
+        // (box tc-win-az3, 2026-11-19). SetGraphicTop ignores an unchanged top.
+        Design.LayoutUpdated += (_, _) => MeasureGraphic();
         Root.SizeChanged += (_, _) => Fit();
-        Root.Loaded += async (_, _) => await LoadAsync();
+        Root.Loaded += async (_, _) =>
+        {
+            SizeToCanvas();
+            await LoadAsync();
+        };
         VisibilityChanged += (_, e) => _gate.SetHiddenToTray(!e.Visible);
         Activated += (_, _) => ReadMotionSetting();
         AppWindow.Changed += (sender, args) =>
@@ -137,10 +146,108 @@ public sealed partial class FirstRunWindow : Window
             _painter.Dispose();
         };
         SettingWatcher.Attach(this, ReadMotionSetting);
-        AppWindow.Resize(new Windows.Graphics.SizeInt32((int)(DesignWidth * Scale()), (int)(DesignHeight * Scale())));
+        HideTitleBar();
+        // The canvas is the client area, as the Mac's defaultSize is its content's.
+        AppWindow.ResizeClient(new Windows.Graphics.SizeInt32((int)(DesignWidth * Scale()), (int)(DesignHeight * Scale())));
         _reduceMotion = !_ui.AnimationsEnabled;
         _model.SetReduceMotion(_reduceMotion);
         Render();
+    }
+
+    /// <summary>
+    /// The Mac's hidden title bar (<c>.windowStyle(.hiddenTitleBar)</c>,
+    /// TraceCommonsAppMain.swift:150): the stage fills the window and the
+    /// system's caption buttons sit over it on a transparent ground, in the
+    /// stage's ink. The strip at the top drags the window; the step thread
+    /// in it takes the pointer (<see cref="UpdateDragRegions"/>).
+    /// </summary>
+    private void HideTitleBar()
+    {
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(DragStrip);
+        AppWindowTitleBar bar = AppWindow.TitleBar;
+        bar.ButtonBackgroundColor = Colors.Transparent;
+        bar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        bar.ButtonForegroundColor = FirstRunStagePainter.Argb(FirstRunTokens.TextPrimary);
+        bar.ButtonInactiveForegroundColor = FirstRunStagePainter.Argb(FirstRunTokens.TextTertiary);
+        bar.ButtonHoverBackgroundColor = FirstRunStagePainter.Argb(FirstRunTokens.FirstRunControlHover);
+        bar.ButtonHoverForegroundColor = FirstRunStagePainter.Argb(FirstRunTokens.TextPrimary);
+        bar.ButtonPressedBackgroundColor = FirstRunStagePainter.Argb(FirstRunTokens.FirstRunControl);
+        bar.ButtonPressedForegroundColor = FirstRunStagePainter.Argb(FirstRunTokens.TextPrimary);
+        Thread.SizeChanged += (_, _) => UpdateDragRegions();
+        Thread.LayoutUpdated += (_, _) => UpdateDragRegions();
+    }
+
+    /// <summary>The step thread's buttons take the pointer inside the drag strip.</summary>
+    private void UpdateDragRegions()
+    {
+        if (Content?.XamlRoot is null)
+        {
+            return;
+        }
+
+        double scale = Scale();
+        if (!TitleBarRegions.IsUsableScale(scale))
+        {
+            return;
+        }
+
+        var rects = new List<LayoutRect>();
+        if (Thread.Visibility == Visibility.Visible && Thread.ActualWidth > 0)
+        {
+            Windows.Foundation.Rect bounds = Thread.TransformToVisual(null)
+                .TransformBounds(new Windows.Foundation.Rect(0, 0, Thread.ActualWidth, Thread.ActualHeight));
+            rects.Add(new LayoutRect(bounds.X, bounds.Y, bounds.Width, bounds.Height));
+        }
+
+        var regions = TitleBarRegions.Passthrough(rects, scale)
+            .Select(r => new Windows.Graphics.RectInt32(r.X, r.Y, r.Width, r.Height))
+            .ToArray();
+        if (!regions.SequenceEqual(_passthrough))
+        {
+            _passthrough = regions;
+            Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
+                .SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, regions);
+        }
+    }
+
+    private Windows.Graphics.RectInt32[] _passthrough = Array.Empty<Windows.Graphics.RectInt32>();
+
+    /// <summary>
+    /// Once the content is laid out, the window is sized so the content, not
+    /// the client area below a title bar, is the canvas: with the content in
+    /// the title bar, a ResizeClient of 860 by 760 still left the content 792
+    /// tall (box tc-win-az3, 2026-11-19).
+    /// </summary>
+    private void SizeToCanvas()
+    {
+        double scale = Scale();
+        if (Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
+        {
+            return;
+        }
+
+        // The frame round the content: the window less the content.
+        int extraWidth = AppWindow.Size.Width - (int)Math.Round(Root.ActualWidth * scale);
+        int extraHeight = AppWindow.Size.Height - (int)Math.Round(Root.ActualHeight * scale);
+        int width = (int)Math.Round(DesignWidth * scale) + extraWidth;
+        int height = (int)Math.Round(DesignHeight * scale) + extraHeight;
+        if (width != AppWindow.Size.Width || height != AppWindow.Size.Height)
+        {
+            AppWindow.Resize(new Windows.Graphics.SizeInt32(width, height));
+        }
+
+        ApplyMinimumSize(extraWidth, extraHeight);
+    }
+
+    /// <summary>The Mac's minimum window (<see cref="FirstRunStageLayout.MinimumWidth"/>), through WM_GETMINMAXINFO.</summary>
+    private void ApplyMinimumSize(int extraWidth, int extraHeight)
+    {
+        double scale = Scale();
+        WindowMinimumSize.Set(
+            WinRT.Interop.WindowNative.GetWindowHandle(this),
+            (int)Math.Ceiling(FirstRunStageLayout.MinimumWidth * scale) + extraWidth,
+            (int)Math.Ceiling(FirstRunStageLayout.MinimumHeight * scale) + extraHeight);
     }
 
     /// <summary>The Tools step started the daemon with the person's declaration.</summary>
@@ -199,6 +306,14 @@ public sealed partial class FirstRunWindow : Window
         var fetched = await Task.Run(FetchedTerms.Fetch).ConfigureAwait(true);
         _terms = fetched.Terms;
         _termsLabel = fetched.Label;
+        if (_runner.State.Step == FirstRunStep.Terms)
+        {
+            // Terms built while loading is built again with the document or
+            // the failure line, as the Mac's TermsScreen follows its fetch:
+            // it said "Loading" for good otherwise (box tc-win-az3, 2026-11-19).
+            _shownStep = (FirstRunStep)(-1);
+        }
+
         Render();
     }
 
@@ -526,6 +641,19 @@ public sealed partial class FirstRunWindow : Window
 
     private static SolidColorBrush Brush(uint argb) => new(FirstRunStagePainter.Argb(argb));
 
+    /// <summary>A space's width at a font: "x x" measured less "xx".</summary>
+    private static double SpaceWidth(double size, FontWeight weight)
+    {
+        double Width(string text)
+        {
+            var block = new TextBlock { Text = text, FontSize = size, FontWeight = weight, TextWrapping = TextWrapping.NoWrap };
+            block.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            return block.DesiredSize.Width;
+        }
+
+        return Math.Max(0, Width("x x") - Width("xx"));
+    }
+
     private static TextBlock Text(string text, double size, uint argb, FontWeight? weight = null) => new()
     {
         Text = text,
@@ -574,9 +702,10 @@ public sealed partial class FirstRunWindow : Window
         AutomationProperties.SetName(title, Copy.Welcome.Title);
         AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level1);
         IReadOnlyList<string> words = WelcomeMotion.Words(Copy.Welcome.Title);
+        title.Spacing = SpaceWidth(26 * WelcomeMotion.HeroScale, FontWeights.SemiBold);
         for (int i = 0; i < words.Count; i++)
         {
-            TextBlock word = Text(words[i], 26 * WelcomeMotion.HeroScale, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
+            TextBlock word = Text(WelcomeMotion.Shown(words[i]), 26 * WelcomeMotion.HeroScale, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
             word.TextWrapping = TextWrapping.NoWrap;
             AutomationProperties.SetAccessibilityView(word, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
             Rise(word, WelcomeMotion.WordDelay(i), focusable: false);
