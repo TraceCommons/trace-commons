@@ -12,6 +12,7 @@ using TraceCommons.App;
 
 using Microsoft.UI.Dispatching;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.ViewModels;
 
@@ -420,6 +421,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ? TrayModel.DecisionCountUnavailable
         : string.Empty;
 
+    /// <summary>
+    /// The Traces tab's text equivalent for its badge: the core's
+    /// decisions-owed sentence (MonitorWindowView.swift:604-606).
+    /// </summary>
+    public string TracesTabDescription => MonitorWords.TracesDescription(_decisionsOwed);
+
     /// <summary>Whether there is a badge to draw at all.</summary>
     public bool HasQueueCount => QueueCountText.Length > 0;
 
@@ -436,6 +443,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShieldIsAttention));
         Raise(nameof(QueueCountText));
         Raise(nameof(QueueCountToolTip));
+        Raise(nameof(TracesTabDescription));
         Raise(nameof(HasQueueCount));
     }
 
@@ -679,6 +687,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// working badge and from nothing at all, because those are three
     /// different facts.
     /// </summary>
+    /// <summary>
+    /// The Private AI tab's dot: the Mac's four states through the core's
+    /// menu table (<see cref="PrivateAIDot"/>), no dot without a state label.
+    /// </summary>
+    public DotStatus PrivateInferenceDot => PrivateAIDot.Of(_privateInferenceState);
+
+    /// <summary>
+    /// The dot's text equivalent: the core's sentence for the same state
+    /// (MonitorWindowView.swift:859-862); empty where there is no dot.
+    /// </summary>
+    public string PrivateInferenceDotDescription =>
+        string.IsNullOrEmpty(_privateInferenceState.Label) || _privateInferenceCopy is null
+            ? string.Empty
+            : PrivateInferenceSurface.StateLine(_privateInferenceState, _privateInferenceCopy);
+
     public bool PrivateInferenceNeedsAttention =>
         PrivateInferenceSurface.Tone(_privateInferenceState)
             is PrivateInferenceTone.Attention or PrivateInferenceTone.Refused;
@@ -749,6 +772,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(PrivateInferenceQuitStops));
             Raise(nameof(PrivateInferenceIsWorking));
             Raise(nameof(PrivateInferenceNeedsAttention));
+            Raise(nameof(PrivateInferenceDot));
+            Raise(nameof(PrivateInferenceDotDescription));
             PrivateInferenceSettingsChanged?.Invoke(settings);
         }
 
@@ -961,6 +986,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// retiring early would take away a recall that still would.
     /// </summary>
     public bool HasUndo => _undoHold is not null;
+
+    /// <summary>The entries the undo card would recall; its stack id holds them (MonitorNotices.swift:655).</summary>
+    public IReadOnlyList<string> UndoEntryIds => _undoEntryIds;
 
     /// <summary>
     /// The submit toast: what was sent, what scrubbing did, what was flagged,

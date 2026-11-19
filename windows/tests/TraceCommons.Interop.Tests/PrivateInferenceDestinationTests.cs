@@ -373,10 +373,16 @@ public class PrivateInferenceDestinationTests
         Assert.DoesNotContain("_privateInferenceOn", badge, StringComparison.Ordinal);
         Assert.DoesNotContain("PrivateInferenceOn", badge, StringComparison.Ordinal);
 
-        // And the markup: the rail badge's Visibility is the tone-derived
-        // property, never the switch.
+        // The tab's dot (W2): the reported state through the core's menu
+        // table, never the switch; the window shows it from that property.
+        string dot = Property(viewModel, "public DotStatus PrivateInferenceDot");
+        Assert.Contains("_privateInferenceState", dot, StringComparison.Ordinal);
+        Assert.DoesNotContain("PrivateInferenceOn", dot, StringComparison.Ordinal);
+        Assert.Contains(
+            "ViewModel.PrivateInferenceDot", ShellSource("TraceCommons.App/MainWindow.Shell.cs"), StringComparison.Ordinal);
+
+        // And the markup never binds the switch.
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
-        Assert.Contains("ViewModel.PrivateInferenceIsWorking", markup, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "x:Bind ViewModel.PrivateInferenceOn", markup, StringComparison.Ordinal);
     }

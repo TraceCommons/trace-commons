@@ -196,7 +196,7 @@ public sealed partial class MainWindow : Window
         if (outcome == CloseRequestOutcome.HideToTray)
         {
             // AppWindow.Hide raises no visibility change: the clocks are told.
-            _clockGate.SetHiddenToTray(true);
+            SetHiddenToTray(true);
             AppWindow.Hide();
         }
         else if (outcome == CloseRequestOutcome.AskToQuit)
@@ -604,7 +604,7 @@ public sealed partial class MainWindow : Window
     internal void BringForward()
     {
         AppWindow.Show();
-        _clockGate.SetHiddenToTray(false);
+        SetHiddenToTray(false);
         Activate();
     }
 
@@ -1719,7 +1719,7 @@ public sealed partial class MainWindow : Window
     {
         _closed = true;
         _clockGate.SetClosed();
-        _moveTimer?.Stop();
+        StopMoveTicks();
         _settingsWindow?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();

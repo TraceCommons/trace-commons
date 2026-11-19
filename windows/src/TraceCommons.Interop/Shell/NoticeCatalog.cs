@@ -46,6 +46,21 @@ public enum NoticeClose
     Declines,
 }
 
+/// <summary>Which word names a card's X (<see cref="NoticeCatalog.CloseWordFor"/>).</summary>
+public enum CloseWord
+{
+    /// <summary>The core's <c>close</c>.</summary>
+    Close,
+    /// <summary>The offer's own decline word.</summary>
+    Decline,
+    /// <summary>The legacy offer's own dismissal word.</summary>
+    LegacyDismiss,
+    /// <summary><c>close_notice_still_sends</c>: closing lets the approval send.</summary>
+    StillSends,
+    /// <summary>The Traces words' <c>dismiss_action</c>.</summary>
+    Dismiss,
+}
+
 /// <summary>One card the Windows window shows today, re-housed in the stack.</summary>
 public sealed record NoticeKind(string Id, NoticeGroup Group, NoticeClose Close);
 
@@ -77,11 +92,20 @@ public static class NoticeCatalog
     /// <summary>The arming offer: Not now stays, the X closes it for now (MonitorNotices.swift:350-356).</summary>
     public static NoticeKind ArmingOffer(string projectId) => new("arming-offer:" + projectId, NoticeGroup.TracesOffers, NoticeClose.ForNow);
 
-    /// <summary>A voided grant: the X is its acknowledgement; Turn back on stays (MonitorNotices.swift:460-463).</summary>
-    public static NoticeKind GrantVoid(string id) => new("void:" + id, NoticeGroup.TracesNow, NoticeClose.PutsAway);
+    /// <summary>
+    /// Every grant the daemon voided, as one stack entry. On the Mac each void
+    /// is its own card whose X is its acknowledgement (MonitorNotices.swift:450-480);
+    /// this shell draws them as one list with an Acknowledge button on each,
+    /// so the entry itself has no X. The voids come first in the consent
+    /// notices (MonitorNotices.swift:452-454).
+    /// </summary>
+    public static readonly NoticeKind GrantVoids = new("void", NoticeGroup.TracesNow, NoticeClose.None);
 
-    /// <summary>An arming rewording: the X is its acknowledgement; Ask stays (MonitorNotices.swift:489-492).</summary>
-    public static NoticeKind ArmingRewording(string id) => new("reworded:" + id, NoticeGroup.TracesNow, NoticeClose.PutsAway);
+    /// <summary>
+    /// Every arming rewording, as one stack entry with an Acknowledge button
+    /// on each (the Mac's X, MonitorNotices.swift:482-508); after the voids.
+    /// </summary>
+    public static readonly NoticeKind ArmingRewordings = new("reworded", NoticeGroup.TracesNow, NoticeClose.None);
 
     /// <summary>A consent gate hold: no X, it goes when the hold does (MonitorNotices.swift:511-513).</summary>
     public static readonly NoticeKind GateHeld = new("gate-held", NoticeGroup.TracesNow, NoticeClose.None);
@@ -98,14 +122,39 @@ public static class NoticeCatalog
     /// </summary>
     public static readonly NoticeKind Health = new("health", NoticeGroup.TracesNow, NoticeClose.None);
 
-    /// <summary>An approval's undo: Dismiss is the X (MonitorNotices.swift:658-662).</summary>
-    public static readonly NoticeKind Undo = new("undo", NoticeGroup.TracesNow, NoticeClose.PutsAway);
+    /// <summary>The id prefix of an approval's undo card (MonitorNotices.swift:655).</summary>
+    public const string UndoPrefix = "approval-undo:";
+
+    /// <summary>
+    /// An approval's undo (MonitorNotices.swift:651-662): the X lets it send,
+    /// as Dismiss did. Its id holds the approved entries', so a second
+    /// approval is a new card that slides in, as on the Mac.
+    /// </summary>
+    public static NoticeKind Undo(IEnumerable<string> entryIds) =>
+        new(UndoPrefix + string.Join(",", entryIds), NoticeGroup.TracesNow, NoticeClose.PutsAway);
+
+    /// <summary>Whether <paramref name="id"/> is an approval's undo card.</summary>
+    public static bool IsUndo(string id) => id.StartsWith(UndoPrefix, StringComparison.Ordinal);
 
     /// <summary>The offer to answer model calls: the X declines it (MonitorNotices.swift:751-761).</summary>
     public static readonly NoticeKind PrivateAIOffer = new("private-ai-offer", NoticeGroup.PrivateAI, NoticeClose.Declines);
 
     /// <summary>One fixed sentence about the last decision: the X clears it (MonitorNotices.swift:266-269).</summary>
     public static readonly NoticeKind ActionNotice = new("action-notice", NoticeGroup.Action, NoticeClose.PutsAway);
+
+    /// <summary>
+    /// The word that names a card's X (MonitorNotices.swift): the decline's
+    /// word for an offer whose X declines it (:752-761), the legacy offer's
+    /// own dismissal (:244-247), the undo's "still sends" sentence while
+    /// approved traces will send (:661), the core's dismiss word for the
+    /// first-contribution note (:324), and <c>close</c> otherwise (:168).
+    /// </summary>
+    public static CloseWord CloseWordFor(NoticeKind card) =>
+        card.Close == NoticeClose.Declines ? CloseWord.Decline
+        : card.Id == LegacyOffer.Id ? CloseWord.LegacyDismiss
+        : IsUndo(card.Id) ? CloseWord.StillSends
+        : card.Id == FirstContribution.Id ? CloseWord.Dismiss
+        : CloseWord.Close;
 
     /// <summary>
     /// The groups a place draws, back first (MonitorNotices.swift:140-161).
@@ -128,8 +177,28 @@ public static class NoticeCatalog
     public static IReadOnlyList<NoticeKind> Order(NoticePlace place, IEnumerable<NoticeKind> present)
     {
         var cards = present.ToArray();
-        return Groups(place).SelectMany(group => cards.Where(card => card.Group == group)).ToArray();
+        return Groups(place)
+            .SelectMany(group => cards.Where(card => card.Group == group).OrderBy(card => Rank(card.Id)))
+            .ToArray();
     }
+
+    /// <summary>
+    /// The Mac's order inside the traces-now group (MonitorNotices.swift:377-407,
+    /// :447-513): the consent notices (voids, then rewordings, then the gate
+    /// hold), then health, then the undo. The witness hold is this shell's
+    /// own and sits with the gate hold. Cards of other groups keep the order
+    /// they were given in (a stable sort, every one rank 0).
+    /// </summary>
+    private static int Rank(string id) => id switch
+    {
+        "void" => 1,
+        "reworded" => 2,
+        "gate-held" => 3,
+        "witness-capacity" => 4,
+        "health" => 5,
+        _ when IsUndo(id) => 6,
+        _ => 0,
+    };
 
     /// <summary>
     /// The cards a place shows once the ones closed for now are taken out.

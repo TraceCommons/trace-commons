@@ -254,11 +254,11 @@ public class MonitorShellTests
         // the action notice in front.
         NoticeKind[] present =
         {
-            NoticeCatalog.ActionNotice, NoticeCatalog.Undo, NoticeCatalog.ArmingOffer("p1"),
+            NoticeCatalog.ActionNotice, NoticeCatalog.Undo(new[] { "e1" }), NoticeCatalog.ArmingOffer("p1"),
             NoticeCatalog.Update, NoticeCatalog.PrivateAIOffer, NoticeCatalog.GateHeld,
         };
         Assert.Equal(
-            new[] { "update", "arming-offer:p1", "undo", "gate-held", "action-notice" },
+            new[] { "update", "arming-offer:p1", "gate-held", "approval-undo:e1", "action-notice" },
             NoticeCatalog.Order(NoticePlace.Traces, present).Select(card => card.Id));
         Assert.Equal(
             new[] { "update", "private-ai-offer", "action-notice" },
@@ -267,7 +267,7 @@ public class MonitorShellTests
             new[] { "update", "action-notice" },
             NoticeCatalog.Order(NoticePlace.Insights, present).Select(card => card.Id));
         Assert.Equal(
-            new[] { "update", "undo", "gate-held" },
+            new[] { "update", "gate-held", "approval-undo:e1" },
             NoticeCatalog.Shown(NoticePlace.Traces, present, new HashSet<string> { "arming-offer:p1", "action-notice" }).Select(card => card.Id));
     }
 
@@ -276,9 +276,10 @@ public class MonitorShellTests
     {
         // MonitorNotices.swift:26-34 and each card's own line.
         Assert.Equal(NoticeClose.None, NoticeCatalog.GateHeld.Close);
-        Assert.Equal(NoticeClose.PutsAway, NoticeCatalog.Undo.Close);
-        Assert.Equal(NoticeClose.PutsAway, NoticeCatalog.GrantVoid("v").Close);
-        Assert.Equal(NoticeClose.PutsAway, NoticeCatalog.ArmingRewording("r").Close);
+        Assert.Equal(NoticeClose.PutsAway, NoticeCatalog.Undo(new[] { "e" }).Close);
+        // One entry for each list; every card in it keeps its Acknowledge.
+        Assert.Equal(NoticeClose.None, NoticeCatalog.GrantVoids.Close);
+        Assert.Equal(NoticeClose.None, NoticeCatalog.ArmingRewordings.Close);
         Assert.Equal(NoticeClose.ForNow, NoticeCatalog.ArmingOffer("p").Close);
         Assert.Equal(NoticeClose.Declines, NoticeCatalog.PrivateAIOffer.Close);
         Assert.Equal(NoticeClose.PutsAway, NoticeCatalog.LegacyNotice.Close);
@@ -453,5 +454,215 @@ public class MonitorShellTests
         Assert.True(gate.MayTick);
         gate.SetClosed();
         Assert.Equal(new[] { false, true, false }, seen);
+    }
+
+    // ---- Notice motion (PopoverNotice.swift:225-247) ----------------------
+
+    [Theory]
+    // Printed by SwiftUI itself on macOS (a throwaway probe, 2026-11-19):
+    // Spring(response: 0.36, dampingRatio: 0.86).value(target: 1, time: t),
+    // the spring .spring(response: 0.36, dampingFraction: 0.86) builds.
+    [InlineData(0.05, 0.231173189)]
+    [InlineData(0.1, 0.567732992)]
+    [InlineData(0.15, 0.803011095)]
+    [InlineData(0.2, 0.928487259)]
+    [InlineData(0.3, 1.001427795)]
+    [InlineData(0.4, 1.003953751)]
+    [InlineData(0.6, 1.000094480)]
+    public void TheStacksSpringIsSwiftUIsSpring(double t, double want)
+    {
+        Assert.Equal(want, NoticeMotion.Progress(t), 6);
+    }
+
+    [Fact]
+    public void TheSpringRunsForSwiftUIsSettlingTime()
+    {
+        // probe: Spring(response: 0.36, dampingRatio: 0.86).settlingDuration.
+        Assert.Equal(0.6449744783708491, NoticeMotion.SpringSettling);
+        Assert.Equal(0, NoticeMotion.Progress(0));
+    }
+
+    [Fact]
+    public void AnArrivingCardComesDownFromAboveTheStackToItsPlace()
+    {
+        // .move(edge: .top): a whole card's height above, negative, to 0.
+        Assert.Equal(-100, NoticeMotion.ArrivalOffset(StackAnchor.Top, 100, 0), 9);
+        Assert.Equal(-100 * (1 - 0.567732992), NoticeMotion.ArrivalOffset(StackAnchor.Top, 100, 0.1), 5);
+        Assert.True(NoticeMotion.ArrivalOffset(StackAnchor.Top, 100, 0.05) < NoticeMotion.ArrivalOffset(StackAnchor.Top, 100, 0.1));
+        Assert.True(Math.Abs(NoticeMotion.ArrivalOffset(StackAnchor.Top, 100, NoticeMotion.SpringSettling)) < 0.02);
+        // A stack at the foot brings its cards up from below.
+        Assert.Equal(100, NoticeMotion.ArrivalOffset(StackAnchor.Bottom, 100, 0), 9);
+    }
+
+    [Fact]
+    public void TheCoveredCardFadesWhereItIsAndIsNotHiddenAtOnce()
+    {
+        // PopoverNotice.swift:244-247: a new card slides in over the one it
+        // covers, which fades (removal: .opacity), the Linux shortfall.
+        NoticeChange change = NoticeMotion.Plan("a", "b", new HashSet<string> { "a" }, animationsEnabled: true);
+        Assert.Equal(new NoticeChange("a", NoticeEntrance.Slide), change);
+        Assert.Equal(1, NoticeMotion.FadeOut(0));
+        Assert.Equal(1 - 0.231173189, NoticeMotion.FadeOut(0.05), 6);
+        Assert.Equal(1 - 0.567732992, NoticeMotion.FadeOut(0.1), 6);
+        Assert.Equal(0, NoticeMotion.FadeOut(NoticeMotion.SpringSettling));
+    }
+
+    [Fact]
+    public void ACardRevealedByACloseFadesInWhereItIs()
+    {
+        NoticeChange change = NoticeMotion.Plan("b", "a", new HashSet<string> { "a", "b" }, animationsEnabled: true);
+        Assert.Equal(new NoticeChange("b", NoticeEntrance.Fade), change);
+        Assert.Equal(0, NoticeMotion.FadeIn(0));
+        Assert.Equal(0.567732992, NoticeMotion.FadeIn(0.1), 6);
+        // The spring overshoots; an opacity does not.
+        Assert.Equal(1, NoticeMotion.FadeIn(0.4));
+    }
+
+    [Fact]
+    public void NothingMovesUnderReduceMotionForTheSameCardOrWhenTheStackAppearsOrEmpties()
+    {
+        var seen = new HashSet<string> { "a" };
+        Assert.Equal(new NoticeChange(null, NoticeEntrance.None), NoticeMotion.Plan("a", "b", seen, animationsEnabled: false));
+        Assert.Equal(new NoticeChange(null, NoticeEntrance.None), NoticeMotion.Plan("a", "a", seen, animationsEnabled: true));
+        // MonitorNotices.swift:76 has no animation in its scope (NoticeMotion's remarks).
+        Assert.Equal(new NoticeChange(null, NoticeEntrance.None), NoticeMotion.Plan(null, "a", seen, animationsEnabled: true));
+        Assert.Equal(new NoticeChange(null, NoticeEntrance.None), NoticeMotion.Plan("a", null, seen, animationsEnabled: true));
+    }
+
+    [Fact]
+    public void KeyFramesSampleTheCurveSixtyTimesASecondAndEndAtTheEnd()
+    {
+        IReadOnlyList<(double Fraction, double Value)> frames = MonitorMotion.KeyFrames(NoticeMotion.FadeIn, NoticeMotion.SpringSettling);
+        Assert.Equal(40, frames.Count);
+        Assert.Equal((0.0, 0.0), frames[0]);
+        Assert.Equal(1, frames[^1].Fraction);
+        Assert.Equal(1, frames[^1].Value);
+        Assert.Equal(NoticeMotion.FadeIn(NoticeMotion.SpringSettling * 6 / 39), frames[6].Value, 12);
+    }
+
+    [Fact]
+    public void TheStackForgetsWhatItHeldOnceItIsEmpty()
+    {
+        // The Mac's seen is the stack's state; the stack goes when nothing is shown.
+        IReadOnlySet<string> seen = NoticeStack.SeenAfter(new HashSet<string>(), new[] { "a", "b" });
+        Assert.Equal(new[] { "a", "b" }, seen.OrderBy(id => id, StringComparer.Ordinal));
+        Assert.Empty(NoticeStack.SeenAfter(seen, Array.Empty<string>()));
+        Assert.True(NoticeStack.Slides("a", NoticeStack.SeenAfter(seen, Array.Empty<string>())));
+    }
+
+    // ---- Notice catalog: order, ids and X names ----------------------------
+
+    [Fact]
+    public void VoidsComeBeforeRewordingsThenTheGateHoldThenHealthThenTheUndo()
+    {
+        // MonitorNotices.swift:377-407 and :447-513.
+        NoticeKind[] present =
+        {
+            NoticeCatalog.Undo(new[] { "e" }), NoticeCatalog.Health, NoticeCatalog.ArmingRewordings,
+            NoticeCatalog.GateHeld, NoticeCatalog.GrantVoids,
+        };
+        Assert.Equal(
+            new[] { "void", "reworded", "gate-held", "health", "approval-undo:e" },
+            NoticeCatalog.Order(NoticePlace.Traces, present).Select(card => card.Id));
+    }
+
+    [Fact]
+    public void TheUndoCardIsNamedByItsEntriesSoASecondApprovalIsANewCard()
+    {
+        // MonitorNotices.swift:655: "approval-undo:" + entryIDs joined by commas.
+        Assert.Equal("approval-undo:a,b", NoticeCatalog.Undo(new[] { "a", "b" }).Id);
+        Assert.NotEqual(NoticeCatalog.Undo(new[] { "a" }).Id, NoticeCatalog.Undo(new[] { "b" }).Id);
+        Assert.True(NoticeCatalog.IsUndo(NoticeCatalog.Undo(new[] { "a" }).Id));
+        Assert.False(NoticeCatalog.IsUndo("update"));
+    }
+
+    [Fact]
+    public void EachXIsNamedWithTheMacsWord()
+    {
+        // MonitorNotices.swift:661 (still sends), :324 (core dismiss word),
+        // :752-761 (decline), :244-247 (the legacy offer's own), :168 (close).
+        Assert.Equal(CloseWord.StillSends, NoticeCatalog.CloseWordFor(NoticeCatalog.Undo(new[] { "e" })));
+        Assert.Equal(CloseWord.Dismiss, NoticeCatalog.CloseWordFor(NoticeCatalog.FirstContribution));
+        Assert.Equal(CloseWord.Decline, NoticeCatalog.CloseWordFor(NoticeCatalog.PrivateAIOffer));
+        Assert.Equal(CloseWord.LegacyDismiss, NoticeCatalog.CloseWordFor(NoticeCatalog.LegacyOffer));
+        Assert.Equal(CloseWord.Close, NoticeCatalog.CloseWordFor(NoticeCatalog.ArmingOffer("p")));
+        Assert.Equal(CloseWord.Close, NoticeCatalog.CloseWordFor(NoticeCatalog.ActionNotice));
+    }
+
+    // ---- Pane crossfade (ThreePane.swift:366-374, :546-556) ---------------
+
+    [Fact]
+    public void AnOpeningInspectorFadesInOnTheTokenCurveAsTheWindowGrows()
+    {
+        var from = new LayoutRect(100, 40, 456, 700);
+        var to = new LayoutRect(100, 40, 759, 700);
+        var run = new PaneMoveRun(from, to, new PaneVisibility(false, false), new PaneVisibility(false, true));
+        Assert.Equal(0, run.At(0).InspectorOpacity);
+        Assert.Equal(from, run.At(0).Frame);
+        // A quarter of 0.22 s: the token curve's 0.767284 (probe, ThePaneCurveIsTheTokenCurve).
+        PaneMoveFrame quarter = run.At(0.055);
+        Assert.Equal(0.767284393, quarter.InspectorOpacity, 5);
+        Assert.Equal(Math.Round(456 + (759 - 456) * 0.767284393), quarter.Frame.Width);
+        Assert.False(quarter.Done);
+        Assert.Equal(1, quarter.MapOpacity);
+        Assert.Equal(new PaneMoveFrame(to, 1, 1, true), run.At(0.22));
+        Assert.Equal(run.At(0.22), run.End);
+    }
+
+    [Fact]
+    public void AClosingInspectorFadesOutOnTheSameCurveAndClock()
+    {
+        var from = new LayoutRect(100, 40, 759, 700);
+        var to = new LayoutRect(100, 40, 456, 700);
+        var run = new PaneMoveRun(from, to, new PaneVisibility(false, true), new PaneVisibility(false, false));
+        Assert.Equal(1, run.At(0).InspectorOpacity);
+        Assert.Equal(1 - 0.767284393, run.At(0.055).InspectorOpacity, 5);
+        Assert.True(run.At(0.1).InspectorOpacity < run.At(0.055).InspectorOpacity);
+        Assert.Equal(0, run.End.InspectorOpacity);
+        Assert.True(run.End.Done);
+        Assert.Equal(to, run.End.Frame);
+    }
+
+    [Theory]
+    [InlineData(false, false, 0.3, 1)]
+    [InlineData(true, true, 0.3, 1)]
+    [InlineData(false, true, 0.3, 0.3)]
+    [InlineData(true, false, 0.3, 0.7)]
+    public void APaneThatStaysIsWholeOneThatOpensRisesOneThatClosesFalls(bool before, bool after, double eased, double want)
+    {
+        Assert.Equal(want, PaneMoveRun.Opacity(before, after, eased), 9);
+    }
+
+    // ---- The Private AI dot (MonitorWindowView.swift:853-862) -------------
+
+    [Theory]
+    [InlineData("", "On", PrivateInferenceTone.Clear, DotStatus.None)]
+    [InlineData("running", "", PrivateInferenceTone.Clear, DotStatus.Off)]
+    [InlineData("running", "On", PrivateInferenceTone.Clear, DotStatus.On)]
+    [InlineData("running_no_backends", "On", PrivateInferenceTone.Attention, DotStatus.Ask)]
+    [InlineData("port_in_use", "Not working", PrivateInferenceTone.Refused, DotStatus.Outside)]
+    [InlineData("off", "Off", PrivateInferenceTone.Neutral, DotStatus.Off)]
+    [InlineData("stopping", "Stopping", PrivateInferenceTone.Held, DotStatus.Off)]
+    public void TheDotHasTheMacsFourStatesAndNoneWithoutALabel(string label, string word, PrivateInferenceTone tone, DotStatus want)
+    {
+        // PrivateInferenceView.swift:33-52: clear on, attention ask, refused
+        // outside, neutral and held off; off when the menu has no word.
+        Assert.Equal(want, PrivateAIDot.For(label, word, tone));
+    }
+
+    [Theory]
+    // Through the real ABI: the core's menu table (private_inference_copy::menu_state).
+    [InlineData("running", DotStatus.On)]
+    [InlineData("running_no_backends", DotStatus.Ask)]
+    // The menu table, not the state sentence's: amber here, where the state
+    // tone (Held) would draw grey (private_inference_copy.rs menu_state).
+    [InlineData("running_elsewhere", DotStatus.Ask)]
+    [InlineData("port_in_use", DotStatus.Outside)]
+    [InlineData("off", DotStatus.Off)]
+    [InlineData("", DotStatus.None)]
+    public void TheDotReadsTheCoresMenuTable(string label, DotStatus want)
+    {
+        Assert.Equal(want, PrivateAIDot.Of(new PrivateInferenceState(label, null)));
+        Assert.Equal(6, PrivateAIDot.Size);
     }
 }

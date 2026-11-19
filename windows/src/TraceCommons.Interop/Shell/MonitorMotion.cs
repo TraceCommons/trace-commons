@@ -93,6 +93,53 @@ public static class MonitorMotion
     }
 
     /// <summary>
+    /// SwiftUI's <c>.spring(response:dampingFraction:)</c> at
+    /// <paramref name="seconds"/> after it starts, from 0 towards 1: a damped
+    /// spring whose undamped period is <paramref name="response"/>
+    /// (stiffness (2 pi / response) squared, unit mass). Checked against
+    /// SwiftUI's own <c>Spring(response:dampingRatio:).value(target:time:)</c>
+    /// on this Mac: for 0.36 / 0.86 it read 0.23117 at 0.05 s, 0.56773 at
+    /// 0.1 s, 0.92849 at 0.2 s and overshot to 1.00395 at 0.4 s.
+    /// </summary>
+    public static double Spring(double response, double damping, double seconds)
+    {
+        if (seconds <= 0)
+        {
+            return 0;
+        }
+
+        double omega = 2 * Math.PI / response;
+        double decay = Math.Exp(-damping * omega * seconds);
+        if (damping < 1)
+        {
+            double omegaD = omega * Math.Sqrt(1 - damping * damping);
+            return 1 - decay * (Math.Cos(omegaD * seconds) + damping * omega / omegaD * Math.Sin(omegaD * seconds));
+        }
+
+        return 1 - decay * (1 + omega * seconds);
+    }
+
+    /// <summary>
+    /// <paramref name="value"/> sampled every 1/<paramref name="perSecond"/>
+    /// of a second across <paramref name="duration"/> seconds, as key frames
+    /// (the fraction of the duration, the value), the last at exactly 1. The
+    /// compositor interpolates between them at the display's own rate, which
+    /// is the rate SwiftUI runs its animations at.
+    /// </summary>
+    public static IReadOnlyList<(double Fraction, double Value)> KeyFrames(Func<double, double> value, double duration, double perSecond = 60)
+    {
+        int steps = Math.Max(1, (int)Math.Ceiling(duration * perSecond));
+        var frames = new (double, double)[steps + 1];
+        for (int i = 0; i <= steps; i++)
+        {
+            double fraction = (double)i / steps;
+            frames[i] = (fraction, value(fraction * duration));
+        }
+
+        return frames;
+    }
+
+    /// <summary>
     /// Whether a pane move animates (ThreePane.swift:539-545): not under
     /// reduce motion, not when the window's frame does not change, and not
     /// when the window was held to the work area so the main pane changes
@@ -161,6 +208,59 @@ public static class MonitorWindowGrowth
     }
 }
 
+/// <summary>One frame of a pane move: the window's outer frame and each pane's opacity.</summary>
+public readonly record struct PaneMoveFrame(LayoutRect Frame, double MapOpacity, double InspectorOpacity, bool Done);
+
+/// <summary>
+/// A pane move under way (ThreePane.swift:538-566): the window's frame on the
+/// token curve over <see cref="MonitorMotion.Standard"/>, and the panes that
+/// open or close crossfading on the same curve and clock (ThreePane.swift:366-374:
+/// a pane that closes goes from 1 to 0, one that opens is inserted with an
+/// opacity transition, 0 to 1; a pane that stays is at 1). The window drives
+/// it once a frame; hiding the window finishes it at its end state.
+/// </summary>
+public sealed class PaneMoveRun
+{
+    public PaneMoveRun(LayoutRect from, LayoutRect to, PaneVisibility old, PaneVisibility next)
+    {
+        From = from;
+        To = to;
+        Old = old;
+        Next = next;
+    }
+
+    public LayoutRect From { get; }
+
+    public LayoutRect To { get; }
+
+    public PaneVisibility Old { get; }
+
+    public PaneVisibility Next { get; }
+
+    /// <summary>The move <paramref name="seconds"/> after it started.</summary>
+    public PaneMoveFrame At(double seconds)
+    {
+        double progress = Math.Clamp(seconds / MonitorMotion.Standard, 0, 1);
+        double eased = MonitorMotion.Ease(progress);
+        return new PaneMoveFrame(
+            MonitorWindowGrowth.Interpolate(From, To, progress),
+            Opacity(Old.Map, Next.Map, eased),
+            Opacity(Old.Inspector, Next.Inspector, eased),
+            progress >= 1);
+    }
+
+    /// <summary>The move's last frame, for a move cut short by hiding the window.</summary>
+    public PaneMoveFrame End => At(MonitorMotion.Standard);
+
+    /// <summary>
+    /// A pane's opacity <paramref name="eased"/> of the way through the move:
+    /// rising for one that opens, falling for one that closes, 1 for one that
+    /// stays.
+    /// </summary>
+    public static double Opacity(bool before, bool after, double eased) =>
+        before == after ? 1 : after ? eased : 1 - eased;
+}
+
 /// <summary>
 /// Whether a window's clocks may tick: only while it is shown, not hidden to
 /// the tray and not minimised. <c>AppWindow.Hide</c> raises no
@@ -204,12 +304,6 @@ public sealed class WindowClockGate
 public static class TitleBarRegions
 {
     /// <summary>
-    /// Each element's bounds, given in device-independent units relative to
-    /// the window's content, as whole physical pixels: the left and top edges
-    /// rounded down and the right and bottom edges rounded up, so the region
-    /// always covers the element. Empty elements are left out.
-    /// </summary>
-    /// <summary>
     /// A caption-button inset reported by the title bar (physical pixels) as a
     /// column width in device-independent units. A reading that is not a
     /// usable number keeps <paramref name="previousDips"/>: while a minimised
@@ -234,6 +328,12 @@ public static class TitleBarRegions
 
     private static bool IsPositive(double value) => double.IsFinite(value) && value > 0;
 
+    /// <summary>
+    /// Each element's bounds, given in device-independent units relative to
+    /// the window's content, as whole physical pixels: the left and top edges
+    /// rounded down and the right and bottom edges rounded up, so the region
+    /// always covers the element. Empty elements are left out.
+    /// </summary>
     public static IReadOnlyList<(int X, int Y, int Width, int Height)> Passthrough(IEnumerable<LayoutRect> dips, double scale)
     {
         var rects = new List<(int, int, int, int)>();

@@ -106,4 +106,56 @@ public class MonitorWordsTests
         Assert.Equal("Home", table.Shell["tab_home"]);
         Assert.False(table.Top.ContainsKey("n"));
     }
+
+    [Fact]
+    public void TheUndoXSaysApprovedTracesStillSend()
+    {
+        // MonitorNotices.swift:661: QueueLegacyWords.closeNoticeStillSends, the
+        // shell words' queue table (shell_words_copy.rs).
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_shell_words_copy_json());
+        string want = JsonDocument.Parse(json!).RootElement.GetProperty("queue").GetProperty("close_notice_still_sends").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(want));
+        Assert.Equal(want, MonitorWords.CloseNoticeStillSends);
+        Assert.NotEqual(MonitorWords.Close, MonitorWords.CloseNoticeStillSends);
+    }
+
+    [Fact]
+    public void TheFirstContributionXIsTheCoresDismissWord()
+    {
+        // MonitorNotices.swift:324: ActionNoticeWords.coreDismissWord, the
+        // Traces words' dismiss_action (SettingsView.swift:126).
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_monitor_traces_copy_json());
+        string want = JsonDocument.Parse(json!).RootElement.GetProperty("dismiss_action").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(want));
+        Assert.Equal(want, MonitorWords.Dismiss);
+    }
+
+    [Fact]
+    public void TheTracesTabsTextEquivalentIsTheCoresDecisionsOwedSentence()
+    {
+        // MonitorWindowView.swift:604-606: decisionsOwedText; nothing at zero,
+        // "unavailable" for an unknown count, never zero.
+        Assert.Equal(NativeMethods.TakeOwnedString(NativeMethods.tc_decisions_owed_text(3)), MonitorWords.TracesDescription(3));
+        Assert.Equal(NativeMethods.TakeOwnedString(NativeMethods.tc_decisions_owed_text(-1)), MonitorWords.TracesDescription(null));
+        Assert.Equal(string.Empty, MonitorWords.TracesDescription(0));
+        Assert.False(string.IsNullOrWhiteSpace(MonitorWords.TracesDescription(null)));
+        Assert.NotEqual(MonitorWords.TracesDescription(null), MonitorWords.TracesDescription(3));
+    }
+
+    [Fact]
+    public void AWordMissingFromItsTableIsEmpty()
+    {
+        Assert.Equal(string.Empty, MonitorWords.WordAt(null, "queue", "close_notice"));
+        Assert.Equal(string.Empty, MonitorWords.WordAt("{\"queue\":3}", "queue", "close_notice"));
+        Assert.Equal(string.Empty, MonitorWords.WordAt("{not json", null, "dismiss_action"));
+        Assert.Equal("X", MonitorWords.WordAt("{\"queue\":{\"close_notice\":\"X\"}}", "queue", "close_notice"));
+    }
+
+    [Fact]
+    public void AStoredDraftIsNamedByItsIdNotItsTypeName()
+    {
+        // A ListView item without a name is named by its ToString (W2 box, fix 3's sibling).
+        var draft = new MissionDraftSummary { Id = "draft-1", SourceCount = 2, Status = "s" };
+        Assert.Equal("draft-1", draft.ToString());
+    }
 }

@@ -76,6 +76,72 @@ public static class MonitorWords
     /// <summary>A notice's X (<c>close</c>, MonitorNotices.swift:168).</summary>
     public static string Close => MonitorShellCopy.Top("close");
 
+    /// <summary>
+    /// The undo card's X while approved traces will still send
+    /// (<c>QueueLegacyWords.closeNoticeStillSends</c>, MonitorNotices.swift:661):
+    /// closing it lets the approval send, and its name says so.
+    /// </summary>
+    public static string CloseNoticeStillSends => QueueWord("close_notice_still_sends");
+
+    /// <summary>
+    /// The first-contribution note's X (<c>ActionNoticeWords.coreDismissWord</c>,
+    /// MonitorNotices.swift:324): the Traces words' <c>dismiss_action</c>.
+    /// </summary>
+    public static string Dismiss => TracesWord("dismiss_action");
+
+    /// <summary>
+    /// The Traces tab's text equivalent for its badge (<c>tracesDescription</c>,
+    /// MonitorWindowView.swift:604-606): the core's decisions-owed sentence,
+    /// "unavailable" for an unknown count and nothing at zero.
+    /// </summary>
+    public static string TracesDescription(long? decisionsOwed) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_decisions_owed_text(decisionsOwed ?? -1)) ?? string.Empty;
+
+    private static readonly Lazy<string?> ShellWordsJson = new(() =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_shell_words_copy_json()));
+
+    private static readonly Lazy<string?> TracesWordsJson = new(() =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_monitor_traces_copy_json()));
+
+    private static string QueueWord(string key) => WordAt(ShellWordsJson.Value, "queue", key);
+
+    private static string TracesWord(string key) => WordAt(TracesWordsJson.Value, null, key);
+
+    /// <summary>
+    /// The string at <paramref name="key"/>, inside <paramref name="table"/>
+    /// when one is named; empty when the payload or the word is missing.
+    /// </summary>
+    internal static string WordAt(string? json, string? table, string key)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (table is not null)
+            {
+                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(table, out root))
+                {
+                    return string.Empty;
+                }
+            }
+
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty(key, out JsonElement word)
+                && word.ValueKind == JsonValueKind.String
+                ? word.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+    }
+
     /// <summary>The main window's title: the app's name, from <c>brand.rs</c>.</summary>
     public static string AppName => App.Value;
 

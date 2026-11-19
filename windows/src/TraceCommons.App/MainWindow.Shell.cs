@@ -58,23 +58,38 @@ public sealed partial class MainWindow
     /// <summary>The main pane's kept width beside the map.</summary>
     private double _keptMain = MonitorPaneLayout.MainWidth;
 
-    /// <summary>Counts pane moves, so an overtaken animation stops.</summary>
-    private int _moveGeneration;
+    /// <summary>The pane move under way, driven once a frame (<see cref="OnMoveFrame"/>).</summary>
+    private PaneMoveRun? _moveRun;
 
-    private DispatcherQueueTimer? _moveTimer;
+    private readonly Stopwatch _moveClock = new();
+
+    private bool _moveTicking;
+
+    /// <summary>A move finished while minimised: its frame, set when the window is restored.</summary>
+    private LayoutRect? _pendingFrame;
 
     private readonly InspectorDemandTracker _demand = new();
 
     private readonly WindowClockGate _clockGate = new();
 
-    /// <summary>Cards closed with their X until the window opens again.</summary>
+    /// <summary>Cards closed with their X until the window opens again
+    /// (shown from the tray: the Mac's window state is new each time it opens).</summary>
     private readonly HashSet<string> _closedNotices = new(StringComparer.Ordinal);
 
-    /// <summary>Every card this stack has held, so one revealed by a close
-    /// fades in place and one that has just arrived slides in.</summary>
-    private readonly HashSet<string> _seenNotices = new(StringComparer.Ordinal);
+    /// <summary>Every card this stack has held since it was last empty, so one
+    /// revealed by a close fades in place and one that has just arrived slides in.</summary>
+    private IReadOnlySet<string> _seenNotices = new HashSet<string>(StringComparer.Ordinal);
 
     private NoticeKind? _frontNotice;
+
+    /// <summary>The front card's element.</summary>
+    private FrameworkElement? _frontCard;
+
+    /// <summary>The card that left the front and is fading where it is, if any.</summary>
+    private FrameworkElement? _outgoingCard;
+
+    /// <summary>Whether the window is hidden to the tray.</summary>
+    private bool _hiddenToTray;
 
     private readonly List<(MonitorTab Tab, ToggleButton Button, Rectangle Rule)> _tabs = new();
 
@@ -117,6 +132,7 @@ public sealed partial class MainWindow
         HomeOpenMissionDrafts.Content = MonitorWords.CrumbTitle(new Crumb(CrumbWord.Missions, MonitorTab.Home, false));
 
         BuildTabs();
+        ApplyTabDescriptions();
         RegisterAccelerators();
         ApplyWindowMaterial();
 
@@ -167,6 +183,22 @@ public sealed partial class MainWindow
         TabInference.Click += (_, _) => OpenTab(MonitorTab.Inference);
         TabTraces.Click += (_, _) => OpenTab(MonitorTab.Traces);
         TabInsights.Click += (_, _) => OpenTab(MonitorTab.Insights);
+    }
+
+    /// <summary>
+    /// The Private AI dot in the Mac's four states and each badged tab's text
+    /// equivalent, the core's sentence (MonitorWindowView.swift:985-991:
+    /// the Private AI state line, the decisions-owed sentence).
+    /// </summary>
+    private void ApplyTabDescriptions()
+    {
+        DotStatus dot = ViewModel.PrivateInferenceDot;
+        InferenceDotOn.Visibility = dot == DotStatus.On ? Visibility.Visible : Visibility.Collapsed;
+        InferenceDotAsk.Visibility = dot == DotStatus.Ask ? Visibility.Visible : Visibility.Collapsed;
+        InferenceDotOutside.Visibility = dot == DotStatus.Outside ? Visibility.Visible : Visibility.Collapsed;
+        InferenceDotOff.Visibility = dot == DotStatus.Off ? Visibility.Visible : Visibility.Collapsed;
+        AutomationProperties.SetHelpText(TabInference, ViewModel.PrivateInferenceDotDescription);
+        AutomationProperties.SetHelpText(TabTraces, ViewModel.TracesTabDescription);
     }
 
     /// <summary>Ctrl+1..4 by position, Ctrl+comma, Ctrl+Shift+M (spec W2-D5 (a)).</summary>
@@ -362,7 +394,15 @@ public sealed partial class MainWindow
             case nameof(MainViewModel.IsInQueueFolder):
                 ApplyPaneAvailability();
                 break;
+            case nameof(MainViewModel.PrivateInferenceDot):
+            case nameof(MainViewModel.PrivateInferenceDotDescription):
+            case nameof(MainViewModel.TracesTabDescription):
+                ApplyTabDescriptions();
+                break;
             case null:
+                ApplyTabDescriptions();
+                RefreshNotices();
+                break;
             case nameof(MainViewModel.HasUndo):
             case nameof(MainViewModel.HasNotice):
             case nameof(MainViewModel.HasHealthBanner):
@@ -466,8 +506,10 @@ public sealed partial class MainWindow
             return;
         }
 
-        int generation = ++_moveGeneration;
-        _moveTimer?.Stop();
+        // A later move takes over from wherever the window is now
+        // (ThreePane.swift:557-562).
+        StopMoveTicks();
+        _moveRun = null;
         if (IsMaximized || ClientWidth <= 0)
         {
             _transition = null;
@@ -481,7 +523,8 @@ public sealed partial class MainWindow
         RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         var workArea = new LayoutRect(work.X, work.Y, work.Width, work.Height);
         PaneMove move = MonitorWindowGrowth.Plan(
-            outer, clientWidth, workArea, Scale, old, next, _keptMain, MonitorPaneLayout.DefaultMapWidth, _uiSettings.AnimationsEnabled);
+            outer, clientWidth, workArea, Scale, old, next, _keptMain, MonitorPaneLayout.DefaultMapWidth,
+            _uiSettings.AnimationsEnabled && _clockGate.MayTick);
         _keptMain = move.Main;
 
         if (!move.Animates)
@@ -497,32 +540,87 @@ public sealed partial class MainWindow
         _transition = new PaneTransition(old, next, MonitorPaneLayout.For(clientWidth, old.Map, old.Inspector, _keptMain).Map, _keptMain);
         ApplyMinimumSize();
         LayoutPanes();
-        var start = Stopwatch.StartNew();
-        _moveTimer ??= DispatcherQueue.CreateTimer();
-        _moveTimer.Interval = TimeSpan.FromMilliseconds(15);
-        _moveTimer.IsRepeating = true;
-        _moveTimer.Tick += Step;
-        _moveTimer.Start();
+        _moveRun = new PaneMoveRun(outer, move.Frame, old, next);
+        ApplyMoveFrame(_moveRun.At(0));
+        _moveClock.Restart();
+        StartMoveTicks();
+    }
 
-        void Step(DispatcherQueueTimer timer, object _)
+    /// <summary>
+    /// The move's clock: once a display frame (CompositionTarget.Rendering),
+    /// the rate the Mac's NSAnimationContext and SwiftUI run the window's
+    /// frame and the panes' crossfade at, not a fixed-interval timer.
+    /// </summary>
+    private void StartMoveTicks()
+    {
+        if (!_moveTicking)
         {
-            if (generation != _moveGeneration)
-            {
-                timer.Tick -= Step;
-                return;
-            }
+            _moveTicking = true;
+            CompositionTarget.Rendering += OnMoveFrame;
+        }
+    }
 
-            double progress = Math.Min(1, start.Elapsed.TotalSeconds / MonitorMotion.Standard);
-            MoveAndResize(MonitorWindowGrowth.Interpolate(outer, move.Frame, progress));
-            if (progress >= 1)
-            {
-                timer.Stop();
-                timer.Tick -= Step;
-                _transition = null;
-                _presented = next;
-                ApplyMinimumSize();
-                LayoutPanes();
-            }
+    private void StopMoveTicks()
+    {
+        if (_moveTicking)
+        {
+            _moveTicking = false;
+            CompositionTarget.Rendering -= OnMoveFrame;
+        }
+    }
+
+    private void OnMoveFrame(object? sender, object e)
+    {
+        if (_moveRun is not PaneMoveRun run)
+        {
+            StopMoveTicks();
+            return;
+        }
+
+        PaneMoveFrame frame = run.At(_moveClock.Elapsed.TotalSeconds);
+        ApplyMoveFrame(frame);
+        if (frame.Done)
+        {
+            CompleteMove(run);
+        }
+    }
+
+    /// <summary>One frame: the window's frame and the panes' opacity on the same curve.</summary>
+    private void ApplyMoveFrame(PaneMoveFrame frame)
+    {
+        if (_minimised)
+        {
+            _pendingFrame = frame.Frame;
+        }
+        else
+        {
+            MoveAndResize(frame.Frame);
+        }
+
+        MapPane.Opacity = frame.MapOpacity;
+        InspectorPane.Opacity = frame.InspectorOpacity;
+    }
+
+    private void CompleteMove(PaneMoveRun run)
+    {
+        StopMoveTicks();
+        _moveRun = null;
+        _transition = null;
+        _presented = run.Next;
+        ApplyMinimumSize();
+        LayoutPanes();
+    }
+
+    /// <summary>
+    /// A move cut short by hiding or minimising the window ends at its end
+    /// state (checklist P1): its last frame, the panes it was moving to.
+    /// </summary>
+    private void FinishMove()
+    {
+        if (_moveRun is PaneMoveRun run)
+        {
+            ApplyMoveFrame(run.End);
+            CompleteMove(run);
         }
     }
 
@@ -543,7 +641,13 @@ public sealed partial class MainWindow
         InspectorColumn.Width = new GridLength(layout.Inspector ?? 0);
         MapPane.Visibility = Visibility.Collapsed;
         InspectorPane.Visibility = layout.Inspector is null ? Visibility.Collapsed : Visibility.Visible;
-        InspectorPane.Opacity = _transition is PaneTransition t && !t.To.Inspector ? 0 : 1;
+        if (_moveRun is null)
+        {
+            // Between moves every pane shown is whole; during one, the move's
+            // frame sets the opacity (ApplyMoveFrame).
+            MapPane.Opacity = 1;
+            InspectorPane.Opacity = 1;
+        }
     }
 
     private void OnPaneRowSizeChanged(object sender, SizeChangedEventArgs e) => LayoutPanes();
@@ -663,6 +767,15 @@ public sealed partial class MainWindow
             case TitleBarRead.AfterDispatch:
                 DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
                 {
+                    if (_pendingFrame is LayoutRect pending && !_minimised)
+                    {
+                        _pendingFrame = null;
+                        if (!IsMaximized)
+                        {
+                            MoveAndResize(pending);
+                        }
+                    }
+
                     UpdateTitleBarRegions();
                     LayoutPanes();
                 });
@@ -683,7 +796,25 @@ public sealed partial class MainWindow
         if (!mayTick)
         {
             _visibilityDebounceTimer.Stop();
-            _moveTimer?.Stop();
+            FinishMove();
+            FinishNoticeMotion();
+        }
+    }
+
+    /// <summary>
+    /// Hiding to the tray stops the clocks; showing the window again is the
+    /// Mac's window opening again, so the cards closed for now come back
+    /// (the Mac keeps <c>closed</c> in the window's own state).
+    /// </summary>
+    private void SetHiddenToTray(bool hidden)
+    {
+        bool reopened = _hiddenToTray && !hidden;
+        _hiddenToTray = hidden;
+        _clockGate.SetHiddenToTray(hidden);
+        if (reopened)
+        {
+            _closedNotices.Clear();
+            RefreshNotices();
         }
     }
 
@@ -761,12 +892,12 @@ public sealed partial class MainWindow
         if (ViewModel.LegacyOffer.ShowsCard) yield return (NoticeCatalog.LegacyOffer, LegacyOfferCard);
         if (ViewModel.ShowFirstContribution) yield return (NoticeCatalog.FirstContribution, FirstContributionCard);
         if (ViewModel.HasArmingOffer) yield return (NoticeCatalog.ArmingOffer(ViewModel.ArmingOfferProjectId), ArmingOfferCard);
-        if (ViewModel.ArmingRewordingCards.Count > 0) yield return (new NoticeKind("reworded", NoticeGroup.TracesNow, NoticeRule.None), RewordingCards);
-        if (ViewModel.GrantVoidCards.Count > 0) yield return (new NoticeKind("void", NoticeGroup.TracesNow, NoticeRule.None), VoidCards);
+        if (ViewModel.GrantVoidCards.Count > 0) yield return (NoticeCatalog.GrantVoids, VoidCards);
+        if (ViewModel.ArmingRewordingCards.Count > 0) yield return (NoticeCatalog.ArmingRewordings, RewordingCards);
         if (ViewModel.HasGateHeldBanner) yield return (NoticeCatalog.GateHeld, GateHeldCard);
         if (ViewModel.HasWitnessBanner) yield return (NoticeCatalog.WitnessCapacity, WitnessCard);
         if (ViewModel.HasHealthBanner) yield return (NoticeCatalog.Health, HealthCard);
-        if (ViewModel.HasUndo) yield return (NoticeCatalog.Undo, UndoCard);
+        if (ViewModel.HasUndo) yield return (NoticeCatalog.Undo(ViewModel.UndoEntryIds), UndoCard);
         if (ViewModel.HasPrivateInferenceOffer) yield return (NoticeCatalog.PrivateAIOffer, PrivateAIOfferCard);
         if (ViewModel.HasNotice) yield return (NoticeCatalog.ActionNotice, ActionNoticeCard);
     }
@@ -780,7 +911,9 @@ public sealed partial class MainWindow
 
     /// <summary>
     /// Shows the front card of this place's stack and the plates behind it;
-    /// every other card collapsed (NoticeCatalog, NoticeStack).
+    /// every other card collapsed (NoticeCatalog, NoticeStack), except the
+    /// card that has just left the front, which fades where it is on the
+    /// stack's spring while the new one comes in (NoticeMotion).
     /// </summary>
     private void RefreshNotices()
     {
@@ -792,40 +925,75 @@ public sealed partial class MainWindow
         var present = PresentNotices().ToList();
         var elements = present.ToDictionary(p => p.Kind.Id, p => p.Card, StringComparer.Ordinal);
         IReadOnlyList<NoticeKind> shown = NoticeCatalog.Shown(NoticeMonitorPlace(), present.Select(p => p.Kind), _closedNotices);
-        foreach (FrameworkElement card in AllCards(this))
+        string[] ids = shown.Select(card => card.Id).ToArray();
+        NoticeKind? front = shown.Count == 0 ? null : shown[^1];
+        FrameworkElement? previousCard = _frontCard;
+        FrameworkElement? frontCard = front is null ? null : elements[front.Id];
+        bool frontChanged = front?.Id != _frontNotice?.Id;
+        NoticeChange change = NoticeMotion.Plan(
+            _frontNotice?.Id, front?.Id, _seenNotices, _uiSettings.AnimationsEnabled && _clockGate.MayTick);
+        _seenNotices = NoticeStack.SeenAfter(_seenNotices, ids);
+        if (frontChanged)
         {
-            card.Visibility = Visibility.Collapsed;
+            // A fade still under way from an earlier change ends now.
+            FinishOutgoing();
         }
 
-        if (shown.Count == 0)
+        foreach (FrameworkElement card in AllCards(this))
         {
-            _frontNotice = null;
+            if (card != frontCard && card != _outgoingCard)
+            {
+                card.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        _frontNotice = front;
+        _frontCard = frontCard;
+        if (front is null || frontCard is null)
+        {
             NoticeStackHost.Visibility = Visibility.Collapsed;
             return;
         }
 
-        NoticeKind front = shown[^1];
-        bool arrived = NoticeStack.Slides(front.Id, _seenNotices);
-        _seenNotices.UnionWith(shown.Select(card => card.Id));
-        FrameworkElement frontCard = elements[front.Id];
         frontCard.Visibility = Visibility.Visible;
-        if (front != _frontNotice && arrived)
+        Canvas.SetZIndex(frontCard, 1);
+        if (frontChanged)
         {
-            Arrive(frontCard);
+            ResetMotion(frontCard);
+            // The same element under a new id (a second approval's undo) has
+            // nothing to fade out: it is the card coming in.
+            if (change.Outgoing is not null && previousCard is not null && previousCard != frontCard)
+            {
+                FadeOut(previousCard);
+            }
+
+            switch (change.Entrance)
+            {
+                case NoticeEntrance.Slide:
+                    Arrive(frontCard);
+                    break;
+                case NoticeEntrance.Fade:
+                    Animate(frontCard, "Opacity", NoticeMotion.FadeIn, null);
+                    break;
+            }
         }
 
-        _frontNotice = front;
         NoticeStackHost.Visibility = Visibility.Visible;
 
         // The X: none for a card that goes only with its cause.
         NoticeClose.Visibility = front.Close == NoticeRule.None ? Visibility.Collapsed : Visibility.Visible;
-        string closeName = front.Close == NoticeRule.Declines
-            ? ViewModel.PrivateInferenceOfferDecline
-            : front.Id == NoticeCatalog.LegacyOffer.Id ? ViewModel.LegacyOffer.Dismiss : MonitorWords.Close;
+        string closeName = NoticeCatalog.CloseWordFor(front) switch
+        {
+            CloseWord.Decline => ViewModel.PrivateInferenceOfferDecline,
+            CloseWord.LegacyDismiss => ViewModel.LegacyOffer.Dismiss,
+            CloseWord.StillSends => MonitorWords.CloseNoticeStillSends,
+            CloseWord.Dismiss => MonitorWords.Dismiss,
+            _ => MonitorWords.Close,
+        };
         AutomationProperties.SetName(NoticeClose, closeName);
         ToolTipService.SetToolTip(NoticeClose, closeName);
 
-        LayoutPlates(shown.Select(card => card.Id).ToArray());
+        LayoutPlates(ids);
     }
 
     private NoticePlace NoticeMonitorPlace() => MonitorNavigation.Place(_at);
@@ -870,31 +1038,105 @@ public sealed partial class MainWindow
     }
 
     /// <summary>
-    /// A new card slides in from the top over the one it covers, on the
-    /// Mac's spring (response 0.36 s, damping 0.86; PopoverNotice.swift:238),
-    /// and fades in. Nothing moves with animations off.
+    /// A new card slides in from the top over the one it covers and fades
+    /// in, on the Mac's spring (response 0.36 s, damping 0.86;
+    /// PopoverNotice.swift:238, <c>.move(edge: .top)</c> with
+    /// <c>.opacity</c>), sampled from <see cref="NoticeMotion"/>.
     /// </summary>
     private void Arrive(FrameworkElement card)
     {
-        if (!_uiSettings.AnimationsEnabled)
+        double height = card.ActualHeight > 0 ? card.ActualHeight : NoticeFront.ActualHeight;
+        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
+        Animate(card, "Translation.Y", t => NoticeMotion.ArrivalOffset(StackAnchor.Top, height, t), null);
+        Animate(card, "Opacity", NoticeMotion.FadeIn, null);
+    }
+
+    /// <summary>
+    /// The card that left the front stays where it is, under the new one, and
+    /// fades on the same spring (PopoverNotice.swift:247 <c>removal: .opacity</c>);
+    /// then it is collapsed. It takes no input while it goes.
+    /// </summary>
+    private void FadeOut(FrameworkElement card)
+    {
+        _outgoingCard = card;
+        card.Visibility = Visibility.Visible;
+        card.IsHitTestVisible = false;
+        Canvas.SetZIndex(card, 0);
+        Animate(card, "Opacity", NoticeMotion.FadeOut, () =>
+        {
+            if (_outgoingCard == card)
+            {
+                FinishOutgoing();
+            }
+        });
+    }
+
+    /// <summary>Ends the outgoing card's fade: collapsed, whole again for its next turn in front.</summary>
+    private void FinishOutgoing()
+    {
+        if (_outgoingCard is not FrameworkElement card)
         {
             return;
         }
 
+        _outgoingCard = null;
+        ResetMotion(card);
+        card.IsHitTestVisible = true;
+        if (card != _frontCard)
+        {
+            card.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// Every notice motion at its end state: the front card in place and
+    /// whole, the outgoing card gone. For hiding the window mid-motion
+    /// (checklist P1).
+    /// </summary>
+    private void FinishNoticeMotion()
+    {
+        FinishOutgoing();
+        if (_frontCard is FrameworkElement front)
+        {
+            ResetMotion(front);
+        }
+    }
+
+    /// <summary>Stops a card's motion and puts it at rest: opaque, in its place.</summary>
+    private static void ResetMotion(FrameworkElement card)
+    {
+        Visual visual = ElementCompositionPreview.GetElementVisual(card);
+        visual.StopAnimation("Opacity");
+        visual.StopAnimation("Translation.Y");
+        visual.Opacity = 1;
+        visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="curve"/> on one of a card's composition
+    /// properties over the spring's settling time, as key frames sampled
+    /// from it 60 times a second; the compositor draws it at the display's
+    /// rate. <paramref name="completed"/> runs when it ends or is stopped.
+    /// </summary>
+    private static void Animate(FrameworkElement card, string property, Func<double, double> curve, Action? completed)
+    {
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
         Compositor compositor = visual.Compositor;
-        SpringScalarNaturalMotionAnimation slide = compositor.CreateSpringScalarAnimation();
-        slide.DampingRatio = (float)NoticeStack.SpringDamping;
-        slide.Period = TimeSpan.FromSeconds(NoticeStack.SpringResponse);
-        slide.InitialValue = -(float)Math.Max(24, card.ActualHeight);
-        slide.FinalValue = 0f;
-        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
-        visual.StartAnimation("Translation.Y", slide);
-        ScalarKeyFrameAnimation fade = compositor.CreateScalarKeyFrameAnimation();
-        fade.InsertKeyFrame(0f, 0f);
-        fade.InsertKeyFrame(1f, 1f);
-        fade.Duration = TimeSpan.FromSeconds(NoticeStack.SpringResponse);
-        visual.StartAnimation("Opacity", fade);
+        ScalarKeyFrameAnimation animation = compositor.CreateScalarKeyFrameAnimation();
+        CompositionEasingFunction linear = compositor.CreateLinearEasingFunction();
+        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(curve, NoticeMotion.SpringSettling))
+        {
+            animation.InsertKeyFrame((float)fraction, (float)value, linear);
+        }
+
+        animation.Duration = TimeSpan.FromSeconds(NoticeMotion.SpringSettling);
+        CompositionScopedBatch batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        visual.StartAnimation(property, animation);
+        batch.End();
+        if (completed is not null)
+        {
+            batch.Completed += (_, _) => completed();
+        }
     }
 
     /// <summary>What the front card's X does, by the card's rule.</summary>
@@ -907,7 +1149,7 @@ public sealed partial class MainWindow
 
         switch (front.Id)
         {
-            case "undo":
+            case string id when NoticeCatalog.IsUndo(id):
                 OnLetItSend(sender, e);
                 break;
             case "action-notice":

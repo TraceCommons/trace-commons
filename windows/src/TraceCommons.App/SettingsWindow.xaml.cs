@@ -41,11 +41,16 @@ public sealed partial class SettingsWindow : Window
             DisplayArea display = DisplayArea.GetFromWindowId(owner.Id, DisplayAreaFallback.Nearest);
             RectInt32 work = display.WorkArea;
             double scale = MonitorScale.For(owner);
+            // 780 by 640 is the Mac's content size, so it is the client
+            // area's here: sizing the outer frame left a 766 by 633 client
+            // (W2 box, 2026-11-19).
             int width = System.Math.Min(work.Width, MonitorPaneLayout.ToPhysical(DesignWidth, scale));
             int height = System.Math.Min(work.Height, MonitorPaneLayout.ToPhysical(DesignHeight, scale));
-            int x = work.X + (work.Width - width) / 2;
-            int y = work.Y + (work.Height - height) / 2;
-            AppWindow.MoveAndResize(new RectInt32(x, y, width, height));
+            AppWindow.ResizeClient(new SizeInt32(width, height));
+            SizeInt32 outer = AppWindow.Size;
+            int x = work.X + System.Math.Max(0, (work.Width - outer.Width) / 2);
+            int y = work.Y + System.Math.Max(0, (work.Height - outer.Height) / 2);
+            AppWindow.Move(new PointInt32(x, y));
         }
 
         AppWindow.Show();

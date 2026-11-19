@@ -791,9 +791,15 @@ jobs:
       # tests or skips them with that reason. That first line is the record
       # of whether GitHub's runner can render; the test box runs the same
       # executable through an /IT task with TC_RENDER_TESTS_REQUIRED=1.
+      # GitHub's windows-latest runner is interactive (session 2 on #2196),
+      # so the tests are required here too: a runner image that landed in
+      # session 0 would otherwise skip them and the job would stay green
+      # with nothing rendered.
       - name: Build and run the Win2D render tests
         working-directory: windows
         shell: pwsh
+        env:
+          TC_RENDER_TESTS_REQUIRED: "1"
         run: |
           msbuild tests/TraceCommons.RenderTests/TraceCommons.RenderTests.csproj -restore -p:Configuration=Release -p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
