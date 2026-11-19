@@ -196,7 +196,7 @@ public sealed partial class MainWindow
         }
         else
         {
-            LookLog($"ember: place at {x:F1} width {width:F1}");
+            LookLog($"ember: place x={x:F1} width={width:F1}");
             GlassComposition.Settle(TabEmber, "Translation.X", 0);
             GlassComposition.Settle(TabEmber, "Scale.X", 1);
         }
