@@ -78,6 +78,9 @@ struct InferenceTabView: View {
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
                 SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
+                // Only while Red Team's runtime is not installed and the card
+                // was not dismissed (owner, 2026-11-19); otherwise nothing.
+                RedTeamSetupPrompt(onOpenSettings: onOpenSettings)
                 ManagedSessionsSection()
                 ledgerSections
                 InferenceBalanceSection()
