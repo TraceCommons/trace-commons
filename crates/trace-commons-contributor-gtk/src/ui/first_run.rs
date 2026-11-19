@@ -148,15 +148,24 @@ fn info(title: &str, text: &str) -> gtk::MenuButton {
     button
 }
 
+/// The first-run window's size, the Mac's: every step at this size.
+pub(super) const WINDOW: (i32, i32) = (860, 760);
+/// The least it can be made, the Mac's `FirstRunProgress.minimumSize`.
+pub(super) const WINDOW_LEAST: (i32, i32) = (760, 640);
+
 pub(super) fn present(app: &Rc<App>) -> adw::Window {
     super::style::install();
     super::community_brand::install();
     let copy = first_run_copy();
+    // The Mac's first-run window (`defaultSize(width: 860, height: 760)`,
+    // `FirstRunProgress.minimumSize` 760 by 640): one size for every step.
     let window = adw::Window::builder()
         .transient_for(&app.window)
         .modal(true)
-        .default_width(680)
-        .default_height(720)
+        .default_width(WINDOW.0)
+        .default_height(WINDOW.1)
+        .width_request(WINDOW_LEAST.0)
+        .height_request(WINDOW_LEAST.1)
         .build();
     StageScheme::hold(&window);
     // The roots window's handoff ends once this window holds the stage.
@@ -259,8 +268,11 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     content.append(stage.thread());
     // Every step the same width, as the Mac's frame holds its content to
     // one column (`FirstRunFrame`).
+    // A page never widens the window: the column is its own width at most
+    // (`column`), and what a step holds that is wider (a long folder path)
+    // stays inside the window rather than growing it from step to step.
     let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::External)
         .vexpand(true)
         .child(&super::first_run_screens::column(&stack))
         .build();
@@ -2387,5 +2399,135 @@ mod dark_tests {
         );
         stage.destroy();
         main.destroy();
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    const APP_MAIN: &str =
+        include_str!("../../../../macos/Sources/TraceCommonsApp/TraceCommonsAppMain.swift");
+    const FIRST_RUN_VIEWS: &str =
+        include_str!("../../../../macos/Sources/TraceCommonsApp/Views/Monitor/FirstRunViews.swift");
+
+    /// The first-run window's size and least size are the Mac's, read from
+    /// its Swift.
+    #[test]
+    fn the_window_is_the_macs_size() {
+        let size = format!(".defaultSize(width: {}, height: {})", WINDOW.0, WINDOW.1);
+        let first_run = APP_MAIN
+            .split("Window(\"First run\"")
+            .nth(1)
+            .expect("the Mac's first-run window");
+        let scene = first_run.split("Window(").next().unwrap();
+        assert!(scene.contains(&size), "the Mac's first run is not {size}");
+        let least = format!(
+            "minimumSize = CGSize(width: {}, height: {})",
+            WINDOW_LEAST.0, WINDOW_LEAST.1
+        );
+        assert!(FIRST_RUN_VIEWS.contains(&least), "not {least}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle(context: &glib::MainContext) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn descendants(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            found.push(widget.clone());
+            descendants(&widget, found);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// The window as drawn: 860 wide on every step, at most 760 needed by
+    /// any (so the Mac's least size holds every step too), and Welcome's
+    /// title, body and both buttons centred in it, as the Mac draws them.
+    /// On main it opened 729 wide and grew to 848 between steps, Welcome
+    /// set at the left.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_every_step_is_one_window_size_and_welcome_is_centred() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.FirstRunWindowTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("tc-first-run-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, _jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        let window = present(&app);
+        settle(&context);
+        let mut all = Vec::new();
+        descendants(window.upcast_ref(), &mut all);
+        let stack = all
+            .iter()
+            .find_map(|w| w.clone().downcast::<gtk::Stack>().ok())
+            .expect("the steps");
+
+        // Welcome: every line's centre on the window's.
+        let welcome = stack.child_by_name("welcome").expect("Welcome");
+        let middle = window.width() as f32 / 2.0;
+        let mut lines = Vec::new();
+        descendants(&welcome, &mut lines);
+        let centred: Vec<gtk::Widget> = lines
+            .into_iter()
+            .filter(|w| {
+                w.is::<gtk::Button>()
+                    || (w.is::<gtk::Label>() && w.has_css_class("tc-flow-body"))
+                    || w.accessible_role() == gtk::AccessibleRole::Heading
+            })
+            .collect();
+        assert!(
+            centred.len() >= 4,
+            "title, body and two buttons: {}",
+            centred.len()
+        );
+        for line in &centred {
+            let at = line.compute_bounds(&window).expect("laid out");
+            let centre = at.x() + at.width() / 2.0;
+            assert!(
+                (centre - middle).abs() <= 2.0,
+                "{} centred at {centre}, the window at {middle}",
+                line.type_().name()
+            );
+        }
+
+        let mut names = Vec::new();
+        let pages = stack.pages();
+        for i in 0..pages.n_items() {
+            let page = pages.item(i).and_downcast::<gtk::StackPage>().unwrap();
+            if let Some(name) = page.name() {
+                names.push(name.to_string());
+            }
+        }
+        assert!(names.len() >= 7, "every step's page: {names:?}");
+        for name in &names {
+            stack.set_visible_child_name(name);
+            settle(&context);
+            assert_eq!(window.width(), WINDOW.0, "{name}: the window grew");
+            let (least, _, _, _) = window.measure(gtk::Orientation::Horizontal, -1);
+            assert!(least <= WINDOW_LEAST.0, "{name} needs {least}");
+        }
+        window.close();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
