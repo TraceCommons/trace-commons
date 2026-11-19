@@ -538,13 +538,12 @@ fn put_rail_away(app: &Rc<App>) {
 }
 
 /// The Settings section a peek's Settings button opens
-/// (`EdgeRailSettings.section`): Private AI's own; for Traces the Mac's
-/// General, which holds the rail's switch, and this shell keeps that switch
-/// under Startup.
+/// (`EdgeRailSettings.section`): Private AI's own; for Traces General,
+/// which holds the rail's switch.
 fn settings_section(peek: Peek) -> Section {
     match peek {
         Peek::PrivateAi => Section::PrivateAI,
-        Peek::Traces => Section::Startup,
+        Peek::Traces => Section::General,
     }
 }
 
@@ -1496,16 +1495,20 @@ mod tests {
     }
 
     /// The Settings button in each peek opens the Mac's section
-    /// (`EdgeRailSettings.section`): Private AI's own, and for Traces the
-    /// Mac's General, whose rail switch this shell keeps under Startup.
+    /// (`EdgeRailSettings.section`): Private AI's own, and for Traces
+    /// General, where the rail's switch is, as on the Mac.
     #[test]
     fn each_peeks_settings_open_the_macs_section() {
         assert_eq!(settings_section(Peek::PrivateAi), Section::PrivateAI);
-        assert_eq!(settings_section(Peek::Traces), Section::Startup);
+        assert_eq!(settings_section(Peek::Traces), Section::General);
+        let mac = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/EdgeRail/EdgeRailView.swift"
+        );
+        assert!(mac.contains("peek == .privateAI ? .privateAI : .general"));
         let settings = include_str!("settings.rs");
         assert!(
-            settings.contains("sections.body(Section::Startup).append(&edge_rail.card)"),
-            "the rail's switch lives under Startup"
+            settings.contains("sections.body(Section::General).append(&edge_rail.card)"),
+            "the rail's switch lives under General"
         );
         assert!(body_of("peek_header").contains("open_settings(&app, settings_section(peek))"));
     }

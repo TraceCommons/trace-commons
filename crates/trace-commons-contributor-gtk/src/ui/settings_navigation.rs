@@ -13,12 +13,13 @@ pub(crate) enum Section {
     Profile,
     Changes,
     PrivateAI,
+    General,
     Startup,
     Witness,
 }
 
 impl Section {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Account,
         Self::Watching,
         Self::Tools,
@@ -27,6 +28,7 @@ impl Section {
         Self::Profile,
         Self::Changes,
         Self::PrivateAI,
+        Self::General,
         Self::Startup,
         Self::Witness,
     ];
@@ -42,6 +44,7 @@ impl Section {
             Self::Profile => nav.profile,
             Self::Changes => nav.log,
             Self::PrivateAI => nav.private_ai,
+            Self::General => nav.general,
             Self::Startup => nav.startup,
             Self::Witness => nav.witness,
         }
@@ -50,7 +53,7 @@ impl Section {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::Watching | Self::Projects | Self::PrivateAI | Self::Startup | Self::Witness
+            Self::Watching | Self::Projects | Self::PrivateAI | Self::General | Self::Witness
         )
     }
 }
@@ -327,14 +330,16 @@ mod tests {
                 nav.profile,
                 nav.log,
                 nav.private_ai,
+                nav.general,
                 nav.startup,
                 nav.witness
             ]
         );
+        // The Mac's App group (General, Startup) starts at General.
         assert_eq!(
             Section::ALL.map(Section::starts_group),
             [
-                false, true, false, true, false, false, false, true, true, true
+                false, true, false, true, false, false, false, true, true, false, true
             ]
         );
     }
