@@ -438,3 +438,17 @@ public sealed class ReferralFlow
         return succeeded;
     }
 }
+
+/// <summary>Referral credit as money (<c>ReferralMoney.format</c>, DaemonClient+Referral.swift:16-22).</summary>
+public static class ReferralMoney
+{
+    /// <summary>The scale the referral amounts are sent in: nano-USD.</summary>
+    public const byte NanoScale = 9;
+
+    /// <summary>The core's money figure, or a dash when it gives none.</summary>
+    public static string Format(ulong nanoUsd)
+    {
+        string amount = NearAiBalanceSurface.Amount((long)Math.Min(nanoUsd, long.MaxValue), NanoScale);
+        return amount.Length > 0 ? amount : "—";
+    }
+}

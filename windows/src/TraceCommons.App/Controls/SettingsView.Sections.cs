@@ -29,7 +29,7 @@ public sealed partial class SettingsView
     /// </summary>
     private static readonly HashSet<SettingsSection> Drawn = new()
     {
-        SettingsSection.Account, SettingsSection.Payouts, SettingsSection.Watching, SettingsSection.Tools,
+        SettingsSection.Account, SettingsSection.Payouts, SettingsSection.Referrals, SettingsSection.Watching, SettingsSection.Tools,
         SettingsSection.Projects, SettingsSection.Consent, SettingsSection.PublicProfile, SettingsSection.Changes,
         SettingsSection.PrivateAI, SettingsSection.General, SettingsSection.Startup, SettingsSection.Witness,
         SettingsSection.Compute,
@@ -66,6 +66,7 @@ public sealed partial class SettingsView
         _payouts = new PayoutLinkSection(host);
         _payouts.VisibilityChanged += _ => DrawList();
         PayoutsHost.Content = _payouts;
+        ReferralsHost.Content = new ReferralsSection(host);
         GeneralHost.Content = new GeneralSection();
         ComputeHost.Content = new ComputeSection(host, AppCompute);
 

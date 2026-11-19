@@ -181,4 +181,13 @@ public class ReferralsTests
         Assert.Null(flow.Listing);
         Assert.Null(flow.Status);
     }
+
+    [Fact]
+    public void ReferralMoneyIsTheCoresFigure()
+    {
+        // ReferralMoney.format: TCNearAiBalance.amount(present: 1, nanos, scale: 9).
+        string viaCore = NativeMethods.TakeOwnedString(NativeMethods.tc_near_ai_balance_amount(1, 1_250_000_000, 9))!;
+        Assert.Equal(viaCore, ReferralMoney.Format(1_250_000_000));
+        Assert.False(string.IsNullOrEmpty(viaCore));
+    }
 }

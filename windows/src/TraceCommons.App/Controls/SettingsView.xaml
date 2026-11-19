@@ -218,6 +218,7 @@
                 </Border>
 
                 <TextBlock x:Name="RuleReferrals" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <ContentControl x:Name="ReferralsHost" HorizontalContentAlignment="Stretch" />
                 <!-- Watching: how the watcher behaves. -->
                 <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
