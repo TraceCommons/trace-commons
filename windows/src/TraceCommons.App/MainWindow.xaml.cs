@@ -380,27 +380,17 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Asks which session folders to watch, then resumes startup.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A window rather than a page: until this is answered there is no daemon,
-    /// so the queue behind it has nothing to show and no menu it offers would
-    /// work.
-    /// </para>
-    /// <para>
-    /// Discovery runs on a background thread. It counts session files
-    /// recursively under both stores, which on a working developer's machine
-    /// is thousands of them, and that is a visible hang if it happens on the
-    /// UI thread. Same reasoning as the daemon start above.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// No session roots yet. On a device never set up, the first run asks,
     /// on its Tools step, and starts the daemon there, as the Mac's does
     /// (W7); the startup this window could not finish resumes once it has.
     /// A device set up before keeps the roots window.
     /// </summary>
+    /// <remarks>
+    /// A window rather than a page: until this is answered there is no
+    /// daemon, so the queue behind it has nothing to show. Discovery runs on
+    /// a background thread: it counts session files recursively, which is a
+    /// visible hang on the UI thread.
+    /// </remarks>
     private async Task ShowSessionRootsAsync()
     {
         OnboardingState onboarding = OnboardingState.Default();
@@ -662,6 +652,19 @@ public sealed partial class MainWindow : Window
         }
         var onboarding = new FirstRunWindow(_host, state);
         onboarding.DaemonStarted += OnSessionRootsDeclared;
+        // A refused grant finished on Ask: the first run's last line, said
+        // on the queue pane once its window has gone (AppModel.firstRunNotice).
+        onboarding.Finished += line =>
+        {
+            if (line is not null)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    ViewModel.ShowQueue();
+                    ViewModel.ShowNotice(line);
+                });
+            }
+        };
         _onboarding = onboarding;
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>

@@ -66,6 +66,20 @@ public sealed partial class FirstRunWindow : Window
     private bool _reduceMotion;
     private FirstRunStep _shownStep = (FirstRunStep)(-1);
     private double? _scanEndedAt;
+    private readonly OnboardingCopy? _onboardingCopy = OnboardingCopy.Load();
+    private bool _closed;
+    private bool _contentStale;
+    private string? _shownKey;
+
+    /// <summary>A folder that matched more than one kind, waiting for the person (ToolsScreen.swift <c>PendingFolder</c>).</summary>
+    private (string Path, IReadOnlyList<string?> Kinds)? _pendingFolder;
+
+    /// <summary>The last picked folder was refused: the tile's red line (ToolsScreen.swift:791-794).</summary>
+    private bool _addRefused;
+
+    /// <summary>Join's invite field while edited, and whether its last look-up was refused.</summary>
+    private string? _inviteDraft;
+    private bool _inviteRefused;
 
     public FirstRunWindow(DaemonHost host, OnboardingState onboarding)
         : this(host, onboarding, null)
@@ -109,12 +123,20 @@ public sealed partial class FirstRunWindow : Window
             () => _host.IsRunning,
             MarkCompleteAsync,
             MarkWatchOnlyCompleteAsync,
-            _ => { },
+            // What a finished first run must still say goes to the shell's
+            // notices once this window has gone (UsesScreen.swift:244-250).
+            notice => Finished?.Invoke(_copy is null ? null : FirstRunNotices.Finished(notice, Copy.Uses)),
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
         _runner = previewAt is FirstRunStep step
             ? new FirstRunRunner(new FirstRunState { Step = step }, new RefusingFirstRunDaemon())
             : new FirstRunRunner(new FirstRunState(), daemon);
-        _runner.Changed += () => DispatcherQueue.TryEnqueue(Render);
+        _runner.Changed += () => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_closed)
+            {
+                Render();
+            }
+        });
         _model.Changed += OnModelChanged;
 
         Stage.Draw += OnDraw;
@@ -141,6 +163,10 @@ public sealed partial class FirstRunWindow : Window
         _gate.Changed += mayTick => { if (mayTick) { ReadMotionSetting(); Kick(); } else { Stop(); FinishInFlight(); } };
         Closed += (_, _) =>
         {
+            // A sign-in still waiting on the browser ends with the window:
+            // its poll would otherwise run on and draw into a closed window.
+            _closed = true;
+            _ = _runner.CancelSignIn();
             _gate.SetClosed();
             Stop();
             _painter.Dispose();
@@ -264,19 +290,20 @@ public sealed partial class FirstRunWindow : Window
     private double Scale() => Win32Dpi.ForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
 
     /// <summary>
-    /// A deep link's invite. Held and not sent: Join's invite card, which
-    /// shows the person what they would join, is not ported yet, and an
-    /// invite nobody was shown is never enrolled (checklist L5).
+    /// A deep link's invite, kept as Join's "Look up" keeps one
+    /// (<see cref="JoinInvite.Offer"/>): Join's invite card shows what would
+    /// be joined, and the sign-in there looks it up and joins it. Nothing is
+    /// sent before the person signs in (checklist L5).
     /// </summary>
     public void OfferInvite(string invite)
     {
-        _heldInvite = invite;
+        _runner.State = JoinInvite.Offer(invite, _runner.State, DeepLink.IssuerHost);
+        _contentStale = true;
+        Render();
     }
 
-    private string? _heldInvite;
-
-    /// <summary>The held invite, for the invite card when it lands.</summary>
-    internal string? HeldInvite => _heldInvite;
+    /// <summary>The first run finished; the line it must still say, or null.</summary>
+    public event Action<string?>? Finished;
 
     /// <summary>Health's Connect target: past Welcome, as Get started.</summary>
     public void GetStarted()
@@ -311,7 +338,7 @@ public sealed partial class FirstRunWindow : Window
             // Terms built while loading is built again with the document or
             // the failure line, as the Mac's TermsScreen follows its fetch:
             // it said "Loading" for good otherwise (box tc-win-az3, 2026-11-19).
-            _shownStep = (FirstRunStep)(-1);
+            _contentStale = true;
         }
 
         Render();
@@ -335,7 +362,7 @@ public sealed partial class FirstRunWindow : Window
         _options = options.ResultAs<ConsentOptionsPayload>()?.Scopes ?? new List<ConsentOption>();
         if (_options.Count > 0 && _runner.State.Step is FirstRunStep.Uses or FirstRunStep.Join)
         {
-            _shownStep = (FirstRunStep)(-1);
+            _contentStale = true;
         }
 
         Render();
@@ -509,6 +536,11 @@ public sealed partial class FirstRunWindow : Window
     /// <summary>Rebuild the current step when it changes, and its footer each time.</summary>
     private void Render()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         if (_copy is null)
         {
             // A table that will not decode is refused, not shown (FirstRunCopy.swift:325-327).
@@ -556,12 +588,26 @@ public sealed partial class FirstRunWindow : Window
 
             ApplyMotions(_reduceMotion ? now + 1e6 : now);
             DispatcherQueue.TryEnqueue(MeasureGraphic);
+            _shownKey = ContentKey(state);
+            _contentStale = false;
+        }
+        else if (_contentStale || ContentKey(state) != _shownKey)
+        {
+            // The same step with new facts (a failure's line, a commit
+            // running or ended, the sign-in waiting, a loaded document):
+            // its content is built again in place, and the stage and the
+            // thread keep their motion.
+            _shownKey = ContentKey(state);
+            _contentStale = false;
+            CurrentStep.Content = BuildStep(state.Step);
+            ApplyMotions(_reduceMotion ? Now + 1e6 : Now);
+            DispatcherQueue.TryEnqueue(MeasureGraphic);
         }
 
         Footer.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
         BackButton.Content = Copy.Frame.Back;
         BackButton.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
-        BackButton.IsEnabled = !_runner.IsCommitting;
+        BackButton.IsEnabled = !_runner.IsCommitting || BackWhileCommitting(state);
         ContinueButton.Content = state.Step == FirstRunStep.Join ? Copy.Uses.Start : Copy.Frame.ContinueButton;
         ContinueButton.IsEnabled = !_runner.IsCommitting && CanContinue(state);
         AutomationProperties.SetName(ContinueButton, (string)ContinueButton.Content);
@@ -570,14 +616,51 @@ public sealed partial class FirstRunWindow : Window
         Kick();
     }
 
+    /// <summary>
+    /// What the step's content shows that can change without a step change;
+    /// a different key builds the content again.
+    /// </summary>
+    private string ContentKey(FirstRunState state) => string.Join("|",
+        Notice(state) ?? "", _runner.IsCommitting, _runner.SignInWaiting, state.SignedIn, state.Account,
+        state.Invite, state.EnrolledInvite ?? "-", _runner.Failure?.GetType().Name ?? "",
+        _pendingFolder?.Path ?? "", _addRefused, _inviteRefused, state.AddedFolders.Count);
+
+    /// <summary>
+    /// The failed request's line under the step's content
+    /// (FirstRunFrame.swift:201-205), the step's own mapping of the runner's
+    /// failure (FoldersScreen.swift:47-73, JoinScreen.swift:193-201).
+    /// </summary>
+    private string? Notice(FirstRunState state)
+    {
+        if (_copy is null)
+        {
+            return null;
+        }
+
+        FirstRunFailure? failure = _runner.Failure;
+        string? started = _onboardingCopy?.WatcherStartFailed;
+        return state.Step switch
+        {
+            FirstRunStep.Tools => FirstRunNotices.Tools(failure, Copy, started, NearAiEnrollSurface.Line),
+            FirstRunStep.Join => FirstRunNotices.Join(failure, state, Copy, started, _privateCopy?.WriteUnconfirmed, NearAiEnrollSurface.Line),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Back while the browser sign-in waits takes the person back, ending
+    /// that sign-in as Cancel does (JoinScreenLayout.backWhileCommitting);
+    /// any other commit withdraws Back.
+    /// </summary>
+    private bool BackWhileCommitting(FirstRunState state) =>
+        state.Step == FirstRunStep.Join && _runner.Committing == CommitPoint.SignIn && _runner.SignInWaiting;
+
     private bool CanContinue(FirstRunState state) => state.Step switch
     {
         FirstRunStep.Terms => _runner.HasAcceptedTerms(true, _terms?.Version, _terms?.ContentSha256),
-        // Automatic needs both sharing disclosures and the core's ready
-        // answer before Start can grant it (SharingDisclosures.swift), which
-        // this window does not show yet: Start stays off for it.
-        FirstRunStep.Join => FirstRunNavigation.CanContinue(JoinStartState(state), RequiredScope)
-            && !(state.SharingChosen && state.Sharing == SharingPath.Automatic),
+        // Automatic goes through both sharing disclosures and the core's
+        // answer when Start is pressed (StartAsync), as on the Mac.
+        FirstRunStep.Join => FirstRunNavigation.CanContinue(JoinStartState(state), RequiredScope) && !_starting,
         _ => FirstRunNavigation.CanContinue(state, RequiredScope),
     };
 
@@ -607,8 +690,7 @@ public sealed partial class FirstRunWindow : Window
                 _runner.ContinueFromTerms(true, _terms?.Version, _terms?.ContentSha256);
                 break;
             case FirstRunStep.Join:
-                _runner.State = JoinStartState(state);
-                await _runner.Commit(CommitPoint.Start);
+                await StartAsync();
                 break;
             default:
                 _runner.State = FirstRunNavigation.Next(state);
@@ -618,8 +700,152 @@ public sealed partial class FirstRunWindow : Window
         Render();
     }
 
-    private void OnBack(object sender, RoutedEventArgs e)
+    private bool _starting;
+
+    /// <summary>A refusal decided before a Start that then failed, said once one succeeds (UsesStart, UsesScreen.swift:275-309).</summary>
+    private FirstRunFailure? _pendingRefusal;
+
+    private AutomaticGrantCopy? _grantCopy;
+    private bool _grantCopyRead;
+
+    /// <summary>
+    /// Start sharing (JoinScreen.swift:712-760): the required use included;
+    /// on Automatic, the scrub and witness disclosures first, then the
+    /// core's answer decides the state Start commits (Automatic with the
+    /// grant ready, or Ask with the refusal said). Cancel on either sheet
+    /// grants nothing and starts nothing.
+    /// </summary>
+    private async Task StartAsync()
     {
+        _starting = true;
+        Render();
+        try
+        {
+            _runner.State = JoinStartState(_runner.State);
+            FirstRunFailure? refused = null;
+            bool decidedNow = false;
+            if (SharingDisclosureFlow.IsNeeded(_runner.State))
+            {
+                if (!_grantCopyRead)
+                {
+                    string dir = _host.ConfigDir;
+                    _grantCopy = await Task.Run(() => AutomaticGrantCopy.Load(dir)).ConfigureAwait(true);
+                    _grantCopyRead = true;
+                }
+
+                var flow = new SharingDisclosureFlow();
+                Flow1GrantRequest? request = null;
+                if (_grantCopy is { } grant)
+                {
+                    if (!await ShowDisclosuresAsync(flow, grant))
+                    {
+                        return;
+                    }
+
+                    DaemonResponse status = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+                    bool connected = status.ResultAs<DaemonStatus>()?.LoggedIn == true;
+                    string progress = flow.ProgressJson(connected, _runner.State.Scopes);
+                    request = await Task.Run(() => Flow1GrantRequest.Ask(progress)).ConfigureAwait(true);
+                }
+
+                (FirstRunState next, refused) = SharingDisclosureFlow.Resolve(_runner.State, request);
+                _runner.State = next;
+                decidedNow = true;
+            }
+
+            FirstRunFailure? carried = decidedNow ? refused : _pendingRefusal;
+            await _runner.Commit(CommitPoint.Start, carried);
+            if (_runner.Completed)
+            {
+                _pendingRefusal = null;
+                return;
+            }
+
+            // A Start that failed keeps the refusal for the retry; the
+            // failure it stopped on is what the step says now.
+            _pendingRefusal = _runner.Failure is FirstRunFailure.CompleteFailed ? _runner.RefusedGrant ?? carried : carried;
+        }
+        finally
+        {
+            _starting = false;
+            Render();
+        }
+    }
+
+    /// <summary>
+    /// The two sheets, one at a time (SharingDisclosureSheet,
+    /// SharingDisclosures.swift:104-205): the scrub lines, then the route
+    /// disclosure. Continue is never the default button, so a stray Enter
+    /// passes no disclosure; a disclosure that cannot be read keeps Continue
+    /// off. False when the person cancelled.
+    /// </summary>
+    private async Task<bool> ShowDisclosuresAsync(SharingDisclosureFlow flow, AutomaticGrantCopy grant)
+    {
+        var scrub = new StackPanel { Spacing = 10 };
+        foreach (string line in grant.Lines)
+        {
+            scrub.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
+        }
+
+        if (await Sheet(WatchCopy.Armed, scrub, true) != ContentDialogResult.Primary || _closed)
+        {
+            return false;
+        }
+
+        flow.AcknowledgeScrub();
+        DaemonResponse facts = await _host.CallAsync(DaemonProtocol.Methods.RouteDisclosure).ConfigureAwait(true);
+        RouteDisclosure? disclosure = facts.IsError || facts.Result is null ? null : RouteDisclosureSurface.ForFacts(facts.Result.Value.GetRawText());
+        RouteDisclosureUnreadable? unreadable = disclosure is null ? RouteDisclosureSurface.Unreadable() : null;
+        var body = new StackPanel { Spacing = 8 };
+        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(disclosure, unreadable))
+        {
+            body.Children.Add(new TextBlock
+            {
+                Text = row.Value.Length > 0 ? row.Text + " " + row.Value : row.Text,
+                TextWrapping = TextWrapping.Wrap,
+                FontWeight = row.IsHeading ? FontWeights.SemiBold : FontWeights.Normal,
+            });
+        }
+
+        string title = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
+        if (await Sheet(title.Length > 0 ? title : WatchCopy.Armed, body, disclosure is not null) != ContentDialogResult.Primary || _closed)
+        {
+            return false;
+        }
+
+        flow.AcknowledgeWitness(disclosure?.Facts.Witness?.SigningAddress);
+        return flow.Step == DisclosureStep.Done;
+    }
+
+    private async Task<ContentDialogResult> Sheet(string title, UIElement body, bool canContinue)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = new ScrollViewer { Content = body, MaxHeight = 420 },
+            PrimaryButtonText = Copy.Frame.ContinueButton,
+            CloseButtonText = Copy.Frame.Cancel,
+            DefaultButton = ContentDialogButton.None,
+            IsPrimaryButtonEnabled = canContinue,
+            XamlRoot = Root.XamlRoot,
+            RequestedTheme = ElementTheme.Dark,
+        };
+        return await dialog.ShowAsync();
+    }
+
+    private async void OnBack(object sender, RoutedEventArgs e)
+    {
+        if (_runner.IsCommitting)
+        {
+            if (BackWhileCommitting(_runner.State))
+            {
+                await _runner.BackFromSignIn();
+                Render();
+            }
+
+            return;
+        }
+
         _runner.State = FirstRunNavigation.Back(_runner.State);
         Render();
     }
@@ -687,7 +913,26 @@ public sealed partial class FirstRunWindow : Window
         AutomationProperties.SetName(title, light + bold);
         panel.Children.Add(title);
         panel.Children.Add(content);
+        if (Notice(_runner.State) is { } notice)
+        {
+            panel.Children.Add(Alert(notice, 560));
+        }
+
         return panel;
+    }
+
+    /// <summary>
+    /// GlassAlert (StatCard.swift:124-138): the failed request's red line,
+    /// unboxed, caption size, under the step's content (FirstRunFrame.swift:201-205).
+    /// </summary>
+    private static TextBlock Alert(string line, double maxWidth)
+    {
+        TextBlock alert = Text(line, 12, FirstRunTokens.StatusOutsideText);
+        alert.MaxWidth = maxWidth;
+        alert.Margin = new Thickness(0, 12, 0, 0);
+        alert.TextAlignment = TextAlignment.Left;
+        AutomationProperties.SetLiveSetting(alert, AutomationLiveSetting.Assertive);
+        return alert;
     }
 
     // ---- Welcome ------------------------------------------------------------
@@ -788,16 +1033,20 @@ public sealed partial class FirstRunWindow : Window
 
     /// <summary>
     /// ToolChecks (ToolsScreen.swift:589-700): one row per found tool with
-    /// the marker check, nothing ticked, rising after the scan.
+    /// the marker check, nothing ticked, rising after the scan; then the
+    /// folders added with the tile, each a row of its own; then the add
+    /// tile, which is how a computer with none of the tools is set up.
     /// </summary>
     private UIElement ToolsList()
     {
+        FirstRunState state = _runner.State;
+        bool enabled = !_runner.IsCommitting;
         var list = new StackPanel { Padding = new Thickness(28, 4, 28, 4) };
         var rows = FirstRunStageLayout.RingRows(_discovered.Where(c => c.Exists), c => c.Source);
         for (int i = 0; i < rows.Count; i++)
         {
             SourceCandidate row = rows[i];
-            string name = _names.TryGetValue(row.Source, out string? n) ? n : row.Source;
+            string name = ToolName(row.Source);
             var line = new Grid { Height = rows.Count > 3 ? 36 : 44, ColumnSpacing = 16 };
             line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -807,27 +1056,219 @@ public sealed partial class FirstRunWindow : Window
             label.MinWidth = 150;
             line.Children.Add(label);
             string question = FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name });
-            MarkerCheckButton check = MarkerCheck(question, _runner.State.RowAnswer(row.Source).Kind == ToolChoiceKind.Watch, on =>
+            MarkerCheckButton check = MarkerCheck(question, state.RowAnswer(row.Source).Kind == ToolChoiceKind.Watch, on =>
             {
                 _runner.State.Answer(row.Source, on ? ToolChoice.Watch(row.Path) : ToolChoice.Off);
-                _model.SetWatched(_runner.State.ToolAnswers.Where(p => p.Value.Kind == ToolChoiceKind.Watch).Select(p => p.Key), Now);
-                Render();
+                WatchedChanged();
             });
+            check.IsEnabled = enabled;
             Grid.SetColumn(check, 1);
             line.Children.Add(check);
             RowRise(line, i, check);
             list.Children.Add(line);
         }
 
+        foreach (AddedFolder folder in ToolsAdding.AddedRows(state))
+        {
+            string name = ToolsAdding.FolderName(folder.Path);
+            AddedFolder f = folder;
+            list.Children.Add(FolderRow(name, folder.Path, Copy.Tools.AddedByYou, MarkerCheckFor(
+                FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name }), folder.Watched == true,
+                on =>
+                {
+                    _runner.State.AnswerAdded(f.Path, on);
+                    WatchedChanged();
+                }, enabled)));
+            if (ToolsAdding.Conflict(folder, state, Copy.Tools, ToolName) is { } conflict)
+            {
+                TextBlock note = Text(conflict, 12, FirstRunTokens.TextSecondary);
+                note.HorizontalAlignment = HorizontalAlignment.Left;
+                note.TextAlignment = TextAlignment.Left;
+                note.MaxWidth = 420;
+                list.Children.Add(note);
+            }
+        }
+
+        if (ToolsAdding.TrajectoryFolder(state) is { } trajectory)
+        {
+            string name = ToolsAdding.Name(null, Copy.Tools, ToolName);
+            list.Children.Add(FolderRow(name, trajectory.Path, Copy.Tools.AddedByYou, MarkerCheckFor(
+                FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name }), true,
+                on =>
+                {
+                    ToolsAdding.SelectTrajectory(on, _runner.State);
+                    _contentStale = true;
+                    WatchedChanged();
+                }, enabled)));
+        }
+
+        if (_pendingFolder is { } pending)
+        {
+            var picker = new ComboBox { PlaceholderText = Copy.Frame.Choose, IsEnabled = enabled, VerticalAlignment = VerticalAlignment.Center };
+            string question = ToolsAdding.Question(pending.Path, Copy.Tools);
+            AutomationProperties.SetName(picker, question);
+            ToolTipService.SetToolTip(picker, question);
+            foreach (string? kind in pending.Kinds)
+            {
+                picker.Items.Add(ToolsAdding.Name(kind, Copy.Tools, ToolName));
+            }
+
+            picker.Items.Add(Copy.Tools.Neither);
+            picker.SelectionChanged += (_, _) =>
+            {
+                int index = picker.SelectedIndex;
+                if (index < 0)
+                {
+                    return;
+                }
+
+                int? kind = index < pending.Kinds.Count ? index : null;
+                if (ToolsAdding.Answer(kind, pending.Path, pending.Kinds, _runner.State))
+                {
+                    _pendingFolder = null;
+                    WatchedChanged();
+                }
+            };
+            list.Children.Add(FolderRow(ToolsAdding.FolderName(pending.Path), pending.Path, null, picker));
+        }
+
+        var column = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
         Border card = Card(list, 0, 4);
+        card.Visibility = list.Children.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        column.Children.Add(card);
+        FrameworkElement tile = AddToolTile(enabled);
+        column.Children.Add(tile);
+        // The tile rises after the found rows, as the next row (ToolsScreen.swift:604).
+        RowRise(tile, rows.Count, (Control)((StackPanel)tile).Children[0]);
         double opened = Now;
         _motions.Add((t =>
         {
             double since = _scanEndedAt is double end ? t - end : double.NegativeInfinity;
-            card.Opacity = since < 0 ? 0 : FirstRunMotion.CardOpacity(since, _reduceMotion);
-            card.IsHitTestVisible = card.Opacity > 0.98;
+            column.Opacity = since < 0 ? 0 : FirstRunMotion.CardOpacity(since, _reduceMotion);
+            column.IsHitTestVisible = column.Opacity > 0.98;
         }, t => !_model.ToolsScanned || (_scanEndedAt is double end && t - end < FirstRunMotion.CardFade)));
-        return card;
+        return column;
+    }
+
+    private string ToolName(string kind) => _names.TryGetValue(kind, out string? n) ? n : kind;
+
+    /// <summary>The stage's watched tools follow the state, and Continue with them.</summary>
+    private void WatchedChanged()
+    {
+        _model.SetWatched(FirstRunStageLayout.RingOrder.Where(k => _runner.State.SessionRoots[k].Kind == ToolChoiceKind.Watch), Now);
+        Render();
+    }
+
+    private MarkerCheckButton MarkerCheckFor(string name, bool on, Action<bool> changed, bool enabled)
+    {
+        MarkerCheckButton check = MarkerCheck(name, on, changed);
+        check.IsEnabled = enabled;
+        return check;
+    }
+
+    /// <summary>
+    /// A folder's row (ToolsScreen.swift:701-727): its name, "Added by you"
+    /// or its path, the full path as the row's tooltip, and its control.
+    /// </summary>
+    private static Grid FolderRow(string name, string path, string? meta, Control trailing)
+    {
+        var line = new Grid { MinHeight = 44, ColumnSpacing = 16 };
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var words = new StackPanel { VerticalAlignment = VerticalAlignment.Center, MinWidth = 150, MaxWidth = 280 };
+        TextBlock title = Text(name, 14, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
+        title.HorizontalAlignment = HorizontalAlignment.Left;
+        title.TextWrapping = TextWrapping.NoWrap;
+        title.TextTrimming = TextTrimming.CharacterEllipsis;
+        words.Children.Add(title);
+        TextBlock sub = Text(meta ?? path, 12, FirstRunTokens.TextSecondary);
+        sub.HorizontalAlignment = HorizontalAlignment.Left;
+        sub.TextWrapping = TextWrapping.NoWrap;
+        sub.TextTrimming = TextTrimming.CharacterEllipsis;
+        words.Children.Add(sub);
+        ToolTipService.SetToolTip(words, path);
+        line.Children.Add(words);
+        trailing.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(trailing, 1);
+        line.Children.Add(trailing);
+        return line;
+    }
+
+    /// <summary>
+    /// The add row (AddToolTile, ToolsScreen.swift:757-810): a dashed
+    /// rounded tile that picks a folder, which the core describes off the UI
+    /// thread; a refused folder shows the core's red line under it.
+    /// </summary>
+    private FrameworkElement AddToolTile(bool enabled)
+    {
+        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+        var plus = new FontIcon { Glyph = "\uE710", FontSize = 11, FontFamily = new FontFamily(FirstRunStagePainter.IconFamily), Foreground = Brush(FirstRunTokens.TextSecondary) };
+        AutomationProperties.SetAccessibilityView(plus, AccessibilityView.Raw);
+        label.Children.Add(plus);
+        label.Children.Add(Text(Copy.Tools.AddTool, 13, FirstRunTokens.TextSecondary));
+        var outline = new Rectangle
+        {
+            RadiusX = 12,
+            RadiusY = 12,
+            Stroke = Brush(FirstRunTokens.FirstRunRule),
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 4, 3 },
+            IsHitTestVisible = false,
+        };
+        var face = new Grid { Height = 36, Padding = new Thickness(32, 0, 32, 0) };
+        face.Children.Add(outline);
+        face.Children.Add(label);
+        var button = new Button
+        {
+            Content = face,
+            Padding = new Thickness(0),
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            IsEnabled = enabled,
+        };
+        AutomationProperties.SetName(button, Copy.Tools.AddTool);
+        AutomationProperties.SetHelpText(button, Copy.Tools.AddToolCaption);
+        ToolTipService.SetToolTip(button, Copy.Tools.AddToolCaption);
+        button.Click += async (_, _) => await PickToolFolderAsync();
+        var tile = new StackPanel { Spacing = 6, MinWidth = 320 };
+        tile.Children.Add(button);
+        if (_addRefused)
+        {
+            tile.Children.Add(Alert(Copy.Tools.AddToolRefused, 420));
+        }
+
+        return tile;
+    }
+
+    /// <summary>
+    /// Pick a folder and describe it (AddToolModel.describe): its answer
+    /// lands only while Tools is up and nothing is committing
+    /// (<see cref="ToolsAdding.AcceptsFolder"/>).
+    /// </summary>
+    private async Task PickToolFolderAsync()
+    {
+        var picker = new Windows.Storage.Pickers.FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        Windows.Storage.StorageFolder? folder = await picker.PickSingleFolderAsync();
+        if (folder is null || _closed)
+        {
+            return;
+        }
+
+        string path = folder.Path;
+        string? json = await Task.Run(() => ToolsAdding.Describe(path)).ConfigureAwait(true);
+        if (_closed || !ToolsAdding.AcceptsFolder(_runner.State.Step, _runner.IsCommitting))
+        {
+            return;
+        }
+
+        AddToolOutcome outcome = ToolsAdding.Outcome(path, json);
+        _addRefused = !ToolsAdding.Apply(outcome, _runner.State);
+        _pendingFolder = outcome is AddToolOutcome.Ask ask ? (ask.Path, ask.Kinds) : null;
+        WatchedChanged();
     }
 
     /// <summary>RowRise (ToolsScreen.swift:740-751).</summary>
@@ -954,63 +1395,106 @@ public sealed partial class FirstRunWindow : Window
         // The Mac's titles and lines (UsesSharing): Automatic by the core's
         // mode name, its scope and sign-in lines under the choices.
         IReadOnlyList<UsesSharing.Option> sharing = UsesSharing.Options(_runner.State, Copy.Uses, WatchCopy.Armed);
-        panel.Children.Add(Segmented(Copy.Uses.Sharing, sharing.Select(o => (o.Title, o.Path)).ToArray()));
-        foreach (UsesSharing.Option option in sharing)
-        {
-            foreach (string line in option.Lines)
-            {
-                TextBlock sub = Text(line, 12, FirstRunTokens.TextTertiary);
-                sub.HorizontalAlignment = HorizontalAlignment.Left;
-                sub.TextAlignment = TextAlignment.Left;
-                panel.Children.Add(sub);
-            }
-        }
-
+        panel.Children.Add(SharingRadios(Copy.Uses.Sharing, sharing));
         return Card(panel, 24, 12);
     }
 
-    /// <summary>FirstRunSegmented (FirstRunStage.swift:410-455): the chosen pill fills over 0.15 s.</summary>
-    private UIElement Segmented(string label, (string Title, SharingPath Value)[] options)
+    /// <summary>
+    /// GlassRadioGroup (Forms.swift:140-175, UsesScreen.swift:710-717): one
+    /// radio per sharing path, its title and, under it, that option's own
+    /// lines; nothing chosen for the person (owner, 2026-10-27).
+    /// </summary>
+    private UIElement SharingRadios(string label, IReadOnlyList<UsesSharing.Option> options)
     {
-        var well = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Padding = new Thickness(2), CornerRadius = new CornerRadius(13), Background = Brush(FirstRunTokens.WellFill), HorizontalAlignment = HorizontalAlignment.Left };
-        AutomationProperties.SetName(well, label);
-        var since = new Dictionary<SharingPath, double?>();
-        foreach (var (title, value) in options)
+        var group = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Left };
+        AutomationProperties.SetName(group, label);
+        string groupName = "sharing-" + Guid.NewGuid().ToString("N");
+        foreach (UsesSharing.Option option in options)
         {
-            bool chosen = _runner.State.SharingChosen && _runner.State.Sharing == value;
-            var pill = new ToggleButton { Content = title, IsChecked = chosen, Height = 22, Padding = new Thickness(10, 0, 10, 0), CornerRadius = new CornerRadius(11), BorderThickness = new Thickness(0), FontSize = 12 };
-            AutomationProperties.SetName(pill, title);
-            since[value] = null;
-            pill.Click += (_, _) =>
+            var words = new StackPanel { Spacing = 1 };
+            TextBlock title = Text(option.Title, 13, FirstRunTokens.TextPrimary);
+            title.HorizontalAlignment = HorizontalAlignment.Left;
+            title.TextAlignment = TextAlignment.Left;
+            words.Children.Add(title);
+            if (option.Lines.Count > 0)
+            {
+                TextBlock sub = Text(string.Join("\n", option.Lines), 12, FirstRunTokens.TextSecondary);
+                sub.HorizontalAlignment = HorizontalAlignment.Left;
+                sub.TextAlignment = TextAlignment.Left;
+                sub.MaxWidth = 460;
+                words.Children.Add(sub);
+            }
+
+            var radio = new RadioButton
+            {
+                Content = words,
+                GroupName = groupName,
+                IsChecked = _runner.State.SharingChosen && _runner.State.Sharing == option.Path,
+            };
+            AutomationProperties.SetName(radio, option.Title);
+            if (option.Lines.Count > 0)
+            {
+                AutomationProperties.SetHelpText(radio, string.Join(" ", option.Lines));
+            }
+
+            SharingPath path = option.Path;
+            radio.Checked += (_, _) =>
             {
                 FirstRunState s = _runner.State;
-                s.Sharing = value;
+                if (s.SharingChosen && s.Sharing == path)
+                {
+                    return;
+                }
+
+                s.Sharing = path;
                 s.SharingChosen = true;
-                double now = Now;
-                foreach (var key in since.Keys.ToList())
-                {
-                    since[key] = now;
-                }
-
-                _model.SetSharing(value, now);
-                foreach (ToggleButton other in well.Children.OfType<ToggleButton>())
-                {
-                    other.IsChecked = ReferenceEquals(other, pill);
-                }
-
+                _model.SetSharing(path, Now);
                 Render();
             };
-            _motions.Add((t =>
-            {
-                bool on = _runner.State.SharingChosen && _runner.State.Sharing == value;
-                double p = FirstRunMotion.PillChosen(on, since[value] is double s ? t - s : null, _reduceMotion);
-                pill.Background = new SolidColorBrush(Lerp(0x00000000, FirstRunTokens.ToggleOn, p));
-                pill.Foreground = new SolidColorBrush(Lerp(FirstRunTokens.TextPrimary, FirstRunTokens.TextOnAccent, p));
-            }, t => since[value] is double s && t - s < FirstRunMotion.PillFill));
-            well.Children.Add(pill);
+            group.Children.Add(radio);
         }
 
-        return well;
+        return group;
+    }
+
+    /// <summary>
+    /// A glow under <paramref name="shape"/>: a composition drop shadow in
+    /// firstRunGlow, masked by the element's own alpha, blurred to
+    /// <paramref name="radius"/>, placed in <paramref name="host"/> behind it.
+    /// The returned setter takes its opacity (0 to 1).
+    /// </summary>
+    private static Func<double, bool> Glow(Panel host, FrameworkElement shape, double radius)
+    {
+        var compositor = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(host).Compositor;
+        var shadow = compositor.CreateDropShadow();
+        shadow.BlurRadius = (float)radius;
+        shadow.Color = FirstRunStagePainter.Argb(FirstRunTokens.FirstRunGlow);
+        shadow.Offset = System.Numerics.Vector3.Zero;
+        shadow.Opacity = 0;
+        var sprite = compositor.CreateSpriteVisual();
+        sprite.Shadow = shadow;
+        var layer = new Canvas { IsHitTestVisible = false };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(layer, AccessibilityView.Raw);
+        host.Children.Add(layer);
+        Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.SetElementChildVisual(layer, sprite);
+        void Fit()
+        {
+            sprite.Size = new System.Numerics.Vector2((float)shape.ActualWidth, (float)shape.ActualHeight);
+            shadow.Mask = shape switch
+            {
+                TextBlock t => t.GetAlphaMask(),
+                Shape sh => sh.GetAlphaMask(),
+                _ => null,
+            };
+        }
+
+        shape.SizeChanged += (_, _) => Fit();
+        shape.Loaded += (_, _) => Fit();
+        return opacity =>
+        {
+            shadow.Opacity = (float)Math.Clamp(opacity, 0, 1);
+            return true;
+        };
     }
 
     private static Windows.UI.Color Lerp(uint a, uint b, double p)
@@ -1089,14 +1573,22 @@ public sealed partial class FirstRunWindow : Window
     // ---- Join -------------------------------------------------------------
 
     /// <summary>
-    /// Join (JoinScreen.swift:346-520): the NEAR AI sign-in, which Start
-    /// needs; no wallet path in the first run (W7-D1 (a)).
+    /// Join (JoinScreen.swift:346-520): the invite card while an invite is
+    /// held, then the NEAR AI sign-in, which Start needs; no wallet path in
+    /// the first run (W7-D1 (a)). Cancel sits beside the sign-in while the
+    /// browser sign-in waits.
     /// </summary>
     private UIElement JoinCard()
     {
         JoinWords join = Copy.Join;
         FirstRunState state = _runner.State;
-        var panel = new StackPanel { Spacing = 8, MaxWidth = 460 };
+        var column = new StackPanel { Spacing = 12, MaxWidth = 460 };
+        if (JoinInvite.ShowsCard(state))
+        {
+            column.Children.Add(InviteCard());
+        }
+
+        var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(Text(join.NearAiEyebrow, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
         panel.Children.Add(Text(join.NearAiText, 14, FirstRunTokens.TextPrimary));
         if (state.SignedIn)
@@ -1105,7 +1597,20 @@ public sealed partial class FirstRunWindow : Window
         }
         else
         {
-            var signIn = new Button { Content = join.NearAiSignIn, HorizontalAlignment = HorizontalAlignment.Center, IsEnabled = !_runner.IsCommitting };
+            var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+            if (_runner.SignInWaiting)
+            {
+                var cancel = new Button { Content = Copy.Frame.Cancel };
+                AutomationProperties.SetName(cancel, Copy.Frame.Cancel);
+                cancel.Click += async (_, _) =>
+                {
+                    await _runner.CancelSignIn();
+                    Render();
+                };
+                actions.Children.Add(cancel);
+            }
+
+            var signIn = new Button { Content = join.NearAiSignIn, IsEnabled = !_runner.IsCommitting };
             AutomationProperties.SetName(signIn, join.NearAiSignIn);
             signIn.Click += async (_, _) =>
             {
@@ -1116,15 +1621,11 @@ public sealed partial class FirstRunWindow : Window
                     _model.SignedIn(Now);
                 }
 
-                _shownStep = (FirstRunStep)(-1);
+                _contentStale = true;
                 Render();
             };
-            panel.Children.Add(signIn);
-        }
-
-        if (FailureLine(_runner.Failure) is { } line)
-        {
-            panel.Children.Add(Text(line, 13, FirstRunTokens.TextSecondary));
+            actions.Children.Add(signIn);
+            panel.Children.Add(actions);
         }
 
         Border card = Card(panel, 24, 16);
@@ -1138,23 +1639,105 @@ public sealed partial class FirstRunWindow : Window
 
         _motions.Add((t => card.BorderBrush = new SolidColorBrush(Lerp(0x00000000, FirstRunTokens.ToggleOn, FirstRunMotion.JoinChosen(chosen, since is double s ? t - s : null, _reduceMotion))),
             t => since is double s && t - s < FirstRunMotion.JoinBorder));
-        return card;
+        column.Children.Add(card);
+        // Why near.ai is no longer chosen, under its card (JoinScreen.swift:506-508).
+        if (FirstRunNotices.JoinNearAI(state, _runner.Failure, Copy, NearAiEnrollSurface.Line) is { } notice)
+        {
+            column.Children.Add(Alert(notice, 460));
+        }
+
+        return column;
     }
 
-    /// <summary>The core's line for a failed commit (FoldersCopy and UsesCopy failure words).</summary>
-    private string? FailureLine(FirstRunFailure? failure) => failure switch
+    /// <summary>
+    /// The invite card (JoinScreen.swift:567-612): the invite field and Look
+    /// up, read-only once an invite is enrolled, and its status line: the
+    /// host it would join, what was joined, or why not.
+    /// </summary>
+    private UIElement InviteCard()
     {
-        FirstRunFailure.SignInFailed => Copy.Folders.SignInFailed,
-        FirstRunFailure.LookupUnavailable => Copy.Folders.LookupUnavailable,
-        FirstRunFailure.EnrollFailed => Copy.Folders.EnrollRefused,
-        FirstRunFailure.SettingsFailed => Copy.Folders.SettingsFailed,
-        FirstRunFailure.ScopesFailed => Copy.Uses.ScopesFailed,
-        FirstRunFailure.RulesFailed => Copy.Uses.RulesFailed,
-        FirstRunFailure.PrivateAIFailed => Copy.Uses.PrivateAiFailed,
-        FirstRunFailure.CompleteFailed => Copy.Uses.CompleteFailed,
-        FirstRunFailure.SharingFailed => Copy.Uses.SharingSaveFailed,
-        _ => null,
-    };
+        JoinWords join = Copy.Join;
+        FirstRunState state = _runner.State;
+        var panel = new StackPanel { Spacing = 6 };
+        if (JoinInvite.ShowsField(state))
+        {
+            bool editable = JoinInvite.IsEditable(state) && !_runner.IsCommitting;
+            var row = new Grid { ColumnSpacing = 8 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var field = new TextBox { Header = join.InviteEyebrow, PlaceholderText = join.InvitePlaceholder, Text = _inviteDraft ?? state.Invite, IsEnabled = editable };
+            AutomationProperties.SetName(field, join.InviteEyebrow);
+            var lookUp = new Button { Content = join.LookUp, VerticalAlignment = VerticalAlignment.Bottom, IsEnabled = editable && JoinInvite.CanLookUp(field.Text, state) };
+            AutomationProperties.SetName(lookUp, join.LookUp);
+            field.TextChanged += (_, _) =>
+            {
+                _inviteDraft = field.Text;
+                _inviteRefused = false;
+                lookUp.IsEnabled = editable && JoinInvite.CanLookUp(field.Text, _runner.State);
+            };
+            void LookUp()
+            {
+                if (!JoinInvite.IsEditable(_runner.State))
+                {
+                    return;
+                }
+
+                var looked = JoinInvite.LookUp(_inviteDraft ?? _runner.State.Invite, _runner.State, _runner.Failure, DeepLink.IssuerHost);
+                _runner.State = looked.State;
+                _runner.Failure = looked.Failure;
+                _inviteRefused = looked.Outcome == JoinLookUpOutcome.Refused;
+                if (!_inviteRefused)
+                {
+                    _inviteDraft = null;
+                }
+
+                _contentStale = true;
+                Render();
+            }
+
+            lookUp.Click += (_, _) => LookUp();
+            field.KeyDown += (_, e) =>
+            {
+                if (e.Key == Windows.System.VirtualKey.Enter)
+                {
+                    LookUp();
+                }
+            };
+            row.Children.Add(field);
+            Grid.SetColumn(lookUp, 1);
+            row.Children.Add(lookUp);
+            panel.Children.Add(row);
+        }
+        else
+        {
+            TextBlock eyebrow = Text(join.InviteEyebrow, 14, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
+            eyebrow.HorizontalAlignment = HorizontalAlignment.Left;
+            panel.Children.Add(eyebrow);
+        }
+
+        switch (JoinInvite.Line(state, _runner.Lookup?.Json, _runner.Failure, join, _inviteRefused))
+        {
+            case JoinInviteLine.Host host:
+                panel.Children.Add(StatusLine(host.Name, FirstRunTokens.TextSecondary));
+                break;
+            case JoinInviteLine.Joined joined:
+                panel.Children.Add(StatusLine(joined.Line, FirstRunTokens.ToggleOn));
+                break;
+            case JoinInviteLine.Error error:
+                panel.Children.Add(Alert(error.Line, 420));
+                break;
+        }
+
+        return Card(panel, 18, 14);
+    }
+
+    private static TextBlock StatusLine(string line, uint argb)
+    {
+        TextBlock t = Text(line, 12, argb);
+        t.HorizontalAlignment = HorizontalAlignment.Left;
+        t.TextAlignment = TextAlignment.Left;
+        return t;
+    }
 
     // ---- The thread -------------------------------------------------------------
 
@@ -1190,7 +1773,13 @@ public sealed partial class FirstRunWindow : Window
                 }
 
                 bool isCurrent = current == i, passed = current is int cur && i < cur;
-                var title = new TextBlock { Text = labels[i], FontSize = 13, Margin = new Thickness(10, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
+                var title = new TextBlock { Text = labels[i], FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+                // The lit title's glow, firstRunGlow at 0.35, radius 7
+                // (FirstRunStage.swift:210-211), drawn under the words from
+                // their own shape and lit with them.
+                var cell = new Grid { Margin = new Thickness(FirstRunStepThread.TitlePadding, 0, FirstRunStepThread.TitlePadding, 0), VerticalAlignment = VerticalAlignment.Center };
+                Func<double, bool> setGlow = Glow(cell, title, FirstRunStepThread.TitleGlow);
+                cell.Children.Add(title);
                 bool wasCurrent = before == i;
                 int at = i;
                 _motions.Add((t =>
@@ -1199,10 +1788,11 @@ public sealed partial class FirstRunWindow : Window
                     uint rest = passed ? FirstRunTokens.TextSecondary : FirstRunTokens.TextTertiary;
                     title.Foreground = new SolidColorBrush(Lerp(rest, FirstRunTokens.TextPrimary, lit));
                     title.FontWeight = lit >= 0.5 ? FontWeights.SemiBold : FontWeights.Medium;
+                    setGlow(FirstRunStepThread.GlowAlpha * lit);
                 }, t => t - now < FirstRunMotion.TitleGlowDelay + FirstRunMotion.TitleGlow));
                 if (passed)
                 {
-                    var back = new Button { Content = title, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = !_runner.IsCommitting };
+                    var back = new Button { Content = cell, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = !_runner.IsCommitting };
                     AutomationProperties.SetName(back, labels[i]);
                     back.Click += (_, _) =>
                     {
@@ -1214,7 +1804,7 @@ public sealed partial class FirstRunWindow : Window
                 else
                 {
                     AutomationProperties.SetName(title, labels[i]);
-                    Thread.Children.Add(title);
+                    Thread.Children.Add(cell);
                 }
 
             }
