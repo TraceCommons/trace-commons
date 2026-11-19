@@ -267,6 +267,17 @@
   color: @tc_glass_ink_tertiary;
 }
 
+/* The Mac's eyebrow size, 10, whatever the desktop's base font: GNOME's
+   11 pt base set the eyebrow's 0.77em at 11.3 px and KDE's 10 pt at 10.3,
+   and "NOT CONTRIBUTED" and "NEAR AI BALANCE" wrapped in a third of the
+   440 pane. Adwaita Sans and Noto Sans set those words wider than SF Pro,
+   so the tracking is eased from the Mac's 0.8 to 0.5: measured with pango
+   at 10 px bold, both set "NOT CONTRIBUTED" in 105 px of the tile's 110. */
+label.tc-type-eyebrow.tc-home-tile-caption-type {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
 .tc-home-tile-caption-ink {
   color: @tc_glass_ink_tertiary;
 }

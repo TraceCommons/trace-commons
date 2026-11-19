@@ -909,6 +909,7 @@ fn caption(title: &str) -> gtk::Label {
         .wrap_mode(gtk::pango::WrapMode::Word)
         .build();
     label.add_css_class("tc-type-eyebrow");
+    label.add_css_class("tc-home-tile-caption-type");
     label.add_css_class("tc-home-tile-caption");
     label
 }
@@ -1105,6 +1106,7 @@ mod tests {
         let twin = |text: &str| {
             let label = gtk::Label::new(Some(text));
             label.add_css_class("tc-type-eyebrow");
+            label.add_css_class("tc-home-tile-caption-type");
             label.set_halign(gtk::Align::Start);
             view.root.append(&label);
             label
@@ -1287,6 +1289,63 @@ mod tests {
             "{pressed:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Home's tile captions are drawn at the Mac's eyebrow size, 10, on
+    /// any desktop font: GNOME's 11 pt base set them at 11.3 px and KDE's
+    /// 10 pt at 10.3, and "NOT CONTRIBUTED" and "NEAR AI BALANCE" wrapped
+    /// to two lines in a third of the 440 pane where the Mac sets one.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_tile_captions_are_the_macs_size_on_a_larger_desktop_font() {
+        adw::init().unwrap();
+        // GNOME's own base size.
+        gtk::Settings::default()
+            .expect("settings")
+            .set_gtk_font_name(Some("Sans 11"));
+        crate::ui::style::install();
+        let view = HomeView::new(false);
+        let window = gtk::Window::builder()
+            .default_width(PANE)
+            .default_height(900)
+            .child(&view.root)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+        }
+        let mut all = Vec::new();
+        descendants(view.root.upcast_ref(), &mut all);
+        let captions: Vec<gtk::Label> = all
+            .into_iter()
+            .filter(|w| w.has_css_class("tc-home-tile-caption"))
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .collect();
+        assert!(
+            captions.len() >= 5,
+            "Home's tile captions: {}",
+            captions.len()
+        );
+        for caption in &captions {
+            let font = caption.pango_context().font_description().expect("a font");
+            let size = font.size() as f64 / gtk::pango::SCALE as f64;
+            // A point size is at GTK's 96 dpi.
+            let px = if font.is_size_absolute() {
+                size
+            } else {
+                size * 96.0 / 72.0
+            };
+            assert!(
+                (px - 10.0).abs() < 0.05,
+                "{:?} drawn at {px} px, not the Mac's 10",
+                caption.text()
+            );
+        }
+        window.close();
     }
 
     /// The main pane's width, the Monitor's.
