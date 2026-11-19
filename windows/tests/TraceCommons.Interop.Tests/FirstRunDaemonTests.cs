@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -15,19 +16,83 @@ namespace TraceCommons.Interop.Tests;
 /// AppModel.swift:4774-5160), driven through the runner so a call that is
 /// not made, or made wrong, fails here.
 /// </summary>
+/// <remarks>
+/// Every reply is one the daemon sent (checklist B4): the first run's
+/// replies recorded by the contributor crate's
+/// <c>daemon::first_run_fixtures_tests</c> under tests/fixtures/first-run
+/// (its README says how each was made), and the status and
+/// set_project_mode replies from the macOS recorded samples.
+/// </remarks>
 public sealed class FirstRunDaemonTests
 {
+    /// <summary>One recorded response frame from tests/fixtures/first-run.</summary>
+    private static string Recorded(string name) =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "first-run", name + ".json"));
+
+    /// <summary>A macOS recorded sample (a bare result), framed as the daemon frames it.</summary>
+    private static JsonObject Sample(string set, string method) => new()
+    {
+        ["id"] = 1,
+        ["result"] = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "RecordedSamples", set, method + ".json"))),
+    };
+
+    /// <summary>The sign-in attempt and page the recorded start reply names.</summary>
+    private static readonly JsonNode Started = JsonNode.Parse(Recorded("near_ai_credential_start"))!["result"]!;
+    private static readonly string AttemptId = (string)Started["attempt_id"]!;
+    private static readonly string BrowserUrl = new Uri((string)Started["browser_url"]!).ToString();
+
+    /// <summary>The account the recorded status sample is settled on.</summary>
+    private static readonly string RecordedScope = (string)Sample("normalDay", "status")["result"]!["account_scope"]!;
+
+    /// <summary>
+    /// A second account. Every recorded status sample is settled on the same
+    /// account, so this one is the recorded status with only its
+    /// <c>account_scope</c> edited.
+    /// </summary>
+    private static readonly string OtherScope = "sha256:" + new string('1', 64);
+
+    /// <summary>
+    /// The recorded status (normalDay) answering <paramref name="scope"/>:
+    /// only <c>account_scope</c> is edited, to another account or to null,
+    /// which is what the daemon sends with no account settled.
+    /// </summary>
+    private static string Status(string? scope)
+    {
+        JsonObject frame = Sample("normalDay", "status");
+        frame["result"]!["account_scope"] = scope;
+        return frame.ToJsonString();
+    }
+
+    /// <summary>The recorded reply each method gets unless a test says otherwise.</summary>
+    private static string DefaultReply(string method) => method switch
+    {
+        "terms_accept" => Recorded("terms_accept"),
+        "set_consent_scopes" => Recorded("set_consent_scopes"),
+        "set_project_mode" => Sample("shared", "set_project_mode").ToJsonString(),
+        "set_settings" => Recorded("set_settings"),
+        "enroll" => Recorded("enroll"),
+        "invite_lookup" => Recorded("invite_lookup_valid"),
+        "grant_automatic_including_existing" => Recorded("grant_automatic_including_existing"),
+        "withdraw_automatic_grant" => Recorded("withdraw_automatic_grant"),
+        "near_ai_credential_start" => Recorded("near_ai_credential_start"),
+        "near_ai_credential_status" => Recorded("near_ai_credential_status_absent"),
+        "near_ai_credential_cancel" => Recorded("near_ai_credential_cancel"),
+        // Not an exception the daemon client swallows: a call with no
+        // recorded reply fails the test rather than reading as a refusal.
+        _ => throw new NotSupportedException("no recorded reply for " + method),
+    };
+
     private sealed class Wire
     {
         public readonly List<(string Method, JsonNode? Params)> Sent = new();
-        public Func<string, string> Reply = _ => "{\"result\":{}}";
+        public Func<string, string> Reply = DefaultReply;
 
         /// <summary>
         /// The account each <c>status</c> read answers, in turn (the last
         /// repeats); null answers none. Status reads are counted apart from
         /// <see cref="Sent"/>, which keeps the calls the plan makes.
         /// </summary>
-        public readonly List<string?> Scopes = new() { "acct-1" };
+        public readonly List<string?> Scopes = new() { RecordedScope };
         public int StatusReads;
 
         public Task<DaemonResponse> Call(string method, string json)
@@ -35,7 +100,7 @@ public sealed class FirstRunDaemonTests
             if (method == "status")
             {
                 string? scope = Scopes[Math.Min(StatusReads++, Scopes.Count - 1)];
-                return Task.FromResult(DaemonResponse.Parse(scope is null ? "{\"result\":{}}" : "{\"result\":{\"account_scope\":\"" + scope + "\"}}"));
+                return Task.FromResult(DaemonResponse.Parse(Status(scope)));
             }
 
             Sent.Add((method, JsonNode.Parse(json)));
@@ -59,7 +124,6 @@ public sealed class FirstRunDaemonTests
     public async Task StartSendsTheMacsCallsInOrder()
     {
         var (daemon, wire, local) = Make();
-        wire.Reply = m => m == "grant_automatic_including_existing" ? "{\"result\":{\"granted\":true,\"include_existing\":true}}" : "{\"result\":{}}";
         var state = new FirstRunState { Step = FirstRunStep.Join, Account = AccountAnswer.NearAI, EnrolledInvite = "I", DaemonStarted = true, SignedIn = true };
         state.ToolAnswers["claude-code"] = ToolChoice.Off;
         state.ToolAnswers["codex"] = ToolChoice.Off;
@@ -90,9 +154,11 @@ public sealed class FirstRunDaemonTests
         Assert.True(await daemon.SetAskEachTime());
         Assert.Equal("withdraw_automatic_grant", wire.Sent[0].Method);
         Assert.True((bool)wire.Sent[0].Params!["return_folders_to_ask"]!);
-        wire.Reply = _ => "{\"result\":{\"granted\":true}}";
+        // A granted answer that leaves the traces already on disk out: the
+        // daemon's from-now grant (README: grant_automatic_from_now.json).
+        wire.Reply = _ => Recorded("grant_automatic_from_now");
         Assert.Equal(new GrantAnswer(false, "automatic-existing-traces-unsupported"), await daemon.GrantAutomatic(null));
-        wire.Reply = _ => "{\"error\":{\"code\":\"refused\",\"message\":\"automatic-grant-witness-changed\"}}";
+        wire.Reply = _ => Recorded("grant_automatic_including_existing_witness_changed");
         Assert.Equal(new GrantAnswer(false, "automatic-grant-witness-changed"), await daemon.GrantAutomatic("w"));
     }
 
@@ -103,14 +169,19 @@ public sealed class FirstRunDaemonTests
         await daemon.EnrollInvite("INVITE-1");
         Assert.Equal("enroll", wire.Sent[0].Method);
         Assert.False(wire.Sent[0].Params!.AsObject().ContainsKey("scopes"));
-        wire.Reply = _ => "{\"result\":{\"valid\":true,\"issuer\":\"x\"}}";
+        wire.Reply = _ => Recorded("invite_lookup_valid");
         Assert.IsType<FirstRunLookup.Found>(await daemon.LookupInvite("INVITE-1"));
         Assert.Equal("INVITE-1", (string)wire.Sent[1].Params!["code"]!);
-        wire.Reply = _ => "{\"result\":{\"valid\":false}}";
+        // A code that is not an invite is refused with the daemon's label.
+        wire.Reply = _ => Recorded("invite_lookup_malformed");
         Assert.Equal(new FirstRunLookup.Refused("invite-invalid"), await daemon.LookupInvite("x"));
-        wire.Reply = _ => "{\"error\":{\"code\":\"unavailable\",\"message\":\"invite-lookup-unavailable\"}}";
+        // An invite the issuer does not know is refused with the issuer's
+        // reason; the daemon never answers valid: false without one.
+        wire.Reply = _ => Recorded("invite_lookup_not_found");
+        Assert.Equal(new FirstRunLookup.Refused("not_found"), await daemon.LookupInvite("x"));
+        wire.Reply = _ => Recorded("invite_lookup_unavailable");
         Assert.IsType<FirstRunLookup.Unavailable>(await daemon.LookupInvite("x"));
-        wire.Reply = _ => "{\"error\":{\"code\":\"unavailable\",\"message\":\"invite-host-not-allowed\"}}";
+        wire.Reply = _ => Recorded("invite_lookup_host_not_allowed");
         Assert.Equal(new FirstRunLookup.Refused("invite-host-not-allowed"), await daemon.LookupInvite("x"));
     }
 
@@ -156,19 +227,16 @@ public sealed class FirstRunDaemonTests
         OpensBrowser = true;
         var (daemon, wire, local) = Make();
         int polls = 0;
-        wire.Reply = m => m switch
-        {
-            "near_ai_credential_start" => "{\"result\":{\"attempt_id\":\"a1\",\"browser_url\":\"https://example.test/login\"}}",
-            "near_ai_credential_status" => ++polls < 3
-                ? "{\"result\":{\"state\":\"absent\",\"attempt_id\":\"a1\",\"attempt_status\":\"waiting_for_browser\"}}"
-                : "{\"result\":{\"state\":\"present\",\"session_state\":\"present\"}}",
-            _ => "{\"result\":{}}",
-        };
+        wire.Reply = m => m == "near_ai_credential_status"
+            ? ++polls < 3
+                ? polls == 1 ? Recorded("near_ai_credential_status_absent") : Recorded("near_ai_credential_status_waiting")
+                : Recorded("near_ai_credential_status_present")
+            : DefaultReply(m);
         Assert.Equal(NearAILoginOutcome.SignedIn, await daemon.NearAILoginOutcome(default));
-        Assert.Equal(new[] { "open https://example.test/login" }, local);
+        Assert.Equal(new[] { "open " + BrowserUrl }, local);
         Assert.Equal("near_ai_credential_status", wire.Sent[0].Method);
         Assert.Equal("near_ai_credential_start", wire.Sent[1].Method);
-        Assert.Equal("a1", (string)wire.Sent[2].Params!["attempt_id"]!);
+        Assert.Equal(AttemptId, (string)wire.Sent[2].Params!["attempt_id"]!);
     }
 
     [Fact]
@@ -178,12 +246,9 @@ public sealed class FirstRunDaemonTests
         try
         {
             var (daemon, wire, _) = Make();
-            wire.Reply = m => m == "near_ai_credential_start"
-                ? "{\"result\":{\"attempt_id\":\"a2\",\"browser_url\":\"https://example.test/login\"}}"
-                : "{\"result\":{\"state\":\"absent\"}}";
             Assert.Equal(NearAILoginOutcome.Failed, await daemon.NearAILoginOutcome(default));
             Assert.Equal("near_ai_credential_cancel", wire.Sent[^1].Method);
-            Assert.Equal("a2", (string)wire.Sent[^1].Params!["attempt_id"]!);
+            Assert.Equal(AttemptId, (string)wire.Sent[^1].Params!["attempt_id"]!);
         }
         finally
         {
@@ -205,13 +270,11 @@ public sealed class FirstRunDaemonTests
 
         (daemon, wire, _) = Make();
         wire.Scopes.Clear();
-        wire.Scopes.AddRange(new[] { "acct-1", "acct-2" });
-        wire.Reply = _ => "{\"result\":{\"granted\":true,\"include_existing\":true}}";
+        wire.Scopes.AddRange(new[] { RecordedScope, OtherScope });
         Assert.Equal(new GrantAnswer(false, "automatic-grant-unavailable"), await daemon.GrantAutomatic(null));
         Assert.Equal("grant_automatic_including_existing", Assert.Single(wire.Sent).Method);
 
         (daemon, wire, _) = Make();
-        wire.Reply = _ => "{\"result\":{\"granted\":true,\"include_existing\":true}}";
         Assert.Equal(new GrantAnswer(true, null), await daemon.GrantAutomatic(null));
         Assert.Equal(2, wire.StatusReads);
     }
@@ -222,11 +285,9 @@ public sealed class FirstRunDaemonTests
         // AppModel.swift: cancel names firstRunLoginAttemptID.
         OpensBrowser = true;
         var (daemon, wire, _) = Make();
-        wire.Reply = m => m switch
-        {
-            "near_ai_credential_start" => "{\"result\":{\"attempt_id\":\"a3\",\"browser_url\":\"https://example.test/login\"}}",
-            _ => "{\"result\":{\"state\":\"absent\",\"attempt_id\":\"a3\",\"attempt_status\":\"waiting_for_browser\"}}",
-        };
+        wire.Reply = m => m == "near_ai_credential_status" && wire.Sent.Exists(s => s.Method == "near_ai_credential_start")
+            ? Recorded("near_ai_credential_status_waiting")
+            : DefaultReply(m);
         using var stop = new System.Threading.CancellationTokenSource();
         Task<NearAILoginOutcome> login = daemon.NearAILoginOutcome(stop.Token);
         while (!wire.Sent.Exists(s => s.Method == "near_ai_credential_start"))
@@ -239,7 +300,7 @@ public sealed class FirstRunDaemonTests
         await login;
         (string method, JsonNode? args) = wire.Sent.Find(s => s.Method == "near_ai_credential_cancel");
         Assert.Equal("near_ai_credential_cancel", method);
-        Assert.Equal("a3", (string)args!["attempt_id"]!);
+        Assert.Equal(AttemptId, (string)args!["attempt_id"]!);
     }
 
     [Fact]
@@ -251,9 +312,7 @@ public sealed class FirstRunDaemonTests
             var daemon = new FirstRunDaemon(
                 (m, _) => m == "near_ai_credential_cancel"
                     ? throw new TcException("gone")
-                    : Task.FromResult(DaemonResponse.Parse(m == "near_ai_credential_start"
-                        ? "{\"result\":{\"attempt_id\":\"a4\",\"browser_url\":\"https://example.test/login\"}}"
-                        : "{\"result\":{\"state\":\"absent\"}}")),
+                    : Task.FromResult(DaemonResponse.Parse(DefaultReply(m))),
                 _ => Task.FromResult(true), () => true, () => Task.FromResult(true), () => Task.FromResult(true), _ => { }, _ => Task.FromResult(false));
             Assert.Equal(NearAILoginOutcome.Failed, await daemon.NearAILoginOutcome(default));
         }
