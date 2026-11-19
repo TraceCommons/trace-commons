@@ -15,8 +15,10 @@
 // gtk4-layer-shell-sys (pkg-config), which also covers the Flatpak, whose
 // gtk4-layer-shell module installs into /app.
 //
-// `tests/layer_shell_link_order.rs` reads the built binaries and holds the
+// `tests/layer_shell_link_order.rs` reads the built shell binary and holds the
 // order.
+
+#![forbid(unsafe_code)]
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
