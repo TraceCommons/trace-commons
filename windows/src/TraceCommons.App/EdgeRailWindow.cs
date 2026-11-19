@@ -323,7 +323,8 @@ internal sealed class EdgeRailWindow : Window
     {
         var path = new Microsoft.UI.Xaml.Shapes.Path
         {
-            Data = NearMarkGeometry.Build(side),
+            Data = NearMarkGeometry.Build(),
+            Stretch = Stretch.Uniform,
             Fill = new SolidColorBrush(Argb(HomeTrayInks.Dark.HeroTints[1])),
             Width = side,
             Height = side,
@@ -334,37 +335,4 @@ internal sealed class EdgeRailWindow : Window
 
     private static Color Argb(uint argb) =>
         Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb);
-}
-
-/// <summary>The N as a XAML geometry, from the same parse the tray draws with.</summary>
-internal static class NearMarkGeometry
-{
-    public static Geometry Build(double side)
-    {
-        var figures = new PathFigureCollection();
-        PathFigure? figure = null;
-        foreach (PathStep step in NearMarkPath.Unit)
-        {
-            switch (step.Kind)
-            {
-                case PathStepKind.Move:
-                    figure = new PathFigure { StartPoint = new Windows.Foundation.Point(step.X * side, step.Y * side), IsClosed = true, IsFilled = true };
-                    figures.Add(figure);
-                    break;
-                case PathStepKind.Line:
-                    figure?.Segments.Add(new LineSegment { Point = new Windows.Foundation.Point(step.X * side, step.Y * side) });
-                    break;
-                case PathStepKind.Cubic:
-                    figure?.Segments.Add(new BezierSegment
-                    {
-                        Point1 = new Windows.Foundation.Point(step.X1 * side, step.Y1 * side),
-                        Point2 = new Windows.Foundation.Point(step.X2 * side, step.Y2 * side),
-                        Point3 = new Windows.Foundation.Point(step.X * side, step.Y * side),
-                    });
-                    break;
-            }
-        }
-
-        return new PathGeometry { Figures = figures, FillRule = FillRule.Nonzero };
-    }
 }

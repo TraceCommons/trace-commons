@@ -69,7 +69,8 @@ internal sealed class TrayFlyoutWindow : Window
         var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S4 };
         title.Children.Add(new Microsoft.UI.Xaml.Shapes.Path
         {
-            Data = NearMarkGeometry.Build(18),
+            Data = NearMarkGeometry.Build(),
+            Stretch = Stretch.Uniform,
             Fill = (Brush)Application.Current.Resources["TcInkPrimaryBrush"],
             Width = 18,
             Height = 18,
