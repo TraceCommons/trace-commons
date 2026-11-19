@@ -44,11 +44,11 @@ fn local_choices_persist_in_all_environments_and_do_not_cross_profiles() {
         let r = registry().unwrap();
         let p = profile_for_environment(env).unwrap();
         let rt = Runtime::open(r.clone(), p.clone(), dir.path(), now()).unwrap();
-        rt.set_local_override("insights_skills", Some(true), now())
+        rt.set_local_override("skills_server_catalog", Some(true), now())
             .unwrap();
         let restarted = Runtime::open(r.clone(), p.clone(), dir.path(), now()).unwrap();
-        assert!(restarted.is_enabled("insights_skills"));
-        assert!(restarted.snapshot().local_overrides["insights_skills"]);
+        assert!(restarted.is_enabled("skills_server_catalog"));
+        assert!(restarted.snapshot().local_overrides["skills_server_catalog"]);
         assert_eq!(
             restarted.snapshot().revision,
             None,
@@ -57,7 +57,7 @@ fn local_choices_persist_in_all_environments_and_do_not_cross_profiles() {
         let mut changed = p;
         changed.capabilities.insert("new-profile".into());
         let changed = Runtime::open(r, changed, dir.path(), now()).unwrap();
-        assert!(!changed.is_enabled("insights_skills"));
+        assert!(!changed.is_enabled("skills_server_catalog"));
         assert!(changed.snapshot().local_overrides.is_empty());
     }
 }

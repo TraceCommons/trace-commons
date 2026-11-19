@@ -10,6 +10,7 @@ import XCTest
 @MainActor
 final class RecordingFirstRunDaemon: FirstRunDaemon {
     var log: [FirstRunCall] = []
+    var completionAccountScope: String?
     /// The call that answers as a failure; every other call succeeds.
     var failing: ((FirstRunCall) -> Bool) = { _ in false }
     var lookup: FirstRunLookup = .found(RecordingFirstRunDaemon.validLookup)
@@ -836,10 +837,47 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.failing = { _ in false }
         daemon.log = []
         await runner.commit(.start)
-        XCTAssertFalse(daemon.log.contains { if case .grantAutomatic = $0 { return true }; return false },
-            "a retry after a refused grant does not ask for Automatic again")
-        XCTAssertEqual(daemon.log.last, .markComplete)
+        XCTAssertEqual(daemon.log, [.markComplete],
+            "a completion retry only records completion once the choices were saved")
         XCTAssertNil(runner.failure)
+    }
+
+    func test_reopenedSetupCannotStartForAReplacementEnrollment() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.completionAccountScope = "original"
+        var state = onUses()
+        state.enrolledInvite = nil
+        state.signedIn = false
+        state.account = .none
+        state = OnboardingNavigation.recordEnrolment(state)
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        let session = NativeAccountSession(state: "known", signedIn: true, expiresAt: nil, signIn: "near_ai")
+        runner.restoreConnectedNearAI(session)
+        XCTAssertTrue(runner.state.signedIn)
+
+        daemon.completionAccountScope = "replacement"
+        await runner.commit(.start)
+
+        XCTAssertTrue(daemon.log.isEmpty)
+        XCTAssertFalse(runner.completed)
+    }
+
+    func test_retryDoesNotApplySavedChoicesToAReplacementEnrollment() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.completionAccountScope = "first"
+        daemon.failing = { $0 == .markComplete }
+        let runner = FirstRunRunner(state: onUses(), daemon: daemon)
+        await runner.commit(.start)
+        XCTAssertTrue(runner.canRetryCompletion)
+
+        daemon.completionAccountScope = "second"
+        daemon.failing = { _ in false }
+        daemon.log = []
+        await runner.commit(.start)
+
+        XCTAssertTrue(daemon.log.isEmpty)
+        XCTAssertFalse(runner.completed)
+        XCTAssertFalse(runner.state.sharingChosen)
     }
 
     func test_leavingWithoutADeclarationFailsClosed() async {
