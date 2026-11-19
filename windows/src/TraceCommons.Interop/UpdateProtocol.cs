@@ -188,7 +188,7 @@ public static class UpdateProtocol
             TcUpdateAvailability.Required =>
                 "A required update is ready to install.",
             TcUpdateAvailability.NoUpdates =>
-                "Near.ai is up to date.",
+                Shell.MonitorWords.AppName + " is up to date.",
             TcUpdateAvailability.Unknown =>
                 "Updates are not managed for this installation.",
             _ =>

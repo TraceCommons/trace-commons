@@ -394,7 +394,9 @@ public class FeatureFlagsTests
     /// The window's whole loop against a real daemon: a local override sends
     /// <c>feature_flags_changed</c>, the gate reads again on it, and the
     /// flag's value flips in the gate's snapshot. A flag the snapshot does
-    /// not name reads off throughout.
+    /// not name reads off throughout. The flag is whichever one this build
+    /// allows a local override for: a production build no longer lists
+    /// insights_skills among its capabilities (#2242).
     /// </summary>
     [Fact]
     public async Task AnOverrideFlipsTheFlagThroughTheChangeEvent()
@@ -411,7 +413,22 @@ public class FeatureFlagsTests
             Assert.False(before.Flags.ContainsKey(unknown));
             Assert.False(gate.IsEnabled(unknown));
 
-            bool was = gate.IsEnabled(FeatureFlagGate.InsightsSkills);
+            JsonElement raw = DaemonResponse.Parse(daemon.Call(FeatureFlagGate.SnapshotMethod)).Result!.Value;
+            string? overridable = null;
+            if (raw.TryGetProperty("local_override_allowed", out JsonElement allowed) && allowed.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty p in allowed.EnumerateObject())
+                {
+                    if (p.Value.ValueKind == JsonValueKind.True)
+                    {
+                        overridable = p.Name;
+                        break;
+                    }
+                }
+            }
+
+            Assert.True(overridable is not null, "this build allows no local override, so no change can be provoked");
+            bool was = gate.IsEnabled(overridable!);
             using var heard = new SemaphoreSlim(0);
             TcSubscription? subscription = daemon.Subscribe(
                 json =>
@@ -423,7 +440,7 @@ public class FeatureFlagsTests
 
             string parameters = new JsonObject
             {
-                ["id"] = FeatureFlagGate.InsightsSkills,
+                ["id"] = overridable,
                 ["value"] = !was,
                 ["environment"] = before.Environment,
                 ["profile_digest"] = before.ProfileDigest,
@@ -433,7 +450,7 @@ public class FeatureFlagsTests
 
             Assert.True(await heard.WaitAsync(TimeSpan.FromSeconds(10)), "no feature_flags_changed after the override");
             await gate.RefreshAsync();
-            Assert.Equal(!was, gate.IsEnabled(FeatureFlagGate.InsightsSkills));
+            Assert.Equal(!was, gate.IsEnabled(overridable!));
             Assert.Equal(before.InstanceId, gate.Current!.InstanceId);
             Assert.True(gate.Current.Generation > before.Generation, $"{gate.Current.Generation} after {before.Generation}");
             Assert.False(gate.IsEnabled(unknown));

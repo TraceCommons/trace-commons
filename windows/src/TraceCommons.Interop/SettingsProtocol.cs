@@ -172,10 +172,16 @@ public sealed class PrivateInferenceStateSnapshot
     public ushort? Port { get; set; }
 }
 
+/// <summary>
+/// The behaviour numbers Settings lets a person edit. The undo window
+/// (<c>approval_hold_secs</c>) is not one of them: the Mac has no such
+/// control, and it could be set low enough to remove undo altogether
+/// (owner decision W9-D1 (a), 2026-11-18, the Linux precedent of #2179).
+/// The daemon keeps whatever value it holds.
+/// </summary>
 public enum BehaviorSetting
 {
     QuiescenceMinutes,
-    ApprovalHoldSeconds,
     DigestHours,
 }
 
@@ -192,7 +198,6 @@ public static class BehaviorSettingsRequest
         double seconds = setting switch
         {
             BehaviorSetting.QuiescenceMinutes => displayedValue * 60,
-            BehaviorSetting.ApprovalHoldSeconds => displayedValue,
             BehaviorSetting.DigestHours => displayedValue * 3600,
             _ => throw new ArgumentOutOfRangeException(nameof(setting)),
         };
@@ -200,7 +205,6 @@ public static class BehaviorSettingsRequest
         string key = setting switch
         {
             BehaviorSetting.QuiescenceMinutes => "quiescence_secs",
-            BehaviorSetting.ApprovalHoldSeconds => "approval_hold_secs",
             BehaviorSetting.DigestHours => "digest_interval_secs",
             _ => throw new ArgumentOutOfRangeException(nameof(setting)),
         };
