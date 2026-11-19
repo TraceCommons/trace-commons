@@ -11,13 +11,56 @@
 
 use std::cell::Cell;
 
+/// How a layer-shell rail asks for the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Not at all: the compositor never gives it the keyboard.
+    Nothing,
+    /// Outright, on the press that asked: an on-demand surface was given it
+    /// only on the next pointer motion on Hyprland 0.56.2 (2026-11-18).
+    Outright,
+}
+
+/// What the rail asks for when it takes the keyboard (`takes`) or not.
+pub fn ask(takes: bool) -> Ask {
+    if takes { Ask::Outright } else { Ask::Nothing }
+}
+
 /// The rail's keyboard, as it opens, closes and is clicked.
 #[derive(Debug, Default)]
 pub struct RailKeyboard {
     clicked: Cell<bool>,
+    /// Mapped afresh, and not yet moved over: an enter alone is the
+    /// fresh map under a parked pointer.
+    fresh: Cell<bool>,
 }
 
 impl RailKeyboard {
+    /// The closed rail was placed, `still_holds` whether its window still
+    /// has the keyboard. Answers whether to map it afresh: KWin 6.6.6
+    /// (2026-11-18) kept the keyboard on a rail that asked for none, and a
+    /// surface mapped afresh starts without it.
+    pub fn placed_closed(&self, still_holds: bool) -> bool {
+        if still_holds {
+            self.fresh.set(true);
+        }
+        still_holds
+    }
+
+    /// The pointer entered the closed rail. Answers whether to open it:
+    /// yes, unless the rail was just mapped afresh, when the pointer may
+    /// only be parked there.
+    pub fn entered(&self) -> bool {
+        !self.fresh.get()
+    }
+
+    /// The pointer moved inside the closed rail. Answers whether to open
+    /// it: only the first motion after a fresh map, which `entered` held
+    /// back; otherwise the enter has already opened it.
+    pub fn moved(&self) -> bool {
+        self.fresh.replace(false)
+    }
+
     /// The rail was drawn open or closed. Answers whether it takes the
     /// keyboard now: a closed rail never does, and forgets the click.
     pub fn placed(&self, open: bool) -> bool {
@@ -76,6 +119,48 @@ mod tests {
         let keyboard = RailKeyboard::default();
         assert!(!keyboard.pressed(false));
         assert!(!keyboard.placed(true));
+    }
+
+    /// Hyprland 0.56.2 (2026-11-18) never gave an on-demand rail the
+    /// keyboard on a press, the first or the second, only on the next
+    /// pointer motion; asked for outright, it gave it on the press. KWin
+    /// 6.6.6 gave it on the press either way.
+    #[test]
+    fn a_press_asks_for_the_keyboard_outright() {
+        assert_eq!(ask(true), Ask::Outright);
+        assert_eq!(ask(false), Ask::Nothing);
+    }
+
+    /// KWin 6.6.6 (2026-11-18) kept the keyboard on the closed rail after it
+    /// asked for none; a surface mapped afresh starts without it. Hyprland
+    /// took it back at once, so there the rail is not mapped again.
+    #[test]
+    fn a_closed_rail_still_holding_the_keyboard_is_mapped_afresh() {
+        let keyboard = RailKeyboard::default();
+        assert!(keyboard.placed_closed(true));
+        assert!(!RailKeyboard::default().placed_closed(false));
+    }
+
+    /// Mapped afresh under a parked pointer, the rail is entered without
+    /// the pointer moving; that alone does not open it, as it would not on
+    /// the Mac. The next motion does, so a real hover still opens it.
+    #[test]
+    fn mapped_afresh_it_opens_on_motion_not_on_the_enter() {
+        let keyboard = RailKeyboard::default();
+        keyboard.placed_closed(true);
+        assert!(!keyboard.entered(), "opened under a parked pointer");
+        assert!(keyboard.moved(), "a hover after the fresh map stayed shut");
+        assert!(keyboard.entered(), "the next enter is an ordinary hover");
+        assert!(!keyboard.moved(), "motion opened it twice");
+    }
+
+    #[test]
+    fn an_ordinary_enter_opens_it() {
+        let keyboard = RailKeyboard::default();
+        assert!(keyboard.entered());
+        assert!(!keyboard.moved());
+        keyboard.placed_closed(false);
+        assert!(keyboard.entered());
     }
 
     #[test]

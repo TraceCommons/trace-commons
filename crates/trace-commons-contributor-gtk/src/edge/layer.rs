@@ -38,15 +38,24 @@ pub fn make_rail(window: &gtk::Window, monitor: Option<&gtk::gdk::Monitor>) {
 /// Whether the rail takes the keyboard, as `edge::keyboard` decides: only
 /// after a click inside the open rail (owner, 2026-11-18, "Keyboard only
 /// after a click"), so Escape and Tab reach it; `None` again as it closes.
-/// Whether the compositor gives a surface the keyboard on the same click
-/// that switched it to on-demand is the compositor's to decide, and has not
-/// been checked on KWin or Hyprland.
+/// Asked for outright (`edge::keyboard::ask`): checked on 2026-11-18,
+/// Hyprland 0.56.2 gave an on-demand rail the keyboard only on the next
+/// pointer motion, never on the press; asked for outright, both it and
+/// KWin 6.6.6 gave it on the press.
 pub fn set_rail_keyboard(window: &gtk::Window, takes: bool) {
-    window.set_keyboard_mode(if takes {
-        KeyboardMode::OnDemand
-    } else {
-        KeyboardMode::None
+    window.set_keyboard_mode(match crate::edge::keyboard::ask(takes) {
+        crate::edge::keyboard::Ask::Outright => KeyboardMode::Exclusive,
+        crate::edge::keyboard::Ask::Nothing => KeyboardMode::None,
     });
+}
+
+/// Maps the closed rail afresh, so a compositor that kept the keyboard on
+/// it after it asked for none lets it go (KWin 6.6.6, 2026-11-18; Hyprland
+/// took it back at once). The layer-shell settings carry over.
+pub fn map_afresh(window: &gtk::Window) {
+    use gtk::prelude::WidgetExt;
+    window.set_visible(false);
+    window.set_visible(true);
 }
 
 /// The panel: on the top layer, over windows and under full-screen ones

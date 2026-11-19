@@ -834,6 +834,11 @@ impl Rail {
                     #[cfg(all(target_os = "linux", feature = "layer-shell"))]
                     if mode == RailMode::LayerShell {
                         crate::edge::layer::set_rail_keyboard(&window, takes);
+                        // Still holding the keyboard it asked to give back
+                        // as the close began: mapped afresh to let it go.
+                        if !open && keyboard.placed_closed(window.is_active()) {
+                            crate::edge::layer::map_afresh(&window);
+                        }
                     }
                     let _ = takes;
                     // On GNOME the extension keeps the keyboard with the rail
@@ -918,9 +923,22 @@ impl Rail {
             motion.connect_enter(move |_, _, _| {
                 if let Some(rail) = weak.upgrade() {
                     rail.cancel_close();
-                    if !rail.opening.is_open() {
+                    if !rail.opening.is_open() && rail.keyboard.entered() {
                         rail.opening.set(true);
                     }
+                }
+            });
+        }
+        {
+            // A rail mapped afresh under a parked pointer opens on the first
+            // motion, not on the enter (`RailKeyboard::entered`).
+            let weak = Rc::downgrade(&rail);
+            motion.connect_motion(move |_, _, _| {
+                if let Some(rail) = weak.upgrade()
+                    && !rail.opening.is_open()
+                    && rail.keyboard.moved()
+                {
+                    rail.opening.set(true);
                 }
             });
         }
