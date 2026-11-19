@@ -6113,7 +6113,10 @@ fn the_windows_words_cross_the_abi() {
     );
     // The Mac's switch keeps its own words.
     let mac = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
-    assert_eq!(mac.credit_icon_animation_toggle, "Animate Dock and menu bar icons");
+    assert_eq!(
+        mac.credit_icon_animation_toggle,
+        "Animate Dock and menu bar icons"
+    );
 }
 
 #[test]
