@@ -83,4 +83,7 @@ public static class FirstRunTokens
 
     /// <summary>textTertiary: #f2f3f8 at 0.84.</summary>
     public const uint TextTertiary = 0xD6F2F3F8;
+
+    /// <summary>statusOutsideText: #ffd3d3 at 1.</summary>
+    public const uint StatusOutsideText = 0xFFFFD3D3;
 }

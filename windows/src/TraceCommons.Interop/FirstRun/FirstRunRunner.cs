@@ -145,13 +145,22 @@ public sealed class FirstRunRunner
 
     public static bool DeclaresRoots(CommitPoint point) => point != CommitPoint.Start;
 
+    private Task _commit = Task.CompletedTask;
+
     /// <summary>Run the calls for <paramref name="point"/> (FirstRunRunner.swift:224-251).</summary>
-    public async Task Commit(CommitPoint point, FirstRunFailure? carrying = null)
+    public Task Commit(CommitPoint point, FirstRunFailure? carrying = null)
     {
         if (IsCommitting)
         {
-            return;
+            return Task.CompletedTask;
         }
+
+        _commit = CommitCore(point, carrying);
+        return _commit;
+    }
+
+    private async Task CommitCore(CommitPoint point, FirstRunFailure? carrying)
+    {
 
         IsCommitting = true;
         Committing = point;
@@ -207,6 +216,23 @@ public sealed class FirstRunRunner
         _login.Cancel();
         Changed?.Invoke();
         await _loginCancel;
+    }
+
+    /// <summary>
+    /// Back on Join while the browser sign-in waits (FirstRunRunner.swift:403-414):
+    /// the wait ends as Cancel ends it, and once the commit is over the
+    /// person goes back a step.
+    /// </summary>
+    public async Task BackFromSignIn()
+    {
+        if (!SignInWaiting || Committing != CommitPoint.SignIn)
+        {
+            return;
+        }
+
+        await CancelSignIn();
+        await _commit;
+        Set(FirstRunNavigation.Back(State));
     }
 
     private async Task HandOverTerms()

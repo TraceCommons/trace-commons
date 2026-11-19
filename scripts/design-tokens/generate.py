@@ -1641,7 +1641,7 @@ WINDOWS_FIRST_RUN_TOKENS = [
     "firstRunCard", "firstRunCardSolid", "firstRunTile", "firstRunTileShadow", "firstRunControl",
     "firstRunControlHover", "firstRunRule", "sceneBase", "sceneWarm", "heroInk", "tintAccent",
     "tintNeutral", "toggleOn", "toggleOff", "toggleKnobOff", "textOnAccent", "wellFill",
-    "textPrimary", "textSecondary", "textTertiary",
+    "textPrimary", "textSecondary", "textTertiary", "statusOutsideText",
 ]
 
 

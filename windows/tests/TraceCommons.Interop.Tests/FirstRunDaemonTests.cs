@@ -22,8 +22,22 @@ public sealed class FirstRunDaemonTests
         public readonly List<(string Method, JsonNode? Params)> Sent = new();
         public Func<string, string> Reply = _ => "{\"result\":{}}";
 
+        /// <summary>
+        /// The account each <c>status</c> read answers, in turn (the last
+        /// repeats); null answers none. Status reads are counted apart from
+        /// <see cref="Sent"/>, which keeps the calls the plan makes.
+        /// </summary>
+        public readonly List<string?> Scopes = new() { "acct-1" };
+        public int StatusReads;
+
         public Task<DaemonResponse> Call(string method, string json)
         {
+            if (method == "status")
+            {
+                string? scope = Scopes[Math.Min(StatusReads++, Scopes.Count - 1)];
+                return Task.FromResult(DaemonResponse.Parse(scope is null ? "{\"result\":{}}" : "{\"result\":{\"account_scope\":\"" + scope + "\"}}"));
+            }
+
             Sent.Add((method, JsonNode.Parse(json)));
             return Task.FromResult(DaemonResponse.Parse(Reply(method)));
         }
@@ -170,6 +184,78 @@ public sealed class FirstRunDaemonTests
             Assert.Equal(NearAILoginOutcome.Failed, await daemon.NearAILoginOutcome(default));
             Assert.Equal("near_ai_credential_cancel", wire.Sent[^1].Method);
             Assert.Equal("a2", (string)wire.Sent[^1].Params!["attempt_id"]!);
+        }
+        finally
+        {
+            OpensBrowser = true;
+        }
+    }
+
+    [Fact]
+    public async Task AGrantChangeWaitsForASettledAccount()
+    {
+        // AppModel.swift:4701-4704, :4994-5000, :5062-5070: no settled
+        // account sends nothing; an account that changed while the call ran
+        // refuses its answer.
+        var (daemon, wire, _) = Make();
+        wire.Scopes[0] = null;
+        Assert.False(await daemon.SetAskEachTime());
+        Assert.Equal(new GrantAnswer(false, "automatic-grant-unavailable"), await daemon.GrantAutomatic(null));
+        Assert.Empty(wire.Sent);
+
+        (daemon, wire, _) = Make();
+        wire.Scopes.Clear();
+        wire.Scopes.AddRange(new[] { "acct-1", "acct-2" });
+        wire.Reply = _ => "{\"result\":{\"granted\":true,\"include_existing\":true}}";
+        Assert.Equal(new GrantAnswer(false, "automatic-grant-unavailable"), await daemon.GrantAutomatic(null));
+        Assert.Equal("grant_automatic_including_existing", Assert.Single(wire.Sent).Method);
+
+        (daemon, wire, _) = Make();
+        wire.Reply = _ => "{\"result\":{\"granted\":true,\"include_existing\":true}}";
+        Assert.Equal(new GrantAnswer(true, null), await daemon.GrantAutomatic(null));
+        Assert.Equal(2, wire.StatusReads);
+    }
+
+    [Fact]
+    public async Task CancelNamesTheAttemptItsSignInStarted()
+    {
+        // AppModel.swift: cancel names firstRunLoginAttemptID.
+        OpensBrowser = true;
+        var (daemon, wire, _) = Make();
+        wire.Reply = m => m switch
+        {
+            "near_ai_credential_start" => "{\"result\":{\"attempt_id\":\"a3\",\"browser_url\":\"https://example.test/login\"}}",
+            _ => "{\"result\":{\"state\":\"absent\",\"attempt_id\":\"a3\",\"attempt_status\":\"waiting_for_browser\"}}",
+        };
+        using var stop = new System.Threading.CancellationTokenSource();
+        Task<NearAILoginOutcome> login = daemon.NearAILoginOutcome(stop.Token);
+        while (!wire.Sent.Exists(s => s.Method == "near_ai_credential_start"))
+        {
+            await Task.Yield();
+        }
+
+        Assert.True(await daemon.CancelNearAILogin());
+        stop.Cancel();
+        await login;
+        (string method, JsonNode? args) = wire.Sent.Find(s => s.Method == "near_ai_credential_cancel");
+        Assert.Equal("near_ai_credential_cancel", method);
+        Assert.Equal("a3", (string)args!["attempt_id"]!);
+    }
+
+    [Fact]
+    public async Task ACancelTheDaemonRefusesDoesNotEscapeTheSignIn()
+    {
+        OpensBrowser = false;
+        try
+        {
+            var daemon = new FirstRunDaemon(
+                (m, _) => m == "near_ai_credential_cancel"
+                    ? throw new TcException("gone")
+                    : Task.FromResult(DaemonResponse.Parse(m == "near_ai_credential_start"
+                        ? "{\"result\":{\"attempt_id\":\"a4\",\"browser_url\":\"https://example.test/login\"}}"
+                        : "{\"result\":{\"state\":\"absent\"}}")),
+                _ => Task.FromResult(true), () => true, () => Task.FromResult(true), () => Task.FromResult(true), _ => { }, _ => Task.FromResult(false));
+            Assert.Equal(NearAILoginOutcome.Failed, await daemon.NearAILoginOutcome(default));
         }
         finally
         {

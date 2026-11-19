@@ -247,6 +247,7 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     /// </summary>
     public async Task<NearAILoginOutcome> NearAILoginOutcome(CancellationToken cancel)
     {
+        _attemptId = null;
         if (await Verdict(null).ConfigureAwait(true) == LoginPoll.SignedIn)
         {
             return FirstRun.NearAILoginOutcome.SignedIn;
@@ -272,9 +273,14 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
 
         if (!opened)
         {
-            await _call(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(attempt.AttemptId)).ConfigureAwait(true);
+            // A page that did not open cancels the attempt; a cancel the
+            // daemon refuses still ends this sign-in as failed, never throws
+            // out of the commit.
+            await Call2(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(attempt.AttemptId)).ConfigureAwait(true);
             return FirstRun.NearAILoginOutcome.Failed;
         }
+
+        _attemptId = attempt.AttemptId;
 
         DateTime until = DateTime.UtcNow.AddSeconds(600);
         while (DateTime.UtcNow < until)
@@ -346,7 +352,45 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
         }
     }
 
-    public Task<bool> CancelNearAILogin() => Ok(DaemonProtocol.Methods.NearAiCredentialCancel);
+    private string? _attemptId;
+
+    /// <summary>
+    /// Cancel names the attempt this sign-in started, as the Mac names
+    /// <c>firstRunLoginAttemptID</c> (AppModel.swift); before one started,
+    /// the daemon cancels whatever runs.
+    /// </summary>
+    public async Task<bool> CancelNearAILogin()
+    {
+        DaemonResponse? r = await Call2(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(_attemptId)).ConfigureAwait(true);
+        return r is { IsError: false };
+    }
+
+    /// <summary>
+    /// The account a grant change belongs to, settled before it is sent
+    /// (<c>settleAutomaticGrantOwner</c>, AppModel.swift:4701-4704): the
+    /// status's <c>account_scope</c>, or null when none is settled.
+    /// </summary>
+    private async Task<string?> AccountScope()
+    {
+        DaemonResponse? r = await Call(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+        return r is { IsError: false } ? r.ResultAs<DaemonStatus>()?.AccountScope : null;
+    }
+
+    /// <summary>
+    /// A grant change under the Mac's guards (AppModel.swift:4994-5000,
+    /// :5062-5070): refused unless an account is settled first, and its
+    /// answer refused if the account changed while it ran.
+    /// </summary>
+    private async Task<DaemonResponse?> GuardedGrantCall(string method, object args)
+    {
+        if (await AccountScope().ConfigureAwait(true) is not { } owner)
+        {
+            return null;
+        }
+
+        DaemonResponse? r = await Call(method, args).ConfigureAwait(true);
+        return await AccountScope().ConfigureAwait(true) == owner ? r : null;
+    }
 
     public async Task<NearAIEnrolment> EnrollNearAI(string? referralCode)
     {
@@ -364,7 +408,8 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     }
 
     /// <summary><c>withdraw_automatic_grant</c> returning folders to Ask (DaemonClient.swift:363-367).</summary>
-    public Task<bool> SetAskEachTime() => Ok("withdraw_automatic_grant", new { return_folders_to_ask = true });
+    public async Task<bool> SetAskEachTime() =>
+        await GuardedGrantCall("withdraw_automatic_grant", new { return_folders_to_ask = true }).ConfigureAwait(true) is { IsError: false };
 
     public Task<bool> SaveConsentScopes(IReadOnlyList<string> scopes) => Ok(DaemonProtocol.Methods.SetConsentScopes, new { scopes });
 
@@ -401,13 +446,18 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     /// </summary>
     public async Task<GrantAnswer> GrantAutomatic(string? witness)
     {
-        DaemonResponse? r = await Call("grant_automatic_including_existing", new Dictionary<string, object?>
+        DaemonResponse? r = await GuardedGrantCall("grant_automatic_including_existing", new Dictionary<string, object?>
         {
             ["confirmed"] = true,
             ["witness_signing_address"] = witness,
             ["include_existing"] = true,
             ["keep_folder_asks"] = true,
         }).ConfigureAwait(true);
+        if (r is null)
+        {
+            return new GrantAnswer(false, "automatic-grant-unavailable");
+        }
+
         if (r is { Error: { } e })
         {
             return new GrantAnswer(false, e.Message.Length == 0 ? "automatic-grant-unavailable" : e.Message);
