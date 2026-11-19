@@ -5,6 +5,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.Interop;
@@ -79,9 +80,33 @@ internal sealed class EdgeRailWindow : Window
         {
             if (_hover.Open && !_hover.HoldsKeyboard)
             {
-                _previousFocus = ToolWindows.Foreground();
+                // WinUI focuses its input site on the press, which activates
+                // the rail before this handler runs: the window that had the
+                // keyboard is the one noted as the rail opened, unless
+                // another has it now (tc-win-az5: the rail handed the
+                // keyboard back to itself).
+                IntPtr foreground = ToolWindows.Foreground();
+                if (foreground != _hwnd)
+                {
+                    _previousFocus = foreground;
+                }
+
                 _hover.Clicked();
                 ToolWindows.TakeKeyboard(_hwnd);
+
+                // A click on the card or the zone focuses nothing, and with
+                // nothing focused Escape never reaches the rail (tc-win-az5:
+                // the rail stayed open). The first control takes focus
+                // without a ring, as a pointer click gives it, once the rail
+                // is laid out and active: a click on the zone opens it in the
+                // same gesture.
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+                {
+                    if (_hover.HoldsKeyboard && FocusManager.FindFirstFocusableElement(_open) is Control first)
+                    {
+                        first.Focus(FocusState.Pointer);
+                    }
+                });
             }
         };
         _root.KeyDown += (_, e) =>
@@ -109,6 +134,11 @@ internal sealed class EdgeRailWindow : Window
         switch (step)
         {
             case EdgeRailStep.GrowThenOpen:
+                if (ToolWindows.Foreground() is var opener && opener != _hwnd)
+                {
+                    _previousFocus = opener;
+                }
+
                 // The window grows before the rail draws open into it
                 // (EdgeRailController.swift:142-147).
                 Place(open: true);
@@ -120,10 +150,12 @@ internal sealed class EdgeRailWindow : Window
             case EdgeRailStep.CloseThenShrink:
                 _closeTimer.Stop();
 
-                // The keyboard goes back as the close starts (checklist M2).
+                // The keyboard goes back as the close starts (checklist M2),
+                // and again once the rail has gone if it came back: the focused
+                // control collapsing moves XAML focus inside the rail, which
+                // activated it again (tc-win-az5).
                 ToolWindows.ReleaseKeyboard(_hwnd);
                 ToolWindows.ReturnFocus(_previousFocus);
-                _previousFocus = IntPtr.Zero;
                 StartSlide(opening: false);
                 break;
         }
@@ -169,6 +201,19 @@ internal sealed class EdgeRailWindow : Window
             _open.Visibility = Visibility.Collapsed;
             _closed.Visibility = Visibility.Visible;
             Place(open: false);
+
+            // After the layout pass that moves XAML focus off the collapsed
+            // controls: that move activated the rail again when the keyboard
+            // went back any sooner.
+            IntPtr returnTo = _previousFocus;
+            _previousFocus = IntPtr.Zero;
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (ToolWindows.Foreground() == _hwnd)
+                {
+                    ToolWindows.ReturnFocus(returnTo);
+                }
+            });
         }
     }
 

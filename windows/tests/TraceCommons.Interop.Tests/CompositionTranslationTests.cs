@@ -73,3 +73,57 @@ public class CompositionTranslationTests
             && t.Contains('(', StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// The rail's keyboard after a click (W13, one-pass checklist M2), asserted
+/// about the source as the other shell wiring is. On tc-win-az5, 2026-11-19:
+/// a click on the card focused nothing, so Escape never reached the rail and
+/// it stayed open; and closing it collapsed the focused control, which moved
+/// XAML focus inside the rail and activated it again, so the keyboard did
+/// not go back to the window that had it.
+/// </summary>
+public class EdgeRailKeyboardWiringTests
+{
+    private static string Source() =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "EdgeRailWindow.cs.txt"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    [Fact]
+    public void AClickThatTakesTheKeyboardFocusesTheFirstControl()
+    {
+        string source = Source();
+        int take = source.IndexOf("ToolWindows.TakeKeyboard(_hwnd);", StringComparison.Ordinal);
+        int focus = source.IndexOf("FocusManager.FindFirstFocusableElement(_open)", StringComparison.Ordinal);
+
+        Assert.True(take >= 0, "the click no longer takes the keyboard where this test looks");
+        Assert.True(focus > take, "after taking the keyboard the rail must focus a control, or Escape has nowhere to arrive");
+    }
+
+    [Fact]
+    public void TheKeyboardGoesBackAgainOnceTheRailHasShrunk()
+    {
+        string source = Source();
+        int shrink = source.IndexOf("Place(open: false);\n", StringComparison.Ordinal);
+        int deferred = source.IndexOf("DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low", shrink + 1, StringComparison.Ordinal);
+        int check = source.IndexOf("if (ToolWindows.Foreground() == _hwnd)", shrink + 1, StringComparison.Ordinal);
+
+        Assert.True(shrink >= 0, "the rail no longer shrinks where this test looks");
+        Assert.True(deferred > shrink && check > deferred, "once the rail has shrunk, and after the layout pass, a rail that took the foreground back must hand it on");
+        Assert.True(source.IndexOf("ToolWindows.ReturnFocus(returnTo);", check, StringComparison.Ordinal) > check);
+    }
+
+    [Fact]
+    public void TheKeyboardGoesBackToAWindowOtherThanTheRail()
+    {
+        string source = Source();
+        int opened = source.IndexOf("case EdgeRailStep.GrowThenOpen:", StringComparison.Ordinal);
+        int pressed = source.IndexOf("_root.PointerPressed +=", StringComparison.Ordinal);
+
+        // Noted as the rail opens, and on the press only when it is another
+        // window: the press itself activates the rail.
+        Assert.True(opened >= 0 && pressed >= 0);
+        Assert.Contains("opener != _hwnd", source.Substring(opened, 300), StringComparison.Ordinal);
+        Assert.Contains("if (foreground != _hwnd)", source.Substring(pressed, 900), StringComparison.Ordinal);
+        Assert.DoesNotContain("_previousFocus = ToolWindows.Foreground();", source, StringComparison.Ordinal);
+    }
+}
