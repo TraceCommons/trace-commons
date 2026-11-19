@@ -1348,3 +1348,108 @@ window.tc-edge-surface {
 .tc-edge-row:hover {
   background-color: @tc_glass_row_hover;
 }
+
+/* ---- First-run motion (the Mac's curves and durations) ----------------
+   Each transition below is the Mac's own: the token curve
+   cubic-bezier(0.2, 0.8, 0.2, 1) at the Mac's duration and delay, pinned
+   by `first_run_stage::tests::the_first_runs_css_motion_is_the_macs`. GTK
+   runs no CSS transition with `gtk-enable-animations` off (no frame clock
+   for the style), as the Mac's Reduce Motion gives the last frame. Kept
+   apart for the motion-core stream to fold into its shared transition
+   variables. */
+
+/* The thread's current title lights 0.42 s after the step changes, over
+   0.3 s (`FirstRunStepThread.title`); the base glow is the lit one at no
+   alpha, so the shadow interpolates. */
+.tc-thread-title {
+  text-shadow: 0 0 14px alpha(@tc_first_run_glow, 0);
+  transition: color 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    text-shadow 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    font-weight 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms;
+}
+
+/* The segmented pill (`FirstRunSegmented`): Ask, Automatic and Never side
+   by side in a well, the chosen one's pill filling over 0.15 s. Real radio
+   buttons, their own circles cleared. */
+.tc-first-run-segmented {
+  padding: 2px;
+  border-radius: 999px;
+  background-color: @tc_first_run_well;
+}
+checkbutton.tc-first-run-segment {
+  padding: 0 10px;
+  min-height: 22px;
+  border-radius: 999px;
+  background-color: alpha(@tc_first_run_toggle_on, 0);
+  font-size: 0.85em;
+  font-weight: 500;
+  transition: background-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    color 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+checkbutton.tc-first-run-segment:hover {
+  background-color: @tc_first_run_control_hover;
+}
+checkbutton.tc-first-run-segment:checked {
+  background-color: @tc_first_run_toggle_on;
+  color: @tc_first_run_text_on_accent;
+}
+checkbutton.tc-first-run-segment > radio,
+checkbutton.tc-first-run-segment > check {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  -gtk-icon-source: none;
+  opacity: 0;
+}
+
+/* The small switch (`FirstRunSwitch`, 30 by 18): the check button's own
+   box is cleared and keeps the room the drawn track takes. */
+checkbutton.tc-first-run-switch {
+  padding: 0;
+  border-spacing: 10px;
+}
+checkbutton.tc-first-run-switch > check {
+  min-width: 30px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: transparent;
+  -gtk-icon-source: none;
+}
+
+/* Join's account card, outlined in the accent once chosen, over the
+   standard 0.22 s (`JoinScreen.accountCard`). An inset ring, as the Mac's
+   `strokeBorder` takes no room. */
+.tc-card.tc-join-card {
+  box-shadow: inset 0 0 0 1.5px alpha(@tc_first_run_toggle_on, 0);
+  transition: box-shadow 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tc-card.tc-join-card.tc-join-chosen {
+  box-shadow: inset 0 0 0 1.5px @tc_first_run_toggle_on;
+}
+
+/* A repo's disclosure in Customize: the chevron turns a quarter over the
+   standard 0.22 s (`ToolsScreen` repo row); the past traces show at once,
+   as the Mac's open is not animated. */
+expander-widget.tc-first-run-disclosure > box > title > expander {
+  -gtk-icon-source: -gtk-icontheme("pan-end-symbolic");
+  -gtk-icon-transform: rotate(0deg);
+  transition: -gtk-icon-transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+expander-widget.tc-first-run-disclosure > box > title > expander:checked {
+  -gtk-icon-transform: rotate(90deg);
+}
+expander-widget.tc-first-run-disclosure > box > title > expander:dir(rtl) {
+  -gtk-icon-source: -gtk-icontheme("pan-end-symbolic-rtl");
+}
+expander-widget.tc-first-run-disclosure > box > title > expander:dir(rtl):checked {
+  -gtk-icon-transform: rotate(-90deg);
+}

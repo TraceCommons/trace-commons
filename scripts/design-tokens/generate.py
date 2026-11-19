@@ -1312,6 +1312,9 @@ FIRST_RUN_COLOURS = [
     "textPrimary", "textSecondary", "textTertiary",
     "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode",
     "tintAccent", "toggleOn",
+    # The first run's own controls (`FirstRunSegmented`, `FirstRunSwitch`,
+    # Join's chosen card), which the GTK first run draws in CSS.
+    "textOnAccent", "toggleOff", "toggleKnobOff", "firstRunControlHover",
 ]
 
 

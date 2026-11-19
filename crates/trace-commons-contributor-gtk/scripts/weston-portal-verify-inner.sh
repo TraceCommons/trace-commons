@@ -305,7 +305,10 @@ else
     ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
     ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
     ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
-    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit; do
+    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit \
+    ui::first_run_stage_view::mounted_tests::the_stage_moves_its_widgets_on_the_macs_clock \
+    ui::first_run_fade::mounted_tests::steps_crossfade_on_the_spatial_spring \
+    ui::first_run_switch::mounted_tests::the_small_switch_ticks_only_while_it_slides; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

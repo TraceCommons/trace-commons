@@ -563,7 +563,26 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
 /// dark in either scheme (`stage.rs`), so its glow is the dark scheme's.
 fn first_run_glow_css() -> String {
     let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
-    format!("@define-color tc_first_run_glow {glow};")
+    format!(
+        "@define-color tc_first_run_glow {glow};\n{}",
+        first_run_controls_css()
+    )
+}
+
+/// The first run's own controls' colours (`FirstRunSegmented`,
+/// `FirstRunSwitch`, Join's chosen card), from the same dark scheme.
+fn first_run_controls_css() -> String {
+    use brand_tokens::first_run::dark as t;
+    [
+        ("tc_first_run_toggle_on", t::TOGGLE_ON),
+        ("tc_first_run_text_on_accent", t::TEXT_ON_ACCENT),
+        ("tc_first_run_well", t::WELL_FILL),
+        ("tc_first_run_control_hover", t::FIRST_RUN_CONTROL_HOVER),
+    ]
+    .iter()
+    .map(|(name, (hex, alpha))| format!("@define-color {name} alpha({hex}, {alpha});"))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -725,6 +744,12 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
             let omarchy::Rgb(r, g, b) = p.ink;
             Some(format!("rgba({r}, {g}, {b}, 0.28)"))
         }
+        // The first run's own controls: the switch and pill's on, its ink,
+        // the pill's well and hover.
+        "tc_first_run_toggle_on" => hex(p.accent),
+        "tc_first_run_text_on_accent" => hex(p.on_accent),
+        "tc_first_run_well" => hex(p.inset),
+        "tc_first_run_control_hover" => hex(p.control_hover),
         // The shell's own grounds and inks.
         "tc_bg" => hex(p.bg),
         "tc_surface" => hex(p.surface),
