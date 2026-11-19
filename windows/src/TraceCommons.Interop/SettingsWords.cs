@@ -108,3 +108,24 @@ public static class SettingsReadWords
     /// <summary>Retry, or null when the core gave no word (then no button is drawn).</summary>
     public static string? Retry => RetryWord.Value;
 }
+
+/// <summary>
+/// The Settings words the Mac reads from the core's shell table
+/// (<c>SettingsLegacyWords</c>, SettingsView.swift:35-115, over
+/// <c>shell_words_copy::settings_words</c>). Empty when the table or the
+/// word is missing, so a control then says nothing.
+/// </summary>
+public static class SettingsLegacyWords
+{
+    private static readonly Lazy<string?> Table = new(() =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_shell_words_copy_json()));
+
+    /// <summary>One word of the table's <c>settings</c> object.</summary>
+    public static string Word(string key) => MonitorWords.WordAt(Table.Value, "settings", key);
+
+    /// <summary><c>undecidedDropped</c> (:52-54): <c>{days}</c> filled.</summary>
+    public static string UndecidedDropped(long days) => Fill(Word("undecided_dropped"), "days", days.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    internal static string Fill(string template, string key, string value) =>
+        template.Replace("{" + key + "}", value, StringComparison.Ordinal);
+}

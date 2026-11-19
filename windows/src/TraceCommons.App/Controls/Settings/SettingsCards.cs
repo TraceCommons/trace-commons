@@ -99,4 +99,99 @@ internal static class SettingsCards
 
         return row;
     }
+
+    /// <summary>
+    /// A glass chip (<c>GlassChip(glass:muted:)</c>, Indicators.swift:70-90):
+    /// mono words, 3 by 9 padding in a capsule, accent ink, or secondary ink
+    /// on the inset tint while muted. One element for Narrator, named by its
+    /// words.
+    /// </summary>
+    public static Border GlassChip(string word, bool muted)
+    {
+        var text = new TextBlock
+        {
+            Text = word,
+            Style = (Style)Resource("TcMonoChipTextStyle"),
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Resource(muted ? "TcInkSecondaryBrush" : "TcAccentTextBrush"),
+            MaxLines = 1,
+        };
+        var chip = new Border
+        {
+            Child = text,
+            Padding = new Thickness(9, 3, 9, 3),
+            CornerRadius = (CornerRadius)Resource("TcPillCornerRadius"),
+            BorderThickness = new Thickness(0.5),
+            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Resource("TcHairlineBrush"),
+            Background = muted ? (Microsoft.UI.Xaml.Media.Brush)Resource("TcSurfaceInsetBrush") : null,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetName(chip, word);
+        AutomationProperties.SetAccessibilityView(text, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        return chip;
+    }
+
+    /// <summary>
+    /// A status chip (<c>GlassChip(_:status:)</c>, Indicators.swift:91-104):
+    /// a 6 pt dot then mono words in the status's ink, 3 by 9 padding, on the
+    /// inset tint (flat pills carry no border).
+    /// </summary>
+    public static Border StatusChip(string word, bool on)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+        row.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse
+        {
+            Width = 6,
+            Height = 6,
+            Fill = (Microsoft.UI.Xaml.Media.Brush)Resource(on ? "TcStatusOnBrush" : "TcStatusOffBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = word,
+            Style = (Style)Resource("TcMonoChipTextStyle"),
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Resource(on ? "TcStatusOnTextBrush" : "TcInkSecondaryBrush"),
+            MaxLines = 1,
+        });
+        var chip = new Border
+        {
+            Child = row,
+            Padding = new Thickness(9, 3, 9, 3),
+            CornerRadius = (CornerRadius)Resource("TcPillCornerRadius"),
+            Background = (Microsoft.UI.Xaml.Media.Brush)Resource("TcSurfaceInsetBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetName(chip, word);
+        AutomationProperties.SetAccessibilityView(row, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        return chip;
+    }
+
+    /// <summary>
+    /// A card whose head is a title with something on its right
+    /// (<c>GlassEyebrowCard(_:title:accessory:)</c>): the eyebrow when the core
+    /// gives one, then the title and the accessory on one line.
+    /// </summary>
+    public static Border TitledCard(string eyebrow, string title, UIElement? accessory, UIElement content)
+    {
+        var head = new Grid { ColumnSpacing = 8 };
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var titleText = Text(title, "TcTitleCardTextStyle");
+        AutomationProperties.SetHeadingLevel(titleText, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level3);
+        head.Children.Add(titleText);
+        if (accessory is FrameworkElement element)
+        {
+            Grid.SetColumn(element, 1);
+            head.Children.Add(element);
+        }
+
+        var stack = new StackPanel { Spacing = 8 };
+        if (!string.IsNullOrEmpty(eyebrow))
+        {
+            stack.Children.Add(Text(eyebrow, "TcEyebrowTextStyle"));
+        }
+
+        stack.Children.Add(head);
+        stack.Children.Add(content);
+        return new Border { Style = Styles?["SettingsCardStyle"] as Style, Child = stack };
+    }
 }

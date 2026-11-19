@@ -109,6 +109,10 @@ public sealed partial class SettingsView
         PayoutsHost.Content = _payouts;
         ReferralsHost.Content = new ReferralsSection(host);
         GeneralHost.Content = new GeneralSection();
+        var watcher = new WatchingSection(host);
+        watcher.PausedChanged += DrawHeaderChip;
+        WatcherHost.Content = watcher;
+        DrawHeaderChip(false);
         ComputeHost.Content = new ComputeSection(host, AppCompute);
 
         DrawList();
@@ -213,7 +217,13 @@ public sealed partial class SettingsView
             }
 
             DaemonResponse status = await host.CallAsync(DaemonProtocol.Methods.Status);
-            return status.IsError ? null : !OnboardingState.Default().IsSetupComplete(status.ResultAs<DaemonStatus>());
+            if (status.IsError || status.ResultAs<DaemonStatus>() is not { } answered)
+            {
+                return null;
+            }
+
+            DrawHeaderChip(answered.Paused);
+            return !OnboardingState.Default().IsSetupComplete(answered);
         });
 
         if (await _gateReader.ReadAsync())
@@ -255,6 +265,18 @@ public sealed partial class SettingsView
             MonitorShellCopy.Top("sign_in"),
             (_, _) => SetUpAgainRequested?.Invoke(this, System.EventArgs.Empty)));
         notice.Content = SettingsCards.Card(string.Empty, stack);
+    }
+
+    /// <summary>
+    /// The header's Watching or Paused chip (<c>SettingsModal.chip</c>,
+    /// SettingsModal.swift:64-73, 243-248), from the last status read; the
+    /// Mac's placeholder status is not paused, so it reads Watching first.
+    /// </summary>
+    private void DrawHeaderChip(bool paused)
+    {
+        HeaderChipHost.Content = SettingsHeaderChip.Live(paused) is { } chip
+            ? SettingsCards.StatusChip(chip.Word, chip.On)
+            : null;
     }
 
     /// <summary>Straight to a section, its rule at the top (<c>scrollTo(_, anchor: .top)</c>, no animation).</summary>

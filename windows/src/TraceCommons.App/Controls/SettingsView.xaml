@@ -62,6 +62,7 @@
               BorderBrush="{ThemeResource TcHairlineDividerBrush}"
               BorderThickness="0,0,0,1">
             <TextBlock x:Name="SettingsTitleText" Style="{StaticResource TcTitleScreenTextStyle}" />
+            <ContentControl x:Name="HeaderChipHost" IsTabStop="False" HorizontalAlignment="Right" VerticalAlignment="Center" />
         </Grid>
 
         <!--
@@ -249,6 +250,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyWatching" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="WatcherHost" HorizontalContentAlignment="Stretch" />
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -286,9 +288,6 @@
                                    SpinButtonPlacementMode="Inline"
                                    IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                                    ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="{x:Bind Settings.QueueExpiryText, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Settings.NotificationOwnerText, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
