@@ -1931,6 +1931,7 @@ mod tests {
             keep_saved_model: false,
             resume_of: None,
             background_model: None,
+            sandbox: None,
         };
         let run = |sessions: &mut crate::managed::sessions::SessionRegistry,
                    request: LaunchRequest| {

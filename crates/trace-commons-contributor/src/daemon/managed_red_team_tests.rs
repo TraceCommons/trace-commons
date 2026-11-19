@@ -75,6 +75,7 @@ fn red_team_launch_request(
         keep_saved_model: false,
         cli_options: None,
         resume_of: None,
+        sandbox: None,
     })
 }
 

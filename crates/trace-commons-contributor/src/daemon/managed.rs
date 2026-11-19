@@ -333,7 +333,7 @@ impl ManagedService {
                     request.params.clone(),
                     dirs::home_dir(),
                 )?;
-                let p: LaunchRequest =
+                let mut p: LaunchRequest =
                     serde_json::from_value(params).map_err(|_| ManagedError::InvalidRequest)?;
                 // Only `managed_session_resume` continues a conversation,
                 // from a row it checks.
@@ -351,6 +351,7 @@ impl ManagedService {
                         return Err(ManagedError::RedTeamNeedsNearAi);
                     }
                 }
+                p.sandbox = crate::managed::sandbox::validate(p.tool, p.sandbox.as_ref())?;
                 let account = self.launch_account(&p, sign_in)?;
                 if p.tool == ToolId::RedTeam
                     && !matches!(
@@ -405,6 +406,8 @@ impl ManagedService {
                         return Err(ManagedError::RedTeamNeedsNearAi);
                     }
                 }
+                again.sandbox =
+                    crate::managed::sandbox::validate(again.tool, again.sandbox.as_ref())?;
                 if again.resume_of.is_some_and(|root| {
                     !self.knows_conversation(again.tool, again.account_id, root)
                 }) {
@@ -461,6 +464,7 @@ impl ManagedService {
                         keep_saved_model: false,
                         resume_of: None,
                         background_model: None,
+                        sandbox: None,
                     },
                     sign_in,
                 )
@@ -807,6 +811,7 @@ impl ManagedService {
                     keep_saved_model: false,
                     resume_of: None,
                     background_model: None,
+                    sandbox: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -1014,7 +1019,7 @@ fn saved_folder_model(
 fn refusal_label(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::Unavailable(value) => value,
-        Refusal::Managed(error) => label(error),
+        Refusal::Managed(error) => label(&error),
     }
 }
 
@@ -1086,8 +1091,14 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
         Ok(value) => Response::ok(request.id, value),
         Err(Refusal::Unavailable(code)) => Response::err(request.id, "unavailable", code),
         Err(Refusal::Managed(error)) => {
-            let code = label(error);
-            Response::err(request.id, code, code)
+            let code = label(&error);
+            let message = match &error {
+                ManagedError::SandboxInputRefused(_) | ManagedError::SandboxHostRefused(_) => {
+                    error.to_string()
+                }
+                _ => code.to_owned(),
+            };
+            Response::err(request.id, code, &message)
         }
     }
 }
@@ -1976,7 +1987,7 @@ fn verify_visible_version(
     }
 }
 
-fn label(error: ManagedError) -> &'static str {
+fn label(error: &ManagedError) -> &'static str {
     match error {
         ManagedError::Conflict => "managed-conflict",
         ManagedError::CollectionAccountBusy => "managed-collection-account-busy",
@@ -2005,6 +2016,8 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::TerminalCallFailed => "managed-terminal-call-failed",
         ManagedError::RedTeamUnavailable => crate::managed::RED_TEAM_UNAVAILABLE_LABEL,
         ManagedError::RedTeamNeedsNearAi => crate::managed::RED_TEAM_NEEDS_NEAR_AI_LABEL,
+        ManagedError::SandboxInputRefused(_) => crate::managed::SANDBOX_INPUT_REFUSED_LABEL,
+        ManagedError::SandboxHostRefused(_) => crate::managed::SANDBOX_HOST_REFUSED_LABEL,
     }
 }
 
@@ -2197,7 +2210,7 @@ mod tests {
             assert!(!too_low(&unknown));
         }
         assert_eq!(
-            label(ManagedError::NearAiBalanceTooLow),
+            label(&ManagedError::NearAiBalanceTooLow),
             "managed-near-ai-balance-too-low"
         );
     }
@@ -2208,7 +2221,7 @@ mod tests {
     #[test]
     fn the_project_auto_mode_server_refusal_has_its_own_label() {
         assert_eq!(
-            label(ManagedError::ProjectSetsAutoModeServer),
+            label(&ManagedError::ProjectSetsAutoModeServer),
             crate::managed::PROJECT_SETS_AUTO_MODE_SERVER_LABEL
         );
     }
@@ -2218,7 +2231,7 @@ mod tests {
     #[test]
     fn the_project_model_refusal_has_its_own_label() {
         assert_eq!(
-            label(ManagedError::ProjectChoosesModel),
+            label(&ManagedError::ProjectChoosesModel),
             crate::managed::PROJECT_CHOOSES_MODEL_LABEL
         );
     }
@@ -2363,6 +2376,7 @@ mod tests {
             background_model: None,
             collect_traces: false,
             cli_options: String::new(),
+            red_team_inputs: Vec::new(),
         };
         assert_eq!(
             saved_folder_model(&shared, &prefs(&folder)),
@@ -2451,6 +2465,7 @@ mod tests {
             background_model: None,
             model: None,
             collect_traces: false,
+            sandbox: None,
         })
     }
 
@@ -2532,6 +2547,7 @@ mod tests {
                     background_model: None,
                     model: None,
                     collect_traces: false,
+                    sandbox: None,
                 }),
                 false,
             )
@@ -3028,7 +3044,7 @@ mod tests {
     #[test]
     fn the_terminal_refusal_has_its_own_label() {
         assert_eq!(
-            label(ManagedError::TerminalNotFound),
+            label(&ManagedError::TerminalNotFound),
             "managed-terminal-not-found"
         );
     }
@@ -3622,7 +3638,7 @@ mod tests {
                 &shared,
                 json!({"session_id":id,"ticket":chosen.ticket.unwrap()})
             ),
-            Err(label(ManagedError::TerminalNotFound).to_string())
+            Err(label(&ManagedError::TerminalNotFound).to_string())
         );
         assert_eq!(in_terminal(id), Some(TerminalSetting::default()));
     }
@@ -4173,12 +4189,12 @@ mod tests {
     #[test]
     fn the_near_ai_sign_in_refusal_has_its_own_label() {
         assert_eq!(
-            label(ManagedError::NearAiSignInRequired),
+            label(&ManagedError::NearAiSignInRequired),
             "managed-near-ai-sign-in-required"
         );
         assert_ne!(
-            label(ManagedError::NearAiSignInRequired),
-            label(ManagedError::SignInRequired)
+            label(&ManagedError::NearAiSignInRequired),
+            label(&ManagedError::SignInRequired)
         );
     }
     /// A shell offers Resume only to a daemon that says it has it.
@@ -4712,6 +4728,7 @@ mod tests {
                         keep_saved_model: false,
                         resume_of: None,
                         background_model: None,
+                        sandbox: None,
                     },
                     &f.account,
                 )
@@ -4918,6 +4935,7 @@ mod tests {
                         keep_saved_model: false,
                         resume_of: None,
                         background_model: None,
+                        sandbox: None,
                     },
                     &f.account,
                 )
