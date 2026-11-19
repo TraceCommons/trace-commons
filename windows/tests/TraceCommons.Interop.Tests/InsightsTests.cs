@@ -599,12 +599,17 @@ public sealed class InsightsAnalyticsTests
         string code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.cs.txt"));
         int overview = xaml.IndexOf("Header=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
         int patterns = xaml.IndexOf("Header=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
+        int benchmarks = xaml.IndexOf("Header=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
         int sessions = xaml.IndexOf("Header=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
         int analyze = xaml.IndexOf("Header=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
-        Assert.True(overview >= 0 && overview < patterns && patterns < sessions && sessions < analyze);
+        // The Mac's Overview, Breakdown, Benchmarks (InsightsView.swift:162), then this app's own two.
+        Assert.True(overview >= 0 && overview < patterns && patterns < benchmarks && benchmarks < sessions && sessions < analyze);
         Assert.DoesNotContain("analytics_tab_spend", xaml);
         Assert.DoesNotContain("analytics_later", xaml);
-        Assert.DoesNotContain("ProgressRing", xaml);
+        // One spinner, Benchmarks' while it reads (InsightsBenchmarksTab.swift:270 GlassSpinner).
+        int ring = xaml.IndexOf("ProgressRing", StringComparison.Ordinal);
+        Assert.True(ring > benchmarks && ring < sessions);
+        Assert.Equal(ring, xaml.LastIndexOf("<ProgressRing", StringComparison.Ordinal) + 1);
         Assert.Contains("ViewModel.SelectTabAsync(", code);
     }
 }
