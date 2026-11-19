@@ -215,9 +215,7 @@ fn dismissal_key(tenant_id: &str) -> Option<String> {
 /// daemon record fits (`acknowledge_legacy_invite_migration` is the notice
 /// after a move) and the card is this shell's alone.
 fn dismissal_file() -> Option<std::path::PathBuf> {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|d| d.join("trace-commons").join("legacy-move-dismissed.json"))
+    crate::shell_state_file("legacy-move-dismissed.json")
 }
 
 fn read_dismissed(path: &std::path::Path) -> Vec<String> {

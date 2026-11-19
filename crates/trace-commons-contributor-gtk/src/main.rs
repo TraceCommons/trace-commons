@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(debug_assertions)]
     let dir = match dir {
         None if trace_commons_contributor_gtk::sample::requested() => {
-            Some(std::env::temp_dir().join(format!("trace-commons-sample-{}", std::process::id())))
+            Some(trace_commons_contributor_gtk::sample_scratch_dir())
         }
         dir => dir,
     };
