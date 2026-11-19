@@ -436,7 +436,9 @@ public class PrivateInferenceTests
     {
         string markup = File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "MainWindow.xaml.txt"));
-        int start = markup.IndexOf("HasPrivateInferenceOffer", StringComparison.Ordinal);
+        // The card is in the window's notice stack (W2): its presence is the
+        // stack's (MainWindow.Shell.cs PresentNotices), its words still bound.
+        int start = markup.IndexOf("x:Name=\"PrivateAIOfferCard\"", StringComparison.Ordinal);
         Assert.True(start >= 0, "the offer card is not in the main window");
         int end = markup.IndexOf("</Border>", start, StringComparison.Ordinal);
         Assert.True(end > start, "the offer card's border does not close");

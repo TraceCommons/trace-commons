@@ -38,8 +38,22 @@ public sealed class ManagedSessionsView : UserControl
         _host = host;
         _signIn = signIn;
         Content = _root;
-        Loaded += async (_, _) => { await RefreshAsync(); _timer.Start(); };
+        Loaded += async (_, _) => { await RefreshAsync(); if (WindowClocks.Running) _timer.Start(); };
         Unloaded += (_, _) => _timer.Stop();
+        // The 10 s poll stops while the window is hidden to the tray or
+        // minimised (WindowClocks), and resumes with a read when it is back.
+        WindowClocks.Changed += async running =>
+        {
+            if (!running)
+            {
+                _timer.Stop();
+            }
+            else if (IsLoaded)
+            {
+                await RefreshAsync();
+                _timer.Start();
+            }
+        };
         _timer.Tick += async (_, _) => await RefreshAsync();
     }
 

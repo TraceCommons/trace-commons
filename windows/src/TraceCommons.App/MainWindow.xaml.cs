@@ -121,16 +121,6 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // The mark and the app name live in the title bar, which means the
-        // window has to own that bar rather than let the system draw it. The
-        // caption buttons stay the system's: only their background is cleared,
-        // so the chrome colour runs behind them and they keep snap layouts,
-        // the window menu and their own accessibility behaviour.
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
-        AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
-        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
-
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
@@ -176,6 +166,10 @@ public sealed partial class MainWindow : Window
         _visibilityDebounceTimer.Interval = TimeSpan.FromMilliseconds(200);
         _visibilityDebounceTimer.IsRepeating = false;
         _visibilityDebounceTimer.Tick += (_, _) => RecomputeVisiblePreviews();
+
+        // The Monitor window's shell: toolbar row, tabs, panes, notices,
+        // keyboard map and clocks (MainWindow.Shell.cs).
+        InitializeShell();
     }
 
     /// <summary>Hide to a reachable tray; otherwise confirm before stopping the daemon.</summary>
@@ -201,6 +195,8 @@ public sealed partial class MainWindow : Window
         args.Cancel = true;
         if (outcome == CloseRequestOutcome.HideToTray)
         {
+            // AppWindow.Hide raises no visibility change: the clocks are told.
+            _clockGate.SetHiddenToTray(true);
             AppWindow.Hide();
         }
         else if (outcome == CloseRequestOutcome.AskToQuit)
@@ -592,11 +588,7 @@ public sealed partial class MainWindow : Window
 
     private void OnTraySettingsRequested()
     {
-        _host.Dispatcher.TryEnqueue(() =>
-        {
-            ShowSettingsPane();
-            BringForward();
-        });
+        _host.Dispatcher.TryEnqueue(ShowSettingsWindow);
     }
 
     private void OnTrayPauseRequested(PauseDuration duration)
@@ -612,6 +604,7 @@ public sealed partial class MainWindow : Window
     internal void BringForward()
     {
         AppWindow.Show();
+        _clockGate.SetHiddenToTray(false);
         Activate();
     }
 
@@ -1142,27 +1135,8 @@ public sealed partial class MainWindow : Window
         ShowSettingsPane();
     }
 
-    private void ShowSettingsPane()
-    {
-        if (SettingsPane.Content is null)
-        {
-            var settings = new SettingsView(_host, ViewModel.LegacyOffer);
-            // Settings no longer holds the model-calls switch; it holds a
-            // pointer at the destination that does, and this is what turns
-            // that pointer into navigation.
-            settings.OpenPrivateInferenceRequested += (_, _) => ShowPrivateInferencePane();
-            // Set up again unenrolled this device: the first run starts,
-            // with a fresh NEAR AI sign-in, as on a device never set up.
-            settings.SetUpAgainRequested += async (_, _) =>
-            {
-                OpenOnboarding(OnboardingState.Default()).Activate();
-                await ViewModel.RefreshAsync();
-            };
-            SettingsPane.Content = settings;
-        }
-
-        ViewModel.ShowSettings();
-    }
+    /// <summary>Settings is its own window (spec W2-D2 (a)).</summary>
+    private void ShowSettingsPane() => ShowSettingsWindow();
 
     /// <summary>
     /// Switches to the model-calls destination, creating the page the first
@@ -1187,53 +1161,6 @@ public sealed partial class MainWindow : Window
     {
         PrivateInferencePane.Content ??= new PrivateInferenceView(_host);
         ViewModel.ShowPrivateInference();
-    }
-
-    // The rail's four destinations on Ctrl-1 through Ctrl-4, in rail order.
-    // In-app only: these fire while this window has focus and take nothing
-    // away from any other application. See the accelerators in the markup.
-
-    private void OnInsightsAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        ShowInsightsPane();
-    }
-
-    private async void OnQueueAccelerator(
-        KeyboardAccelerator sender,
-        KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        if (!await StartContributionsAsync()) return;
-        ViewModel.ShowQueue();
-    }
-
-    private async void OnHistoryAccelerator(
-        KeyboardAccelerator sender,
-        KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        if (!await StartContributionsAsync()) return;
-        HistoryPane.Content ??= new HistoryView(_host);
-        ViewModel.ShowHistory();
-    }
-
-    private async void OnPrivateInferenceAccelerator(
-        KeyboardAccelerator sender,
-        KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        if (!await StartContributionsAsync()) return;
-        ShowPrivateInferencePane();
-    }
-
-    private async void OnSettingsAccelerator(
-        KeyboardAccelerator sender,
-        KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        if (!await StartContributionsAsync()) return;
-        ShowSettingsPane();
     }
 
     /// <summary>
@@ -1602,6 +1529,7 @@ public sealed partial class MainWindow : Window
         if (GroupOf(sender) is QueueGroupViewModel group)
         {
             ViewModel.OpenFolder(group.ProjectId);
+            OpenInspectorForFolder();
         }
     }
 
@@ -1790,6 +1718,9 @@ public sealed partial class MainWindow : Window
     private async void OnClosed(object sender, WindowEventArgs args)
     {
         _closed = true;
+        _clockGate.SetClosed();
+        _moveTimer?.Stop();
+        _settingsWindow?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;

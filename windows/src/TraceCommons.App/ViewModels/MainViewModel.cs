@@ -67,6 +67,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private IReadOnlyList<string> _undoEntryIds = Array.Empty<string>();
 
+    /// <summary>When the approval the undo covers was made: a demand key, so a
+    /// second approval of the same session opens the inspector again.</summary>
+    private DateTimeOffset? _undoApprovedAt;
+
+    /// <summary>The folder whose Submit all is in flight, for inspector demand.</summary>
+    private string? _submittingFolder;
+
+    /// <summary>Whether this window's clocks may run: false while it is hidden
+    /// to the tray or minimised (<see cref="SetClocksRunning"/>).</summary>
+    private bool _clocksRunning = true;
+
     /// <summary>
     /// The toast line behind the current undo bar, from
     /// <see cref="ApprovalHold.Toast"/>. It says exactly what happened, so
@@ -447,7 +458,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         PrivateInference,
         Insights,
         MissionDrafts,
-        Settings,
+        Home,
     }
 
     public bool ShowingQueue => _pane == MainPane.Queue;
@@ -480,7 +491,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SetPane(MainPane.MissionDrafts);
     }
 
-    public bool ShowingSettings => _pane == MainPane.Settings;
+    /// <summary>
+    /// Home's overview: the Monitor window's first tab. Settings is its own
+    /// window now, not a pane (spec W2-D2 (a)).
+    /// </summary>
+    public bool ShowingHome => _pane == MainPane.Home;
+
+    public void ShowHome() => SetPane(MainPane.Home);
 
     public void ShowQueue() => SetPane(MainPane.Queue);
 
@@ -488,7 +505,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void ShowPrivateInference() => SetPane(MainPane.PrivateInference);
 
-    public void ShowSettings() => SetPane(MainPane.Settings);
 
     private void SetPane(MainPane pane)
     {
@@ -506,7 +522,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingQueue));
         Raise(nameof(ShowingHistory));
         Raise(nameof(ShowingPrivateInference));
-        Raise(nameof(ShowingSettings));
+        Raise(nameof(ShowingHome));
         Raise(nameof(ShowingInsights));
         Raise(nameof(ShowingMissionDrafts));
     }
@@ -721,7 +737,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 Raise(nameof(ShowingMissionDrafts));
                 if (!missionsShown && _pane == MainPane.MissionDrafts)
                 {
-                    SetPane(MainPane.Queue);
+                    // A mission page falls back to Home's overview
+                    // (MonitorNavigation.swift:17-20).
+                    SetPane(MainPane.Home);
                 }
             }
 
@@ -930,6 +948,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     internal void ShowNotice(string line) => Notice = line;
 
+    /// <summary>The notice's X: the line goes, nothing else changes.</summary>
+    internal void ClearNotice() => Notice = string.Empty;
+
     /// <summary>
     /// Whether an approval can still be recalled.
     ///
@@ -983,11 +1004,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             case PreviewOutcome.Approved when decision.Hold is { } hold
                                               && hold.IsLive(DateTimeOffset.UtcNow):
                 _undoHold = hold;
+                _undoApprovedAt = DateTimeOffset.UtcNow;
                 _undoEntryIds = new[] { entry.EntryId };
                 _undoNoticeLine = hold.Toast.Line;
                 Notice = string.Empty;
                 RaiseUndo();
-                _undoTick.Start();
+                if (_clocksRunning) _undoTick.Start();
                 break;
 
             case PreviewOutcome.Approved:
@@ -1128,11 +1150,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             .Select(entry => entry.EntryId)
             .ToList();
 
-        DaemonResponse response = await _host
-            .CallAsync(
-                DaemonProtocol.Methods.Approve,
-                SubmitParams.ForProject(projectId, outcome))
-            .ConfigureAwait(true);
+        _submittingFolder = projectId;
+        Raise(nameof(Demand));
+        DaemonResponse response;
+        try
+        {
+            response = await _host
+                .CallAsync(
+                    DaemonProtocol.Methods.Approve,
+                    SubmitParams.ForProject(projectId, outcome))
+                .ConfigureAwait(true);
+        }
+        finally
+        {
+            _submittingFolder = null;
+            Raise(nameof(Demand));
+        }
 
         ApplySubmitOutcome(response, candidateEntryIds);
 
@@ -1238,10 +1271,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
         {
             _undoHold = hold;
+            _undoApprovedAt = DateTimeOffset.UtcNow;
             _undoEntryIds = hold.ApprovedEntryIds(candidateEntryIds);
             _undoNoticeLine = hold.Toast.Line;
             RaiseUndo();
-            _undoTick.Start();
+            if (_clocksRunning) _undoTick.Start();
         }
     }
 
@@ -1382,13 +1416,57 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         _undoTick.Stop();
         _undoHold = null;
+        _undoApprovedAt = null;
         _undoEntryIds = Array.Empty<string>();
         _undoNoticeLine = string.Empty;
         RaiseUndo();
     }
 
+    /// <summary>
+    /// What in this window asks for the inspector now
+    /// (<see cref="TraceCommons.Interop.Shell.InspectorDemand"/>): the
+    /// approval held open for undoing and when it was made, and the folder
+    /// whose Submit all is in flight. Contributed, kept and folder-undo have
+    /// no source in this shell until the Traces tree (W3).
+    /// </summary>
+    public TraceCommons.Interop.Shell.DemandSources Demand => new(
+        ApprovalUndo: _undoHold is null ? null : _undoEntryIds,
+        ApprovedAt: _undoHold is null ? null : _undoApprovedAt,
+        SubmittingFolder: _submittingFolder);
+
+    /// <summary>
+    /// Stops or restarts this window's own clock, the undo countdown, while
+    /// the window is hidden to the tray or minimised. The hold is the
+    /// daemon's deadline, so restarting re-reads it at once rather than
+    /// resuming a count.
+    /// </summary>
+    public void SetClocksRunning(bool running)
+    {
+        if (_clocksRunning == running)
+        {
+            return;
+        }
+
+        _clocksRunning = running;
+        if (!running)
+        {
+            _undoTick.Stop();
+            return;
+        }
+
+        if (_undoHold is not null)
+        {
+            OnUndoTick();
+            if (_undoHold is not null)
+            {
+                _undoTick.Start();
+            }
+        }
+    }
+
     private void RaiseUndo()
     {
+        Raise(nameof(Demand));
         Raise(nameof(HasUndo));
         Raise(nameof(UndoHeadline));
         Raise(nameof(UndoButtonText));
