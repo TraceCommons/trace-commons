@@ -441,6 +441,30 @@ else
   fi
 fi
 
+# --- every window carries the app id -----------------------------------------
+#
+# A window GTK does not hold as one of the application's (the first run, the
+# Look inside sheet, every dialog) takes its Wayland app id from the program
+# name, which was the binary's (`trace-commons-shell`), so the desktop could
+# not match it to ai.tracecommons.Contributor.desktop. The client's own
+# protocol log names every toplevel's app id; each must be the app's.
+if [ -n "${WAYLAND_SOCKET:-}" ]; then
+  APP_IDS=$(
+    cd "$WORKDIR" &&
+      WAYLAND_DEBUG=1 WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+        GSK_RENDERER=cairo timeout 60 "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 8 2>&1 |
+      grep -o 'set_app_id("[^"]*")' | sort | uniq -c
+  )
+  echo "toplevel app ids: ${APP_IDS:-none}"
+  if [ -z "$APP_IDS" ]; then
+    fail "no toplevel set an app id -- the app-id check read nothing"
+  elif grep -v 'set_app_id("ai.tracecommons.Contributor")' <<< "$APP_IDS" | grep -q .; then
+    fail "a window's app id is not ai.tracecommons.Contributor"
+  else
+    echo "every toplevel's app id is ai.tracecommons.Contributor"
+  fi
+fi
+
 # --- axis 2: bounded reply from the independent live portal probe ----------
 
 PORTAL_UP=0

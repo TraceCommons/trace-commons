@@ -78,6 +78,16 @@ use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
 
+/// Names the process by the app id, before any window exists. A window GTK
+/// does not hold as one of the application's (the first run, the Look
+/// inside sheet, every dialog) takes its Wayland app id and its X11
+/// `WM_CLASS` from the program name, which is otherwise the binary's
+/// (`trace-commons-shell`), so the desktop could not match it to
+/// `ai.tracecommons.Contributor.desktop`.
+pub fn name_the_process() {
+    glib::set_prgname(Some(APP_ID));
+}
+
 /// The reading column, shared by every screen in this window so the header's
 /// switcher, the health banner and the queue's cards all sit on the same two
 /// vertical lines.
@@ -2385,6 +2395,14 @@ mod card_preview_tests {
 #[cfg(test)]
 mod screen_tests {
     use super::*;
+
+    /// Every window, not only the main one, is named by the app id: the
+    /// program name is what GTK gives a window outside the application.
+    #[test]
+    fn every_window_takes_the_app_id_as_its_program_name() {
+        name_the_process();
+        assert_eq!(glib::prgname().as_deref(), Some(APP_ID));
+    }
 
     /// The tab strip, the tray menu and the accelerators all read
     /// `screens()`: the four tabs, Home first, in the Mac's order.

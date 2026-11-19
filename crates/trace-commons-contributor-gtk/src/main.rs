@@ -108,6 +108,8 @@ fn main() -> anyhow::Result<()> {
         trace_commons_contributor_gtk::ui::onboarding::set_pending_invite(invite);
     }
 
+    // Every window, the first run and the dialogs included, by the app id.
+    ui::name_the_process();
     let application = adw::Application::builder()
         .application_id(ui::APP_ID)
         // The window is the primary surface on this platform, so the
