@@ -234,6 +234,7 @@ else
     ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
     ui::glass_motion::tests::mounted_a_running_driver_follows_reduce_motion_live \
     ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
+    ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
     ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \

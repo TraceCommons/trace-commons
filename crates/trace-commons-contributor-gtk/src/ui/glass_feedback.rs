@@ -405,13 +405,29 @@ mod tests {
         };
         // Nine o'clock on the 9.25-point radius: the ring.
         let ring = px(0.75, 10.0);
-        assert!(ring.iter().zip([198, 199, 202]).all(|(a, b)| a.abs_diff(b) <= 12), "{ring:?}");
+        assert!(
+            ring.iter()
+                .zip([198, 199, 202])
+                .all(|(a, b)| a.abs_diff(b) <= 12),
+            "{ring:?}"
+        );
         // Inside the ring: the ground, so the stroke stayed 1.5.
         let inside = px(2.5, 10.0);
-        assert!(inside.iter().zip([242, 243, 246]).all(|(a, b)| a.abs_diff(b) <= 3), "{inside:?}");
+        assert!(
+            inside
+                .iter()
+                .zip([242, 243, 246])
+                .all(|(a, b)| a.abs_diff(b) <= 3),
+            "{inside:?}"
+        );
         // Just past three o'clock, clockwise: the arc.
         let arc = px(19.0, 11.5);
-        assert!(arc.iter().zip([60, 60, 67]).all(|(a, b)| a.abs_diff(b) <= 40), "{arc:?}");
+        assert!(
+            arc.iter()
+                .zip([60, 60, 67])
+                .all(|(a, b)| a.abs_diff(b) <= 40),
+            "{arc:?}"
+        );
     }
 
     /// No stock spinner is left where the Mac draws its own: the map's
@@ -422,7 +438,10 @@ mod tests {
             ("first_run.rs", include_str!("first_run.rs")),
             ("monitor/map.rs", include_str!("monitor/map.rs")),
         ] {
-            assert!(!source.contains("gtk::Spinner"), "{name} still uses gtk::Spinner");
+            assert!(
+                !source.contains("gtk::Spinner"),
+                "{name} still uses gtk::Spinner"
+            );
         }
     }
 
