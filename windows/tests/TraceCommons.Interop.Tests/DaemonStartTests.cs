@@ -59,19 +59,19 @@ public class DaemonStartTests
             starts++;
             return Task.CompletedTask;
         }, () => running);
-        refused.SetException(RootsNotDeclared());
-        await Assert.ThrowsAsync<TcException>(() => launch);
-        TcException joined = await Assert.ThrowsAsync<TcException>(() => contribution);
-        Assert.True(joined.IsRootsNotDeclared); // The roots screen still opens from the explicit start.
-        Assert.Equal(1, starts);
-
-        // The roots screen's answer starts again with its settings.
-        await gate.RunAsync(() =>
+        // The roots screen's answer, sent while that start is still under
+        // way, carries settings that can clear its refusal.
+        Task answer = gate.RunAsync(() =>
         {
             starts++;
             running = true;
             return Task.CompletedTask;
         }, () => running, retryAfterFailure: true);
+        refused.SetException(RootsNotDeclared());
+        await Assert.ThrowsAsync<TcException>(() => launch);
+        TcException joined = await Assert.ThrowsAsync<TcException>(() => contribution);
+        Assert.True(joined.IsRootsNotDeclared); // The roots screen still opens from the explicit start.
+        await answer; // and that answer starts again with its settings.
         Assert.Equal(2, starts);
         Assert.True(running);
     }
