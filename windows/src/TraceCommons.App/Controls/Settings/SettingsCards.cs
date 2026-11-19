@@ -24,15 +24,42 @@ internal static class SettingsCards
         }
 
         stack.Children.Add(content);
-        return new Border
+        return new Border { Style = Styles?["SettingsCardStyle"] as Style, Child = stack };
+    }
+
+    /// <summary>
+    /// The Settings window's own resources, whose styles take their brushes
+    /// as theme resources, so a card follows the window's theme.
+    /// </summary>
+    public static ResourceDictionary? Styles { get; set; }
+
+    /// <summary>A hairline between groups of the section list.</summary>
+    public static Border Hairline()
+    {
+        var hairline = new Border { Style = Styles?["SettingsHairlineStyle"] as Style };
+        AutomationProperties.SetAccessibilityView(hairline, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        return hairline;
+    }
+
+    /// <summary>
+    /// What a section draws where its read has not answered: a spinner while
+    /// it is out, then the core's failure line with Retry (<c>SettingsReadNotice</c>).
+    /// </summary>
+    public static UIElement ReadNotice(bool failed, RoutedEventHandler retry)
+    {
+        if (!failed)
         {
-            Background = (Microsoft.UI.Xaml.Media.Brush)Resource("TcSurfaceCardBrush"),
-            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Resource("TcHairlineBrush"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = (CornerRadius)Resource("TcCardCornerRadius"),
-            Padding = new Thickness(14, 12, 14, 12),
-            Child = stack,
-        };
+            return new ProgressRing { IsActive = true, Width = 16, Height = 16, HorizontalAlignment = HorizontalAlignment.Left };
+        }
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        row.Children.Add(Caption(TraceCommons.Interop.SettingsReadWords.Failed));
+        if (TraceCommons.Interop.SettingsReadWords.Retry is { } word)
+        {
+            row.Children.Add(Button(word, retry));
+        }
+
+        return row;
     }
 
     public static TextBlock Text(string text, string style = "TcBodyTextStyle") => new()

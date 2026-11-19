@@ -84,3 +84,27 @@ public static class SettingsNavWordsLive
 
     private static string? NullIfEmpty(string? word) => string.IsNullOrEmpty(word) ? null : word;
 }
+
+/// <summary>
+/// The words a section draws where its read has not answered
+/// (<c>SettingsUnavailable</c>, SettingsStateRow.swift:85-109): the core's
+/// request-failed line and the Settings table's Retry.
+/// </summary>
+public static class SettingsReadWords
+{
+    private static readonly Lazy<string?> RetryWord = new(() =>
+        SettingsNavWords.Field(NativeMethods.TakeOwnedString(NativeMethods.tc_source_settings_copy()), "retry"));
+
+    /// <summary>The line for a failed read; a dash when the core gave none.</summary>
+    public static string Failed
+    {
+        get
+        {
+            string line = MonitorShellCopy.Top("request_failed");
+            return line.Length > 0 ? line : SettingsListRow.Placeholder;
+        }
+    }
+
+    /// <summary>Retry, or null when the core gave no word (then no button is drawn).</summary>
+    public static string? Retry => RetryWord.Value;
+}

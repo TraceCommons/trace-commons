@@ -30,6 +30,27 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <!--
+        The Settings sections' code-built cards and the list's hairlines take
+        their brushes through these styles, so they follow the window's own
+        theme (Settings, General, Appearance) as the markup does; a brush read
+        from the application's resources would follow the app's theme instead.
+    -->
+    <UserControl.Resources>
+        <Style x:Key="SettingsCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceCardBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcCardCornerRadius}" />
+            <Setter Property="Padding" Value="14,12" />
+        </Style>
+        <Style x:Key="SettingsHairlineStyle" TargetType="Border">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Margin" Value="0,6" />
+            <Setter Property="Background" Value="{ThemeResource TcHairlineDividerBrush}" />
+        </Style>
+    </UserControl.Resources>
+
     <Grid RowDefinitions="Auto,*">
 
         <!--

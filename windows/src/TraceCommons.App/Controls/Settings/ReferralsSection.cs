@@ -84,8 +84,16 @@ public sealed class ReferralsSection : UserControl
         _root.Children.Clear();
         _apply = null;
         _problem = null;
-        if (_flow.Surface is not { } surface || !_flow.Answered)
+        if (_flow.Surface is not { } surface)
         {
+            return;
+        }
+
+        if (!_flow.Answered)
+        {
+            // Not answered yet: a spinner, or the failure line with Retry,
+            // never a blank body under the rule (ReferralsSection.swift).
+            _root.Children.Add(SettingsCards.ReadNotice(_flow.Failed, async (_, _) => await _flow.RefreshAsync()));
             return;
         }
 

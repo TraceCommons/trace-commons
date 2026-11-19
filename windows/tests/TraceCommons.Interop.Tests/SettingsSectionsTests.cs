@@ -137,4 +137,14 @@ public class SettingsSectionsTests
         Assert.Null(SettingsGeneralCopy.Decode("{\"general\":\"General\",\"appearance\":\"Appearance\",\"light\":\" \",\"dark\":\"Dark\",\"system\":\"System\"}"));
         Assert.Null(SettingsGeneralCopy.Decode("[]"));
     }
+
+    [Fact]
+    public void AFailedReadIsSaidInTheCoresWordsWithItsRetry()
+    {
+        // SettingsUnavailable.line (SettingsStateRow.swift:89-94): the
+        // monitor table's request_failed; Retry from the Settings table.
+        Assert.Equal(MonitorShellCopy.Top("request_failed"), SettingsReadWords.Failed);
+        Assert.False(string.IsNullOrEmpty(SettingsReadWords.Failed));
+        Assert.False(string.IsNullOrEmpty(SettingsReadWords.Retry));
+    }
 }

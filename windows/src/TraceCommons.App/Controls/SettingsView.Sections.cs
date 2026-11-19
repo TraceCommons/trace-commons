@@ -46,6 +46,7 @@ public sealed partial class SettingsView
 
     private void BuildSections(DaemonHost host)
     {
+        SettingsCards.Styles = Resources;
         SettingsTitleText.Text = MonitorWords.SettingsTitle;
         StartAtLoginSwitch.Header = MonitorShellCopy.Shell("start_at_login");
         AutomationProperties.SetName(SectionList, MonitorShellCopy.Top("settings_sections"));
@@ -135,14 +136,7 @@ public sealed partial class SettingsView
         {
             if (SettingsSections.StartsGroup(section, rows))
             {
-                var hairline = new Border
-                {
-                    Height = 1,
-                    Margin = new Thickness(0, 6, 0, 6),
-                    Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcHairlineDividerBrush"],
-                };
-                AutomationProperties.SetAccessibilityView(hairline, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
-                SectionList.Children.Add(hairline);
+                SectionList.Children.Add(SettingsCards.Hairline());
             }
 
             SettingsListRow row = SettingsSections.ListRow(section, words);
