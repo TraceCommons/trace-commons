@@ -1505,12 +1505,11 @@ mod tests {
             join.contains(&format!("box-shadow 220ms {curve}")),
             "{join}"
         );
-        let chevron = rule("expander-widget.tc-first-run-disclosure > box > title > expander");
-        assert!(
-            chevron.contains(&format!("-gtk-icon-transform 220ms {curve}")),
-            "{chevron}"
-        );
-        assert!(css.contains("> expander:checked {\n  -gtk-icon-transform: rotate(90deg);"));
+        // The repo chevron's 0.22 s turn is the shared disclosure's
+        // (`glass_motion::disclosure`, pinned in `motion_css`), not a rule
+        // of the first run's own.
+        assert!(!css.contains("tc-first-run-disclosure"));
+        assert!(include_str!("first_run.rs").contains("super::glass_motion::disclosure(&more);"));
         // The token curve the CSS names is the generated one.
         assert_eq!(
             super::super::style::brand_tokens::first_run::EASE,
