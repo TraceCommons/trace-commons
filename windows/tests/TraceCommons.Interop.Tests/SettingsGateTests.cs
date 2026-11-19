@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using TraceCommons.Interop.Shell;
 using Xunit;
 
@@ -33,5 +35,64 @@ public class SettingsGateTests
     {
         Assert.Equal(want, SettingsGates.For(section, SettingsGate.SignedOut));
         Assert.Equal(SettingsGate.Open, SettingsGates.For(section, SettingsGate.Open));
+    }
+
+    /// <summary>
+    /// Two status changes overlap: the older read answers "set up" after the
+    /// newer one answered "needs onboarding". The newer answer stands
+    /// (#2219 review, defect 1).
+    /// </summary>
+    [Fact]
+    public async Task AnOlderReplyLandingLateDoesNotReopenTheGate()
+    {
+        var replies = new Queue<TaskCompletionSource<bool?>>();
+        var reader = new SettingsGateReader(() =>
+        {
+            var reply = new TaskCompletionSource<bool?>();
+            replies.Enqueue(reply);
+            return reply.Task;
+        });
+
+        Task<bool> older = reader.ReadAsync();
+        Task<bool> newer = reader.ReadAsync();
+        TaskCompletionSource<bool?> olderReply = replies.Dequeue();
+        TaskCompletionSource<bool?> newerReply = replies.Dequeue();
+
+        newerReply.SetResult(true);
+        Assert.True(await newer);
+        Assert.Equal(SettingsGate.SignedOut, reader.Gate);
+
+        olderReply.SetResult(false);
+        Assert.False(await older);
+        Assert.Equal(SettingsGate.SignedOut, reader.Gate);
+    }
+
+    /// <summary>
+    /// The Mac counts a failed status read as known, over the placeholder
+    /// status that requires onboarding (MonitorNavigation.swift:275-283),
+    /// so a first failed read closes the gated sections; once a status has
+    /// answered, a failed read keeps it.
+    /// </summary>
+    [Fact]
+    public async Task AFirstFailedReadClosesTheGateALaterOneKeepsTheAnswer()
+    {
+        var answers = new Queue<bool?>(new bool?[] { null, false, null });
+        var reader = new SettingsGateReader(() => Task.FromResult(answers.Dequeue()));
+
+        Assert.Equal(SettingsGate.Awaiting, reader.Gate);
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(SettingsGate.SignedOut, reader.Gate);
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(SettingsGate.Open, reader.Gate);
+        Assert.False(await reader.ReadAsync());
+        Assert.Equal(SettingsGate.Open, reader.Gate);
+    }
+
+    [Fact]
+    public async Task AReadThatThrowsCountsAsFailed()
+    {
+        var reader = new SettingsGateReader(() => throw new System.InvalidOperationException("down"));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(SettingsGate.SignedOut, reader.Gate);
     }
 }

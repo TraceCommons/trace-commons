@@ -44,6 +44,9 @@ public sealed partial class SettingsView
     /// <summary>The window's onboarding gate; awaiting until the status is read.</summary>
     private SettingsGate _gate = SettingsGate.Awaiting;
 
+    /// <summary>The status reads behind <see cref="_gate"/>; the newest read wins.</summary>
+    private SettingsGateReader? _gateReader;
+
     private void BuildSections(DaemonHost host)
     {
         SettingsCards.Styles = Resources;
@@ -174,8 +177,9 @@ public sealed partial class SettingsView
     /// Reads whether onboarding is required, as the main window decides it
     /// (OnboardingState.IsSetupComplete over the daemon's status), then gates
     /// the sections first run asks about. A failed read requires onboarding,
-    /// so a write surface stays closed. Sample data opens every section, as
-    /// a sample launch skips first run.
+    /// so a write surface stays closed, until a later read answers; a reply
+    /// overtaken by a newer read is dropped (<see cref="SettingsGateReader"/>).
+    /// Sample data opens every section, as a sample launch skips first run.
     /// </summary>
     private async void OnSectionsLoaded(object sender, RoutedEventArgs e)
     {
@@ -201,21 +205,20 @@ public sealed partial class SettingsView
 
     private async System.Threading.Tasks.Task ReadGateAsync(DaemonHost host)
     {
-        bool requires;
-        if (Program.IsSampleLaunch)
+        _gateReader ??= new SettingsGateReader(async () =>
         {
-            requires = false;
-        }
-        else
-        {
-            DaemonResponse status = await host.CallAsync(DaemonProtocol.Methods.Status);
-            requires = status.IsError || !OnboardingState.Default().IsSetupComplete(status.ResultAs<DaemonStatus>());
-        }
+            if (Program.IsSampleLaunch)
+            {
+                return false;
+            }
 
-        SettingsGate gate = SettingsGates.Of(onboardingKnown: true, requiresOnboarding: requires);
-        if (gate != _gate)
+            DaemonResponse status = await host.CallAsync(DaemonProtocol.Methods.Status);
+            return status.IsError ? null : !OnboardingState.Default().IsSetupComplete(status.ResultAs<DaemonStatus>());
+        });
+
+        if (await _gateReader.ReadAsync())
         {
-            _gate = gate;
+            _gate = _gateReader.Gate;
             DrawList();
         }
     }
