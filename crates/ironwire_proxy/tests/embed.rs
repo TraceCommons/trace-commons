@@ -1240,3 +1240,203 @@ async fn a_host_still_starts_on_config_shapes_main_accepted() {
         .expect("a config main accepted still starts");
     proxy.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_host_bound_vertex_listener_rotates_capabilities_only_after_shutdown() {
+    use ironwire_proxy::embed::{EmbedOptions, VertexGateway, start_with_options};
+    let home = home();
+    let old = "nearai-0123456789abcdef0123456789abcdef";
+    let new = "nearai-fedcba9876543210fedcba9876543210";
+    let options = |project: &str| {
+        EmbedOptions::default().with_vertex_gateway(
+            VertexGateway::new(
+                project.into(),
+                "nearai".into(),
+                "configured-model".into(),
+                None,
+            )
+            .unwrap(),
+        )
+    };
+    let client = reqwest::Client::new();
+    let first = start_with_options(home.path(), Some(0), options(old), |_, _| {})
+        .await
+        .unwrap();
+    let old_port = first.port();
+    let url = |port, project| {
+        format!(
+            "http://127.0.0.1:{port}/vertex/projects/{project}/locations/region/publishers/anthropic/models/count-tokens:rawPredict"
+        )
+    };
+    assert_eq!(
+        client
+            .post(url(old_port, old))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .post(url(old_port, new))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(format!("http://127.0.0.1:{old_port}/anthropic/v1/messages"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    first.shutdown().await;
+    assert!(
+        client
+            .post(url(old_port, old))
+            .body("{}")
+            .send()
+            .await
+            .is_err()
+    );
+    let second = start_with_options(home.path(), Some(0), options(new), |_, _| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .post(url(second.port(), old))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(url(second.port(), new))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    second.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopping_acceptance_closes_the_listener_without_waiting_for_inflight_inference() {
+    use ironwire_proxy::embed::{
+        EmbedOptions, HostSecret, StartupProbes, UpdateChecks, VertexGateway, start_with_options,
+    };
+    use std::sync::Arc;
+    let inference_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let received = inference_calls.clone();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let upstream_release = release.clone();
+    let upstream = axum::Router::new().fallback(move || {
+        let release = upstream_release.clone();
+        received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            let body = async_stream::stream! {
+                yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"held\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"held-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"));
+                yield Ok(axum::body::Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"started\"}}\n\n"));
+                release.notified().await;
+                yield Ok(axum::body::Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+            };
+            ([ ("content-type", "text/event-stream") ], axum::body::Body::from_stream(body))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let upstream_task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), format!("[[backends]]\nid='nearai'\nkind='nearai'\nenabled=false\n[[backends]]\nid='anthropic-key'\nkind='anthropic-api'\nbase_url='{base}'\napi_key_env='FIXTURE_KEY'\n")).unwrap();
+    let project = "nearai-0123456789abcdef0123456789abcdef";
+    let mut proxy = start_with_options(
+        home.path(),
+        Some(0),
+        EmbedOptions::default()
+            .with_credentials(|name| {
+                (name == "FIXTURE_KEY").then(|| HostSecret::from("fixture-key"))
+            })
+            .with_startup_probes(StartupProbes::Off)
+            .with_update_checks(UpdateChecks::Off)
+            .with_vertex_gateway(
+                VertexGateway::new(
+                    project.into(),
+                    "anthropic-key".into(),
+                    "held-model".into(),
+                    None,
+                )
+                .unwrap(),
+            ),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    let port = proxy.port();
+    let mut response = reqwest::Client::new().post(format!("http://127.0.0.1:{port}/vertex/projects/{project}/locations/region/publishers/anthropic/models/claude:streamRawPredict"))
+        .body(r#"{"messages":[],"stream":true}"#).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response.chunk().await.unwrap().is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(3), proxy.stop_accepting())
+        .await
+        .expect("stopping acceptance must not wait for a held inference stream");
+    assert!(
+        !proxy.is_finished(),
+        "in-flight stream and drain owner must remain alive"
+    );
+    let late_connection = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+    let before_late = inference_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let late_inference = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/vertex/projects/{project}/locations/region/publishers/anthropic/models/claude:rawPredict"))
+        .timeout(std::time::Duration::from_millis(500))
+        .body(r#"{"messages":[],"stream":false}"#).send().await;
+    if let Ok(stream) = &late_connection {
+        eprintln!(
+            "embedded listener: late connect succeeded; peer_known={}; late_http_status={:?}; new_upstream_calls={}",
+            stream.peer_addr().is_ok(),
+            late_inference
+                .as_ref()
+                .map(|response| response.status().as_u16())
+                .ok(),
+            inference_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(before_late)
+        );
+    }
+    assert_eq!(
+        inference_calls.load(std::sync::atomic::Ordering::SeqCst),
+        before_late,
+        "shutdown admitted another inference request"
+    );
+    assert!(
+        late_inference.is_err(),
+        "shutdown served another HTTP request"
+    );
+    assert!(
+        late_connection.is_err(),
+        "shutdown still completed a new handshake"
+    );
+    // The barrier is repeatable, and its completion does not consume the owner.
+    proxy.stop_accepting().await;
+    let drained = tokio::spawn(proxy.shutdown());
+    assert!(!drained.is_finished());
+    release.notify_one();
+    while response.chunk().await.unwrap().is_some() {}
+    tokio::time::timeout(std::time::Duration::from_secs(3), drained)
+        .await
+        .unwrap()
+        .unwrap();
+    upstream_task.abort();
+}

@@ -78,8 +78,9 @@ pub fn parse_completion(protocol: Protocol, response: &Value) -> Completion {
 
 /// Write a non-streaming answer for `protocol`.
 ///
-/// `requested_model` is the model the client asked for, never the one that
-/// served it: a foreign slug makes the client's own bookkeeping incoherent.
+/// `requested_model` is the label the caller reports. Ordinary translations
+/// retain the client alias for its bookkeeping; a host-bound Vertex listener
+/// deliberately supplies the provider model instead.
 #[must_use]
 pub fn emit_completion(
     protocol: Protocol,

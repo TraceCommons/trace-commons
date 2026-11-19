@@ -56,6 +56,12 @@ pub(crate) const PANIC: &str = "panic";
 pub(crate) const BODY_REJECTED: &str = "body_rejected";
 /// The body was read but is not JSON.
 pub(crate) const INVALID_JSON: &str = "invalid_json";
+/// A malformed Vertex path, body or route override.
+pub(crate) const INVALID_VERTEX_REQUEST: &str = "invalid_vertex_request";
+/// A bound Vertex request did not carry its private capability.
+pub(crate) const INVALID_VERTEX_CAPABILITY: &str = "invalid_vertex_capability";
+/// No authoritative count is available for this facade.
+pub(crate) const UNSUPPORTED_TOKEN_COUNT: &str = "unsupported_token_count";
 /// A login-bound URL names no login of the façade's product.
 pub(crate) const UNKNOWN_LOGIN: &str = "unknown_login";
 /// The client went away before the response began.
@@ -139,6 +145,8 @@ impl RowClaim {
 pub(crate) enum Envelope {
     /// `{"type":"error","error":{...}}`.
     Anthropic,
+    /// Vertex input normalized into Anthropic Messages.
+    Vertex,
     /// `{"error":{...}}`.
     OpenAi,
 }
@@ -154,7 +162,7 @@ impl Envelope {
     /// The façade name the ledger records.
     fn facade(self) -> &'static str {
         match self {
-            Self::Anthropic => "anthropic",
+            Self::Anthropic | Self::Vertex => "anthropic",
             Self::OpenAi => "openai",
         }
     }
@@ -200,7 +208,11 @@ impl PendingRow {
             return None;
         }
         let facade = envelope.facade();
-        let path = recorded_path(request.uri().path(), facade);
+        let path = if envelope == Envelope::Vertex {
+            super::vertex::canonical_path(request.uri().path()).to_string()
+        } else {
+            recorded_path(request.uri().path(), facade)
+        };
         let claim = RowClaim::default();
         request.extensions_mut().insert(claim.clone());
         Some(Self {
@@ -308,7 +320,7 @@ fn caught(envelope: Envelope) -> Response {
         PANIC_MESSAGE,
     );
     match envelope {
-        Envelope::Anthropic => error.into_response(),
+        Envelope::Anthropic | Envelope::Vertex => error.into_response(),
         Envelope::OpenAi => error.on_openai_facade(false).into_response(),
     }
 }

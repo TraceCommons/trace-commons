@@ -266,8 +266,14 @@ to Anthropic.
   loop. That is `ironwire_core::capability`, not this crate.
 - **Refusal beats degradation.** Nothing here makes a lossy route silently
   acceptable; it makes the loss precise enough to report.
-- **The model the client asked for is the model reported back.** Substituting
-  the served slug makes the client's own bookkeeping incoherent.
+- **Ordinary translations report the model the client asked for.** Substituting
+  the served slug makes those clients' bookkeeping incoherent. Host-bound Vertex
+  listeners explicitly select provider model reporting instead: non-streaming
+  completion `model` or the stream's initial provider envelope wins, with the
+  forced configured model as fallback when absent. A provider substitution is
+  preserved rather than stamped with the configured ID. The original client
+  alias remains the ledger's `requested_model`. Streaming translators expose
+  this as opt-in `Translator::with_provider_model`; generic behavior is unchanged.
 
 ---
 
