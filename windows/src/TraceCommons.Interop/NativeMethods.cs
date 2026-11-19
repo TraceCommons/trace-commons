@@ -1254,6 +1254,15 @@ internal static class NativeMethods
     internal static extern IntPtr tc_monitor_screens_copy_json();
 
     /// <summary>
+    /// The compiled default Private AI campaign, as JSON
+    /// (<c>trace_commons.h</c>): Home's campaign hero, which shows the
+    /// compiled campaign only (owner decision W11-D3 (a)). Free with
+    /// <c>tc_string_free</c>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_private_ai_campaign_json();
+
+    /// <summary>
     /// The app's name (<c>brand::APP_NAME</c>), for the titles of the windows
     /// Alt-Tab and the taskbar name. Owned; NULL only on a caught panic.
     /// </summary>
