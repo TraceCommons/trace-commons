@@ -1293,6 +1293,12 @@ window.tc-edge-surface {
   background-color: alpha(@tc_glass_ink, 0.12);
 }
 
+/* A rail tile's name on hover, beside the tile (`attach_rail_tip`). */
+.tc-edge-rail-tip > contents {
+  padding: 4px 8px;
+  color: @tc_glass_ink;
+}
+
 .tc-edge-round {
   background: none;
   background-image: none;

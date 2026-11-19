@@ -732,7 +732,7 @@ impl Rail {
                 Peek::PrivateAi => glyph::icon(glyphs::SHIELD).upcast(),
                 Peek::Traces => trace_nodes_icon(geometry::MARK_SIDE).upcast(),
             };
-            let tile = peek_tile(&child, peek);
+            let tile = tile(&child, peek.name());
             inner.append(&tile);
             tiles.push((peek, tile));
         }
@@ -1085,27 +1085,105 @@ impl Rail {
     }
 }
 
-/// A peek's rail tile: named for a screen reader, with no tooltip. A
-/// pointer over it opens its peek, whose title names it; a tooltip said it
-/// again and, set under the pointer as GTK places it, covered the tile
-/// below (KDE shot 72: Traces' over the NEAR AI tile).
-fn peek_tile(child: &gtk::Widget, peek: Peek) -> gtk::Button {
-    let button = tile(child, peek.name());
-    button.set_tooltip_text(None);
-    button
-}
-
-/// One rail tile: a glyph button on the control tiers (`GlassRailTile`).
+/// One rail tile: a glyph button on the control tiers (`GlassRailTile`),
+/// named for a screen reader and, on hover, beside it (`rail_tip`).
 fn tile(child: &gtk::Widget, name: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .child(child)
         .width_request(glass::size::EDGE_RAIL_TILE)
         .height_request(glass::size::EDGE_RAIL_TILE)
-        .tooltip_text(name)
         .build();
     button.add_css_class("tc-edge-rail-tile");
     button.update_property(&[gtk::accessible::Property::Label(name)]);
+    attach_rail_tip(&button, name);
     button
+}
+
+/// How long the pointer rests on a tile before its name shows: GTK's own
+/// tooltip hover delay (`HOVER_TIMEOUT` in gtktooltip.c), which the
+/// tooltip this replaces had.
+const RAIL_TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The tile's name on hover, as the Mac's `.help(label)` gives it, drawn
+/// beside the tile on the side away from the screen edge. Not a GTK
+/// tooltip: GTK places one under its widget, and on KDE that covered the
+/// next tile down (shot 72: Traces' over the NEAR AI tile). The rail is a
+/// column, so beside it covers no tile. It takes no grab and the pointer
+/// passes through it; leaving or pressing the tile takes it away.
+fn attach_rail_tip(button: &gtk::Button, name: &str) {
+    let label = gtk::Label::new(Some(name));
+    label.add_css_class("tc-type-caption");
+    let tip = gtk::Popover::builder()
+        .child(&label)
+        .position(gtk::PositionType::Left)
+        .has_arrow(false)
+        .autohide(false)
+        .can_focus(false)
+        .can_target(false)
+        .build();
+    tip.add_css_class("tc-edge-rail-tip");
+    // The tile's name is already its accessible label; the tip is drawing.
+    tip.set_accessible_role(gtk::AccessibleRole::Presentation);
+    tip.set_parent(button);
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+    let hide = {
+        let tip = tip.downgrade();
+        let pending = pending.clone();
+        move || {
+            if let Some(id) = pending.take() {
+                id.remove();
+            }
+            if let Some(tip) = tip.upgrade() {
+                tip.popdown();
+            }
+        }
+    };
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter({
+        let tip = tip.downgrade();
+        let pending = pending.clone();
+        let hide = hide.clone();
+        move |_, _, _| {
+            hide();
+            let tip = tip.clone();
+            let shown = Rc::downgrade(&pending);
+            let id = glib::timeout_add_local_once(RAIL_TIP_DELAY, move || {
+                if let Some(pending) = shown.upgrade() {
+                    pending.take();
+                }
+                if let Some(tip) = tip.upgrade() {
+                    tip.popup();
+                }
+            });
+            pending.replace(Some(id));
+        }
+    });
+    motion.connect_leave({
+        let hide = hide.clone();
+        move |_| hide()
+    });
+    button.add_controller(motion);
+    button.connect_clicked({
+        let hide = hide.clone();
+        move |_| hide()
+    });
+    button.connect_destroy(move |_| {
+        hide();
+        tip.unparent();
+    });
+}
+
+/// The name tip `attach_rail_tip` gave a tile.
+#[cfg(test)]
+fn rail_tip(button: &gtk::Button) -> Option<gtk::Popover> {
+    let mut child = button.first_child();
+    while let Some(widget) = child {
+        if let Ok(tip) = widget.clone().downcast::<gtk::Popover>() {
+            return Some(tip);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 /// The peek's title, with Private AI's word right after it, and the
@@ -1702,31 +1780,87 @@ mod tests {
         main.destroy();
     }
 
-    /// A pointer over a peek's tile shows its peek, titled with the
-    /// tile's name, and no tooltip under the pointer to cover the tile
-    /// below it; the app's tile, with no peek, keeps its tooltip.
+    /// A rail tile names itself on hover, as the Mac's `.help(label)`
+    /// does: after GTK's own hover delay, beside the tile on the side away
+    /// from the screen edge, so it covers no tile above or below it. GTK's
+    /// own tooltip is placed under its widget, and on KDE it covered the
+    /// next tile (shot 72: Traces' over the NEAR AI tile); the round before
+    /// this one dropped the name instead. Leaving the tile, or pressing it,
+    /// takes the name away.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
-    fn mounted_a_peek_tile_has_no_tooltip_its_peek_names_it() {
+    fn mounted_a_rail_tile_names_itself_beside_it_after_the_hover_delay() {
         gtk::init().expect("GTK display");
-        for peek in Peek::ALL {
-            let child: gtk::Widget = gtk::Label::new(None).upcast();
-            let button = peek_tile(&child, peek);
-            assert_eq!(button.tooltip_text(), None, "{peek:?}");
-            assert_eq!(
-                button.accessible_role(),
-                gtk::AccessibleRole::Button,
-                "{peek:?}"
-            );
+        let context = glib::MainContext::default();
+        let wait = |ms: u64| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let column = gtk::Box::new(gtk::Orientation::Vertical, glass::space::S1);
+        let names = [Peek::PrivateAi.name(), Peek::Traces.name(), "Open"];
+        let tiles: Vec<gtk::Button> = names
+            .iter()
+            .map(|name| tile(&gtk::Label::new(None).upcast(), name))
+            .collect();
+        for tile in &tiles {
+            column.append(tile);
         }
-        let source = include_str!("edge_surfaces.rs");
-        assert!(source.contains("let tile = peek_tile(&child, peek);"));
-        assert!(
-            source.contains(".label(peek.name())"),
-            "the peek's title is its name"
-        );
-        let app_tile = tile(&gtk::Label::new(None).upcast(), "Open");
-        assert_eq!(app_tile.tooltip_text().as_deref(), Some("Open"));
+        let window = gtk::Window::builder().child(&column).build();
+        window.present();
+        wait(100);
+        for (tile, name) in tiles.iter().zip(names) {
+            assert!(
+                !tile.has_tooltip(),
+                "{name}: no GTK tooltip, which GTK places under the tile"
+            );
+            assert_eq!(
+                tile.accessible_role(),
+                gtk::AccessibleRole::Button,
+                "{name}"
+            );
+            let tip = rail_tip(tile).unwrap_or_else(|| panic!("{name} has a name tip"));
+            let label = tip
+                .child()
+                .and_downcast::<gtk::Label>()
+                .expect("the tip is a label");
+            assert_eq!(label.text(), name);
+            assert_eq!(
+                tip.position(),
+                gtk::PositionType::Left,
+                "{name}: beside the tile, toward the peek, never under it"
+            );
+            assert!(!tip.has_arrow());
+            assert!(!tip.is_autohide(), "{name}: it takes no grab");
+            assert!(!tip.can_target(), "{name}: the pointer passes through it");
+
+            let motion = tile
+                .observe_controllers()
+                .into_iter()
+                .filter_map(|c| c.ok())
+                .find_map(|c| c.downcast::<gtk::EventControllerMotion>().ok())
+                .expect("the tile watches the pointer");
+            motion.emit_by_name::<()>("enter", &[&4.0f64, &4.0f64]);
+            wait(RAIL_TIP_DELAY.as_millis() as u64 / 2);
+            assert!(!tip.is_visible(), "{name}: not before the hover delay");
+            wait(RAIL_TIP_DELAY.as_millis() as u64);
+            assert!(tip.is_visible(), "{name}: shown after the hover delay");
+            motion.emit_by_name::<()>("leave", &[]);
+            wait(50);
+            assert!(!tip.is_visible(), "{name}: gone when the pointer leaves");
+
+            // A press takes it away too, and a pending one never shows.
+            motion.emit_by_name::<()>("enter", &[&4.0f64, &4.0f64]);
+            tile.emit_clicked();
+            wait(RAIL_TIP_DELAY.as_millis() as u64 * 2);
+            assert!(!tip.is_visible(), "{name}: a press cancels it");
+            motion.emit_by_name::<()>("leave", &[]);
+        }
+        window.destroy();
     }
 
     /// The Traces peek's folder list draws every row whole, its name and
