@@ -26,6 +26,7 @@ pub mod funding;
 pub mod glass_backdrop;
 pub mod glass_feedback;
 pub mod glass_motion;
+mod glass_switch;
 pub mod hero_art;
 pub mod hero_card;
 pub mod history;

@@ -94,7 +94,7 @@ pub struct PrivateInferenceView {
     pub funding: crate::ui::funding::FundingSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
-    switch: gtk::Switch,
+    switch: super::glass_switch::GlassSwitch,
     /// What the listener is actually doing: one toned sentence, and the
     /// serving line under it when there is a port. Rebuilt on each render.
     status: gtk::Box,
@@ -174,7 +174,8 @@ impl PrivateInferenceView {
             .hexpand(true)
             .build();
         label.add_css_class("tc-body");
-        let switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        let switch = super::glass_switch::GlassSwitch::new();
+        switch.set_halign(gtk::Align::End);
         switch.set_sensitive(false);
         switch.set_valign(gtk::Align::Center);
         switch.update_property(&[gtk::accessible::Property::Label(

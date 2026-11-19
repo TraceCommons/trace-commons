@@ -236,6 +236,7 @@ else
     ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
     ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
     ui::glass_motion::tests::mounted_an_opened_expanders_details_fade_in \
+    ui::glass_switch::tests::mounted_a_pressed_switch_slides_and_keeps_gtks_contract \
     ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
