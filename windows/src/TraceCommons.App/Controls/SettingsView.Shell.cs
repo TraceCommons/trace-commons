@@ -7,7 +7,8 @@ namespace TraceCommons.App.Controls;
 
 /// <summary>
 /// Settings' credit-arrival and edge rail switches (W12, W13). Every word is
-/// the core's (<c>home_history.credit_icon_animation_*</c> and
+/// the core's (<c>home_history.credit_icon_animation_title</c>, the Windows
+/// words for the switch and its caption, <see cref="WindowsWords"/>, and
 /// <c>edge_rail.setting_*</c> in the monitor table); a missing word leaves
 /// its card out rather than showing one of this shell's own. The choices are
 /// the shell's (<see cref="ShellPreferences"/>), never the daemon's.
@@ -23,8 +24,8 @@ public sealed partial class SettingsView
         Card(
             CreditAnimationTitle, CreditAnimationSwitch, CreditAnimationCaption,
             MonitorShellCopy.Section("home_history", "credit_icon_animation_title"),
-            MonitorShellCopy.Section("home_history", "credit_icon_animation_toggle"),
-            MonitorShellCopy.Section("home_history", "credit_icon_animation_caption"),
+            WindowsWords.CreditIconAnimationToggle,
+            WindowsWords.CreditIconAnimationCaption,
             prefs.CreditIconAnimation);
 
         // The Mac's card heads the rail's switch with a Settings eyebrow of

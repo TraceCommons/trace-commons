@@ -1954,6 +1954,27 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
 /// The default Private AI promotion, shared by the native app and the
 /// separately published campaign feed. It is compiled into the contributor
 /// so a failed network read never makes the promotion disappear.
+/// The Windows app's words where it cannot say what the Mac says: Settings'
+/// credit-arrival switch names the taskbar and tray, where the Mac names the
+/// Dock and menu bar. A table of its own, so the Mac's monitor export keeps
+/// exactly the fields that shell decodes, as the Linux words do
+/// (`credit_icon_animation_toggle_linux`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct WindowsWordsCopy {
+    pub credit_icon_animation_toggle: &'static str,
+    pub credit_icon_animation_caption: &'static str,
+}
+
+/// The Windows app's own words (`WindowsWordsCopy`).
+pub fn windows_words_copy() -> WindowsWordsCopy {
+    WindowsWordsCopy {
+        // Owner-approved 2026-11-19 ("Same as Linux").
+        credit_icon_animation_toggle: "Animate taskbar and tray icons",
+        // Owner-approved 2026-11-19 ("Same as Linux").
+        credit_icon_animation_caption: "Burst gold coins on the tray icon and flag the taskbar when credits arrive.",
+    }
+}
+
 pub fn private_ai_campaign_json() -> &'static str {
     include_str!("private_ai_campaign.json")
 }

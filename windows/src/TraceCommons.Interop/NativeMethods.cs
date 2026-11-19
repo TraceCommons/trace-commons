@@ -1316,6 +1316,14 @@ internal static class NativeMethods
     internal static extern IntPtr tc_private_ai_campaign_json();
 
     /// <summary>
+    /// The Windows app's own words (<c>preview_copy::windows_words_copy</c>)
+    /// as an owned JSON object: Settings' credit-arrival switch naming the
+    /// taskbar and tray. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_windows_words_copy_json();
+
+    /// <summary>
     /// The app's name (<c>brand::APP_NAME</c>), for the titles of the windows
     /// Alt-Tab and the taskbar name. Owned; NULL only on a caught panic.
     /// </summary>
