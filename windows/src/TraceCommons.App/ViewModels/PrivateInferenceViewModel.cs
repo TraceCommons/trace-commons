@@ -83,16 +83,16 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string Subtitle => _copy?.Subtitle ?? string.Empty;
 
-    /// <summary>
-    /// The tab's heading row as the Mac draws it (spec W19-D1 (a),
-    /// <c>PrivateAIInspectorView</c>): the status title, the state's chip and
-    /// sentence, and the subtitle. Empty words until the core's arrive.
-    /// </summary>
     /// <summary>The card that opens Settings: the core's title and help text (InferenceAccount.swift:125-145).</summary>
     public string SettingsLinkTitle => _copy?.PanelSettingsTitle ?? string.Empty;
 
     public string SettingsLinkHelp => _copy?.PanelSettingsOpenAccessibility ?? string.Empty;
 
+    /// <summary>
+    /// The tab's heading row as the Mac draws it (spec W19-D1 (a),
+    /// <c>PrivateAIInspectorView</c>): the status title, the state's chip and
+    /// sentence, and the subtitle. Empty words until the core's arrive.
+    /// </summary>
     public PrivateAIHeading Heading => _copy is null
         ? new PrivateAIHeading(string.Empty, string.Empty, TraceCommons.Interop.Shell.DotStatus.None, string.Empty, string.Empty)
         : PrivateAIHeading.For(_state, _copy);

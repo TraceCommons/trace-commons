@@ -357,8 +357,11 @@ public sealed class SpendOrganizationsTests
         Assert.True(model.Switching);
         Assert.False(model.CanPick);
         Assert.Equal(new SpendOrganizationLine("SWITCHING", SpendOrganizationTone.Ask), model.StateLine);
-        await model.SelectAsync("org-a");
-        await model.DismissAsync();
+        // Not awaited: a second call that went out would wait on the same gate.
+        Task second = model.SelectAsync("org-a");
+        Task dismiss = model.DismissAsync();
+        Assert.True(second.IsCompleted);
+        Assert.True(dismiss.IsCompleted);
         Assert.Equal(new[] { "{\"organization_id\":\"org-b\"}" }, daemon.Selects);
         daemon.SelectGate.SetResult();
         await pending;
