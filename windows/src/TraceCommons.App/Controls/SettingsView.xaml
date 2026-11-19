@@ -603,7 +603,7 @@
                     terminal names from the daemon and collapses itself when
                     the daemon offers none. No string is typed here.
                 -->
-                <ContentControl x:Name="ManagedTerminalHost"
+                <ContentControl IsTabStop="False" x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
                 <!--
