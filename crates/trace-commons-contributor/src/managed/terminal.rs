@@ -1825,6 +1825,7 @@ fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
 /// `plan.env`, sorted as Windows expects.
 /// Returns the new process's id.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn spawn_in_new_console(plan: &Plan) -> Result<u32, ManagedError> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStrExt;
