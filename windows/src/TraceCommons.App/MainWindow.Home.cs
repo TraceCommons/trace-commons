@@ -72,6 +72,12 @@ public sealed partial class MainWindow
             _home.Recheck();
         };
 
+        // Home's own reads follow the daemon while Home is on screen, as the
+        // tray's do: the window opens on Home, so no page change would ever
+        // ask for them (HomeStore.run on the Mac).
+        _host.StatusChanged += RefreshHomeIfShown;
+        _host.QueueChanged += RefreshHomeIfShown;
+
         _creditTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         _creditTimer.Tick += (_, _) => CreditFrame();
         _taskbarCredit = new TaskbarCredit(WinRT.Interop.WindowNative.GetWindowHandle(this));
@@ -116,6 +122,14 @@ public sealed partial class MainWindow
                 }
 
                 break;
+        }
+    }
+
+    private void RefreshHomeIfShown()
+    {
+        if (ViewModel.ShowingHome && !_closed)
+        {
+            _ = RefreshHomeAsync();
         }
     }
 

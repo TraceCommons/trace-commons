@@ -377,6 +377,7 @@ public sealed partial class MainWindow : Window
         await ViewModel.CheckForUpdateAsync();
 
         await RefreshTrayAsync();
+        RefreshHomeIfShown();
         await ShowOnboardingIfNeededAsync();
         OfferNextRedirectedInvite();
     }
@@ -484,7 +485,9 @@ public sealed partial class MainWindow : Window
                 _trayRollup,
                 _trayProjects);
             (Strip strip, StripMarkWords? words) = TrayStrip.FromStatus(status);
-            _tray.Update(menu, status.IsHealthy, strip, words);
+            // The header and tooltip read health by the same rule as the
+            // icon (TrayStrip.Unhealthy, the Mac's model.health).
+            _tray.Update(menu, !TrayStrip.Unhealthy(status), strip, words);
             FeedHome(status, _trayRollup, _trayPending);
 
             // Settled Trace credit arriving live (BalanceArrival.Tracker,

@@ -245,6 +245,36 @@ public class HomeWiringTests
         Assert.True(TrayStrip.Unhealthy(saturated));
     }
 
+    /// <summary>A sample launch's switches hold for the run and write nothing to disk.</summary>
+    [Fact]
+    public void AReadOnlyPreferenceWritesNothing()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "tc-prefs-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(dir, "shell-preferences.json");
+        var prefs = new ShellPreferences(path) { ReadOnly = true };
+        prefs.EdgeRail = true;
+        prefs.BalanceShown = new BalanceArrival.Reading(9, 1);
+        Assert.True(prefs.EdgeRail);
+        Assert.False(File.Exists(path));
+        Assert.False(Directory.Exists(dir));
+    }
+
+    /// <summary>
+    /// AppModel.swift:1693-1694: witness-saturated is not health while the
+    /// witness card says it with the count.
+    /// </summary>
+    [Fact]
+    public void ASaturatedWitnessWithItsCardIsNotAttention()
+    {
+        DaemonStatus status = JsonSerializer.Deserialize<DaemonStatus>("""
+            {"decisions_owed":0,"paused":false,"health":{"last_error_label":"witness-saturated"},
+             "witness_capacity":{"waiting_sessions":2,"next_retry_at":"2026-11-19T12:00:00Z","privacy_check_sessions":0,"checking_sessions":0}}
+            """)!;
+        Assert.NotNull(WitnessCapacitySurface.Notice(status.WitnessCapacity));
+        Assert.False(TrayStrip.Unhealthy(status));
+        Assert.Equal(StripCondition.Live, TrayStrip.FromStatus(status).Strip.Condition);
+    }
+
     /// <summary>The compact figure today's tokens are written in (<c>.notation(.compactName)</c>).</summary>
     [Theory]
     [InlineData(999UL, "999")]

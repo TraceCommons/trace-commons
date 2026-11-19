@@ -41,7 +41,8 @@ public sealed partial class MainWindow
                     {
                         OpenTab(t);
                     }
-                });
+                },
+                ShowSettingsWindow);
         }
         else if (!_prefs.EdgeRail && _rail is not null)
         {

@@ -44,13 +44,15 @@ internal sealed class EdgeRailWindow : Window
     private readonly Func<IReadOnlyList<HomeTile>> _privateAITiles;
     private readonly Func<IReadOnlyList<HomeTile>> _tracesTiles;
     private readonly Action<MonitorTab?> _openApp;
+    private readonly Action _openSettings;
     private bool _sliding;
     private bool _slidingOpen;
     private IntPtr _previousFocus;
     private MonitorTab _peekTab = MonitorTab.Inference;
 
-    public EdgeRailWindow(Func<IReadOnlyList<HomeTile>> privateAITiles, Func<IReadOnlyList<HomeTile>> tracesTiles, Action<MonitorTab?> openApp)
+    public EdgeRailWindow(Func<IReadOnlyList<HomeTile>> privateAITiles, Func<IReadOnlyList<HomeTile>> tracesTiles, Action<MonitorTab?> openApp, Action openSettings)
     {
+        _openSettings = openSettings;
         _privateAITiles = privateAITiles;
         _tracesTiles = tracesTiles;
         _openApp = openApp;
@@ -267,7 +269,7 @@ internal sealed class EdgeRailWindow : Window
         settings.Click += (_, _) =>
         {
             Step(_hover.CloseNow());
-            _openApp(null);
+            _openSettings();
         };
         Grid.SetColumn(settings, 1);
         header.Children.Add(settings);
