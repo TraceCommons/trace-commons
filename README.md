@@ -223,9 +223,6 @@ crates/
 ├── trace-commons-contributor-platform/  Shared OS credentials and local files.
 ├── trace-commons-contributor-ffi/  C ABI over the contributor, for the macOS and Windows apps.
 ├── trace-commons-contributor-gtk/  Linux GTK app (in development; its own Cargo workspace).
-├── ironwire_*/                  IronWire, the loopback inference proxy the daemon runs
-│                                for Private AI (11 crates; MIT OR Apache-2.0, copyright
-│                                NEAR AI; imported from nearai/ironwire). See docs/ironwire/.
 └── trace-commons-client-server-tests/  Unpublished cross-contract test package;
                                  client-only tests do not build the server.
 
@@ -239,7 +236,7 @@ docs/
 ├── status.md                    Deployment status and reference notes.
 ├── release-runbook.md           Cutting a signed app or CLI release.
 ├── operator/                    Operator runbooks (per slice).
-├── ironwire/                    IronWire design documents and working rules.
+├── ironwire/                    Pointer to the upstream nearai/ironwire dependency.
 └── superpowers/                 Per-slice design specs + implementation plans.
 .github/workflows/ci.yml         Server-side CI gates.
 .github/workflows/clients.yml    Desktop app CI.

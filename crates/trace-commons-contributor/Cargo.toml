@@ -98,12 +98,11 @@ keyring-core = "=1.0.0"
 # IronWire's proxy, run in-process behind the private_inference switch, and
 # two more of its crates used directly: `ironwire_agents` (pointing a coding
 # tool's own config at the proxy without taking the file over) and
-# `ironwire_catalog` (the `Catalog` type its API takes). The ironwire_* crates
-# live in this repository since 2026-11-10, imported from nearai/ironwire at
-# b234896; the pin history before that is in this file's git log.
-ironwire_proxy = { path = "../ironwire_proxy" }
-ironwire_agents = { path = "../ironwire_agents" }
-ironwire_catalog = { path = "../ironwire_catalog" }
+# `ironwire_catalog` (the `Catalog` type its API takes). Pinned to the same
+# upstream revision as `nearai/nearai-red-sandbox` so both resolve one graph.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
