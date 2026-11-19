@@ -36,8 +36,10 @@ public class NativeBindingTests
     /// <summary>
     /// How many C ABI functions C# binds. Moves only on purpose: a slice that
     /// binds a new export states the old and new numbers (checklist I1).
+    /// 129 to 132 (W17-D2, 2026-11-19): tc_nudge_copy_json,
+    /// tc_nudge_digest_help_json and tc_subscribe_with_accepts.
     /// </summary>
-    private const int BoundFunctions = 129;
+    private const int BoundFunctions = 132;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
     private const int HeaderFunctions = 187;

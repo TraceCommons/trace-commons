@@ -331,6 +331,12 @@ public static class DaemonProtocol
         public const string QueueChanged = "queue_changed";
         public const string StatusChanged = "status_changed";
         public const string DigestDue = "digest_due";
+
+        /// <summary>
+        /// A re-engagement notification is due (opt-in: delivered only to a
+        /// subscriber that declared it, <c>tc_subscribe_with_accepts</c>).
+        /// </summary>
+        public const string ReengageDue = "reengage_due";
         public const string ResyncRequired = "resync_required";
 
         /// <summary>

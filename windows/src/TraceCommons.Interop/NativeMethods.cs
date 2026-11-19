@@ -155,6 +155,19 @@ internal static partial class NativeMethods
     internal static extern ulong tc_subscribe(IntPtr handle, TcEventCallback cb, IntPtr ctx);
 
     /// <summary>
+    /// <see cref="tc_subscribe"/>, declaring the opt-in events this
+    /// subscriber can render (a JSON array such as <c>["reengage_due"]</c>);
+    /// null declares none and is exactly tc_subscribe. Lifetime rules for
+    /// the callback and ctx are tc_subscribe's.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ulong tc_subscribe_with_accepts(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? acceptsJson,
+        TcEventCallback cb,
+        IntPtr ctx);
+
+    /// <summary>
     /// The ABI's only real barrier: blocks until the callback is guaranteed
     /// not to fire again. Returns void and REFUSES SILENTLY when called from a
     /// thread inside any tokio runtime context, so callers must compare
@@ -1284,6 +1297,24 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_shell_words_copy_json();
+
+    /// <summary>
+    /// The core's nudge table (<c>nudge_copy</c>): every fixed nudge word,
+    /// key to text, as a JSON object. Free with tc_string_free. NULL only on
+    /// a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_nudge_copy_json();
+
+    /// <summary>
+    /// The digest switch's help for the schedule in
+    /// <paramref name="settingsJson"/> (<c>digest_interval_secs</c>,
+    /// <c>digest_schedule</c>), as <c>{"digest_help": ...}</c>. Free with
+    /// tc_string_free.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_nudge_digest_help_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? settingsJson);
 
     /// <summary>
     /// The glass monitor's Traces words (<c>preview_copy::monitor_traces_copy</c>)
