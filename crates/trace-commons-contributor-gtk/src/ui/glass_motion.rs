@@ -146,7 +146,48 @@ fn toplevel(widget: &gtk::Widget) -> Option<gdk::Toplevel> {
 /// Whether `widget`'s window is minimised or suspended. A widget in no
 /// window yet is not hidden by this: its frame clock does not run anyway.
 pub fn window_hidden(widget: &impl IsA<gtk::Widget>) -> bool {
-    toplevel(widget.upcast_ref()).is_some_and(|toplevel| hides(toplevel.state()))
+    toplevel(widget.upcast_ref()).is_some_and(|toplevel| hides(state_of(&toplevel)))
+}
+
+/// The toplevel's state as the compositor reports it.
+#[cfg(not(test))]
+fn state_of(toplevel: &gdk::Toplevel) -> gdk::ToplevelState {
+    toplevel.state()
+}
+
+/// The toplevel's state as the compositor reports it, with `MINIMIZED`
+/// added on a window a test has minimised ([`minimise_for_test`]).
+#[cfg(test)]
+fn state_of(toplevel: &gdk::Toplevel) -> gdk::ToplevelState {
+    let minimised = MINIMISED.with(|list| list.borrow().iter().any(|t| t == toplevel));
+    if minimised {
+        toplevel.state() | gdk::ToplevelState::MINIMIZED
+    } else {
+        toplevel.state()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MINIMISED: RefCell<Vec<gdk::Toplevel>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Minimises `window` (or shows it again) as the compositor would: its
+/// toplevel reads `MINIMIZED` and reports a state change, on the path a
+/// real minimise takes ([`window_hidden`], [`on_window_state`]). No
+/// compositor the tests run under says a window is minimised: xdg-shell
+/// never reports it, and weston sends no `suspended`.
+#[cfg(test)]
+pub fn minimise_for_test(window: &impl IsA<gtk::Widget>, minimised: bool) {
+    let toplevel = toplevel(window.upcast_ref()).expect("a shown window");
+    MINIMISED.with(|list| {
+        let mut list = list.borrow_mut();
+        list.retain(|t| t != &toplevel);
+        if minimised {
+            list.push(toplevel.clone());
+        }
+    });
+    toplevel.notify("state");
 }
 
 /// Calls `changed(widget)` each time the window `widget` is in is
@@ -756,32 +797,6 @@ mod tests {
         assert_eq!(hidden_changed(&seen, true), None);
         assert_eq!(hidden_changed(&seen, false), Some(false));
         assert_eq!(hidden_changed(&seen, false), None);
-    }
-
-    /// A clock that runs on its own (not through `keep_ticking` or a
-    /// `Driver`) holds while its window is minimised or suspended, and
-    /// starts again when the window is shown: the first-run stage, the
-    /// map's clock and shimmer, the hero art, and the refresh turn.
-    #[test]
-    fn every_long_clock_holds_while_its_window_is_hidden() {
-        for (name, source) in [
-            (
-                "first_run_stage_view.rs",
-                include_str!("first_run_stage_view.rs"),
-            ),
-            ("monitor/map.rs", include_str!("monitor/map.rs")),
-            ("hero_card.rs", include_str!("hero_card.rs")),
-            ("glass_feedback.rs", include_str!("glass_feedback.rs")),
-        ] {
-            assert!(
-                source.contains("window_hidden("),
-                "{name}: its clock runs on while the window is hidden"
-            );
-            assert!(
-                source.contains("on_window_state("),
-                "{name}: its clock does not start again when the window is shown"
-            );
-        }
     }
 
     /// Every expander the shell builds moves as `GlassExpander` does (or

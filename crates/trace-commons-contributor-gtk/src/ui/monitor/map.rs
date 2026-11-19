@@ -5580,6 +5580,87 @@ mod tests {
         window.close();
     }
 
+    /// Minimised, the map's clock and its shimmer hold: the clock stops,
+    /// no frame is drawn, no shimmer pass is due, and motion asked for
+    /// meanwhile starts nothing. Shown again, the shimmer is due once more
+    /// and the clock runs for what moves.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_clock_and_shimmer_hold_while_the_window_is_minimised() {
+        use crate::ui::glass_motion::minimise_for_test;
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "claude-code")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        let imp = map.canvas.imp();
+        let scene = map.canvas.scene();
+        let stack = scene.stack.as_ref().expect("the pile");
+        let (x, y, w, h) = stack.card(&imp.geometry(), false, false);
+        let card = Some((x + w / 2.0, y + h / 2.0));
+        imp.point_at(card);
+        assert!(map.canvas.shimmer_scheduled(), "the first pass is due");
+        assert!(map.canvas.is_ticking(), "the pile moves on the clock");
+
+        minimise_for_test(&window, true);
+        settle_within(100, || false);
+        assert!(!map.canvas.is_ticking(), "the clock runs while minimised");
+        assert!(
+            !map.canvas.shimmer_scheduled(),
+            "a shimmer pass is due while minimised"
+        );
+        // Motion asked for while minimised starts nothing.
+        imp.point_at(None);
+        imp.point_at(card);
+        let drawn = imp.last_frame.get();
+        settle_within(300, || false);
+        assert!(
+            !map.canvas.is_ticking(),
+            "the pile started the clock while minimised"
+        );
+        assert_eq!(imp.last_frame.get(), drawn, "frames drawn while minimised");
+        assert!(!map.canvas.shimmer_scheduled());
+
+        minimise_for_test(&window, false);
+        settle_within(100, || false);
+        assert!(
+            map.canvas.shimmer_scheduled(),
+            "no shimmer once shown again"
+        );
+        assert_eq!(
+            map.canvas.is_ticking(),
+            map.canvas.clock_wanted().is_some(),
+            "the clock does not follow what moves once shown again"
+        );
+        imp.point_at(None);
+        imp.point_at(card);
+        assert!(
+            map.canvas.is_ticking(),
+            "the pile cannot move once shown again"
+        );
+        let drawn = imp.last_frame.get();
+        settle_within(300, || imp.last_frame.get() > drawn);
+        assert!(
+            imp.last_frame.get() > drawn,
+            "no frame drawn once shown again"
+        );
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
     /// Iterates the main loop until `done` holds or `millis` pass.
     fn settle_within(millis: u64, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
