@@ -119,6 +119,88 @@ public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Senda
         return url
     }
     enum CodingKeys: String, CodingKey { case tool, installed; case installURL = "install_url" }
+
+    public init(tool: String, installed: Bool, installURL: String = "") {
+        self.tool = tool
+        self.installed = installed
+        self.installURL = installURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tool = try c.decode(String.self, forKey: .tool)
+        installed = try c.decode(Bool.self, forKey: .installed)
+        installURL = try c.decodeIfPresent(String.self, forKey: .installURL) ?? ""
+    }
+}
+
+/// Red Team sandbox settings sent on `managed_launch_prepare`.
+public struct ManagedSandboxSettings: Codable, Equatable, Sendable {
+    public var inputs: [String]
+    public var allowHosts: [String]
+    public var packages: Bool
+    public var cpus: UInt32?
+    public var memoryMiB: UInt32?
+
+    public init(
+        inputs: [String] = [],
+        allowHosts: [String] = [],
+        packages: Bool = false,
+        cpus: UInt32? = nil,
+        memoryMiB: UInt32? = nil
+    ) {
+        self.inputs = inputs
+        self.allowHosts = allowHosts
+        self.packages = packages
+        self.cpus = cpus
+        self.memoryMiB = memoryMiB
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case inputs, packages, cpus
+        case allowHosts = "allow_hosts"
+        case memoryMiB = "memory_mib"
+    }
+
+    public func toParams() -> [String: Any] {
+        var out: [String: Any] = [
+            "inputs": inputs,
+            "allow_hosts": allowHosts,
+            "packages": packages,
+        ]
+        if let cpus { out["cpus"] = cpus }
+        if let memoryMiB { out["memory_mib"] = memoryMiB }
+        return out
+    }
+}
+
+/// Launch-sheet state for Red Team sandbox files and network allowlist.
+/// Network access is off by default.
+public struct RedTeamSandboxDraft: Equatable, Sendable {
+    public var inputs: [String] = []
+    public var networkEnabled: Bool = false
+    public var allowHosts: [String] = []
+    public var packages: Bool = false
+
+    public init(
+        inputs: [String] = [],
+        networkEnabled: Bool = false,
+        allowHosts: [String] = [],
+        packages: Bool = false
+    ) {
+        self.inputs = inputs
+        self.networkEnabled = networkEnabled
+        self.allowHosts = allowHosts
+        self.packages = packages
+    }
+
+    public func sandboxSettings() -> ManagedSandboxSettings {
+        ManagedSandboxSettings(
+            inputs: inputs,
+            allowHosts: networkEnabled ? allowHosts : [],
+            packages: networkEnabled && packages
+        )
+    }
 }
 
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
@@ -243,13 +325,20 @@ public enum ManagedSurface {
     /// The Start button's key for a tool, or nil for a tool this shell
     /// does not know.
     public static func startKey(_ tool: String) -> String? {
-        signInTools.contains(tool) ? "start_" + tool : nil
+        ["claude", "codex", "opencode", "red_team"].contains(tool) ? "start_" + tool : nil
+    }
+
+    /// Whether the launch dialog draws Red Team Files and Network sections.
+    public static func showsSandboxSection(for tool: String) -> Bool {
+        tool == "red_team"
     }
 
     /// The Add sheet's sign-in types. Signed in, NEAR AI is not offered: the
     /// sign-in entries already run on it, with no key. Signed out, a pasted
     /// key stays the fallback.
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
+        // Red Team runs only on NEAR AI.
+        if tool == "red_team" { return ["near_ai"] }
         // OpenCode has no subscription flow. A saved NEAR AI connection for
         // it uses a pasted key and names its own model, even while signed
         // in; the sign-in entry starts on the default its proxy names.
@@ -272,7 +361,7 @@ public enum ManagedSurface {
 
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
-        ["claude", "codex", "opencode"].contains(tool) ? tool : nil
+        ["claude", "codex", "opencode", "red_team"].contains(tool) ? tool : nil
     }
 
     /// A failed action is said in the shared copy, never as the daemon's
@@ -314,6 +403,8 @@ public enum ManagedSurface {
         // line that says what to remove.
         let projectSetsAutoModeServer = "managed-project-sets-auto-mode-server"
         if code == projectSetsAutoModeServer || message == projectSetsAutoModeServer { return "project_sets_auto_mode_server" }
+        if code == "red_team_unavailable" || message == "red_team_unavailable" { return "red_team_unavailable" }
+        if code == "red_team_needs_near_ai" || message == "red_team_needs_near_ai" { return "red_team_needs_near_ai" }
         return "action_failed"
     }
 
@@ -859,7 +950,7 @@ public extension ManagedSurface {
     /// collection opt-in, or a picked model where `offersModelChoice`.
     static func launchParams(
         account: ManagedAccount, cwd: String?, requestID: String, generation: UInt64,
-        model: String?, collectTraces: Bool
+        model: String?, collectTraces: Bool, sandbox: ManagedSandboxSettings? = nil
     ) -> [String: Any] {
         var params: [String: Any] = [
             "request_id": requestID, "purpose": "coding", "tool": account.tool,
@@ -874,6 +965,9 @@ public extension ManagedSurface {
         } else if offersModelChoice(tool: account.tool, connection: account.connection),
                   let model, model != defaultModel {
             params["model"] = model
+        }
+        if account.tool == "red_team", let sandbox {
+            params["sandbox"] = sandbox.toParams()
         }
         return params
     }
@@ -904,9 +998,17 @@ public extension ManagedSnapshot {
         return !tools.contains { ManagedSurface.supportedTools.contains($0.tool) && $0.installed }
     }
     func canLaunch(tool: String) -> Bool {
+        if tool == "red_team" {
+            return tools?.first { $0.tool == "red_team" }?.installed == true
+        }
         guard ManagedSurface.supportedTools.contains(tool) else { return false }
         guard let tools else { return true }
         return tools.first { $0.tool == tool }?.installed == true
+    }
+
+    /// Tools offered by the daemon's snapshot (hides `red_team` when omitted).
+    var visibleTools: [ManagedToolAvailability] {
+        (tools ?? []).filter { ManagedSurface.toolKey($0.tool) != nil }
     }
 
     /// A running, starting or unknown session holds its account: no sign-in,
@@ -983,11 +1085,15 @@ public extension ManagedSnapshot {
     /// sends no `tools` offers no OpenCode button (fail closed), while
     /// Claude Code and Codex keep `canLaunch`'s older-daemon reading.
     var signInStartTools: [String] {
-        ManagedSurface.signInTools.filter { tool in
+        var list = ManagedSurface.signInTools.filter { tool in
             guard signInEntry(tool) != nil, canLaunch(tool: tool) else { return false }
             guard tool == "opencode" else { return true }
             return tools?.first { $0.tool == tool }?.installed == true
         }
+        if signInEntry("red_team") != nil, canLaunch(tool: "red_team") {
+            list.append("red_team")
+        }
+        return list
     }
 
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
