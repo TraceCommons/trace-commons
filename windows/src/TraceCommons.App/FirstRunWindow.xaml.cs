@@ -297,7 +297,7 @@ public sealed partial class FirstRunWindow : Window
     /// </summary>
     public void OfferInvite(string invite)
     {
-        _runner.State = JoinInvite.Offer(invite, _runner.State, DeepLink.IssuerHost);
+        _runner.State = JoinInvite.Offer(invite, _runner.State, TraceCommons.Interop.Invite.IssuerHost);
         _contentStale = true;
         Render();
     }
@@ -1682,7 +1682,7 @@ public sealed partial class FirstRunWindow : Window
                     return;
                 }
 
-                var looked = JoinInvite.LookUp(_inviteDraft ?? _runner.State.Invite, _runner.State, _runner.Failure, DeepLink.IssuerHost);
+                var looked = JoinInvite.LookUp(_inviteDraft ?? _runner.State.Invite, _runner.State, _runner.Failure, TraceCommons.Interop.Invite.IssuerHost);
                 _runner.State = looked.State;
                 _runner.Failure = looked.Failure;
                 _inviteRefused = looked.Outcome == JoinLookUpOutcome.Refused;
