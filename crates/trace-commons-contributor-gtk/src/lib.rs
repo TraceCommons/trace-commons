@@ -27,6 +27,7 @@ pub mod copy;
 mod dbus;
 pub mod disclosure;
 pub mod document_portal;
+pub mod edge;
 pub mod eligibility;
 pub mod first_run;
 pub mod home;
@@ -61,4 +62,78 @@ pub fn state_dir() -> anyhow::Result<std::path::PathBuf> {
             .dir()
             .to_path_buf(),
     )
+}
+
+/// Where the shell keeps one of its own small files -- the window's panes
+/// (`monitor-window.json`), the rail's switch, the appearance, the Home
+/// cards, the onboarding and legacy-move markers: `trace-commons/<name>`
+/// under the state directory. On sample data (debug builds only) it is in
+/// the run's throwaway directory instead, the one `main` gives the window's
+/// direct `ConfigStore` reads, so a sample launch neither reads nor writes
+/// the person's own files. Each caller's own override variable and its
+/// test-build guard come first.
+pub fn shell_state_file(name: &str) -> Option<std::path::PathBuf> {
+    shell_state_file_in(
+        name,
+        sample_requested(),
+        dirs::state_dir().or_else(dirs::data_local_dir),
+    )
+}
+
+fn shell_state_file_in(
+    name: &str,
+    sample: bool,
+    root: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if sample {
+        return Some(sample_scratch_dir().join(name));
+    }
+    root.map(|dir| dir.join("trace-commons").join(name))
+}
+
+/// The throwaway directory a sample launch keeps its state in, one per
+/// process.
+pub fn sample_scratch_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("trace-commons-sample-{}", std::process::id()))
+}
+
+fn sample_requested() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        sample::requested()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+mod shell_state_tests {
+    use super::*;
+
+    #[test]
+    fn a_sample_launch_keeps_its_window_state_out_of_the_persons_directory() {
+        let real = std::path::PathBuf::from("/home/someone/.local/state");
+        let path = shell_state_file_in("monitor-window.json", true, Some(real.clone())).unwrap();
+        assert!(
+            !path.starts_with(&real),
+            "sample mode wrote under the person's state directory: {}",
+            path.display()
+        );
+        assert_eq!(path, sample_scratch_dir().join("monitor-window.json"));
+    }
+
+    #[test]
+    fn a_normal_launch_keeps_it_under_the_state_directory() {
+        let real = std::path::PathBuf::from("/home/someone/.local/state");
+        assert_eq!(
+            shell_state_file_in("monitor-window.json", false, Some(real.clone())),
+            Some(real.join("trace-commons").join("monitor-window.json"))
+        );
+        assert_eq!(
+            shell_state_file_in("monitor-window.json", false, None),
+            None
+        );
+    }
 }

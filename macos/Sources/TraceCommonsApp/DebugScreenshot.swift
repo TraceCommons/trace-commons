@@ -268,6 +268,8 @@ enum DebugScreenshot {
             .appendingPathComponent("trace-commons-capture-insights-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: insightsDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: insightsDirectory) }
+        // A run killed before its cleanup leaves its suite file behind.
+        CaptureSuite.sweepStale()
         for shot in windowShots() {
             let traces = TracesStore(client: nil)
             traces.attach(client)
@@ -280,31 +282,30 @@ enum DebugScreenshot {
             await home.load()
             await inference.load()
             // The panes' switches, in a suite of this capture's own.
-            let suiteName = "trace-commons-capture-\(UUID().uuidString)"
-            guard let defaults = UserDefaults(suiteName: suiteName) else { continue }
-            defaults.set(shot.showsMap, forKey: "monitor.showsMap")
-            defaults.set(shot.showsInspector, forKey: "monitor.showsInspector")
-            defaults.set(true, forKey: "monitor.panesSeeded")
-            let capture = MonitorWindowView.Capture(
-                tab: shot.tab, mapTab: MonitorWindowView.mapTab(for: shot.tab) ?? .traces,
-                traces: traces, home: home, inference: inference,
-                insightsStore: .custom(insightsDirectory.path))
-            // Only around the synchronous render, so the live app never
-            // reads onboarding as done or its glass as painted in between.
-            renderingSampleWindows = true
-            GlassMaterial.paintsForCapture = true
-            defer {
-                renderingSampleWindows = false
-                GlassMaterial.paintsForCapture = false
+            CaptureSuite.run { defaults, _ in
+                defaults.set(shot.showsMap, forKey: "monitor.showsMap")
+                defaults.set(shot.showsInspector, forKey: "monitor.showsInspector")
+                defaults.set(true, forKey: "monitor.panesSeeded")
+                let capture = MonitorWindowView.Capture(
+                    tab: shot.tab, mapTab: MonitorWindowView.mapTab(for: shot.tab) ?? .traces,
+                    traces: traces, home: home, inference: inference,
+                    insightsStore: .custom(insightsDirectory.path))
+                // Only around the synchronous render, so the live app never
+                // reads onboarding as done or its glass as painted in between.
+                renderingSampleWindows = true
+                GlassMaterial.paintsForCapture = true
+                defer {
+                    renderingSampleWindows = false
+                    GlassMaterial.paintsForCapture = false
+                }
+                render(
+                    MonitorWindowView(capture: capture, navigation: MainWindowNavigation(), missionDrafts: MissionDraftsModel())
+                        .environmentObject(model)
+                        .defaultAppStorage(defaults),
+                    to: directory + "/" + shot.fileName(set: set, appearance: appearanceName),
+                    size: CGSize(width: shot.width, height: GlassTokens.Size.windowHeight)
+                )
             }
-            render(
-                MonitorWindowView(capture: capture, navigation: MainWindowNavigation(), missionDrafts: MissionDraftsModel())
-                    .environmentObject(model)
-                    .defaultAppStorage(defaults),
-                to: directory + "/" + shot.fileName(set: set, appearance: appearanceName),
-                size: CGSize(width: shot.width, height: GlassTokens.Size.windowHeight)
-            )
-            defaults.removePersistentDomain(forName: suiteName)
         }
     }
     #endif

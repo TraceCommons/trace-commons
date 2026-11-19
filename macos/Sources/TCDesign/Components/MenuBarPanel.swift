@@ -362,6 +362,7 @@ public struct GlassMenuBarStrip: View {
     private let badge: Int?
     private let mark: Mark
     private let graph: Bool
+    private let creditBurst: Double?
     @Environment(\.colorScheme) private var colorScheme
 
     /// `traces` is shared (up) over kept (down) per step, oldest first.
@@ -371,9 +372,12 @@ public struct GlassMenuBarStrip: View {
     /// known steps with no calls and unknown ones draw the same; the
     /// popover has the counts. `graph` false draws no bars and no centre
     /// line: the mark, then the badge's slot.
+    /// `creditBurst`, when non-nil, is elapsed seconds into a credit-arrival
+    /// gold gleam and mini coin burst drawn within the strip's own bounds so
+    /// the menu-bar item's width never jitters.
     public init(
         traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, condition: Condition, badge: Int?,
-        mark: Mark = .none, graph: Bool = true
+        mark: Mark = .none, graph: Bool = true, creditBurst: Double? = nil
     ) {
         self.traces = traces
         self.privateAI = privateAI
@@ -381,6 +385,7 @@ public struct GlassMenuBarStrip: View {
         self.badge = badge
         self.mark = mark
         self.graph = graph
+        self.creditBurst = creditBurst
     }
 
     /// The mark drawn: the ring only with no badge on a live strip (no
@@ -509,6 +514,58 @@ public struct GlassMenuBarStrip: View {
     /// touches the bars.
     static let markOnlyGap: CGFloat = 2
 
+    // MARK: - Credit arrival burst
+
+    static let stripCoinCount = 10
+    static let stripDrag: Double = 3.8
+    static let stripGravity: Double = 10
+    static let markHopDuration: Double = 0.35
+    static let markHopPeak: CGFloat = 2.0
+
+    /// Mini coins fanning from the brand mark across the strip, staying inside
+    /// the 22pt menu-bar height so the item's width never changes.
+    static let stripCoins: [GlassCoinBurst.Coin] = (0..<stripCoinCount).map { index in
+        // Fan mostly rightward across the strip (-0.42*pi .. +0.42*pi) with a
+        // couple of steeper arcs so the burst reads around the mark too.
+        let slot = (Double(index) / Double(max(1, stripCoinCount - 1))) - 0.5
+        let angle = slot * 0.88 * .pi + (GlassCoinBurst.noise(index, 21) - 0.5) * 0.14
+        return GlassCoinBurst.Coin(
+            angle: angle,
+            speed: 44 + GlassCoinBurst.noise(index, 22) * 58,
+            diameter: 2.4 + CGFloat(GlassCoinBurst.noise(index, 23)) * 1.2,
+            spin: 1.8 + GlassCoinBurst.noise(index, 24) * 2.0,
+            phase: GlassCoinBurst.noise(index, 25),
+            tilt: (GlassCoinBurst.noise(index, 26) - 0.5) * 1.0,
+            delay: GlassCoinBurst.noise(index, 27) * 0.08
+        )
+    }
+
+    /// How strongly the brand mark gleams gold `t` seconds into a credit burst.
+    static func creditGleam(at t: Double) -> Double {
+        guard t >= 0, t < GlassCoinBurst.duration else { return 0 }
+        let rise = 0.15
+        let holdUntil = 0.7
+        if t < rise { return t / rise }
+        if t < holdUntil { return 1 }
+        return max(0, 1 - (t - holdUntil) / (GlassCoinBurst.duration - holdUntil))
+    }
+
+    /// Subtle upward hop on the brand mark as the burst begins; 0 at `stillAt`
+    /// so Reduce Motion stays still.
+    static func markHop(at t: Double) -> CGFloat {
+        guard t > 0, t < markHopDuration else { return 0 }
+        return -markHopPeak * CGFloat(sin(.pi * t / markHopDuration))
+    }
+
+    /// Where a strip coin sits `t` seconds into the burst, relative to the
+    /// brand mark's centre.
+    static func stripCoinOffset(_ coin: GlassCoinBurst.Coin, at t: Double) -> CGVector {
+        let flown = max(0, t - coin.delay)
+        let reach = coin.speed * (1 - exp(-stripDrag * flown)) / stripDrag
+        let fall = 0.5 * stripGravity * flown * flown
+        return CGVector(dx: cos(coin.angle) * reach, dy: sin(coin.angle) * reach * 0.45 + fall)
+    }
+
     /// A token in the bar's scheme, never left for the system to resolve.
     private func ink(_ rgba: GlassRGBA) -> GlassRGBA {
         colorScheme == .dark ? rgba.dark : rgba.light
@@ -530,29 +587,88 @@ public struct GlassMenuBarStrip: View {
         let gap = graph ? (halo ? Self.haloReach : -Self.badgeOverlap) : Self.markOnlyGap + (halo ? Self.haloReach : 0)
         HStack(alignment: .bottom, spacing: gap) {
             Canvas { context, size in
-                if let logo = GlassBrandMark.path(
-                    at: CGPoint(x: 0, y: (size.height - Self.markSize) / 2), size: Self.markSize)
-                {
+                let burstTime = creditBurst.flatMap { ($0 >= 0 && $0 < GlassCoinBurst.duration) ? $0 : nil }
+                let markOrigin = CGPoint(
+                    x: 0,
+                    y: (size.height - Self.markSize) / 2 + (burstTime.map(Self.markHop(at:)) ?? 0)
+                )
+                let markCentre = CGPoint(x: Self.markSize / 2, y: size.height / 2)
+                if let t = burstTime, t < GlassCoinBurst.flashDuration {
+                    let left = 1 - t / GlassCoinBurst.flashDuration
+                    let radius = (Self.height / 2) * CGFloat(0.45 + 0.55 * (t / GlassCoinBurst.flashDuration))
+                    context.fill(
+                        Path(ellipseIn: CGRect(
+                            x: markCentre.x - radius, y: markCentre.y - radius,
+                            width: radius * 2, height: radius * 2
+                        )),
+                        with: .radialGradient(
+                            Gradient(colors: [
+                                GlassCoinBurst.goldLight.color.opacity(0.85 * left),
+                                GlassCoinBurst.gold.color.opacity(0.35 * left),
+                                GlassCoinBurst.gold.color.opacity(0),
+                            ]),
+                            center: markCentre, startRadius: 0, endRadius: radius
+                        )
+                    )
+                }
+                if let logo = GlassBrandMark.path(at: markOrigin, size: Self.markSize) {
                     context.fill(logo, with: .color(markInk.color))
+                    if let t = burstTime {
+                        let gleam = Self.creditGleam(at: t)
+                        if gleam > 0 {
+                            context.fill(logo, with: .color(GlassCoinBurst.gold.color.opacity(gleam)))
+                        }
+                        if t < 0.3 {
+                            let flash = (1 - t / 0.3) * 0.55
+                            context.fill(logo, with: .color(GlassCoinBurst.goldLight.color.opacity(flash)))
+                        }
+                    }
                 }
-                guard graph else { return }
-                let left = Self.markSize + Self.markGap
-                let above = Self.graphTop + Self.reach
-                let below = above + Self.centreLine
-                context.fill(
-                    Path(CGRect(x: left, y: above, width: Self.graphWidth(steps: steps.count), height: Self.centreLine)),
-                    with: .color(markInk.opacity(0.3).color))
-                func segment(_ x: CGFloat, from edge: CGFloat, by length: CGFloat, up: Bool, _ colour: GlassRGBA) {
-                    guard length > 0 else { return }
-                    let rect = CGRect(x: x, y: up ? edge - length : edge, width: Self.barWidth, height: length)
-                    context.fill(Path(rect), with: .color(colour.color))
+                if graph {
+                    let left = Self.markSize + Self.markGap
+                    let above = Self.graphTop + Self.reach
+                    let below = above + Self.centreLine
+                    context.fill(
+                        Path(CGRect(x: left, y: above, width: Self.graphWidth(steps: steps.count), height: Self.centreLine)),
+                        with: .color(markInk.opacity(0.3).color))
+                    func segment(_ x: CGFloat, from edge: CGFloat, by length: CGFloat, up: Bool, _ colour: GlassRGBA) {
+                        guard length > 0 else { return }
+                        let rect = CGRect(x: x, y: up ? edge - length : edge, width: Self.barWidth, height: length)
+                        context.fill(Path(rect), with: .color(colour.color))
+                    }
+                    for (index, step) in steps.enumerated() {
+                        let x = left + CGFloat(index) * (2 * Self.barWidth + Self.stepGap)
+                        segment(x, from: above, by: step.verified, up: true, verified)
+                        segment(x, from: below, by: step.calls, up: false, calls)
+                        segment(x + Self.barWidth, from: above, by: step.shared, up: true, shared)
+                        segment(x + Self.barWidth, from: below, by: step.kept, up: false, kept)
+                    }
                 }
-                for (index, step) in steps.enumerated() {
-                    let x = left + CGFloat(index) * (2 * Self.barWidth + Self.stepGap)
-                    segment(x, from: above, by: step.verified, up: true, verified)
-                    segment(x, from: below, by: step.calls, up: false, calls)
-                    segment(x + Self.barWidth, from: above, by: step.shared, up: true, shared)
-                    segment(x + Self.barWidth, from: below, by: step.kept, up: false, kept)
+                if let t = burstTime {
+                    var burstContext = context
+                    burstContext.opacity = GlassCoinBurst.opacity(at: t)
+                    for coin in Self.stripCoins {
+                        let flown = t - coin.delay
+                        guard flown > 0 else { continue }
+                        let delta = Self.stripCoinOffset(coin, at: t)
+                        let point = CGPoint(x: markCentre.x + delta.dx, y: markCentre.y + delta.dy)
+                        guard point.x >= 1, point.x <= size.width - 1,
+                              point.y >= 1, point.y <= size.height - 1
+                        else { continue }
+                        if flown < 0.45 {
+                            let back = Self.stripCoinOffset(coin, at: max(0, t - 0.04))
+                            let dot = coin.diameter * 0.38
+                            burstContext.fill(
+                                Path(ellipseIn: CGRect(
+                                    x: markCentre.x + back.dx - dot / 2,
+                                    y: markCentre.y + back.dy - dot / 2,
+                                    width: dot, height: dot
+                                )),
+                                with: .color(GlassCoinBurst.spark.color.opacity(0.75 * (1 - flown / 0.45)))
+                            )
+                        }
+                        GlassCoinBurst.drawCoin(coin, at: point, turn: coin.phase + coin.spin * flown, in: &burstContext)
+                    }
                 }
             }
             .frame(width: width, height: Self.height)

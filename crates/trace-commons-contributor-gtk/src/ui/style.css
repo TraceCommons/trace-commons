@@ -1191,3 +1191,73 @@ checkbutton.tc-marker-check > check {
   color: transparent;
   -gtk-icon-source: none;
 }
+
+/* The edge rail and the menu-bar panel (ui/edge_surfaces.rs), outside the
+   window. Their windows are see-through: only the handle and the panes
+   draw. The handle is drawn straight on the desktop, so its colour is
+   translucent. A desktop skin reaches them through these classes. */
+window.tc-edge-surface {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.tc-edge-rail-handle {
+  background-color: @tc_glass_edge_rail_handle;
+  border-radius: 2px;
+}
+
+.tc-edge-rail-tile {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 14px;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  color: @tc_glass_ink;
+}
+
+.tc-edge-rail-tile:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-edge-rail-tile.tc-selected {
+  background-color: @tc_glass_control_selected;
+  color: @tc_glass_selected_ink;
+}
+
+.tc-edge-rail-rule {
+  background-color: alpha(@tc_glass_ink, 0.12);
+}
+
+.tc-edge-round {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: @tc_glass_ink;
+}
+
+.tc-edge-round:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-edge-row {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 11px;
+  padding: 4px 6px;
+  color: @tc_glass_ink;
+}
+
+.tc-edge-row:hover {
+  background-color: @tc_glass_row_hover;
+}
