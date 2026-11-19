@@ -200,6 +200,7 @@ else
     ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
+    ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
@@ -462,12 +463,12 @@ fi
 # not match it to ai.tracecommons.Contributor.desktop. The client's own
 # protocol log names every toplevel's app id; each must be the app's.
 if [ -n "${WAYLAND_SOCKET:-}" ]; then
-  APP_IDS=$(
+  PROTOCOL_LOG=$(
     cd "$WORKDIR" &&
       WAYLAND_DEBUG=1 WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-        GSK_RENDERER=cairo timeout 60 "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 8 2>&1 |
-      grep -o 'set_app_id("[^"]*")' | sort | uniq -c
+        GSK_RENDERER=cairo timeout 60 "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 8 2>&1
   )
+  APP_IDS=$(grep -o 'set_app_id("[^"]*")' <<< "$PROTOCOL_LOG" | sort | uniq -c)
   echo "toplevel app ids: ${APP_IDS:-none}"
   if [ -z "$APP_IDS" ]; then
     fail "no toplevel set an app id -- the app-id check read nothing"
@@ -475,6 +476,17 @@ if [ -n "${WAYLAND_SOCKET:-}" ]; then
     fail "a window's app id is not ai.tracecommons.Contributor"
   else
     echo "every toplevel's app id is ai.tracecommons.Contributor"
+  fi
+  # The title each toplevel is listed by: never the raw app id, which a
+  # window with no title of its own was listed by before.
+  TITLES=$(grep -o 'set_title("[^"]*")' <<< "$PROTOCOL_LOG" | sort | uniq -c)
+  echo "toplevel titles: ${TITLES:-none}"
+  if [ -z "$TITLES" ]; then
+    fail "no toplevel set a title -- the title check read nothing"
+  elif grep -qi 'tracecommons' <<< "$TITLES"; then
+    fail "a window is titled by the raw app id"
+  else
+    echo "no toplevel is titled by the raw app id"
   fi
 fi
 

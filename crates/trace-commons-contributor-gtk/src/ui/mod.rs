@@ -85,8 +85,13 @@ pub const APP_ID: &str = "ai.tracecommons.Contributor";
 /// `WM_CLASS` from the program name, which is otherwise the binary's
 /// (`trace-commons-shell`), so the desktop could not match it to
 /// `ai.tracecommons.Contributor.desktop`.
+///
+/// The application name is the brand's: a window with no title of its own
+/// is listed by it (GDK titles an untitled X11 window with it, and GLib
+/// answers the program name, the raw id, when it is unset).
 pub fn name_the_process() {
     glib::set_prgname(Some(APP_ID));
+    glib::set_application_name(copy::APP_NAME);
 }
 
 /// The reading column, shared by every screen in this window so the header's
@@ -2418,14 +2423,6 @@ mod card_preview_tests {
 #[cfg(test)]
 mod screen_tests {
     use super::*;
-
-    /// Every window, not only the main one, is named by the app id: the
-    /// program name is what GTK gives a window outside the application.
-    #[test]
-    fn every_window_takes_the_app_id_as_its_program_name() {
-        name_the_process();
-        assert_eq!(glib::prgname().as_deref(), Some(APP_ID));
-    }
 
     /// The tab strip, the tray menu and the accelerators all read
     /// `screens()`: the four tabs, Home first, in the Mac's order.

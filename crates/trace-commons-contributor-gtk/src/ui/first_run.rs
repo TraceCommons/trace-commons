@@ -160,6 +160,9 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     // The Mac's first-run window (`defaultSize(width: 860, height: 760)`,
     // `FirstRunProgress.minimumSize` 760 by 640): one size for every step.
     let window = adw::Window::builder()
+        // The name window lists and overviews give it; the header draws
+        // its own title widget.
+        .title(crate::copy::APP_NAME)
         .transient_for(&app.window)
         .modal(true)
         .default_width(WINDOW.0)
@@ -2542,6 +2545,84 @@ mod window_tests {
             assert!(least <= WINDOW_LEAST.0, "{name}: the window needs {least}");
         }
         window.close();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name each window is listed by (window lists, overviews, the
+    /// X11 `WM_NAME`): its own title, else the one GDK gives an untitled
+    /// window, the application name. The first run and the Look inside
+    /// sheet are the brand's, and no window is listed by the raw app id
+    /// the process is named by. On the branch before this fix the first
+    /// run and the sheet had no title, so both were listed as
+    /// "ai.tracecommons.Contributor".
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_every_window_is_listed_by_the_brand_never_the_raw_id() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        // As `main` names the process, before any window exists.
+        super::super::name_the_process();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.WindowNameTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-window-names-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, _jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        app.window.present();
+        app.entries.borrow_mut().push(crate::model::QueueEntry {
+            entry_id: "entry-1".into(),
+            state: "pending".into(),
+            ..Default::default()
+        });
+        super::super::preview::open(&app, 0);
+        let first_run = present(&app);
+        settle(&context);
+        let listed = |window: &gtk::Window| {
+            window
+                .title()
+                .map(|title| title.to_string())
+                .or_else(|| glib::application_name().map(|name| name.to_string()))
+                .unwrap_or_default()
+        };
+        let mut names = Vec::new();
+        for item in gtk::Window::toplevels().iter::<glib::Object>() {
+            let window = item.unwrap().downcast::<gtk::Window>().unwrap();
+            if window.is_visible() {
+                names.push((window.type_().name().to_string(), listed(&window)));
+            }
+        }
+        assert!(
+            names.len() >= 3,
+            "the main window, the sheet, the first run: {names:?}"
+        );
+        for (kind, name) in &names {
+            assert!(!name.is_empty(), "{kind} is listed by no name: {names:?}");
+            assert!(
+                !name.contains(super::super::APP_ID),
+                "{kind} is listed as {name}: {names:?}"
+            );
+        }
+        assert_eq!(
+            listed(first_run.upcast_ref()),
+            crate::copy::APP_NAME,
+            "the first run"
+        );
+        let sheet = names.iter().filter(|(kind, _)| kind == "AdwWindow").count();
+        assert!(
+            sheet >= 2,
+            "the sheet and the first run are both open: {names:?}"
+        );
+        for (kind, name) in names.iter().filter(|(kind, _)| kind == "AdwWindow") {
+            assert_eq!(name, crate::copy::APP_NAME, "{kind}");
+        }
+        first_run.close();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
