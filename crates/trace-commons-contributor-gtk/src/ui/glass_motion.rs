@@ -149,6 +149,38 @@ pub fn window_hidden(widget: &impl IsA<gtk::Widget>) -> bool {
     toplevel(widget.upcast_ref()).is_some_and(|toplevel| hides(toplevel.state()))
 }
 
+/// Calls `changed(widget)` each time the window `widget` is in is
+/// minimised, suspended or shown again, while `widget` is mapped: for a
+/// clock of its own to hold while it cannot be seen (`window_hidden`).
+pub fn on_window_state(widget: &impl IsA<gtk::Widget>, changed: impl Fn(&gtk::Widget) + 'static) {
+    let widget: &gtk::Widget = widget.upcast_ref();
+    let changed = Rc::new(changed);
+    let held: Rc<RefCell<Option<(gdk::Toplevel, gtk::glib::SignalHandlerId)>>> = Rc::default();
+    {
+        let held = Rc::clone(&held);
+        widget.connect_map(move |widget| {
+            let Some(window) = toplevel(widget) else {
+                return;
+            };
+            let weak = widget.downgrade();
+            let changed = Rc::clone(&changed);
+            let id = window.connect_state_notify(move |_| {
+                if let Some(widget) = weak.upgrade() {
+                    changed(&widget);
+                }
+            });
+            if let Some((old, old_id)) = held.borrow_mut().replace((window, id)) {
+                old.disconnect(old_id);
+            }
+        });
+    }
+    widget.connect_unmap(move |_| {
+        if let Some((window, id)) = held.borrow_mut().take() {
+            window.disconnect(id);
+        }
+    });
+}
+
 /// A tween's value `progress` (eased, 0 to 1) of the way from `from` to `to`.
 pub fn tween_value(from: f64, to: f64, progress: f64) -> f64 {
     from + (to - from) * progress
@@ -359,13 +391,11 @@ pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + '
     struct Loop {
         tick: Option<gtk::TickCallbackId>,
         began: Option<i64>,
-        window: Option<(gdk::Toplevel, gtk::glib::SignalHandlerId)>,
     }
     let frame: Rc<dyn Fn(f64)> = Rc::new(frame);
     let state = Rc::new(RefCell::new(Loop {
         tick: None,
         began: None,
-        window: None,
     }));
     // Starts or stops the tick to match the widget, its window and the
     // setting. Called on every change of any of them.
@@ -413,34 +443,15 @@ pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + '
     };
     {
         let sync = Rc::clone(&sync);
-        let state = Rc::clone(&state);
-        widget.connect_map(move |widget| {
-            // Follow the window's own state while mapped: minimised,
-            // suspended, and back.
-            if let Some(window) = toplevel(widget) {
-                let weak = widget.downgrade();
-                let again = Rc::clone(&sync);
-                let id = window.connect_state_notify(move |_| {
-                    if let Some(widget) = weak.upgrade() {
-                        again(&widget);
-                    }
-                });
-                if let Some((old, old_id)) = state.borrow_mut().window.replace((window, id)) {
-                    old.disconnect(old_id);
-                }
-            }
-            sync(widget);
-        });
+        widget.connect_map(move |widget| sync(widget));
     }
     {
         let sync = Rc::clone(&sync);
-        let state = Rc::clone(&state);
-        widget.connect_unmap(move |widget| {
-            if let Some((window, id)) = state.borrow_mut().window.take() {
-                window.disconnect(id);
-            }
-            sync(widget);
-        });
+        widget.connect_unmap(move |widget| sync(widget));
+    }
+    {
+        let sync = Rc::clone(&sync);
+        on_window_state(widget, move |widget| sync(widget));
     }
     let weak = widget.downgrade();
     on_animations_changed(widget, move |_| {

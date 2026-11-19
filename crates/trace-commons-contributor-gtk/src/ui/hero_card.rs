@@ -322,7 +322,13 @@ impl HeroCard {
                 if let Some(id) = timer.borrow_mut().take() {
                     id.remove();
                 }
-                if !area.is_mapped() || !animations_enabled() || paint.mask.borrow().is_none() {
+                // Held, too, while its window is minimised or suspended:
+                // the Mac's timelines stop when their window cannot be seen.
+                if !area.is_mapped()
+                    || !animations_enabled()
+                    || paint.mask.borrow().is_none()
+                    || super::glass_motion::window_hidden(&area)
+                {
                     paint.time.set(0.0);
                     paint.epoch.set(None);
                     area.queue_draw();
@@ -353,6 +359,10 @@ impl HeroCard {
         {
             let start = Rc::clone(&start);
             self.canvas.connect_map(move |_| start());
+        }
+        {
+            let start = Rc::clone(&start);
+            super::glass_motion::on_window_state(&self.canvas, move |_| start());
         }
         {
             let timer = Rc::clone(&timer);

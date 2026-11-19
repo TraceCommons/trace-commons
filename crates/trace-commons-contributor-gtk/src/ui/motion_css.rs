@@ -293,7 +293,11 @@ mod tests {
         assert!(tree.contains("\"pan-down-symbolic\""));
         assert!(tree.contains("\"pan-end-symbolic\""));
         let css = css(true);
-        assert_eq!(css.matches("-gtk-icon-transform ").count(), 2, "only expanders turn");
+        assert_eq!(
+            css.matches("-gtk-icon-transform ").count(),
+            2,
+            "only expanders turn"
+        );
         assert!(!css.contains("tc-tree-chevron"));
     }
 }
