@@ -30,6 +30,9 @@ public struct ClaudeDesktopStatus: Decodable, Equatable, Sendable {
         "status_disconnected", "status_ready", "status_observed", "status_unavailable",
         "status_sign_in_required", "status_disabled", "instructions", "error",
     ]
+    /// The Private AI tab's setup notice (`ClaudeDesktopPrompt`). Optional:
+    /// a daemon without them draws no notice, and the row still works.
+    public static let promptCopyKeys = ["prompt_title", "prompt_line", "prompt_dismiss"]
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -81,5 +84,23 @@ public struct ClaudeDesktopStatus: Decodable, Equatable, Sendable {
         self.copy = copy
         self.environment = environment
         self.recognizedState = recognizedState
+    }
+}
+
+/// Whether the Private AI tab offers Claude Desktop setup: the flag is on,
+/// Claude Desktop is installed on this Mac, the person has not dismissed the
+/// notice, and the daemon says it is not set up (`disconnected`). Any other
+/// state either is set up or cannot be set up from here, and Settings'
+/// row says which.
+public enum ClaudeDesktopPrompt {
+    /// Claude Desktop's bundle identifier.
+    public static let desktopBundleID = "com.anthropic.claudefordesktop"
+    /// The `UserDefaults` key holding the dismissal.
+    public static let dismissedKey = "claudeDesktopPromptDismissed"
+
+    public static func shows(featureOn: Bool, desktopInstalled: Bool, dismissed: Bool,
+                             status: ClaudeDesktopStatus?) -> Bool {
+        guard featureOn, desktopInstalled, !dismissed, let status, status.state == .disconnected else { return false }
+        return ClaudeDesktopStatus.promptCopyKeys.allSatisfy { !status.text($0).isEmpty }
     }
 }

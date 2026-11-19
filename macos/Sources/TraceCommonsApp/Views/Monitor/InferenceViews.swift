@@ -78,6 +78,9 @@ struct InferenceTabView: View {
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
                 SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
+                // Only while Claude Desktop is installed and not set up
+                // (owner request, 2026-11-19); otherwise draws nothing.
+                ClaudeDesktopSetupPrompt(onOpenSettings: onOpenSettings)
                 ManagedSessionsSection()
                 ledgerSections
                 InferenceBalanceSection()

@@ -66,3 +66,34 @@ final class ClaudeDesktopSurfaceTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(ClaudeDesktopStatus.self, from: data))
     }
 }
+
+/// The Private AI tab's notice offering Claude Desktop setup.
+final class ClaudeDesktopPromptTests: XCTestCase {
+    private func status(_ state: String, promptCopy: Bool = true) throws -> ClaudeDesktopStatus {
+        var copy = Dictionary(uniqueKeysWithValues: ClaudeDesktopStatus.copyKeys.map { ($0, $0) })
+        if promptCopy { for key in ClaudeDesktopStatus.promptCopyKeys { copy[key] = key } }
+        let fields: [String: Any] = ["state": state, "observed": false, "copy": copy]
+        return try JSONDecoder().decode(ClaudeDesktopStatus.self, from: JSONSerialization.data(withJSONObject: fields))
+    }
+
+    func testShownOnlyWhileInstalledFlaggedUndismissedAndNotSetUp() throws {
+        let off = try status("disconnected")
+        XCTAssertTrue(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: off))
+        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: false, desktopInstalled: true, dismissed: false, status: off))
+        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: false, dismissed: false, status: off))
+        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: true, status: off))
+        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: nil))
+    }
+
+    func testNotShownOnceSetUpOrWhenSetupCannotRun() throws {
+        for state in ["ready", "observed", "unavailable", "sign_in_required", "disabled", "later_state"] {
+            XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false,
+                                                     status: try status(state)), state)
+        }
+    }
+
+    func testADaemonWithoutThePromptWordsDrawsNoPrompt() throws {
+        let status = try status("disconnected", promptCopy: false)
+        XCTAssertFalse(ClaudeDesktopPrompt.shows(featureOn: true, desktopInstalled: true, dismissed: false, status: status))
+    }
+}
