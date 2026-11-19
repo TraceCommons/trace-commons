@@ -20,6 +20,9 @@
 //! within a few hundred milliseconds turns a little more softly on the
 //! Mac.
 
+use std::collections::BTreeMap;
+
+use super::map_scene::PileStep;
 use crate::ui::glass_motion;
 use crate::ui::style::brand_tokens::tile;
 
@@ -227,6 +230,117 @@ pub const REORDER: Ease = Ease::Spring(0.42, 0.8);
 pub const GROW: Ease = Ease::Spring(0.3, 0.7);
 /// A grown coin's scale (`scaleEffect(grown ? 1.3 : 1)`).
 pub const GROWN: f64 = 1.3;
+
+/// The pile as it moves: the card's height, width and names on
+/// `MapToolPile.hover`'s stages, the coins' spacing on `LAY` and each
+/// coin's place and growth on `REORDER` and `GROW`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PileMotion {
+    pub tall: Tween,
+    pub wide: Tween,
+    pub names: Tween,
+    /// How far the coins are laid out open: 0 closed, 1 open.
+    pub lay: Tween,
+    coins: BTreeMap<String, CoinMotion>,
+}
+
+/// One coin as it moves: its place in the pile (an index, fractional
+/// between two) and how far it is grown (0 to 1, past 1 as it springs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoinMotion {
+    pub index: Tween,
+    pub grow: Tween,
+}
+
+impl Default for PileMotion {
+    fn default() -> Self {
+        Self {
+            tall: Tween::at_rest(0.0),
+            wide: Tween::at_rest(0.0),
+            names: Tween::at_rest(0.0),
+            lay: Tween::at_rest(0.0),
+            coins: BTreeMap::new(),
+        }
+    }
+}
+
+impl PileMotion {
+    /// One of the hover's stages, at `now`, on its own timing; at once
+    /// under reduced motion.
+    pub fn step(&mut self, step: PileStep, now: f64, reduce_motion: bool) {
+        let ease = |ease: Ease| (!reduce_motion).then_some(ease);
+        match step {
+            PileStep::Tall(true) => self.tall.retarget(1.0, now, ease(TALL_OPEN)),
+            PileStep::Wide(true) => self.wide.retarget(1.0, now, ease(WIDE_OPEN)),
+            PileStep::Names(true) => self
+                .names
+                .retarget(1.0, now, ease(Ease::ease_out(NAMES_IN))),
+            PileStep::Names(false) => {
+                self.names
+                    .retarget(0.0, now, ease(Ease::ease_out(NAMES_OUT)))
+            }
+            PileStep::Wide(false) => self.wide.retarget(0.0, now, ease(WIDE_CLOSE)),
+            PileStep::Tall(false) => self.tall.retarget(0.0, now, ease(TALL_CLOSE)),
+        }
+    }
+
+    /// The coins' targets at `now`: laid `open` or closed, in `order`
+    /// front first, those in `grown` grown. A coin new to the pile is
+    /// simply there.
+    pub fn follow(
+        &mut self,
+        now: f64,
+        open: bool,
+        order: &[String],
+        grown: &[String],
+        reduce_motion: bool,
+    ) {
+        let ease = |ease: Ease| (!reduce_motion).then_some(ease);
+        self.lay
+            .retarget(if open { 1.0 } else { 0.0 }, now, ease(LAY));
+        self.coins.retain(|id, _| order.contains(id));
+        for (index, id) in order.iter().enumerate() {
+            let grows = if grown.contains(id) { 1.0 } else { 0.0 };
+            let coin = self.coins.entry(id.clone()).or_insert(CoinMotion {
+                index: Tween::at_rest(index as f64),
+                grow: Tween::at_rest(grows),
+            });
+            coin.index.retarget(index as f64, now, ease(REORDER));
+            coin.grow.retarget(grows, now, ease(GROW));
+        }
+    }
+
+    pub fn coin(&self, id: &str) -> Option<CoinMotion> {
+        self.coins.get(id).copied()
+    }
+
+    /// Whether anything in the pile is still moving at `now`.
+    pub fn moving(&self, now: f64) -> bool {
+        [self.tall, self.wide, self.names, self.lay]
+            .iter()
+            .any(|tween| tween.moving(now))
+            || self
+                .coins
+                .values()
+                .any(|coin| coin.index.moving(now) || coin.grow.moving(now))
+    }
+
+    /// Everything at its target at once (reduced motion turned on).
+    pub fn settle(&mut self) {
+        for tween in [
+            &mut self.tall,
+            &mut self.wide,
+            &mut self.names,
+            &mut self.lay,
+        ] {
+            tween.settle();
+        }
+        for coin in self.coins.values_mut() {
+            coin.index.settle();
+            coin.grow.settle();
+        }
+    }
+}
 
 // --- The graph and the panes ------------------------------------------------------
 
@@ -647,6 +761,103 @@ mod tests {
         close(new_a, 0.775_561_333, 1e-5, "new opacity");
         let ((old_x, old_a), (new_x, new_a)) = period_slide(Edge::Leading, 0.45);
         assert_eq!((old_x, old_a, new_x, new_a), (-1.0, 0.0, 0.0, 1.0));
+    }
+
+    /// Each of the hover's stages takes its own timing from
+    /// `MapToolPile.hover`, and none under reduced motion.
+    #[test]
+    fn each_pile_stage_moves_on_its_own_timing() {
+        let mut pile = PileMotion::default();
+        pile.step(PileStep::Tall(true), 0.0, false);
+        close(pile.tall.value(0.1), 0.609_732_579, 1e-6, "tall opening");
+        pile.step(PileStep::Wide(true), 0.26, false);
+        close(pile.wide.value(0.36), 0.676_634_630, 1e-6, "wide opening");
+        pile.step(PileStep::Names(true), 0.46, false);
+        close(
+            pile.names.value(0.46 + 0.09),
+            Ease::ease_out(0.18).progress(0.09),
+            1e-9,
+            "names in",
+        );
+        assert!(pile.moving(0.5));
+        assert!(!pile.moving(2.0));
+        pile.step(PileStep::Names(false), 3.0, false);
+        close(
+            pile.names.value(3.075),
+            1.0 - Ease::ease_out(0.15).progress(0.075),
+            1e-9,
+            "names out",
+        );
+        pile.step(PileStep::Wide(false), 3.1, false);
+        close(
+            pile.wide.value(3.2),
+            1.0 - 0.698_592_952,
+            1e-6,
+            "wide closing",
+        );
+        pile.step(PileStep::Tall(false), 3.32, false);
+        close(
+            pile.tall.value(3.42),
+            1.0 - 0.601_787_319,
+            1e-6,
+            "tall closing",
+        );
+        // Under reduced motion each stage is there at once.
+        let mut still = PileMotion::default();
+        still.step(PileStep::Tall(true), 0.0, true);
+        still.step(PileStep::Wide(true), 0.0, true);
+        assert_eq!((still.tall.value(0.0), still.wide.value(0.0)), (1.0, 1.0));
+        assert!(!still.moving(0.0));
+    }
+
+    /// The coins: laid open on `LAY`, a coin to the front on `REORDER`, a
+    /// coin a trace is in grown on `GROW` past 1.3 and back; a coin new to
+    /// the pile at its place at once.
+    #[test]
+    fn the_coins_lay_reorder_and_grow_on_the_macs_springs() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut pile = PileMotion::default();
+        pile.follow(0.0, false, &ids(&["a", "b", "c"]), &[], false);
+        assert!(!pile.moving(0.0), "the first coins are simply there");
+        assert_eq!(pile.coin("c").unwrap().index.value(0.0), 2.0);
+        pile.follow(1.0, true, &ids(&["a", "b", "c"]), &[], false);
+        close(pile.lay.value(1.1), 0.582_676_783, 1e-6, "laid open");
+        // c comes to the front: a and b each move back one.
+        pile.follow(2.0, true, &ids(&["c", "a", "b"]), &ids(&["c"]), false);
+        let c = pile.coin("c").unwrap();
+        close(
+            c.index.value(2.1),
+            2.0 * (1.0 - 0.496_621_349),
+            1e-6,
+            "c forward",
+        );
+        close(
+            pile.coin("a").unwrap().index.value(2.1),
+            0.496_621_349,
+            1e-6,
+            "a back",
+        );
+        close(
+            c.grow.value(2.2),
+            1.044_867_376,
+            1e-6,
+            "c grows past its size",
+        );
+        // A coin gone from the pile is forgotten; a new one is at rest.
+        pile.follow(3.0, true, &ids(&["d", "c"]), &[], false);
+        assert!(pile.coin("a").is_none());
+        assert_eq!(pile.coin("d").unwrap().index.value(3.0), 0.0);
+        assert!(!pile.coin("d").unwrap().index.moving(3.0));
+        // Reduced motion: every coin at its place at once.
+        pile.follow(4.0, false, &ids(&["c", "d"]), &[], true);
+        assert_eq!(pile.lay.value(4.0), 0.0);
+        assert_eq!(pile.coin("c").unwrap().index.value(4.0), 0.0);
+        assert!(!pile.moving(4.0));
+        pile.follow(5.0, true, &ids(&["d", "c"]), &[], false);
+        assert!(pile.moving(5.1));
+        pile.settle();
+        assert!(!pile.moving(5.1));
+        assert_eq!(pile.coin("c").unwrap().index.value(5.1), 1.0);
     }
 
     /// A tween heads for its target on its ease, from wherever it is when

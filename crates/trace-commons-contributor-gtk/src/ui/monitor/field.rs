@@ -11,14 +11,20 @@
 //! white with the marks barely there, and the dark one navy with the marks
 //! clearly seen, as on the Mac.
 //!
-//! Deliberate platform differences, each until a later slice: the Mac's
-//! shimmer that crosses the field every 40 seconds and the light under the
-//! pointer are not drawn here.
+//! What moves on it (`map_motion` holds the numbers): the shimmer, a
+//! slanted band of light that crosses the marks a second after the map is
+//! shown and every 40 seconds after (`GlassMapShimmer`, `draw_shimmer`),
+//! and the light under the pointer, the marks within 140 points lit and a
+//! soft white bloom over them (`GlassMapMarkGlow`, `GlassMapLight`,
+//! `draw_light`). The marks are cached once per size as an alpha mask with
+//! the edge fade in it (`Field::tile_mask`), so a shimmer frame paints a
+//! gradient through it and builds no path.
 
 use std::cell::RefCell;
 
 use super::glyph::Artwork;
 use super::map::MapColours;
+use super::map_motion;
 
 /// The tile's cell: two marks to a cell, on its diagonal, so rows stagger.
 pub const PITCH: f64 = 28.0;
@@ -133,36 +139,164 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, colours: &MapColo
     // The marks and dots, faded out toward the edges.
     cr.push_group();
     cr.new_path();
-    let mark = Artwork::brand_mark();
-    if let Some(segments) = mark.cached_segments() {
-        let [bx, by, bw, bh] = mark.view_box;
-        let scale = MARK / bw.max(bh);
-        for (x, y) in origins(width, height) {
-            let _ = cr.save();
-            cr.translate(x, y);
-            cr.scale(scale, scale);
-            cr.translate(-bx, -by);
-            super::glyph::append_segments(cr, &segments);
-            let _ = cr.restore();
-        }
-    }
-    for (x, y) in dots(width, height) {
-        cr.new_sub_path();
-        cr.arc(x, y, DOT / 2.0, 0.0, std::f64::consts::TAU);
-    }
+    append_marks(cr, &origins(width, height));
+    append_dots(cr, &dots(width, height));
     cr.set_fill_rule(gtk::cairo::FillRule::Winding);
     rgba(cr, &ink(dark));
     let _ = cr.fill();
     let _ = cr.pop_group_to_source();
+    let _ = cr.mask(&fade(width, height));
+    let _ = cr.restore();
+}
+
+/// The tile's fade toward the field's edges (`GlassMapMarks.fade`): full
+/// in the middle, 85% halfway, gone at the edge.
+fn fade(width: f64, height: f64) -> gtk::cairo::RadialGradient {
     let white = gtk::gdk::RGBA::WHITE;
-    let fade = elliptical(
+    elliptical(
         width * 0.5,
         height * 0.52,
         width * 0.62,
         height * 0.62,
         &[(0.0, white, 1.0), (0.55, white, 0.85), (1.0, white, 0.0)],
-    );
-    let _ = cr.mask(&fade);
+    )
+}
+
+/// Adds a mark at each of `origins` (top-left corners) to the path.
+fn append_marks(cr: &gtk::cairo::Context, origins: &[(f64, f64)]) {
+    let mark = Artwork::brand_mark();
+    let Some(segments) = mark.cached_segments() else {
+        return;
+    };
+    let [bx, by, bw, bh] = mark.view_box;
+    let scale = MARK / bw.max(bh);
+    for (x, y) in origins {
+        let _ = cr.save();
+        cr.translate(*x, *y);
+        cr.scale(scale, scale);
+        cr.translate(-bx, -by);
+        super::glyph::append_segments(cr, &segments);
+        let _ = cr.restore();
+    }
+}
+
+/// Adds a dot at each of `centres` to the path.
+fn append_dots(cr: &gtk::cairo::Context, centres: &[(f64, f64)]) {
+    for (x, y) in centres {
+        cr.new_sub_path();
+        cr.arc(*x, *y, DOT / 2.0, 0.0, std::f64::consts::TAU);
+    }
+}
+
+/// The marks and dots of a field `width` by `height` as an alpha mask,
+/// faded toward the edges as the Mac masks its tile, its shimmer and its
+/// glow (`.mask(GlassMapMarks.fade)`), at `scale` pixels a point.
+pub fn tile_mask(width: f64, height: f64, scale: f64) -> Option<gtk::cairo::ImageSurface> {
+    let pixels = |points: f64| (points * scale).ceil() as i32;
+    if pixels(width) <= 0 || pixels(height) <= 0 {
+        return None;
+    }
+    let surface =
+        gtk::cairo::ImageSurface::create(gtk::cairo::Format::A8, pixels(width), pixels(height))
+            .ok()?;
+    surface.set_device_scale(scale, scale);
+    {
+        let cr = gtk::cairo::Context::new(&surface).ok()?;
+        cr.push_group();
+        append_marks(&cr, &origins(width, height));
+        append_dots(&cr, &dots(width, height));
+        cr.set_fill_rule(gtk::cairo::FillRule::Winding);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+        let _ = cr.fill();
+        let _ = cr.pop_group_to_source();
+        let _ = cr.mask(&fade(width, height));
+    }
+    surface.flush();
+    Some(surface)
+}
+
+/// The shimmer `progress` of the way across (`GlassMapShimmer`): the
+/// marks lit along a slanted band, a gradient clear but for the band
+/// painted through `mask` (`tile_mask`). Nothing at 0.
+pub fn draw_shimmer(
+    cr: &gtk::cairo::Context,
+    mask: &gtk::cairo::ImageSurface,
+    width: f64,
+    height: f64,
+    progress: f64,
+    dark: bool,
+) {
+    if progress <= 0.0 {
+        return;
+    }
+    let ((sx, sy), (ex, ey)) = map_motion::shimmer_band(progress, width, height);
+    let crest = map_motion::shimmer_ink(dark);
+    let band = gtk::cairo::LinearGradient::new(sx, sy, ex, ey);
+    band.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0);
+    band.add_color_stop_rgba(0.5, 1.0, 1.0, 1.0, crest);
+    band.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
+    let _ = cr.save();
+    let _ = cr.set_source(&band);
+    let _ = cr.mask_surface(mask, 0.0, 0.0);
+    let _ = cr.restore();
+}
+
+/// The light under `pointer` at `opacity` (it fades in and out): the
+/// marks and dots within `REACH` lit by `light(distance)` in `lit_ink`,
+/// faded with the tile (`GlassMapMarkGlow`), then the bloom over them
+/// (`GlassMapLight`), which the fade does not touch.
+pub fn draw_light(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    pointer: (f64, f64),
+    opacity: f64,
+    dark: bool,
+) {
+    if opacity <= 0.0 {
+        return;
+    }
+    let (px, py) = pointer;
+    let reach = map_motion::REACH;
+    let ink = map_motion::lit_ink(dark) * opacity;
+    let _ = cr.save();
+    // The marks and dots near the pointer, each as lit as its distance,
+    // faded toward the field's edges with the tile.
+    cr.push_group();
+    let half = MARK / 2.0;
+    let near = |x: f64, y: f64| (x - px).abs() < reach && (y - py).abs() < reach;
+    for origin in origins(width, height) {
+        let lit = map_motion::light((origin.0 + half - px).hypot(origin.1 + half - py));
+        if lit <= 0.0 || !near(origin.0 + half, origin.1 + half) {
+            continue;
+        }
+        cr.new_path();
+        append_marks(cr, &[origin]);
+        cr.set_fill_rule(gtk::cairo::FillRule::Winding);
+        cr.set_source_rgba(1.0, 1.0, 1.0, ink * lit);
+        let _ = cr.fill();
+    }
+    for centre in dots(width, height) {
+        let lit = map_motion::light((centre.0 - px).hypot(centre.1 - py));
+        if lit <= 0.0 {
+            continue;
+        }
+        cr.new_path();
+        append_dots(cr, &[centre]);
+        cr.set_source_rgba(1.0, 1.0, 1.0, ink * lit);
+        let _ = cr.fill();
+    }
+    let _ = cr.pop_group_to_source();
+    let _ = cr.mask(&fade(width, height));
+    // The bloom, over the marks and the veil.
+    let bloom = gtk::cairo::RadialGradient::new(px, py, 0.0, px, py, reach);
+    let alpha = map_motion::bloom(dark) * opacity;
+    bloom.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, alpha);
+    bloom.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
+    cr.new_path();
+    cr.arc(px, py, reach, 0.0, std::f64::consts::TAU);
+    let _ = cr.set_source(&bloom);
+    let _ = cr.fill();
     let _ = cr.restore();
 }
 
@@ -173,6 +307,8 @@ type FieldKey = (i32, i32, bool, gtk::gdk::RGBA, gtk::gdk::RGBA);
 #[derive(Default)]
 pub struct Field {
     kept: RefCell<Option<(FieldKey, gtk::gsk::RenderNode)>>,
+    /// The marks' alpha mask for the shimmer, by size and scale.
+    mask: RefCell<Option<((i32, i32, i32), gtk::cairo::ImageSurface)>>,
 }
 
 impl Field {
@@ -206,6 +342,25 @@ impl Field {
         let node: gtk::gsk::RenderNode = gtk::gsk::prelude::IsRenderNode::upcast(node);
         self.kept.replace(Some((key, node.clone())));
         node
+    }
+
+    /// The marks' mask for a field `width` by `height` at `scale`, drawn
+    /// once and kept until its size or scale changes.
+    pub fn tile_mask(
+        &self,
+        width: i32,
+        height: i32,
+        scale: i32,
+    ) -> Option<gtk::cairo::ImageSurface> {
+        let key = (width, height, scale);
+        if let Some((kept, mask)) = self.mask.borrow().as_ref()
+            && *kept == key
+        {
+            return Some(mask.clone());
+        }
+        let mask = tile_mask(f64::from(width), f64::from(height), f64::from(scale.max(1)))?;
+        self.mask.replace(Some((key, mask.clone())));
+        Some(mask)
     }
 }
 
@@ -275,6 +430,133 @@ mod tests {
         first.sort_by(f64::total_cmp);
         assert_eq!(first.len(), 2);
         assert!((first[1] - first[0] - pitch * 2.0).abs() < 0.001);
+    }
+
+    /// The field over the dark pane, its marks and ground, with what
+    /// `paint` adds over it, as the brightness of a few pixels.
+    fn dark_field(
+        w: i32,
+        h: i32,
+        paint: impl Fn(&gtk::cairo::Context),
+    ) -> impl Fn(f64, f64) -> u32 {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap();
+        let colours = MapColours::scheme(true);
+        {
+            let cr = gtk::cairo::Context::new(&surface).unwrap();
+            crate::ui::monitor::map::source(&cr, &colours.pane_opaque, 1.0);
+            let _ = cr.paint();
+            draw(&cr, f64::from(w), f64::from(h), &colours, true);
+            paint(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap().to_vec();
+        move |x: f64, y: f64| {
+            let i = y as usize * stride + x as usize * 4;
+            u32::from(data[i]) + u32::from(data[i + 1]) + u32::from(data[i + 2])
+        }
+    }
+
+    /// The brightest pixel of the mark whose top-left corner is `origin`.
+    fn mark_peak(px: &impl Fn(f64, f64) -> u32, origin: (f64, f64)) -> u32 {
+        (0..6)
+            .flat_map(|dy| (0..6).map(move |dx| (dx, dy)))
+            .map(|(dx, dy)| px(origin.0 + f64::from(dx), origin.1 + f64::from(dy)))
+            .max()
+            .unwrap()
+    }
+
+    /// The shimmer lights the marks on its band, slanted 20 degrees and
+    /// crossing left to right, and leaves the rest as they were; at 0 it
+    /// draws nothing (`GlassMapShimmer`).
+    #[test]
+    fn the_shimmer_lights_the_marks_on_its_band_only() {
+        let (w, h) = (400, 400);
+        let mask = tile_mask(f64::from(w), f64::from(h), 1.0).unwrap();
+        let rest = dark_field(w, h, |_| {});
+        let none = dark_field(w, h, |cr| {
+            draw_shimmer(cr, &mask, f64::from(w), f64::from(h), 0.0, true)
+        });
+        let half = dark_field(w, h, |cr| {
+            draw_shimmer(cr, &mask, f64::from(w), f64::from(h), 0.5, true)
+        });
+        let marks = origins(f64::from(w), f64::from(h));
+        let ((sx, sy), (ex, ey)) = map_motion::shimmer_band(0.5, f64::from(w), f64::from(h));
+        let (ux, uy) = ((ex - sx), (ey - sy));
+        let length = ux.hypot(uy);
+        // How far along the band's normal a point is, 0 at its crest.
+        let off_crest = |(x, y): (f64, f64)| {
+            let along = ((x - sx) * ux + (y - sy) * uy) / length;
+            (along - length / 2.0).abs()
+        };
+        let centre = |&(x, y): &(f64, f64)| (x + MARK / 2.0, y + MARK / 2.0);
+        let on = marks
+            .iter()
+            .filter(|o| {
+                let c = centre(o);
+                off_crest(c) < 3.0 && (c.0 - 200.0).abs() < 60.0 && (c.1 - 200.0).abs() < 60.0
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(!on.is_empty(), "no mark on the crest near the middle");
+        for origin in &on {
+            assert!(
+                mark_peak(&half, *origin) > mark_peak(&rest, *origin) + 60,
+                "a mark on the crest at {origin:?} is not lit"
+            );
+            assert_eq!(mark_peak(&none, *origin), mark_peak(&rest, *origin));
+        }
+        let off = marks
+            .iter()
+            .find(|o| off_crest(centre(o)) > length && (centre(o).0 - 200.0).abs() < 80.0)
+            .copied()
+            .unwrap();
+        assert_eq!(mark_peak(&half, off), mark_peak(&rest, off), "off the band");
+    }
+
+    /// Under the pointer the marks are lit to `litInk`, easing to nothing
+    /// at 140 points, and a bloom lightens the ground; the light at half
+    /// opacity is half as strong (`GlassMapMarkGlow`, `GlassMapLight`).
+    #[test]
+    fn the_light_under_the_pointer_reaches_140_points() {
+        let (w, h) = (400, 400);
+        let marks = origins(f64::from(w), f64::from(h));
+        let pointer = (marks[0].0 + MARK / 2.0, marks[0].1 + MARK / 2.0);
+        let pointer = marks
+            .iter()
+            .map(|&(x, y)| (x + MARK / 2.0, y + MARK / 2.0))
+            .min_by(|a, b| {
+                (a.0 - 200.0)
+                    .hypot(a.1 - 200.0)
+                    .total_cmp(&(b.0 - 200.0).hypot(b.1 - 200.0))
+            })
+            .unwrap_or(pointer);
+        let rest = dark_field(w, h, |_| {});
+        let lit = dark_field(w, h, |cr| {
+            draw_light(cr, f64::from(w), f64::from(h), pointer, 1.0, true)
+        });
+        let dim = dark_field(w, h, |cr| {
+            draw_light(cr, f64::from(w), f64::from(h), pointer, 0.5, true)
+        });
+        let under = (pointer.0 - MARK / 2.0, pointer.1 - MARK / 2.0);
+        let gain = mark_peak(&lit, under) - mark_peak(&rest, under);
+        let half_gain = mark_peak(&dim, under) - mark_peak(&rest, under);
+        assert!(gain > 40, "the mark under the pointer gains {gain}");
+        assert!(
+            half_gain < gain && half_gain * 2 + 12 > gain,
+            "half the light gains {half_gain} of {gain}"
+        );
+        // Past the reach nothing changes, the bloom included.
+        let far = marks
+            .iter()
+            .find(|&&(x, y)| (x + MARK / 2.0 - pointer.0).hypot(y + MARK / 2.0 - pointer.1) > 150.0)
+            .copied()
+            .unwrap();
+        assert_eq!(mark_peak(&lit, far), mark_peak(&rest, far));
+        // The ground beside the pointer is lighter by the bloom.
+        let ground = (pointer.0 + PITCH / 2.0, pointer.1);
+        assert!(lit(ground.0, ground.1) > rest(ground.0, ground.1));
     }
 
     /// The light field over the light pane is the Mac's own near-white:
