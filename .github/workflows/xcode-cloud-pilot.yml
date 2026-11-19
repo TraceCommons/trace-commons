@@ -1,0 +1,252 @@
+# Xcode Cloud pilot: Cloud builds the archive, this job signs and notarizes it.
+#
+# Xcode Cloud archives the native app (macos/NearAI.xcodeproj, scheme
+# NearAI-Cloud) and passes its own archive validator. Its managed Developer ID
+# export cannot run yet: Apple refuses to create the team's Developer ID
+# Application Managed certificate (HTTP 409, resultCode 7460) while showing
+# none, a state only Apple can clear (docs/operator/xcode-cloud-pilot.md). So
+# this job takes the Cloud archive and gives it the signature a release has:
+# the same Developer ID certificate, committed profile and notary key as
+# release-apps.yml. It signs, notarizes, staples and verifies. It does not
+# publish anything: no release, DMG, appcast or tag. The artifact is for
+# inspection while the pilot is qualified.
+#
+# Started by a push to the pilot branch, which starts a Cloud build of that
+# commit, or by hand. By hand it can instead sign a build Xcode Cloud already
+# ran (build_run_id), without starting another.
+name: xcode-cloud-pilot
+
+on:
+  push:
+    branches: [xcode-cloud-release-pilot]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch for Xcode Cloud to build
+        default: xcode-cloud-release-pilot
+      build_run_id:
+        description: Sign this existing Xcode Cloud build run instead of starting one
+        default: ""
+
+permissions:
+  contents: read
+
+# One pilot build at a time; a newer push waits rather than racing it.
+concurrency:
+  group: xcode-cloud-pilot
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: Sign and notarize the Xcode Cloud archive
+    runs-on: macos-26
+    # This job holds the Developer ID private key, as release-apps.yml's
+    # macOS job does, so it declares the same environment.
+    environment: release
+    timeout-minutes: 90
+    env:
+      # NearAI Cloud pilot, Iqlusion team KXSWJN7WY8.
+      XCODE_CLOUD_WORKFLOW_ID: 59025125-A8A9-4F65-9D19-8E504576C729
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The runner context is not available in a job's env, so the scratch
+      # directory is set here.
+      - name: Set the scratch directory
+        run: echo "WORK=$RUNNER_TEMP/xcode-cloud-pilot" >> "$GITHUB_ENV"
+
+      # Starting builds needs a key whose role reaches Xcode Cloud (App
+      # Manager or higher). XCODE_CLOUD_ASC_* names one; without it the
+      # notary key is tried, which works when that key has the role.
+      - name: Write the App Store Connect key
+        env:
+          XC_KEY: ${{ secrets.XCODE_CLOUD_ASC_KEY_P8_BASE64 }}
+          XC_KEY_ID: ${{ secrets.XCODE_CLOUD_ASC_KEY_ID }}
+          XC_ISSUER: ${{ secrets.XCODE_CLOUD_ASC_ISSUER_ID }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK"
+          if [ -n "$XC_KEY" ]; then
+            key="$XC_KEY"; id="$XC_KEY_ID"; issuer="$XC_ISSUER"
+          else
+            key="$NOTARY_KEY"; id="$NOTARY_KEY_ID"; issuer="$NOTARY_ISSUER"
+          fi
+          for value in "$key" "$id" "$issuer"; do
+            [ -n "$value" ] || { echo "no App Store Connect key is configured" >&2; exit 1; }
+          done
+          rm -f "$WORK/asc.p8" "$WORK/notary.p8"
+          ( umask 077
+            echo "$key" | base64 --decode > "$WORK/asc.p8"
+            echo "$NOTARY_KEY" | base64 --decode > "$WORK/notary.p8" )
+          chmod 600 "$WORK/asc.p8" "$WORK/notary.p8"
+          {
+            echo "ASC_KEY_P8_PATH=$WORK/asc.p8"
+            echo "ASC_KEY_ID=$id"
+            echo "ASC_ISSUER_ID=$issuer"
+          } >> "$GITHUB_ENV"
+
+      - name: Start the Xcode Cloud build, or take the one given
+        id: run
+        env:
+          BRANCH: ${{ inputs.branch || github.ref_name }}
+          GIVEN_RUN: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GIVEN_RUN" ]; then
+            run="$GIVEN_RUN"
+          else
+            run="$(python3 macos/ci_scripts/xcode-cloud-api.py start \
+              --workflow "$XCODE_CLOUD_WORKFLOW_ID" --branch "$BRANCH")"
+          fi
+          echo "Xcode Cloud build run: $run"
+          echo "id=$run" >> "$GITHUB_OUTPUT"
+
+      # A run ends FAILED while the managed Developer ID export cannot run,
+      # even when the archive succeeded; the archive step below is the gate.
+      - name: Wait for Xcode Cloud
+        env:
+          RUN: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          python3 macos/ci_scripts/xcode-cloud-api.py wait --run "$RUN" \
+            --timeout-minutes 60 > "$WORK/run.json"
+          python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); print("build", a["number"], a["completionStatus"], a["sourceCommit"]["commitSha"])' "$WORK/run.json"
+
+      - name: Download the archive
+        env:
+          RUN: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          python3 macos/ci_scripts/xcode-cloud-api.py archive --run "$RUN" --out "$WORK/archive.zip"
+          ditto -x -k "$WORK/archive.zip" "$WORK/archive"
+          archive="$(find "$WORK/archive" -maxdepth 1 -name '*.xcarchive' | head -1)"
+          [ -d "$archive/Products/Applications/Near.ai.app" ] || { echo "no app in the archive" >&2; exit 1; }
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      # The metadata the Cloud build embedded must name the commit Cloud
+      # says it built (and, for a push, the commit pushed), the production
+      # channel, a universal release build and the production Sparkle key.
+      - name: Check what Cloud built
+        env:
+          TC_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          PUSHED: ${{ github.event_name == 'push' && github.sha || '' }}
+        run: |
+          set -euo pipefail
+          python3 - "$ARCHIVE" "$WORK/run.json" <<'EOF'
+          import hashlib, json, os, pathlib, sys
+          app = pathlib.Path(sys.argv[1]) / 'Products/Applications/Near.ai.app'
+          meta = json.loads((app / 'Contents/Resources/pilot-build.json').read_text())
+          run = json.load(open(sys.argv[2]))
+          def need(ok, what):
+              if not ok:
+                  sys.exit('refusing to sign: ' + what)
+          need(meta['sourceCommit'] == run['sourceCommit']['commitSha'], 'archive commit is not the commit Cloud built')
+          if os.environ['PUSHED']:
+              need(meta['sourceCommit'] == os.environ['PUSHED'], 'Cloud built a different commit from the one pushed')
+          need(meta['channel'] == 'production', 'not the production channel')
+          need(meta['mode'] == 'release-universal', 'not a universal release build')
+          need(sorted(meta['architectures']) == ['arm64', 'x86_64'], 'not universal')
+          key = os.environ['TC_SPARKLE_PUBLIC_ED_KEY']
+          need(key and meta['sparklePublicKeySHA256'] == hashlib.sha256(key.encode()).hexdigest(),
+               'Sparkle public key is not the production key')
+          print(f"Cloud build {meta['buildVersion']}: {meta['shortVersion']} at {meta['sourceCommit']}")
+          EOF
+
+      # A throwaway keychain, removed in the last step, as in
+      # make-release-dmg.sh. Never enable shell tracing here.
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$WORK/signing.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 1800 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          rm -f "$WORK/cert.p12"
+          ( umask 077; echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12" )
+          security import "$WORK/cert.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$WORK/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+      # The committed Developer ID profile, the one release-apps.yml embeds:
+      # the keychain-access-groups entitlement is killed at exec without it.
+      - name: Export with the Developer ID certificate and profile
+        run: |
+          set -euo pipefail
+          profile=macos/TraceCommons-DeveloperID.provisionprofile
+          security cms -D -i "$profile" > "$WORK/profile.plist"
+          name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$WORK/profile.plist")"
+          uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$WORK/profile.plist")"
+          profiles="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          mkdir -p "$profiles"
+          cp "$profile" "$profiles/$uuid.provisionprofile"
+          cat > "$WORK/export.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>developer-id</string>
+            <key>teamID</key><string>KXSWJN7WY8</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Developer ID Application</string>
+            <key>provisioningProfiles</key><dict><key>ai.tracecommons.shell</key><string>$name</string></dict>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive -archivePath "$ARCHIVE" \
+            -exportOptionsPlist "$WORK/export.plist" -exportPath "$WORK/export"
+          echo "APP=$WORK/export/Near.ai.app" >> "$GITHUB_ENV"
+
+      - name: Verify the signature
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          for code in "$APP" "$APP/Contents/MacOS/near-ai" \
+              "$APP/Contents/Frameworks/libtrace_commons_contributor_ffi.dylib" \
+              "$APP/Contents/Frameworks/Sparkle.framework"; do
+            details="$(codesign -dvv "$code" 2>&1)"
+            grep -q 'Authority=Developer ID Application: Iqlusion Inc (KXSWJN7WY8)' <<<"$details" \
+              || { echo "not Developer ID signed: $code" >&2; exit 1; }
+            grep -q 'flags=0x10000(runtime)' <<<"$details" \
+              || { echo "no hardened runtime: $code" >&2; exit 1; }
+          done
+          ./scripts/ci/assert-no-staging-markers.sh check "$APP"
+          ./scripts/ci/verify-macos-entitlements.sh "$APP"
+
+      - name: Notarize, staple and assess
+        env:
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "$APP" "$WORK/notarize.zip"
+          xcrun notarytool submit "$WORK/notarize.zip" \
+            --key "$WORK/notary.p8" \
+            --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
+            --timeout 20m --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP" dist/Near.ai-xcode-cloud.zip
+          cp "$APP/Contents/Resources/pilot-build.json" dist/
+          ( cd dist && shasum -a 256 Near.ai-xcode-cloud.zip > Near.ai-xcode-cloud.zip.sha256 )
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: xcode-cloud-pilot-${{ steps.run.outputs.id }}
+          path: dist/
+          retention-days: 14
+
+      - name: Remove the keychain and keys
+        if: always()
+        run: |
+          security delete-keychain "$WORK/signing.keychain-db" 2>/dev/null || true
+          rm -f "$WORK/asc.p8" "$WORK/notary.p8" "$WORK/cert.p12"

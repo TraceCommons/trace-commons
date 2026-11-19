@@ -1,0 +1,90 @@
+# Generator source for the checked-in pilot project. Xcode Cloud opens the
+# project directly; it never installs or runs XcodeGen.
+name: NearAI
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    macOS: '14.0'
+  createIntermediateGroups: true
+packages:
+  TraceCommons:
+    path: .
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.6
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    MACOSX_DEPLOYMENT_TARGET: '14.0'
+    ARCHS: arm64 x86_64
+    ONLY_ACTIVE_ARCH: NO
+    DEVELOPMENT_TEAM: KXSWJN7WY8
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ENABLE_MODULES: YES
+targets:
+  NearAI:
+    type: application
+    productName: Near.ai
+    platform: macOS
+    sources:
+      - path: Sources/TraceCommonsApp
+      - path: icons/production/AppIcon.icon
+        type: file
+        buildPhase: resources
+      - path: .xcode-cloud/generated/en.lproj
+        type: folder
+        buildPhase: resources
+      - path: .xcode-cloud/generated/pilot-build.json
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: Near.ai
+        PRODUCT_MODULE_NAME: TraceCommonsApp
+        EXECUTABLE_NAME: TraceCommonsApp
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tracecommons.shell
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: .xcode-cloud/generated/Info.plist
+        CODE_SIGN_ENTITLEMENTS: entitlements.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/.xcode-cloud/ffi-universal
+        OTHER_LDFLAGS: $(inherited) -ltrace_commons_contributor_ffi
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
+        COMBINE_HIDPI_IMAGES: YES
+    dependencies:
+      - package: TraceCommons
+        product: TCBridge
+      - package: TraceCommons
+        product: TCDesign
+      - package: TraceCommons
+        product: TCShellCore
+      - package: TraceCommons
+        product: TCUpdates
+      - package: Sparkle
+        product: Sparkle
+      - framework: .xcode-cloud/ffi-universal/libtrace_commons_contributor_ffi.dylib
+        embed: true
+        codeSign: true
+        link: false
+      - framework: .xcode-cloud/ffi-universal/near-ai
+        embed: true
+        codeSign: true
+        link: false
+        copy:
+          destination: executables
+schemes:
+  NearAI-Cloud:
+    build:
+      targets:
+        NearAI: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+      revealArchiveInOrganizer: false

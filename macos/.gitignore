@@ -1,2 +1,5 @@
 .build/
 .swiftpm/
+.xcode-cloud/
+NearAI.xcodeproj/xcuserdata/
+NearAI.xcodeproj/project.xcworkspace/xcuserdata/
