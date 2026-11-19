@@ -159,6 +159,22 @@
         </Setter>
     </Style>
 
+    <!--
+        A bare ItemsControl or ContentControl is a layout host with no
+        automation peer, yet both are tab stops by default, so Tab landed on
+        them and a screen reader heard a nameless pane (box tab walk,
+        2026-11-19: ten such stops in Settings, more on Private AI, Traces
+        and History). The controls inside them keep their own stops. These
+        apply to the exact types only: a ListView, a Button or any other
+        subclass keeps its own focus behaviour.
+    -->
+    <Style TargetType="ItemsControl">
+        <Setter Property="IsTabStop" Value="False" />
+    </Style>
+    <Style TargetType="ContentControl">
+        <Setter Property="IsTabStop" Value="False" />
+    </Style>
+
     <!-- Every ToggleSwitch in the app takes the Mac's switch. -->
     <Style TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}" />
 
